@@ -1305,8 +1305,13 @@ pub(crate) fn promote_index_root_to_first_indx(
     }
     let usa_count = block_size / sector_size + 1;
     let usa_offset = 0x28usize;
-    let first_rel = (usa_offset + usa_count * 2 + 7) & !7;
     let block_ih = crate::idx_block::INDX_INDEX_HEADER_OFFSET;
+    // The on-disk first-entry offset is relative to the INDEX_HEADER, not
+    // the start of the INDX block. The USA ends at an absolute block offset.
+    let first_abs = (usa_offset + usa_count * 2 + 7) & !7;
+    let first_rel = first_abs
+        .checked_sub(block_ih)
+        .ok_or("INDX USA overlaps the index header")?;
     let block_total = first_rel
         .checked_add(entries.len())
         .ok_or("INDX entry size overflow")?;
@@ -1957,6 +1962,18 @@ mod tests {
         rec[end_marker_pos..end_marker_pos + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
 
         rec
+    }
+
+    #[test]
+    fn promoted_indx_entries_start_after_the_usa() {
+        let mut record = index_root_record(&[make_entry(10, 5, "f_0000.txt")]);
+        let block = promote_index_root_to_first_indx(&mut record, 4096, 512).unwrap();
+        let ih = crate::idx_block::INDX_INDEX_HEADER_OFFSET;
+        let first = read_u32_le(&block, ih + IH_FIRST_ENTRY_OFFSET).unwrap() as usize;
+        let usa_offset = u16::from_le_bytes([block[4], block[5]]) as usize;
+        let usa_count = u16::from_le_bytes([block[6], block[7]]) as usize;
+        let first_after_usa = (usa_offset + usa_count * 2 + 7) & !7;
+        assert_eq!(ih + first, first_after_usa);
     }
 
     /// Build a single $FILE_NAME index entry (matching build_file_name_index_entry layout).
