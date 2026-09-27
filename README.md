@@ -247,6 +247,28 @@ are documented there.
 Reverse chronological highlights from `git log`. Full per-commit
 history available via `git log` in the repo.
 
+### 2026-09-27 — 0.5.0
+
+- **Breaking:** `fs_ntfs_readlink` follows the readlink contract shared
+  by every driver in the family. Success returns the target's length,
+  not counting the NUL; a short buffer is `ERANGE` with nothing written;
+  a path that is not a link, or a NULL argument, is `EINVAL`. Callers
+  that test `== 0` for success must switch to `>= 0`.
+- **Breaking (Rust API):** `idx_block::vcn_to_disk_offset` takes a third
+  argument, and `index_io::IndexEntryLocation` gains a required field.
+- The read and write paths are bounded against the volume: offsets,
+  run ends, index blocks and allocations are checked before they are
+  used, and a failure after an allocation gives the clusters back.
+- `$ATTRIBUTE_LIST` is consulted before the base record, index lookups
+  collate the way the index is ordered, and a WOF-compressed file is
+  refused by the Rust API as well as the C ABI, rather than read back
+  as zeros.
+- mkfs system streams carry valid headers and the measured namespace,
+  `$MFTMirr` declares the four records it holds, and a volume-label
+  change refreshes it.
+- The fuzz harness runs and covers more decoders; the test tiers print
+  a verdict rather than a transcript.
+
 ### 2026-09-06 — 0.4.0
 
 - `mkfs.ntfs` ships as its own binary, sharing the formatter with the
