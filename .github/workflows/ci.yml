@@ -799,6 +799,13 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      - name: Validate enumeration without required paths on Windows
+        shell: bash
+        run: |
+          scripts/tier.sh matrix -- bash scripts/run-matrix.sh mac-format-basic-256mib \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       - name: Validate routed leaf split on Windows
         shell: bash
         run: |
