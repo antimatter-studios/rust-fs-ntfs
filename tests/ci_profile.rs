@@ -2751,3 +2751,64 @@ jobs:
         );
     }
 }
+
+/// Every `chores.yml` pin a workflow reads is one `chores.yml` declares.
+///
+/// The workflows read their sibling pins out of `chores.yml` -- bash
+/// through `pin NAME`, PowerShell through `Select-String -Pattern
+/// '^\s*NAME:...'` -- so the pin lives in one place. A name that is read
+/// and never declared comes back empty: PowerShell stops with "Cannot
+/// index into a null array", and bash hands `git clone --branch` an
+/// empty ref. `release.yml` read `VHD_TOOL_REF` and nothing declared
+/// it, which stopped the v0.5.0 release in its Windows chkdsk job. A
+/// tag is the only thing that runs that job, so no pull request showed
+/// it.
+#[test]
+fn every_pin_a_workflow_reads_is_declared_in_chores_yml() {
+    let chores = read_or_panic(&manifest_dir().join("chores.yml"));
+    let declared = |name: &str| {
+        chores
+            .lines()
+            .any(|line| line.trim_start().starts_with(&format!("{name}:")))
+    };
+    let is_name = |c: char| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_';
+    let dir = manifest_dir().join(".github").join("workflows");
+    let mut reads = 0;
+    let mut undeclared = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("read .github/workflows") {
+        let path = entry.expect("workflow entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            continue;
+        }
+        let file = path.file_name().unwrap().to_string_lossy().into_owned();
+        for line in read_or_panic(&path).lines() {
+            let mut names = Vec::new();
+            for (at, _) in line.match_indices("$(pin ") {
+                let rest = &line[at + "$(pin ".len()..];
+                names.push(rest.chars().take_while(|&c| is_name(c)).collect::<String>());
+            }
+            if line.contains("Select-String -Path chores.yml") {
+                if let Some(at) = line.find(r"'^\s*") {
+                    let rest = &line[at + r"'^\s*".len()..];
+                    names.push(rest.chars().take_while(|&c| is_name(c)).collect::<String>());
+                }
+            }
+            for name in names.into_iter().filter(|n| !n.is_empty()) {
+                reads += 1;
+                if !declared(&name) {
+                    undeclared.push(format!("{file}: {name}"));
+                }
+            }
+        }
+    }
+    assert!(
+        reads >= 3,
+        "expected the workflows to read their sibling pins from chores.yml; found {reads} reads"
+    );
+    undeclared.sort();
+    undeclared.dedup();
+    assert!(
+        undeclared.is_empty(),
+        "these workflows read a pin chores.yml does not declare: {undeclared:?}"
+    );
+}
