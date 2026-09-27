@@ -1,6 +1,8 @@
-# Builds the two fixtures whose shapes only Windows can author:
+# Builds the fixtures whose shapes only Windows can author:
 #   * ntfs-attrlist.img: named $DATA streams overflow into extension records
 #   * ntfs-compressed.img: classic NTFS/LZNT1-compressed $DATA
+#   * ntfs-symlink.img: symlinks Windows created, plus
+#     ntfs-symlink.targets.tsv, the target Windows itself reports for each
 #
 # Run from the repository root on an elevated Windows host. vhd_tool must be
 # on PATH; CI installs the pinned rust-img-vhd release before invoking this.
@@ -78,5 +80,32 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-compressed.img' -Label 'COMPRESSE
     }
 }
 
-Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img |
+# Symlinks created by Windows, and the target Windows reports for each, so
+# fs_ntfs_readlink is graded against the platform rather than against the
+# reparse bytes this crate's own writer produces (tests/readlink_windows_oracle.rs).
+# The report is .NET's LinkTarget, which is the reparse point's PrintName.
+$symlinkReport = [System.IO.Path]::GetFullPath('test-disks/ntfs-symlink.targets.tsv')
+New-WindowsFixture -ImagePath 'test-disks/ntfs-symlink.img' -Label 'SYMLINK' -Populate {
+    param($root)
+    New-Item -ItemType Directory -Path (Join-Path $root 'sub') | Out-Null
+    [System.IO.File]::WriteAllBytes((Join-Path $root 'sub\file.txt'), [byte[]](0x41))
+    [System.IO.File]::WriteAllBytes((Join-Path $root "sub\na$([char]0x00EF)ve-$([char]0x65E5)$([char]0x672C).txt"), [byte[]](0x42))
+
+    $links = [ordered]@{
+        'abs-dir'  = 'C:\Windows\System32'
+        'rel-file' = 'sub\file.txt'
+        'rel-uni'  = "sub\na$([char]0x00EF)ve-$([char]0x65E5)$([char]0x672C).txt"
+    }
+    $lines = foreach ($name in $links.Keys) {
+        $link = Join-Path $root $name
+        New-Item -ItemType SymbolicLink -Path $link -Value $links[$name] | Out-Null
+        $reported = (Get-Item -LiteralPath $link -Force).LinkTarget
+        if (-not $reported) { throw "Windows reports no link target for $name" }
+        "$name`t$reported"
+    }
+    [System.IO.File]::WriteAllText($symlinkReport, (($lines -join "`n") + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+
+Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img |
     Format-Table Name,Length

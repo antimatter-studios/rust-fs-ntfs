@@ -516,8 +516,10 @@ chore test -- --verbose        # the same run, streamed as it happens
 cargo test --test capi_fsck_callbacks   # one file, straight through cargo
 ```
 
-The full suite requires the Windows-authored `test-disks/ntfs-attrlist.img`
-and `test-disks/ntfs-compressed.img`. Generate them with
+The full suite requires the Windows-authored `test-disks/ntfs-attrlist.img`,
+`test-disks/ntfs-compressed.img`, `test-disks/ntfs-symlink.img` and the
+symlink targets Windows reports, `test-disks/ntfs-symlink.targets.tsv`.
+Generate them with
 `test-disks/build-windows-native-read-fixtures.ps1` on Windows; CI uploads
 the same images to its Linux integration job.
 
