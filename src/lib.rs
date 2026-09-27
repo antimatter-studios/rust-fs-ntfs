@@ -96,6 +96,18 @@ fn set_error(msg: &str) {
     LAST_ERRNO.with(|cell| *cell.borrow_mut() = errno);
 }
 
+/// Record `msg` with an explicit errno, for failures whose errno is part of
+/// a documented contract and must not depend on the wording of a message.
+fn set_error_errno(msg: &str, errno: c_int) {
+    set_error(msg);
+    LAST_ERRNO.with(|cell| *cell.borrow_mut() = errno);
+}
+
+/// `<errno.h>` values the C ABI promises by contract rather than infers.
+/// Identical on Linux, macOS and Windows UCRT.
+const ERRNO_EINVAL: c_int = 22;
+const ERRNO_ERANGE: c_int = 34;
+
 /// Heuristic mapping from our error message content to a POSIX errno.
 /// Not exhaustive — falls back to EIO for unmatched cases. Intended
 /// as a convenience companion to `fs_ntfs_last_error` so FFI consumers
@@ -1516,11 +1528,22 @@ pub extern "C" fn fs_ntfs_read_file(
 // Symlink / reparse point reading (stub for now)
 // ---------------------------------------------------------------------------
 
-/// Read the symlink target of a reparse-point file into `buf` (NUL-terminated).
-/// `bufsize` must include room for the NUL terminator.
-/// Returns the number of bytes written (excluding NUL) on success, `-1` on
-/// error. The path must refer to a file with a `$REPARSE_POINT` attribute
-/// whose tag is `IO_REPARSE_TAG_SYMLINK`; non-symlink reparse tags return -1.
+/// Read the target of a symlink or mount point into `buf`, NUL-terminated.
+///
+/// The contract, shared by every driver in the family:
+///
+/// * success: returns the target's length in bytes, excluding the NUL (as
+///   Linux `readlink(2)` does), and writes the target plus a NUL into `buf`;
+/// * `bufsize < length + 1`: returns -1 with errno `ERANGE`, the message
+///   names the size needed, and **nothing** is written into `buf` — a target
+///   is never silently truncated;
+/// * NULL `fs`/`path`/`buf`, a non-UTF-8 path, or a path that is not a
+///   symlink or mount point: -1 with `EINVAL`;
+/// * any other failure: -1 with errno set (`ENOENT` for a missing path,
+///   `EIO` for unreadable metadata).
+///
+/// The target is the reparse point's print name with any `\??\` NT prefix
+/// removed.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_readlink(
     fs: *mut FsNtfsHandle,
@@ -1530,14 +1553,14 @@ pub extern "C" fn fs_ntfs_readlink(
 ) -> c_int {
     ffi_guard("fs_ntfs_readlink", -1, move || {
         if fs.is_null() || path.is_null() || buf.is_null() {
-            set_error("fs_ntfs_readlink: null argument");
+            set_error_errno("fs_ntfs_readlink: null argument", ERRNO_EINVAL);
             return -1;
         }
         let bridge = unsafe { &*fs };
         let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
             Ok(s) => s,
             Err(_) => {
-                set_error("fs_ntfs_readlink: non-UTF-8 path");
+                set_error_errno("fs_ntfs_readlink: non-UTF-8 path", ERRNO_EINVAL);
                 return -1;
             }
         };
@@ -1550,13 +1573,21 @@ pub extern "C" fn fs_ntfs_readlink(
             Ok(r) => r,
             Err(e) => return err_int(e),
         };
-        let reparse = match read::read_attribute_value(&mut io, rec, AttrType::ReparsePoint, None) {
-            Ok(b) => b,
-            Err(_) => {
-                set_error("not a reparse point");
-                return -1;
-            }
-        };
+        let reparse =
+            match read::read_attribute_value_if_present(&mut io, rec, AttrType::ReparsePoint, None)
+            {
+                Ok(Some(b)) => b,
+                Ok(None) => {
+                    set_error_errno(
+                        &format!(
+                            "fs_ntfs_readlink: {path_str} is not a symlink (no reparse point)"
+                        ),
+                        ERRNO_EINVAL,
+                    );
+                    return -1;
+                }
+                Err(e) => return err_int(e),
+            };
         // Decode tag + tag-specific path.
         if reparse.len() < 8 {
             set_error("reparse data too short");
@@ -1574,7 +1605,12 @@ pub extern "C" fn fs_ntfs_readlink(
             0xA000_000C /* SYMLINK */ => decode_symlink_print_name(data),
             0xA000_0003 /* MOUNT_POINT */ => decode_mount_point_print_name(data),
             other => {
-                set_error(&format!("unsupported reparse tag {other:#010x}"));
+                set_error_errno(
+                    &format!(
+                        "fs_ntfs_readlink: {path_str} is not a symlink (reparse tag {other:#010x})"
+                    ),
+                    ERRNO_EINVAL,
+                );
                 return -1;
             }
         };
@@ -1594,18 +1630,27 @@ pub extern "C" fn fs_ntfs_readlink(
             .map(String::from)
             .unwrap_or(target);
         let bytes = cleaned.as_bytes();
-        if bytes.len() + 1 > bufsize {
-            set_error(&format!(
-                "readlink: buffer too small (need {}, have {bufsize})",
-                bytes.len() + 1
-            ));
+        let Ok(len) = c_int::try_from(bytes.len()) else {
+            set_error("fs_ntfs_readlink: target length does not fit the return type");
+            return -1;
+        };
+        // Checked before a single byte is written: a buffer that cannot hold
+        // the whole target and its NUL is left exactly as the caller gave it.
+        if bytes.len() >= bufsize {
+            set_error_errno(
+                &format!(
+                    "fs_ntfs_readlink: buffer too small (need {} bytes, have {bufsize})",
+                    bytes.len() + 1
+                ),
+                ERRNO_ERANGE,
+            );
             return -1;
         }
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast::<u8>(), bytes.len());
             *(buf.add(bytes.len())) = 0; // NUL terminator
         }
-        bytes.len() as c_int
+        len
     })
 }
 
