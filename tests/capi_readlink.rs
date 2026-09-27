@@ -139,9 +139,15 @@ fn one_byte_short_is_erange_and_leaves_buffer_untouched() {
 fn zero_bufsize_is_erange() {
     let img = volume_with_link("zero_buf");
     let m = Mounted::new(&img);
+    // A non-NULL buffer of size 0 is merely too small: ERANGE, not EINVAL.
     let (rc, _) = m.readlink("/link", 0);
     assert_eq!(rc, -1);
     assert_eq!(unsafe { fs_ntfs_last_errno() }, ERANGE, "{}", last_error());
+    assert!(
+        last_error().contains(&(TARGET.len() + 1).to_string()),
+        "message names the size needed: {}",
+        last_error()
+    );
 }
 
 #[test]
