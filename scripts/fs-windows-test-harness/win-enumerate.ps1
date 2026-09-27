@@ -35,6 +35,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# The command template prefixes optional paths with '=' so an absent value
+# survives SSH and PowerShell -File argument parsing. Direct callers may omit it.
+if ($RequiredPaths.StartsWith('=')) {
+    $RequiredPaths = $RequiredPaths.Substring(1)
+}
+
 . "$PSScriptRoot\_lib.ps1"
 
 $KeepImageBool = $false

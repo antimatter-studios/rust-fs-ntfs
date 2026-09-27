@@ -126,17 +126,23 @@ esac
 #
 # tmp/ is gitignored and is where the tier logs already live.
 set +e
-CORE_DIR="$(RUSTFLAGS= RUSTDOCFLAGS= \
+CORE_MANIFEST="$(RUSTFLAGS= RUSTDOCFLAGS= \
     cargo metadata --format-version 1 --locked --manifest-path "$REPO/Cargo.toml" \
     2>/dev/null | python3 -c '
 import json, sys
 packages = json.load(sys.stdin)["packages"]
-print(next((p["manifest_path"].rsplit("/", 1)[0]
+print(next((p["manifest_path"]
             for p in packages if p["name"] == "am-fs-core"), ""))
 ' 2>/dev/null)"
 metadata_status=$?
 set -e
-if [ "$metadata_status" -ne 0 ] || [ -z "$CORE_DIR" ] || [ ! -f "$CORE_DIR/scripts/output-budget.sh" ]; then
+if [ -n "$CORE_MANIFEST" ] && command -v cygpath >/dev/null 2>&1; then
+    # Cargo returns a Windows path on Git Bash runners; shell file tests need
+    # the corresponding POSIX path.
+    CORE_MANIFEST="$(cygpath -u "$CORE_MANIFEST")"
+fi
+CORE_DIR="$(dirname "$CORE_MANIFEST")"
+if [ "$metadata_status" -ne 0 ] || [ -z "$CORE_MANIFEST" ] || [ ! -f "$CORE_DIR/scripts/output-budget.sh" ]; then
     echo "tier.sh: cargo could not say where am-fs-core is, or its copy has no" >&2
     echo "         scripts/output-budget.sh. The wrapper lives in rust-fs-core;" >&2
     echo "         check the am-fs-core dependency resolves and is at a version" >&2
