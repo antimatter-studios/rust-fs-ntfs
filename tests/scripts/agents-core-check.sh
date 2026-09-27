@@ -33,7 +33,7 @@ grep -v 'BEGIN SHARED BLOCK' "$BAK" > AGENTS.md
 check "a missing BEGIN marker" nonzero; restore
 grep -v 'END SHARED BLOCK' "$BAK" > AGENTS.md
 check "a missing END marker" nonzero; restore
-sed -i.t 's/sha256:60fad6dd/sha256:00000000/' AGENTS.md && rm -f AGENTS.md.t
+sed -i.t 's/sha256:8e0e4d55/sha256:00000000/' AGENTS.md && rm -f AGENTS.md.t
 check "a marker that disagrees with the content" nonzero; restore
 rm -f AGENTS.md
 check "no AGENTS.md at all" nonzero; restore
