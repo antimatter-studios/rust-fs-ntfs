@@ -806,6 +806,10 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      - name: Capture Windows matrix diagnostics on failure
+        if: failure()
+        shell: bash
+        run: bash scripts/matrix-fetch-diag.sh
       - name: Generate raw image and wrap in GPT-partitioned VHD
         shell: pwsh
         run: |
