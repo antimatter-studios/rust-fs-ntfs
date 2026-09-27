@@ -480,7 +480,7 @@ tasks:
     cmds:
       # Through tier.sh, so a failure prints the tail of the log instead of
       # telling the reader to go and run it again themselves.
-      - scripts/tier.sh scripts -- bash -c 'for t in tests/scripts/*.sh; do bash "$t"; done'
+      - scripts/tier.sh scripts -- scripts/run-script-tests.sh tests/scripts
 
   clean:
     desc: Remove this crate's cargo output

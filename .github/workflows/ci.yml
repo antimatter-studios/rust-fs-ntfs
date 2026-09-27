@@ -124,10 +124,12 @@ jobs:
 
       # The shell tests (tests/scripts/*.sh): the scripts that turn the
       # Windows VM's output into verdicts. By glob, like `chore test:scripts`.
+      # Through run-script-tests.sh, which fails if ANY test failed; a bare
+      # for-loop reported only the last test's status (#362).
       - name: shell tests
         if: matrix.os == 'ubuntu-latest'
         shell: bash
-        run: for t in tests/scripts/*.sh; do bash "$t"; done
+        run: scripts/run-script-tests.sh tests/scripts
 
       # Test scope is intentionally narrow: only tests that DON'T need
       # the out-of-tree `test-disks/*.img` fixtures. The fixture-driven
