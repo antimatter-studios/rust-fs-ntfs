@@ -1966,7 +1966,11 @@
           "dest": "{vm.workdir}/{scenario.image}"
         },
         { "op": "win-chkdsk", "modes": "readonly,/scan", "verdict_shape": "Clean", "keep_image": "true" },
-        { "op": "win-enumerate", "keep_image": "false" },
+        {
+          "op": "win-enumerate",
+          "required_paths": "routed/f_0000.txt,routed/f_0079.txt",
+          "keep_image": "false"
+        },
         { "op": "win-assert-routed-names", "directory": "routed", "count": "80" }
       ],
       "_notes": "Mac writes 80 sorted names, forcing a second split of the routed INDX leaf. Windows must enumerate and chkdsk the result."
