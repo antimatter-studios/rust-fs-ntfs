@@ -2180,7 +2180,7 @@ fn promote_parent_index_io<T: BlockIo + ?Sized>(
             AttrType::Bitmap as u32,
             crate::mkfs::stream::I30,
             bitmap_id,
-            &[1],
+            &[1, 0, 0, 0, 0, 0, 0, 0],
         );
         crate::attr_resize::insert_attribute_sorted(&mut parent, &bitmap)?;
         Ok((parent, block))

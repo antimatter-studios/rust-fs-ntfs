@@ -15,7 +15,9 @@
 
 mod common;
 
+use fs_ntfs::attr_io::{self, AttrType};
 use fs_ntfs::block_io::{BlockIo, PathIo};
+use fs_ntfs::mft_io;
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::write;
 use ntfs::indexes::NtfsFileNameIndex;
@@ -222,7 +224,7 @@ fn an_overflowed_directory_can_gain_and_lose_a_name() {
 #[test]
 fn routed_leaf_splits_again_after_the_first_two_leaf_tree() {
     let img = fresh_vol("routed_leaf_split");
-    write::mkdir(Path::new(&img), "/", "d").expect("mkdir");
+    let directory = write::mkdir(Path::new(&img), "/", "d").expect("mkdir");
 
     // Sorted inserts fill the right-hand leaf after the first split. The
     // next split must add another separator to the resident parent index.
@@ -237,6 +239,13 @@ fn routed_leaf_splits_again_after_the_first_two_leaf_tree() {
     for i in 0..80 {
         assert!(names.contains(&format!("f_{i:04}.txt")), "missing {i}");
     }
+
+    // An independently created four-block directory uses an eight-byte
+    // resident $Bitmap:$I30, even though only four bits are set.
+    let (_, record) = mft_io::read_mft_record(Path::new(&img), directory).expect("directory");
+    let bitmap = attr_io::find_attribute(&record, AttrType::Bitmap, Some("$I30"))
+        .expect("directory index bitmap");
+    assert_eq!(bitmap.resident_value_length, Some(8));
 }
 
 #[test]
