@@ -26,6 +26,8 @@ Cargo.lock.bak
 
 # Test artifacts
 test-disks/*.img
+# The symlink targets Windows reports, written beside ntfs-symlink.img.
+test-disks/*.targets.tsv
 !test-disks/.gitkeep
 
 # Local Windows-VM test pipeline outputs. The orchestrator

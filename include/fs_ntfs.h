@@ -371,6 +371,28 @@ int64_t fs_ntfs_read_file(fs_ntfs_fs_t *fs, const char *path,
 
 /* ---- Symlink / Reparse points ---- */
 
+/*
+ * Read the target of the symlink or mount point at `path` into `buf`.
+ * The target is the reparse point's print name, with any NT "\??\"
+ * prefix removed.
+ *
+ * Returns:
+ *   >= 0  success: the target's length in bytes, NOT counting the NUL
+ *         (as Linux readlink(2) does). `buf` holds the target followed
+ *         by a NUL terminator. Test success with `>= 0`, not `== 0`.
+ *   -1    failure, with fs_ntfs_last_errno() set on every path:
+ *         ERANGE  `bufsize < length + 1`. NOTHING is written into
+ *                 `buf`, and fs_ntfs_last_error() names the size
+ *                 needed. The target is never silently truncated
+ *                 (this deliberately differs from Linux readlink(2)).
+ *         EINVAL  `fs`, `path` or `buf` is NULL; `path` is not UTF-8;
+ *                 or `path` is not a symlink or mount point.
+ *         ENOENT  `path` does not exist.
+ *         other   e.g. EIO when the volume's metadata cannot be read.
+ *
+ * `bufsize` counts the NUL: a buffer of exactly `length + 1` bytes
+ * succeeds.
+ */
 int fs_ntfs_readlink(fs_ntfs_fs_t *fs, const char *path,
                          char *buf, size_t bufsize);
 

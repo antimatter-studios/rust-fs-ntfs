@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Breaking
+
+- **`fs_ntfs_readlink` follows the readlink contract shared by every driver
+  in the family.** Success returns the target's length in bytes, not
+  counting the NUL, as Linux `readlink(2)` does, and writes the target plus
+  a NUL. A buffer smaller than `length + 1` now returns -1 with
+  `fs_ntfs_last_errno() == ERANGE`, and the message names the size needed.
+  Before this change it reported `EIO`. Nothing is written into the buffer,
+  so the target is never silently truncated. A path that is not a symlink
+  or mount point, or that is not UTF-8, now reports `EINVAL` where it
+  reported `EIO`, and a NULL argument reports `EINVAL` explicitly. The
+  header now states the contract. It had never said what the return value
+  was, so callers that test `== 0` for success must switch to `>= 0`.
+  Windows grades the target through a Windows-authored symlink fixture that
+  also records the target Windows reports for each link:
+  `ntfs-symlink.img` and `ntfs-symlink.targets.tsv`. (#358)
+
 ### Added
 
 - **Budgeted test tiers resolve the canonical wrapper from `rust-fs-core`.**

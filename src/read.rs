@@ -196,16 +196,30 @@ pub fn read_attribute_value<T: BlockIo + ?Sized>(
     attr_type: AttrType,
     name: Option<&str>,
 ) -> Result<Vec<u8>, String> {
+    read_attribute_value_if_present(io, record_number, attr_type, name)?.ok_or_else(|| {
+        format!(
+            "read_attribute_value: attribute {attr_type:?} (name {name:?}) not found in record {record_number}"
+        )
+    })
+}
+
+/// [`read_attribute_value`], with an absent attribute reported as
+/// `Ok(None)` rather than an error, so a caller can tell "this record has
+/// no such attribute" apart from "the attribute could not be read".
+pub fn read_attribute_value_if_present<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    attr_type: AttrType,
+    name: Option<&str>,
+) -> Result<Option<Vec<u8>>, String> {
     match locate_attribute(io, record_number, attr_type, name)? {
         Some((params, holder, record, loc)) => {
             if attr_type == AttrType::Data && name.is_none() {
                 refuse_wof_compressed(io, &params, &record, holder, record_number)?;
             }
-            read_value_from_record(io, &params, &record, &loc, Holes::AreZeros)
+            read_value_from_record(io, &params, &record, &loc, Holes::AreZeros).map(Some)
         }
-        None => Err(format!(
-            "read_attribute_value: attribute {attr_type:?} (name {name:?}) not found in record {record_number}"
-        )),
+        None => Ok(None),
     }
 }
 

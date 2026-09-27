@@ -323,6 +323,8 @@ jobs:
           path: |
             test-disks/ntfs-attrlist.img
             test-disks/ntfs-compressed.img
+            test-disks/ntfs-symlink.img
+            test-disks/ntfs-symlink.targets.tsv
           if-no-files-found: error
           retention-days: 1
 
