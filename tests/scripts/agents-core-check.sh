@@ -33,7 +33,13 @@ grep -v 'BEGIN SHARED BLOCK' "$BAK" > AGENTS.md
 check "a missing BEGIN marker" nonzero; restore
 grep -v 'END SHARED BLOCK' "$BAK" > AGENTS.md
 check "a missing END marker" nonzero; restore
-sed -i.t 's/sha256:8e0e4d55/sha256:00000000/' AGENTS.md && rm -f AGENTS.md.t
+# Corrupt whichever digest the marker declares, not one spelled out here: a
+# literal digest stops matching the day the block moves, the substitution then
+# changes nothing, and the case passes on a clean file for the wrong reason.
+sed -E -i.t 's/(BEGIN SHARED BLOCK: .* sha256:)[0-9a-f]{8}/\100000000/' AGENTS.md && rm -f AGENTS.md.t
+if cmp -s AGENTS.md "$BAK"; then
+    fail=$((fail + 1)); printf '  FAIL  %s\n' "the marker's digest was not corrupted, so the next case proves nothing"
+fi
 check "a marker that disagrees with the content" nonzero; restore
 rm -f AGENTS.md
 check "no AGENTS.md at all" nonzero; restore
