@@ -15,7 +15,7 @@ with every repository in this family**. Do not edit it here: change the
 canonical copy and propagate it, or `chore lint` will fail. Everything after
 the END marker is specific to this repository.
 
-<!-- BEGIN SHARED BLOCK: agent-core v2 sha256:8e0e4d55b026cff6cc3476160ed112117ca8ea64ad456408b9f1fe2a1dcf308b -->
+<!-- BEGIN SHARED BLOCK: agent-core v2 sha256:38af4d2c5377d38ab382baa4eab4aa679841e2b4eba4f4d01dacd255ffa7d32e -->
 ## Claiming work
 
 Several agents work these repositories at the same time. Before you start on
@@ -120,8 +120,10 @@ oracles below.
 
 Test tiers run through `scripts/tier.sh`, which runs the suite **quietly**: the
 whole run goes to `tmp/logs/<tier>.log`, a pass prints one verdict line naming
-that log, and a failure prints its tail. CI keeps the logs as an artifact, so
-the detail is always retrievable.
+that log, and a failure prints the verdict, the command's status and the log's
+path — `--tail N`, or `OUTPUT_BUDGET_FAIL_TAIL=N`, prints the tail for whoever
+is watching. **Read the log**: a failing tier names it and does not recite it.
+CI keeps the logs as an artifact, so the detail is always retrievable.
 
 The budget caps the log, not merely what is shown, and every number in the
 table was measured. A run that passes but prints more than its budget **fails**.
