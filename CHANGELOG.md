@@ -17,6 +17,24 @@
   gains `--dry-run`, and `--size` is the shared spelling of `--create-size`,
   which stays. `rust-fs-ntfs doctor` says, for every dotted name on PATH,
   whether the program found is ours, and if not what wins and the fix.
+- **`fs.ntfs <target> ls|read|get|info` works on an image or device
+  without mounting it.** `ls` lists name, type, size, mode, mtime, MFT
+  record, attributes and a link's target as JSON, leaving the metafiles
+  (records 0 to 15) out unless `--all` asks. `read` streams a file's bytes
+  to stdout, or to `-o FILE` through `FILE.partial`. `get` and `info` report
+  the shared envelope (`fs`, `label`, `total_bytes`, `free_bytes`,
+  `block_size`, `dirty`) with the volume info and stats nested under
+  `ntfs`, or one key of it, `--text` giving the bare value. `--offset`
+  addresses a volume inside a whole-disk image. `resize` answers `not
+  implemented` (exit 3): the library cannot resize a volume. `set`, `write`
+  and `mkdir` answer the same until they are wired.
+- **`fs_ntfs::reparse_link_target`** decodes a symlink's or mount point's
+  target from a `$REPARSE_POINT` value, as `fs_ntfs_readlink` reports it.
+- **`chore test:cli:oracle`** reads volumes Windows formatted and wrote --
+  a new `ntfs-cli-read.img` fixture whose files Windows hashed with
+  `Get-FileHash`, the compressed fixture and the symlink fixture -- with the
+  installed `fs.ntfs`, and compares bytes and link targets with what
+  Windows reported. CI's `cli` job runs it with the Windows job's fixtures.
 - **A release publishes the command-line tools as prebuilt tarballs.** A
   version tag builds them on macOS (arm64) and Linux (x86_64), once the
   full suite and Windows `chkdsk` have passed, and attaches

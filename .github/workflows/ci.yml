@@ -328,6 +328,8 @@ jobs:
             test-disks/ntfs-compressed.img
             test-disks/ntfs-symlink.img
             test-disks/ntfs-symlink.targets.tsv
+            test-disks/ntfs-cli-read.img
+            test-disks/ntfs-cli-read.sha256.tsv
           if-no-files-found: error
           retention-days: 1
 
@@ -1045,9 +1047,16 @@ jobs:
   # name, the CAVEATS and the licences, every name answering --version as
   # this crate), so a release is never the first time the tarball is put
   # together.
+  #
+  # `test:cli:oracle` then holds the tools to something that is not us:
+  # volumes Windows wrote, with the SHA-256 and link targets Windows itself
+  # reported (tests/cli-oracle/).
   cli:
     name: cli (the installed tools, on PATH)
     runs-on: ubuntu-latest
+    # The Windows-authored volumes are the oracle for the read verbs
+    # (tests/cli-oracle/); only a Windows runner can make them.
+    needs: [windows-native-read-fixtures]
     steps:
       - uses: actions/checkout@v4
       - name: Install chore and check out sibling repos
@@ -1078,6 +1087,16 @@ jobs:
       - name: chore test:cli
         id: tier
         run: chore test:cli
+      - name: Download Windows-authored native read fixtures
+        uses: actions/download-artifact@v4
+        with:
+          name: ntfs-windows-native-read-fixtures
+          path: test-disks
+      # Volumes Windows formatted and wrote, read by the installed fs.ntfs
+      # and compared with the hashes and link targets Windows reported.
+      - name: chore test:cli:oracle
+        id: oracle
+        run: chore test:cli:oracle
       - name: The release tarball, packaged and its layout checked
         shell: bash
         run: |

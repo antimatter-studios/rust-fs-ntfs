@@ -2,6 +2,8 @@
 //! with. Everything filesystem-specific lives here, and nothing here is
 //! plumbing (that is `common`).
 
+pub mod device;
+pub mod fs;
 pub mod mkfs;
 
 // THE FORMATTER'S ONE IMPLEMENTATION, shared with `rust-ntfs format`, the

@@ -481,9 +481,25 @@ tasks:
     # and in CI alike: each file prints `test result: ok. N passed`, and a
     # run that executed fewer checks than the floor fails although every
     # file passed. 41 checks executed when the tier was added (mkfs.ntfs and
-    # the names, on a Mac); the floor is 39, about 95% of that.
+    # the names, on a Mac), 86 with fs.ntfs's read verbs; the floor is 82,
+    # about 95% of that.
     cmds:
       - 'scripts/tier.sh cli -- scripts/test-cli.sh'
+
+  test:cli:oracle:
+    desc: 'The installed tools against something that is not us: volumes Windows wrote, read by fs.ntfs (tests/cli-oracle/)'
+    # The same gate as test:cli (doctor first, nothing skips, a floor), over
+    # tests/cli-oracle/test-*.sh. Those need what only another platform can
+    # provide -- the Windows-authored fixtures from
+    # test-disks/build-windows-native-read-fixtures.ps1 -- and FAIL naming
+    # it when it is missing, so this is not in `chore test`: CI's `cli` job
+    # runs it with the fixtures the Windows job built.
+    #
+    # FLOOR: 27 checks executed when the tier was added (the Windows-authored
+    # read fixtures: eight files, the compressed file, three symlinks); the
+    # floor is 25.
+    cmds:
+      - 'scripts/tier.sh cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=25 scripts/test-cli.sh'
 
   test:ignored:
     desc: 'The #[ignore]d tests: known defects, run so a fix cannot go unnoticed'
