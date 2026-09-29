@@ -13,10 +13,11 @@
 //! that ends up quietly weaker than the original.
 //!
 //! The target name is `mkfs_ntfs` because cargo will not accept a dot in
-//! one, and NOTHING RENAMES IT. `release.yml` publishes to crates.io and
-//! ships no binary artifacts, so `cargo install am-fs-ntfs` puts
-//! `mkfs_ntfs` on the path; installing it under the conventional name is
-//! the packager's step:
+//! one. The release renames it: `scripts/package-cli.sh` packages it as
+//! `mkfs.ntfs` in the per-platform tarballs `release.yml` publishes on the
+//! tag's GitHub release, which is what a package manager installs. A
+//! `cargo install am-fs-ntfs` still puts `mkfs_ntfs` on the path, and
+//! installing it under the conventional name is then the installer's step:
 //!
 //! ```text
 //! install -m755 target/release/mkfs_ntfs /usr/local/sbin/mkfs.ntfs
