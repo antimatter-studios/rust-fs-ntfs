@@ -533,8 +533,13 @@ chore cli:install                  # stage tmp/cli/bin/{rust-fs-ntfs,mkfs.ntfs}
 export PATH="$PWD/tmp/cli/bin:$PATH"
 mkfs.ntfs --size 64M --label BACKUP disk.img   # a JSON report on stdout
 rust-fs-ntfs mkfs --help           # the same tool; nothing can shadow this name
+fs.ntfs disk.img ls /              # JSON entries; --all adds the metafiles
+fs.ntfs disk.img read /notes.txt > notes.txt
+fs.ntfs disk.img get label --text
+fs.ntfs --offset 1048576 whole-disk.img info
 rust-fs-ntfs doctor                # is every name on PATH this program?
 chore test:cli                     # the tools as installed: doctor, then tests/cli/
+chore test:cli:oracle              # against volumes Windows wrote (tests/cli-oracle/)
 ```
 
 Reports are JSON on stdout (`--text` for people); a failure is

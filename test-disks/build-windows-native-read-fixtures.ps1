@@ -3,6 +3,8 @@
 #   * ntfs-compressed.img: classic NTFS/LZNT1-compressed $DATA
 #   * ntfs-symlink.img: symlinks Windows created, plus
 #     ntfs-symlink.targets.tsv, the target Windows itself reports for each
+#   * ntfs-cli-read.img: files Windows wrote, plus ntfs-cli-read.sha256.tsv,
+#     each file's path, size and the SHA-256 Windows itself computes
 #
 # Run from the repository root on an elevated Windows host. vhd_tool must be
 # on PATH; CI installs the pinned rust-img-vhd release before invoking this.
@@ -107,5 +109,38 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-symlink.img' -Label 'SYMLINK' -Po
         (New-Object System.Text.UTF8Encoding($false)))
 }
 
-Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img |
+# Files Windows writes and hashes itself, so `fs.ntfs ls` and `fs.ntfs read`
+# are graded against the platform rather than against bytes this crate's own
+# writer produced (tests/cli-oracle/test-windows-authored.sh). The sizes sit
+# on the boundaries that change how NTFS stores a file: empty, resident in the
+# MFT record, one cluster, one cluster and a byte, and a large random file.
+$cliReadReport = [System.IO.Path]::GetFullPath('test-disks/ntfs-cli-read.sha256.tsv')
+New-WindowsFixture -ImagePath 'test-disks/ntfs-cli-read.img' -Label 'CLIREAD' -Populate {
+    param($root)
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    New-Item -ItemType Directory -Path (Join-Path $root 'sub\deep') -Force | Out-Null
+    $files = [ordered]@{
+        'empty.bin'            = 0
+        'one.bin'              = 1
+        'resident.bin'         = 500
+        'cluster.bin'          = 4096
+        'cluster-plus-one.bin' = 4097
+        'random.bin'           = 1048576
+        'sub/deep/file.bin'    = 5000
+        "na$([char]0x00EF)ve-$([char]0x65E5)$([char]0x672C).txt" = 42
+    }
+    $lines = foreach ($rel in $files.Keys) {
+        $size = $files[$rel]
+        $bytes = New-Object byte[] $size
+        if ($size -gt 0) { $rng.GetBytes($bytes) }
+        $path = Join-Path $root ($rel -replace '/', '\')
+        [System.IO.File]::WriteAllBytes($path, $bytes)
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        "/$rel`t$size`t$hash"
+    }
+    [System.IO.File]::WriteAllText($cliReadReport, (($lines -join "`n") + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+
+Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img |
     Format-Table Name,Length

@@ -64,7 +64,8 @@ shift
 #   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
 #   scripts     101 / 2,669 (11 shell tests, rebased 2026-09-26)  135 / 3,500
 #   matrix      633 / 35,311 green, 1,521 / 78,075 red (see below)  900 / 50,000
-#   cli         11 / 449 (Mac, 2026-09-29, 2 files)               15 / 600
+#   cli         17 / 706 (CI Linux, 2026-09-29, 3 files)          23 / 950
+#   cli-oracle  11 / 574 (CI Linux, 2026-09-29, 1 file)           15 / 780
 #
 # THE CLIPPY ROW MOVED ON 2026-09-19, from 150/5,000 to 260/11,500. Adding
 # tests/fuzz_decoders.rs gave `--all-targets` another target to lint, and a
@@ -94,6 +95,11 @@ shift
 # naming the binary, doctor's line per tool, and three lines per passing
 # file (its name, its count, its trailing line). It is small by design, so a
 # file that starts printing per check shows as a breach, not as noise.
+# CLI-ORACLE is the same script over tests/cli-oracle/, the checks against
+# volumes another platform wrote; the same shape, fewer files. On CI's
+# runner doctor adds a line per same-named program later on PATH (ntfs-3g's
+# /usr/sbin/mkfs.ntfs and /sbin/mkfs.ntfs), which is why both rows were
+# first estimated low and are now CI's measurement.
 case "$TIER" in
     clippy)     MAX_LINES=260;  MAX_BYTES=11500 ;;
     unit)       MAX_LINES=1000; MAX_BYTES=64000 ;;
@@ -103,7 +109,8 @@ case "$TIER" in
     asan)       MAX_LINES=1100; MAX_BYTES=72000 ;;
     scripts)    MAX_LINES=135;  MAX_BYTES=3500 ;;
     matrix)     MAX_LINES=900;  MAX_BYTES=50000 ;;
-    cli)        MAX_LINES=15;   MAX_BYTES=600 ;;
+    cli)        MAX_LINES=23;   MAX_BYTES=950 ;;
+    cli-oracle) MAX_LINES=15;   MAX_BYTES=780 ;;
     *)
         echo "tier.sh: '$TIER' has no budget. Add a measured row to scripts/tier.sh." >&2
         exit 2

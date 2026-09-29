@@ -28,6 +28,8 @@ Cargo.lock.bak
 test-disks/*.img
 # The symlink targets Windows reports, written beside ntfs-symlink.img.
 test-disks/*.targets.tsv
+# The files Windows wrote and the SHA-256 it computed, beside ntfs-cli-read.img.
+test-disks/*.sha256.tsv
 !test-disks/.gitkeep
 
 # Local Windows-VM test pipeline outputs. The orchestrator

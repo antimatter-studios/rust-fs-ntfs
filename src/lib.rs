@@ -1688,6 +1688,32 @@ fn decode_mount_point_print_name(data: &[u8]) -> Option<String> {
     utf16_le_bytes_to_string(&data[start..start + print_name_length])
 }
 
+/// The target a `$REPARSE_POINT` value names, when it is a link: a
+/// symbolic link's or a mount point's print name, with any `\??\` NT
+/// prefix removed -- what `fs_ntfs_readlink` returns. `None` for another
+/// reparse tag, a value too short to hold its header, or a link with no
+/// print name. For callers that already hold the value (a listing, which
+/// reads each entry's reparse point anyway).
+pub fn reparse_link_target(reparse: &[u8]) -> Option<String> {
+    if reparse.len() < 8 {
+        return None;
+    }
+    let tag = u32::from_le_bytes([reparse[0], reparse[1], reparse[2], reparse[3]]);
+    let data_len = u16::from_le_bytes([reparse[4], reparse[5]]) as usize;
+    let data = reparse.get(8..8 + data_len)?;
+    let target = match tag {
+        0xA000_000C /* SYMLINK */ => decode_symlink_print_name(data),
+        0xA000_0003 /* MOUNT_POINT */ => decode_mount_point_print_name(data),
+        _ => None,
+    }?;
+    Some(
+        target
+            .strip_prefix(r"\??\")
+            .map(String::from)
+            .unwrap_or(target),
+    )
+}
+
 /// Decode disk-sourced UTF-16LE. `None` means there is no name here --
 /// zero length, or a byte count that cannot be UTF-16 at all.
 ///
