@@ -13,7 +13,10 @@
   the notes an installer shows) and the two licence files. The cargo
   target's `mkfs_ntfs` name does not appear in it, and `rust-ntfs` is not
   shipped. `scripts/package-cli.sh` builds and checks each tarball, and
-  `tests/scripts/package-cli.sh` tests that script.
+  `tests/scripts/package-cli.sh` tests that script. The release job attests
+  each tarball's build provenance, checkable with `gh attestation verify
+  <tarball> --repo christhomas/rust-fs-ntfs --signer-workflow
+  christhomas/rust-fs-ntfs/.github/workflows/release.yml`.
 - **`mkfs.ntfs --version` (and `-V`) prints the tool name and crate
   version**, e.g. `mkfs.ntfs (am-fs-ntfs) 0.5.0`. It was rejected as an
   unknown flag. `rust-ntfs format --version` answers the same way.

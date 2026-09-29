@@ -119,5 +119,10 @@ grep -q 'scripts/package-cli.sh' "$release" && ok \
     || bad "release.yml packages through scripts/package-cli.sh"
 grep -q 'cargo build --release --locked --bin mkfs_ntfs' "$release" && ok \
     || bad "release.yml builds the mkfs_ntfs target"
+grep -qE 'uses: actions/attest-build-provenance@[0-9a-f]{40}' "$release" && ok \
+    || bad "release.yml attests the tarballs' build provenance, with the action pinned to a commit"
+grep -q 'attestations: write' "$release" && ok \
+    || bad "release.yml grants the release job attestations: write"
+
 printf 'package-cli: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

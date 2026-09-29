@@ -649,8 +649,8 @@ jobs:
           retention-days: 7
 
   # The one job that writes to the repository, and only once every leg of
-  # package-cli passed. It checks nothing out and runs no third-party action
-  # beyond fetching the legs' tarballs, which it hands to `gh`.
+  # package-cli passed. It checks nothing out: it downloads the legs'
+  # tarballs, attests their provenance, and hands them to `gh`.
   release:
     name: publish the GitHub release
     needs: [package-cli]
@@ -658,6 +658,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Build provenance: the OIDC token signs the attestation, and
+      # attestations: write stores it against this repository.
+      id-token: write
+      attestations: write
     steps:
       - name: collect every leg's tarball
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -665,6 +669,15 @@ jobs:
           pattern: mkfs-ntfs-*
           path: dist
           merge-multiple: true
+
+      # A signed statement that each tarball was built by this workflow from
+      # this commit, before anything is published. An installer checks it
+      # with `gh attestation verify <tarball> --repo <owner>/<repo>
+      # --signer-workflow <owner>/<repo>/.github/workflows/release.yml`.
+      - name: attest the tarballs' build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
 
       # A re-run finds the release already there and replaces its assets;
       # otherwise the release is created with all of them at once.
