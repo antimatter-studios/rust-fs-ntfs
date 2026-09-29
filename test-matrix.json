@@ -2086,6 +2086,7 @@
         {
           "op": "win-chkdsk",
           "modes": "readonly,/scan",
+          "keep_image": "false",
           "verdict_shape": "Clean"
         }
       ],
@@ -2123,6 +2124,7 @@
         {
           "op": "win-chkdsk",
           "modes": "readonly,/scan",
+          "keep_image": "false",
           "verdict_shape": "RepairRequired"
         }
       ],
@@ -2156,6 +2158,7 @@
         {
           "op": "win-chkdsk",
           "modes": "readonly,/scan",
+          "keep_image": "false",
           "verdict_shape": "RepairRequired"
         }
       ],
@@ -2189,6 +2192,7 @@
         {
           "op": "win-chkdsk",
           "modes": "readonly,/scan",
+          "keep_image": "false",
           "verdict_shape": "RepairRequired"
         }
       ],
