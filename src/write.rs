@@ -4062,6 +4062,56 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
     .map_err(|e| format!("replace $DATA: {e}"))
 }
 
+/// Replace a file's unnamed `$DATA` with `new_data`, whatever it holds now:
+/// the new content and nothing of the old, at exactly `new_data.len()`
+/// bytes. Returns the new size.
+///
+/// A resident `$DATA` goes through [`write_file_contents_io`], which keeps
+/// it resident or promotes it. A non-resident one stays non-resident: it
+/// is shrunk ([`truncate_io`]) or grown ([`grow_nonresident_io`]) to the new
+/// length first, and the bytes are then written over it from offset 0
+/// ([`write_at_io`], which moves `initialized_length` up to what it
+/// wrote). The resize comes first so that a failed grow leaves the old
+/// content in place rather than half of the new -- except where growing in
+/// place cannot fit the new run and the file is emptied to grow as one run;
+/// if THAT fails too, the file is left empty and the error says so.
+pub fn replace_file_contents_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    new_data: &[u8],
+) -> Result<u64, String> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let (_, record) = crate::mft_io::read_mft_record_io(io, rec)?;
+    let loc = attr_io::find_attribute(&record, AttrType::Data, None)
+        .ok_or_else(|| format!("{file_path} has no unnamed $DATA"))?;
+    if loc.is_resident {
+        return write_file_contents_io(io, file_path, new_data);
+    }
+    let old = loc
+        .non_resident_value_length
+        .ok_or("missing non-resident value_length")?;
+    let new = new_data.len() as u64;
+    if new < old {
+        truncate_io(io, file_path, new)?;
+    } else if new > old {
+        // In place first, which keeps the old content if it fails. A grow
+        // that has to append a second run can outgrow the room the
+        // attribute has for its mapping pairs; emptied first, the file
+        // grows as ONE run, which needs no more room than it had.
+        if let Err(in_place) = grow_nonresident_io(io, file_path, new) {
+            truncate_io(io, file_path, 0)?;
+            grow_nonresident_io(io, file_path, new).map_err(|e| {
+                format!(
+                    "grow to {new} bytes: {in_place}; and emptied to grow as one run: {e} \
+                     (the file is now empty)"
+                )
+            })?;
+        }
+    }
+    write_at_io(io, file_path, 0, new_data)?;
+    Ok(new)
+}
+
 /// High-level: write `new_data` as the entire content of the file.
 /// Dispatches between resident rewrite and promotion-to-non-resident
 /// based on whether the data still fits inside the MFT record.

@@ -1106,8 +1106,15 @@ jobs:
         with:
           name: ntfs-windows-native-read-fixtures
           path: test-disks
+      # ntfs-3g's own tools read what fs.ntfs wrote (tests/cli-oracle/
+      # test-ntfs3g.sh): a second, independent reader beside Windows.
+      - name: Install ntfs-3g (the Linux oracle)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ntfs-3g
       # Volumes Windows formatted and wrote, read by the installed fs.ntfs
-      # and compared with the hashes and link targets Windows reported.
+      # and compared with the hashes and link targets Windows reported; and
+      # volumes fs.ntfs wrote, read by ntfs-3g.
       - name: chore test:cli:oracle
         id: oracle
         run: chore test:cli:oracle

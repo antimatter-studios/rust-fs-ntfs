@@ -536,11 +536,14 @@ rust-fs-ntfs mkfs --help           # the same tool; nothing can shadow this name
 fs.ntfs disk.img ls /              # JSON entries; --all adds the metafiles
 fs.ntfs disk.img read /notes.txt > notes.txt
 fs.ntfs disk.img get label --text
+fs.ntfs disk.img write /notes.txt < notes.txt
+fs.ntfs disk.img mkdir /backup
+fs.ntfs disk.img set label "Backup Volume"
 fs.ntfs --offset 1048576 whole-disk.img info
 fsck.ntfs disk.img                 # dirty flag, $LogFile, $MFTMirr, MFT records; exit 0/1/4/8
 rust-fs-ntfs doctor                # is every name on PATH this program?
 chore test:cli                     # the tools as installed: doctor, then tests/cli/
-chore test:cli:oracle              # against volumes Windows wrote (tests/cli-oracle/)
+chore test:cli:oracle              # against Windows-written volumes, and ntfs-3g (tests/cli-oracle/)
 ```
 
 Reports are JSON on stdout (`--text` for people); a failure is

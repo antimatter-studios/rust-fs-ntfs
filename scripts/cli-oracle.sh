@@ -16,6 +16,11 @@
 #   set-dirty IMAGE                  fs.ntfs set dirty true
 #   corrupt IMAGE mirror|signature   damage the volume by its on-disk layout
 #   fsck-finds IMAGE KIND            fsck.ntfs exits 4 and reports a finding of KIND
+#   populate IMAGE LABEL             fs.ntfs mkdir, write (every size that changes
+#                                    how NTFS stores a file, replacements shorter
+#                                    and longer) and set label; IMAGE.manifest then
+#                                    lists every file's SHA-256, every directory and
+#                                    the label, for win-cli-verify.ps1
 #
 # The binary is target/release/rust-fs-ntfs (built with `--features cli`),
 # or RUST_FS_NTFS. JSON is read with grep, not jq: the Windows runner's Git
@@ -98,6 +103,42 @@ case "$step" in
         run fsck "$image"
         [ "$status" -eq 4 ] || die "fsck.ntfs exited $status, not 4 (errors left): $out"
         has "\"kind\": \"$1\"" || die "fsck.ntfs reported no $1 finding: $out"
+        ;;
+    populate)
+        [ $# -eq 1 ] || die "populate IMAGE LABEL"
+        manifest="$image.manifest"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+        random() { if [ "$2" -gt 0 ]; then head -c "$2" /dev/urandom >"$1"; else : >"$1"; fi; }
+        : >"$manifest"
+        for dir in /d /d/e; do
+            run fs "$image" mkdir "$dir"
+            [ "$status" -eq 0 ] || die "fs.ntfs mkdir $dir exited $status: $(cat "$image.cli-err")"
+            printf 'dir\t%s\n' "$dir" >>"$manifest"
+        done
+        # path:size, then path:size again for a replacement.
+        for spec in /empty.bin:0 /one.bin:1 /resident.bin:500 /cluster.bin:4096 \
+            /cluster-plus-one.bin:4097 /random.bin:1048576 /d/e/deep.bin:5000 \
+            "/na$(printf '\303\257')ve-$(printf '\346\227\245\346\234\254').txt:42" \
+            /shrunk.bin:4097 /shrunk.bin:1 /grown.bin:1 /grown.bin:1048576; do
+            path="${spec%:*}"
+            size="${spec##*:}"
+            random "$work/data" "$size"
+            set +e
+            "$BIN" fs "$image" write "$path" <"$work/data" >/dev/null 2>"$image.cli-err"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] || die "fs.ntfs write $path ($size bytes) exited $status: $(cat "$image.cli-err")"
+            grep -v "^file	$path	" "$manifest" >"$work/m" || true
+            printf 'file\t%s\t%s\t%s\n' "$path" "$size" "$(sha "$work/data")" >>"$work/m"
+            cp "$work/m" "$manifest"
+        done
+        run fs "$image" set label "$1"
+        [ "$status" -eq 0 ] || die "fs.ntfs set label exited $status: $(cat "$image.cli-err")"
+        printf 'label\t%s\n' "$1" >>"$manifest"
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the writes exited $status: $out"
         ;;
     *)
         die "unknown step '$step'"

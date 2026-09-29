@@ -123,25 +123,33 @@ fn command() -> Cmd {
         )
         .subcommand(
             Cmd::new("write")
-                .about("Create or replace a file with the bytes on stdin (not implemented yet)")
+                .about("Create or replace a file with the bytes on stdin")
                 .arg(
                     Arg::new("path")
                         .value_name("PATH")
                         .required(true)
                         .value_parser(value_parser!(OsString)),
                 )
-                .after_help("Examples:\n  fs.ntfs disk.img write /notes.txt < notes.txt"),
+                .after_help(
+                    "Examples:\n  fs.ntfs disk.img write /notes.txt < notes.txt\n  \
+                     tar cf - ./dir | fs.ntfs disk.img write /backup.tar\n  \
+                     fs.ext4 src.img read /f | fs.ntfs dst.img write /f\n\n\
+                     The parent directory must exist. An existing file is replaced.",
+                ),
         )
         .subcommand(
             Cmd::new("mkdir")
-                .about("Create a directory (not implemented yet)")
+                .about("Create a directory (its parent must exist)")
                 .arg(
                     Arg::new("path")
                         .value_name("PATH")
                         .required(true)
                         .value_parser(value_parser!(OsString)),
                 )
-                .after_help("Examples:\n  fs.ntfs disk.img mkdir /backup"),
+                .after_help(
+                    "Examples:\n  fs.ntfs disk.img mkdir /backup\n  \
+                     fs.ntfs disk.img mkdir /backup/2026",
+                ),
         )
         .subcommand(key_command(
             "get",
@@ -153,12 +161,19 @@ fn command() -> Cmd {
         ))
         .subcommand(
             Cmd::new("set")
-                .about("Change a property: dirty (true or false)")
+                .about("Change a property: label, or dirty (true or false)")
                 .arg(Arg::new("key").value_name("KEY").required(true))
-                .arg(Arg::new("value").value_name("VALUE").required(true))
+                .arg(
+                    Arg::new("value")
+                        .value_name("VALUE")
+                        .required(true)
+                        .allow_hyphen_values(true),
+                )
                 .after_help(
-                    "Examples:\n  fs.ntfs disk.img set dirty false\n  \
-                     fs.ntfs disk.img set dirty true\n\n\
+                    "Examples:\n  fs.ntfs disk.img set label \"Backup Volume\"\n  \
+                     fs.ntfs disk.img set label \"\"            remove the label\n  \
+                     fs.ntfs disk.img set dirty false\n\n\
+                     A label is at most 32 UTF-16 code units. \
                      `set dirty false` clears the flag without looking at $LogFile: use it \
                      only on a volume known to be consistent. fsck.ntfs -y clears it only \
                      when the log is empty.",
@@ -230,9 +245,8 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
             )
         }
         "set" => set(target, offset, sub),
-        "write" | "mkdir" => Err(CliError::not_implemented(format!(
-            "{verb}: not in this build of fs.ntfs yet"
-        ))),
+        "write" => write(target, offset, path_arg(sub)?),
+        "mkdir" => mkdir(target, offset, path_arg(sub)?),
         "resize" => Err(CliError::not_implemented(
             "resize: this library cannot resize an NTFS volume",
         )),
@@ -454,9 +468,19 @@ fn set(target: &OsString, offset: u64, sub: &ArgMatches) -> Result<Outcome, CliE
             ]);
             Ok(Outcome::report(report).with_text(want.to_string()))
         }
-        "label" => Err(CliError::not_implemented(
-            "set label: not in this build of fs.ntfs yet",
-        )),
+        "label" => {
+            super::format::check_label(value)
+                .map_err(|e| CliError::usage(e.replacen("--label", "set label", 1)))?;
+            edit(target, offset, "set label", |dev| {
+                fs_ntfs::write::set_volume_label_io(dev, value)
+            })?;
+            let label = if value.is_empty() {
+                Json::Null
+            } else {
+                Json::from(value.as_str())
+            };
+            Ok(Outcome::report(Json::object([("label", label)])).with_text(value.clone()))
+        }
         k if KEYS.contains(&k) || k.starts_with("ntfs.") => Err(CliError::refused(format!(
             "{k} is read-only{}",
             if k == "total_bytes" {
@@ -469,6 +493,103 @@ fn set(target: &OsString, offset: u64, sub: &ArgMatches) -> Result<Outcome, CliE
             "no key {other:?}; the settable keys are dirty and label"
         ))),
     }
+}
+
+/// Split an absolute path into its parent and its last name, refusing the
+/// root and the names that are not names (`.`, `..`).
+fn split_path(path: &str) -> Result<(String, &str), CliError> {
+    let trimmed = path.trim_end_matches('/');
+    let (parent, name) = trimmed.rsplit_once('/').ok_or_else(|| {
+        CliError::usage(format!("{path}: give the path from the root, as /{path}"))
+    })?;
+    if name.is_empty() || name == "." || name == ".." {
+        return Err(CliError::usage(format!("{path}: names no file")));
+    }
+    let parent = if parent.is_empty() { "/" } else { parent };
+    Ok((parent.to_string(), name))
+}
+
+/// Run `edit` on a writable open of `target`, then sync it. A volume
+/// Windows marked dirty is refused before anything is written, as the C
+/// ABI's read-write mount refuses it: its `$LogFile` may hold changes
+/// this library cannot replay. A fresh-format volume is upgraded first,
+/// as Windows does on its first read-write mount.
+fn edit<T>(
+    target: &OsString,
+    offset: u64,
+    what: &str,
+    edit: impl FnOnce(&mut Device) -> Result<T, String>,
+) -> Result<T, CliError> {
+    let (mut dev, info) = device::mount(target, offset, true)?;
+    if is_dirty(&info) {
+        return Err(CliError::failed(format!(
+            "{what}: the volume is dirty, and a write over a $LogFile this library cannot \
+             replay could lose changes; check it with fsck.ntfs (or chkdsk on Windows) first"
+        )));
+    }
+    fs_ntfs::fsck::upgrade_volume_version_io(&mut dev)
+        .map_err(|e| CliError::failed(format!("{what}: upgrade the volume version: {e}")))?;
+    let done = edit(&mut dev).map_err(|e| CliError::failed(format!("{what}: {e}")))?;
+    fs_ntfs::block_io::BlockIo::sync(&mut dev)
+        .map_err(|e| CliError::failed(format!("{what}: {e}")))?;
+    Ok(done)
+}
+
+/// Create or replace a regular file with everything on stdin. The whole
+/// input is read before the image is opened, so a failing producer
+/// (`false | fs.ntfs img write /f`) leaves the image as it was, and
+/// everything that can be refused (a missing parent, a directory at the
+/// path) is refused before anything is written.
+fn write(target: &OsString, offset: u64, path: &str) -> Result<Outcome, CliError> {
+    let (parent, name) = split_path(path)?;
+    let mut data = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut data)
+        .map_err(|e| CliError::failed(format!("read stdin: {e}")))?;
+    let (created, size) = edit(target, offset, path, |dev| {
+        let created = match read::resolve_path(dev, path) {
+            Ok(record) => {
+                if read::read_stat(dev, record)?.is_dir {
+                    return Err("is a directory".to_string());
+                }
+                false
+            }
+            Err(e) if e.contains("not found") => {
+                let parent_record = read::resolve_path(dev, &parent)?;
+                if !read::read_stat(dev, parent_record)?.is_dir {
+                    return Err(format!("{parent} is not a directory"));
+                }
+                fs_ntfs::write::create_file_io(dev, &parent, name)?;
+                true
+            }
+            Err(e) => return Err(e),
+        };
+        let size = fs_ntfs::write::replace_file_contents_io(dev, path, &data)?;
+        Ok((created, size))
+    })?;
+    let report = Json::object([
+        ("path", Json::from(path)),
+        ("bytes", Json::from(size)),
+        ("created", Json::from(created)),
+    ]);
+    let text = format!(
+        "{} {path} ({size} bytes)",
+        if created { "created" } else { "replaced" }
+    );
+    Ok(Outcome::report(report).with_text(text))
+}
+
+/// Create one directory. Its parent must exist, and nothing may be at the
+/// path already.
+fn mkdir(target: &OsString, offset: u64, path: &str) -> Result<Outcome, CliError> {
+    let (parent, name) = split_path(path)?;
+    let record = edit(target, offset, path, |dev| {
+        if read::resolve_path(dev, path).is_ok() {
+            return Err("already exists".to_string());
+        }
+        fs_ntfs::write::mkdir_io(dev, &parent, name)
+    })?;
+    let report = Json::object([("path", Json::from(path)), ("record", Json::from(record))]);
+    Ok(Outcome::report(report).with_text(format!("created {path}")))
 }
 
 /// Whether `$Volume` carries the dirty flag: the volume was not cleanly
