@@ -57,9 +57,20 @@ repo="${repo##*/}"
 [ -n "$repo" ] || die "no repository in $root/Cargo.toml"
 
 tarball="$crate-$version-$label.tar.gz"
+work=""
+
+# ON ANY FAILURE, NO TARBALL: not a partial one, and not one a previous run
+# left under the same name, which a caller could otherwise take for this
+# run's output. The trap is installed before anything below can fail,
+# mktemp included.
+cleanup() {
+    local status=$?
+    [ -z "$work" ] || rm -rf "$work"
+    [ "$status" -eq 0 ] || rm -f "$tarball"
+    return "$status"
+}
+trap cleanup EXIT
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
-fail() { rm -f "$tarball"; die "$*"; }
 
 stage="$work/stage"
 mkdir -p "$stage/bin" "$stage/share/$repo" "$work/unpacked"
@@ -85,18 +96,18 @@ COPYFILE_DISABLE=1 tar -czf "$tarball" -C "$stage" bin share "${licences[@]}"
 want_list="$(printf '%s\n' "${want[@]}" | sort)"
 got_list="$(tar -tzf "$tarball" | sed 's|^\./||' | grep -v '/$' | sort)"
 [ "$got_list" = "$want_list" ] \
-    || fail "$tarball holds [$(echo $got_list)], expected [$(echo $want_list)]"
+    || die "$tarball holds [$(echo $got_list)], expected [$(echo $want_list)]"
 
 tar -xzf "$tarball" -C "$work/unpacked"
-[ -s "$work/unpacked/share/$repo/CAVEATS" ] || fail "share/$repo/CAVEATS is empty"
+[ -s "$work/unpacked/share/$repo/CAVEATS" ] || die "share/$repo/CAVEATS is empty"
 for t in "${tools[@]}"; do
     tool="${t#*:}"
     exe="$work/unpacked/bin/$tool"
-    [ -x "$exe" ] || fail "bin/$tool is not executable in $tarball"
-    "$exe" --help > /dev/null || fail "$tool --help failed"
-    reported="$("$exe" --version)" || fail "$tool --version failed"
+    [ -x "$exe" ] || die "bin/$tool is not executable in $tarball"
+    "$exe" --help > /dev/null || die "$tool --help failed"
+    reported="$("$exe" --version)" || die "$tool --version failed"
     [ "$reported" = "$tool ($crate) $version" ] \
-        || fail "$tool --version says '$reported', expected '$tool ($crate) $version'"
+        || die "$tool --version says '$reported', expected '$tool ($crate) $version'"
 done
 
 printf '%s\n' "$tarball"
