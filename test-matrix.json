@@ -2159,7 +2159,7 @@
           "op": "win-chkdsk",
           "modes": "readonly,/scan",
           "keep_image": "false",
-          "verdict_shape": "RepairRequired"
+          "verdict_shape": "Damaged"
         }
       ],
       "image": "nfs-cli-corrupt-mirror-fsck-win-chkdsk.img",
@@ -2193,7 +2193,7 @@
           "op": "win-chkdsk",
           "modes": "readonly,/scan",
           "keep_image": "false",
-          "verdict_shape": "RepairRequired"
+          "verdict_shape": "Damaged"
         }
       ],
       "image": "nfs-cli-corrupt-signature-fsck-win-chkdsk.img",

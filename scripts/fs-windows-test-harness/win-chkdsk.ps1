@@ -17,7 +17,7 @@
 #                order: readonly, /scan, /spotfix, /F, /F /scan.
 #                Empty / absent => run readonly only (matches the
 #                default `mac:format -> win:chkdsk` shape).
-#   -VerdictShape  `Clean` (default) or `RepairRequired`. See the
+#   -VerdictShape  `Clean` (default), `RepairRequired` or `Damaged`. See the
 #                  comment block above the chkdsk loop for the gating
 #                  rules.
 #   -KeepImage   If `true` (string, from `{step.keep_image?}`), the
@@ -38,7 +38,7 @@
 #     verdict logic returned passed=true
 #   1 otherwise; per-mode exit codes are in <Diag>/chkdsk-*-exit.txt
 #   2 for config errors (bad -VerdictShape, missing /scan in
-#     RepairRequired modes)
+#     RepairRequired modes, no modes at all for Damaged)
 #
 # Phase 1e (done): this script invokes `vhd_tool create-fixed` from
 # antimatter-studios/rust-img-vhd to wrap the .img into a VHD before
@@ -62,8 +62,8 @@ $ErrorActionPreference = 'Stop'
 if (-not $VerdictShape -or $VerdictShape.Trim() -eq '') {
     $VerdictShape = 'Clean'
 }
-if ($VerdictShape -ne 'Clean' -and $VerdictShape -ne 'RepairRequired') {
-    Write-Error "invalid -VerdictShape: '$VerdictShape' (expected Clean or RepairRequired)"
+if ($VerdictShape -notin @('Clean', 'RepairRequired', 'Damaged')) {
+    Write-Error "invalid -VerdictShape: '$VerdictShape' (expected Clean, RepairRequired or Damaged)"
     exit 2
 }
 
@@ -102,6 +102,16 @@ try {
     #     - run /F (capture as `fix_exit`)
     #     - run post-/F /scan (capture as `post_scan_exit`)
     #     - verdict: pre_scan != 0 AND fix_exit == 0 AND post_scan_exit == 0
+    #
+    #   Damaged (a volume whose structures were broken on purpose):
+    #     - run the listed modes first; at least one must exit non-zero,
+    #       which is Windows saying it found the damage. `/scan` is not
+    #       required: the online scan does not compare $MFTMirr with
+    #       $MFT, and exits 0 on a volume whose mirror was changed,
+    #       while the read-only pass exits 3 on it
+    #     - run /F /X; 0 or 1 both pass, 1 being chkdsk's "errors found
+    #       and fixed", the answer a damaged volume is expected to get
+    #     - run post-/F /scan; must exit 0
     $rawExits = @{}      # diag-key -> exit code (for diag inspection)
     function Invoke-ChkdskMode([string]$mode, [string]$letter, [string]$diag, [string]$labelSuffix = '') {
         $modeFile = ($mode -replace '[/\\ ]', '-') + $labelSuffix
@@ -133,6 +143,31 @@ try {
             passed = $passed
             verdict_shape = 'clean'
             exits = $rawExits
+        } | ConvertTo-Json -Compress | Out-File "$Diag\verdict.json" -Encoding ASCII
+    } elseif ($VerdictShape -eq 'Damaged') {
+        $preExits = @()
+        foreach ($mode in $Modes.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) {
+            $exit = Invoke-ChkdskMode -mode $mode -letter $letter -diag $Diag
+            $rawExits[$mode] = $exit
+            $preExits += $exit
+        }
+        if ($preExits.Count -eq 0) {
+            [Console]::Error.WriteLine("Damaged needs at least one mode in -Modes to find the damage; got -Modes '$Modes'")
+            exit 2
+        }
+        $fixExit = Invoke-ChkdskMode -mode '/F /X' -letter $letter -diag $Diag
+        $rawExits['/F /X'] = $fixExit
+        $postScanExit = Invoke-ChkdskMode -mode '/scan' -letter $letter -diag $Diag -labelSuffix '-post'
+        $rawExits['/scan-post'] = $postScanExit
+        $found = @($preExits | Where-Object { $_ -ne 0 }).Count -gt 0
+        $passed = $found -and ($fixExit -eq 0 -or $fixExit -eq 1) -and ($postScanExit -eq 0)
+        @{
+            passed = $passed
+            verdict_shape = 'damaged'
+            exits = $rawExits
+            damage_found = $found
+            fix_exit = $fixExit
+            post_scan_exit = $postScanExit
         } | ConvertTo-Json -Compress | Out-File "$Diag\verdict.json" -Encoding ASCII
     } else {
         # RepairRequired
