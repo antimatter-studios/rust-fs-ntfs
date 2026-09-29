@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **A release publishes `mkfs.ntfs` as a prebuilt binary.** A version tag
+  now also builds the formatter on macOS (arm64) and Linux (x86_64), once
+  the full suite and Windows `chkdsk` have passed, and attaches
+  `am-fs-ntfs-<version>-<platform>.tar.gz` to the tag's GitHub release.
+  Each tarball is laid out as an install prefix and holds nothing else:
+  `bin/mkfs.ntfs`, `share/rust-fs-ntfs/CAVEATS` (from `packaging/CAVEATS`,
+  the notes an installer shows) and the two licence files. The cargo
+  target's `mkfs_ntfs` name does not appear in it, and `rust-ntfs` is not
+  shipped. `scripts/package-cli.sh` builds and checks each tarball, and
+  `tests/scripts/package-cli.sh` tests that script. The release job attests
+  each tarball's build provenance, checkable with `gh attestation verify
+  <tarball> --repo christhomas/rust-fs-ntfs --signer-workflow
+  christhomas/rust-fs-ntfs/.github/workflows/release.yml`.
+- **`mkfs.ntfs --version` (and `-V`) prints the tool name and crate
+  version**, e.g. `mkfs.ntfs (am-fs-ntfs) 0.5.0`. It was rejected as an
+  unknown flag. `rust-ntfs format --version` answers the same way.
+
 ## [0.5.0] — 2026-09-27
 
 ### Breaking

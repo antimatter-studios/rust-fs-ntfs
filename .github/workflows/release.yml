@@ -16,10 +16,11 @@ name: Release
 #
 # Trusted publishing (OIDC) via crates-io-auth-action; no stored token.
 #
-# Note: this workflow does NOT ship prebuilt binaries / GitHub Releases. The
-# crate is consumed as a library (the gold-standard sister crate am-fs-ext4
-# ships none either); the per-platform binary matrix was distribution, not
-# testing, and was flaky. The focus here is: full tests + chkdsk -> publish.
+# The same two gates also stand in front of the binary release: once both
+# pass, `package-cli` builds `mkfs.ntfs` natively on each platform and
+# `release` publishes the tarballs as the tag's GitHub release, which is what
+# a package manager installs from. Only the formatter ships; `rust-ntfs`, the
+# CLI the test matrix drives, does not.
 
 on:
   push:
@@ -560,3 +561,142 @@ jobs:
         # No --locked: publish rewrites the am-fs-core path dep into its
         # registry version (0.2.x from crates.io), which --locked forbids.
         run: cargo publish
+
+  # ---------------------------------------------------------------------------
+  # The formatter as a downloadable binary, so it can be installed with a
+  # package manager rather than `cargo install`. Gated on the same two jobs
+  # as the crates.io publish: a binary Windows' chkdsk has not passed is not
+  # one to hand out.
+  #
+  # THE BINARY IS RENAMED, by scripts/package-cli.sh: cargo refuses a dot in
+  # a target name, so the target is `mkfs_ntfs` and the published binary is
+  # `mkfs.ntfs`. The tarball is laid out as an install prefix --
+  # bin/mkfs.ntfs, share/rust-fs-ntfs/CAVEATS and the licences -- so an
+  # installer copies it whole and never names a tool. The script also
+  # checks the tarball it made -- exactly those files, a tool that answers
+  # --help, and a --version naming this tag's version -- and fails the leg
+  # otherwise.
+  # tests/scripts/package-cli.sh holds the script to that.
+  #
+  # Native builds, one runner per platform: cross-compiling needs a cross
+  # toolchain or an emulator, and neither is worth it for two targets GitHub
+  # already provides natively. Read-only: a leg uploads its tarball as a
+  # workflow artifact, and `release` publishes them together once every leg
+  # has passed, so a failed leg cannot leave a release with one platform on
+  # it. Actions in these two jobs are pinned to commits because `release`
+  # holds a write token.
+  # ---------------------------------------------------------------------------
+  package-cli:
+    name: package mkfs.ntfs (${{ matrix.label }})
+    needs: [crates-test, validate-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      # One platform failing should not hide whether the other built.
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            label: darwin-arm64
+          - runner: ubuntu-latest
+            label: linux-x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      # The path dependency, at the ref chores.yml pins (read from there
+      # rather than restated).
+      - name: clone am-fs-core sibling
+        shell: bash
+        run: |
+          set -euo pipefail
+          pin() { sed -n "s/^  $1: *//p" chores.yml | tr -d '\r'; }
+          git clone --quiet --depth 1 --branch "$(pin FS_CORE_REF)" \
+            https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-27
+        with:
+          toolchain: 1.95.0
+
+      - name: build mkfs_ntfs
+        shell: bash
+        run: cargo build --release --locked --bin mkfs_ntfs
+
+      - name: package and check mkfs.ntfs
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          tarball="$(scripts/package-cli.sh "${GITHUB_REF_NAME#v}" "${{ matrix.label }}")"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          # The sha256 in the job summary, so checking a package manager's
+          # checksum against the build is a copy, not a re-download.
+          {
+            echo "### $tarball"
+            echo ""
+            echo '```'
+            echo "sha256 $(shasum -a 256 "$tarball" | cut -d' ' -f1)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: keep the tarball for the release job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mkfs-ntfs-${{ matrix.label }}
+          path: ${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # The one job that writes to the repository, and only once every leg of
+  # package-cli passed. It checks nothing out: it downloads the legs'
+  # tarballs, attests their provenance, and hands them to `gh`.
+  release:
+    name: publish the GitHub release
+    needs: [package-cli]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Build provenance: the OIDC token signs the attestation, and
+      # attestations: write stores it against this repository.
+      id-token: write
+      attestations: write
+    steps:
+      - name: collect every leg's tarball
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: mkfs-ntfs-*
+          path: dist
+          merge-multiple: true
+
+      # A signed statement that each tarball was built by this workflow from
+      # this commit, before anything is published. An installer checks it
+      # with `gh attestation verify <tarball> --repo <owner>/<repo>
+      # --signer-workflow <owner>/<repo>/.github/workflows/release.yml`.
+      - name: attest the tarballs' build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+
+      # A re-run finds the release already there and replaces its assets;
+      # otherwise the release is created with all of them at once.
+      - name: create the release, or upload to it
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          shopt -s nullglob
+          assets=(dist/*.tar.gz)
+          if [ "${#assets[@]}" -ne 2 ]; then
+            echo "expected 2 tarballs (one per package-cli leg), found ${#assets[@]}: ${assets[*]}" >&2
+            exit 1
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            gh release create "$tag" "${assets[@]}" --title "$tag" --generate-notes
+          fi

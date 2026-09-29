@@ -198,7 +198,7 @@ jobs:
               echo "::error::only $n unit tests executed, floor is 600 -- 637 ran on 2026-09-17 in run 34985102618, and a run that executes less than that stopped early rather than passed"
               exit 1
           fi
-      # The floor here is 8 out of a measured 9, which looks like no margin at
+      # The floor here is 15 out of a measured 16, which looks like no margin at
       # all and is the right number anyway: this selection is two named test
       # binaries, so it does not drift the way a `--lib` count does, and what
       # the floor has to catch is the drop to ZERO -- a renamed file leaving
@@ -208,11 +208,12 @@ jobs:
       - name: fixture-free integration tests with an executed-test floor
         run: |
           scripts/tier.sh mkfs -- cargo test --release --locked --test mkfs_roundtrip --test mkfs_bin_smoke
-          # Measured 9 executed (mkfs_roundtrip 3 + mkfs_bin_smoke 6). Floor 8.
+          # Measured 16 executed (mkfs_roundtrip 9 + mkfs_bin_smoke 7) on
+          # 2026-09-29, when mkfs_bin_smoke gained the --version test. Floor 15.
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/mkfs.log | awk '{s+=$4} END{print s+0}')
-          echo "tests executed: $n (floor 8)"
-          if [ "$n" -lt 8 ]; then
-              echo "::error::only $n tests executed, floor is 8 -- 9 ran on 2026-09-17 in run 34985102618, and a run that executes less than that stopped early rather than passed"
+          echo "tests executed: $n (floor 15)"
+          if [ "$n" -lt 15 ]; then
+              echo "::error::only $n tests executed, floor is 15 -- 16 ran on 2026-09-29, and a run that executes less than that stopped early rather than passed"
               exit 1
           fi
 
