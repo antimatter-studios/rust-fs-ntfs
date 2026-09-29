@@ -133,6 +133,16 @@ refused "a binary reporting a version other than the tag's" 9.9.9 darwin-arm64 "
 refused "a missing label" 9.9.9 "" "$(dirname "$good")"
 refused "a missing version" "" darwin-arm64 "$(dirname "$good")"
 STALE="$crate-9.9.9-darwin-arm64.tar.gz" refused "a failure beside a previous run's tarball" 9.9.9 darwin-arm64 "$sandbox/nowhere"
+# A working directory that cannot be made is a failure too, and it is the
+# first thing the script can fail on after naming the tarball. An mktemp that
+# fails stands in for an unusable TMPDIR: macOS mktemp falls back to the
+# per-user temporary directory when TMPDIR is missing or read-only, so TMPDIR
+# alone cannot make it fail there.
+mkdir -p "$sandbox/failing-mktemp"
+printf '#!/bin/sh\necho "mktemp: cannot create directory" >&2\nexit 1\n' > "$sandbox/failing-mktemp/mktemp"
+chmod +x "$sandbox/failing-mktemp/mktemp"
+STALE="$crate-9.9.9-darwin-arm64.tar.gz" PATH="$sandbox/failing-mktemp:$PATH" \
+    refused "a working directory that cannot be made, beside a previous run's tarball" 9.9.9 darwin-arm64 "$(dirname "$good")"
 
 # --- The release workflow packages through this script. ------------------
 release="$ROOT/.github/workflows/release.yml"

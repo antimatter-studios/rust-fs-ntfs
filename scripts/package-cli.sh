@@ -57,18 +57,20 @@ repo="${repo##*/}"
 [ -n "$repo" ] || die "no repository in $root/Cargo.toml"
 
 tarball="$crate-$version-$label.tar.gz"
-work="$(mktemp -d)"
+work=""
 
 # ON ANY FAILURE, NO TARBALL: not a partial one, and not one a previous run
 # left under the same name, which a caller could otherwise take for this
-# run's output.
+# run's output. The trap is installed before anything below can fail,
+# mktemp included.
 cleanup() {
     local status=$?
-    rm -rf "$work"
+    [ -z "$work" ] || rm -rf "$work"
     [ "$status" -eq 0 ] || rm -f "$tarball"
     return "$status"
 }
 trap cleanup EXIT
+work="$(mktemp -d)"
 
 stage="$work/stage"
 mkdir -p "$stage/bin" "$stage/share/$repo" "$work/unpacked"
