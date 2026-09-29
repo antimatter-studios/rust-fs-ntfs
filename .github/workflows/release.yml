@@ -570,9 +570,12 @@ jobs:
   #
   # THE BINARY IS RENAMED, by scripts/package-cli.sh: cargo refuses a dot in
   # a target name, so the target is `mkfs_ntfs` and the published binary is
-  # `mkfs.ntfs`. The script also checks the tarball it made -- exactly
-  # mkfs.ntfs and the licences, a binary that answers --help, and a
-  # --version naming this tag's version -- and fails the leg otherwise.
+  # `mkfs.ntfs`. The tarball is laid out as an install prefix --
+  # bin/mkfs.ntfs, share/rust-fs-ntfs/CAVEATS and the licences -- so an
+  # installer copies it whole and never names a tool. The script also
+  # checks the tarball it made -- exactly those files, a tool that answers
+  # --help, and a --version naming this tag's version -- and fails the leg
+  # otherwise.
   # tests/scripts/package-cli.sh holds the script to that.
   #
   # Native builds, one runner per platform: cross-compiling needs a cross

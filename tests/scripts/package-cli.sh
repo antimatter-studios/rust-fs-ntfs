@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# The release tarball holds exactly `mkfs.ntfs` and the licences, and the
-# binary in it runs.
+# The release tarball has the layout an installer copies as-is --
+# bin/mkfs.ntfs, share/rust-fs-ntfs/CAVEATS and the licences, nothing else --
+# and the tool in it runs and identifies itself.
 #
 # Cargo refuses a dot in a target name, so the formatter builds as
 # `mkfs_ntfs`. scripts/package-cli.sh renames it to `mkfs.ntfs` before
@@ -56,7 +57,7 @@ package() {
 
 # --- A good build: the tarball, its name, and exactly its contents. -------
 good="$(stub 9.9.9 0 good/mkfs_ntfs)"
-if tarball="$(package 9.9.9 darwin-arm64 "$good")"; then
+if tarball="$(package 9.9.9 darwin-arm64 "$(dirname "$good")")"; then
     ok
 else
     bad "a good build packages: $(cat "$sandbox/stderr")"
@@ -70,25 +71,28 @@ esac
 
 if [ -f "$tarball" ]; then
     listing="$(tar -tzf "$tarball" | sort | tr '\n' ' ')"
-    [ "$listing" = "LICENSE-APACHE LICENSE-MIT mkfs.ntfs " ] && ok \
-        || bad "tarball holds exactly mkfs.ntfs and the licences, got: $listing"
+    files="$(tar -tzf "$tarball" | sed 's|^\./||' | grep -v '/$' | sort | tr '\n' ' ')"
+    [ "$files" = "LICENSE-APACHE LICENSE-MIT bin/mkfs.ntfs share/rust-fs-ntfs/CAVEATS " ] && ok \
+        || bad "tarball holds exactly bin/mkfs.ntfs, the CAVEATS and the licences, got: $files"
 
     case "$listing" in
         *mkfs_ntfs*) bad "the cargo target name reached the tarball: $listing" ;;
         *) ok ;;
     esac
     case "$listing" in
-        *rust-ntfs*) bad "the test driver was shipped: $listing" ;;
+        *bin/rust-ntfs*) bad "the test driver was shipped: $listing" ;;
         *) ok ;;
     esac
 
     unpacked="$sandbox/unpacked"
     mkdir -p "$unpacked"
     tar -xzf "$tarball" -C "$unpacked"
-    [ -x "$unpacked/mkfs.ntfs" ] && ok || bad "mkfs.ntfs is executable in the tarball"
+    [ -x "$unpacked/bin/mkfs.ntfs" ] && ok || bad "bin/mkfs.ntfs is executable in the tarball"
+    cmp -s "$unpacked/share/rust-fs-ntfs/CAVEATS" "$ROOT/packaging/CAVEATS" && ok \
+        || bad "share/rust-fs-ntfs/CAVEATS is packaging/CAVEATS"
     cmp -s "$unpacked/LICENSE-MIT" "$ROOT/LICENSE-MIT" && ok || bad "LICENSE-MIT is the repository's"
     cmp -s "$unpacked/LICENSE-APACHE" "$ROOT/LICENSE-APACHE" && ok || bad "LICENSE-APACHE is the repository's"
-    cmp -s "$unpacked/mkfs.ntfs" "$good" && ok || bad "mkfs.ntfs is the built binary, renamed"
+    cmp -s "$unpacked/bin/mkfs.ntfs" "$good" && ok || bad "bin/mkfs.ntfs is the built binary, renamed"
 fi
 
 # --- Each way a build can be wrong is refused, with no tarball left. ------
@@ -103,11 +107,11 @@ refused() {
     fi
 }
 
-refused "a missing binary" 9.9.9 darwin-arm64 "$sandbox/nowhere/mkfs_ntfs"
-refused "a binary whose --help fails" 9.9.9 darwin-arm64 "$(stub 9.9.9 1 helpfails/mkfs_ntfs)"
-refused "a binary reporting a version other than the tag's" 9.9.9 darwin-arm64 "$(stub 1.0.0 0 wrongver/mkfs_ntfs)"
-refused "a missing label" 9.9.9 "" "$good"
-refused "a missing version" "" darwin-arm64 "$good"
+refused "a missing binary" 9.9.9 darwin-arm64 "$sandbox/nowhere"
+refused "a binary whose --help fails" 9.9.9 darwin-arm64 "$(dirname "$(stub 9.9.9 1 helpfails/mkfs_ntfs)")"
+refused "a binary reporting a version other than the tag's" 9.9.9 darwin-arm64 "$(dirname "$(stub 1.0.0 0 wrongver/mkfs_ntfs)")"
+refused "a missing label" 9.9.9 "" "$(dirname "$good")"
+refused "a missing version" "" darwin-arm64 "$(dirname "$good")"
 
 # --- The release workflow packages through this script. ------------------
 release="$ROOT/.github/workflows/release.yml"

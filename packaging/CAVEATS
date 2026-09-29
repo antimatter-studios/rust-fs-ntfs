@@ -1,0 +1,2 @@
+The mkfs.ntfs on your PATH is this one: `mkfs.ntfs --version` names am-fs-ntfs.
+On Linux, ntfs-3g also installs a mkfs.ntfs; only one of the two can be linked.
