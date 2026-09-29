@@ -209,8 +209,17 @@ fn fix_for(
 const PROBE_POLL: Duration = Duration::from_millis(10);
 const PROBE_POLLS: u32 = 500;
 
+/// How much of a `--version` answer is kept: the identity is its first
+/// line. The rest is read and dropped, so a long answer cannot fill the
+/// pipe and stall the program.
+const PROBE_KEEP: usize = 64 * 1024;
+
 /// Run `program --version` with no input, and give up after a few
 /// seconds: a program that is not ours may wait for a terminal.
+///
+/// Its stdout is READ WHILE IT RUNS, on a thread. Read only after it
+/// exits, a program answering more than a pipe holds blocks on the full
+/// pipe, runs out the time and is taken for someone else's.
 fn ask_version(program: &Path) -> Option<String> {
     let mut child = Process::new(program)
         .arg("--version")
@@ -219,24 +228,43 @@ fn ask_version(program: &Path) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut kept = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let room = PROBE_KEEP.saturating_sub(kept.len());
+                    kept.extend_from_slice(&chunk[..n.min(room)]);
+                }
+            }
+        }
+        kept
+    });
     // Polled rather than timed: a count of short sleeps needs no clock.
     let mut polls_left = PROBE_POLLS;
-    loop {
+    let exited = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(_)) => break true,
             Ok(None) if polls_left > 0 => {
                 polls_left -= 1;
                 std::thread::sleep(PROBE_POLL);
             }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
+            _ => break false,
         }
+    };
+    if !exited {
+        // Killing it closes the pipe, which ends the reader.
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = reader.join();
+        return None;
     }
-    let out = child.wait_with_output().ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    let kept = reader.join().ok()?;
+    Some(String::from_utf8_lossy(&kept).into_owned())
 }
 
 #[cfg(unix)]
@@ -318,4 +346,30 @@ pub fn run(family: &Family) -> Outcome {
     Outcome::report(report)
         .with_text(text.join("\n"))
         .with_code(u8::from(!ok))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A program that answers `--version` and then keeps writing: more than
+    /// a pipe holds. Read only after it exits, it blocks on a full pipe,
+    /// runs out the probe's time and is taken for someone else's program.
+    #[test]
+    fn a_long_answer_is_read_while_the_program_runs() {
+        let dir = std::env::temp_dir().join(format!("fs-ntfs-doctor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("chatty");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\necho 'mkfs.ntfs (am-fs-ntfs) 9.9.9'\nhead -c 1048576 /dev/zero\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let answer = ask_version(&program).expect("a program that exits is answered");
+        assert_eq!(answer.lines().next(), Some("mkfs.ntfs (am-fs-ntfs) 9.9.9"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

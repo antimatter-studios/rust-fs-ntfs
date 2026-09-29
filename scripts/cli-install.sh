@@ -17,6 +17,12 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PREFIX="${CLI_INSTALL_DIR:-$REPO/tmp/cli}"
+# Made absolute before the `cd` below: a relative prefix would otherwise be
+# staged under the repository and printed relative to the caller.
+case "$PREFIX" in
+    /*) ;;
+    *) PREFIX="$PWD/$PREFIX" ;;
+esac
 BIN="$PREFIX/bin"
 
 if [ "${1:-}" = "--print-bin-dir" ]; then
