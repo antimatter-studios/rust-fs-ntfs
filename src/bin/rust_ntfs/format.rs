@@ -43,6 +43,7 @@ Options:
                            file of the given size first. SIZE accepts K/M/G/T
                            suffixes (1024-based). Refuses to apply to existing
                            block devices — only valid for image files.
+  -V, --version            Print the version and exit.
   -h, --help               Print this help and exit.
 
 Positional:
@@ -224,6 +225,14 @@ fn parse_args(args: Vec<String>, prog: &str) -> Result<Opts, String> {
         match arg.as_str() {
             "-h" | "--help" => {
                 print!("{}", usage(prog));
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!(
+                    "{prog} ({}) {}",
+                    env!("CARGO_PKG_NAME"),
+                    env!("CARGO_PKG_VERSION")
+                );
                 std::process::exit(0);
             }
             "-L" | "--label" => {
