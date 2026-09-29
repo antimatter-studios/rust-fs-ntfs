@@ -471,6 +471,191 @@ pub fn fsck_io<'cb, T: FsckIo>(
 }
 
 // ---------------------------------------------------------------------------
+// Read-only check: what a checker reports without writing anything
+// ---------------------------------------------------------------------------
+
+/// `$MFTMirr` holds copies of the first four MFT records (`$MFT`,
+/// `$MFTMirr`, `$LogFile`, `$Volume`); a volume with a smaller record size
+/// holds as many as fit its mirror's data. Same count as
+/// `mkfs::MFTMIRR_RECORDS` and `mft_io::sync_mftmirr_record_io`.
+const MIRRORED_RECORDS: u64 = 4;
+
+/// One thing [`check_io`] found wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckFinding {
+    /// `$MFTMirr`'s copy of this record is not byte-for-byte the record in
+    /// `$MFT`. chkdsk compares the two and reports the same.
+    MirrorMismatch { record: u64 },
+    /// `$MFT`'s bitmap says this record is in use, and it does not read as
+    /// one: no `FILE` signature, update-sequence fixups that do not match
+    /// (a torn write), or a header describing more bytes than the record
+    /// has.
+    BadRecord { record: u64, reason: String },
+    /// `$MFTMirr` itself could not be read, so nothing was compared.
+    MirrorUnreadable { reason: String },
+}
+
+/// What [`check_io`] read, and what it found.
+#[derive(Debug, Clone)]
+pub struct CheckReport {
+    /// `$Volume`'s dirty flag.
+    pub dirty: bool,
+    /// Whether `$LogFile` is all `0xFF` -- empty, nothing to replay. A log
+    /// that is not empty may hold transactions, and this crate cannot
+    /// replay them (#137), so a dirty volume with one is not repaired.
+    pub logfile_empty: bool,
+    /// How many MFT records the bitmap marks in use, each of which was read.
+    pub records_scanned: u64,
+    pub findings: Vec<CheckFinding>,
+}
+
+/// Is `$LogFile` all `0xFF` bytes? Reads the whole log; writes nothing.
+pub fn logfile_is_empty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
+    let (logfile_disk_offset, logfile_size) = locate_logfile_data_io(io)?;
+    let mut buf = [0u8; LOGFILE_CHUNK];
+    let mut checked = 0;
+    while checked < logfile_size {
+        let n = std::cmp::min(logfile_size - checked, LOGFILE_CHUNK as u64) as usize;
+        io.read_exact_at(logfile_disk_offset + checked, &mut buf[..n])
+            .map_err(|e| format!("read $LogFile: {e}"))?;
+        if buf[..n].iter().any(|&byte| byte != LOGFILE_EMPTY_FILL) {
+            return Ok(false);
+        }
+        checked += n as u64;
+    }
+    Ok(true)
+}
+
+/// Check a volume WITHOUT WRITING ANYTHING: the dirty flag, whether
+/// `$LogFile` is empty, `$MFTMirr` against `$MFT`, and the header of every
+/// MFT record `$MFT`'s bitmap marks in use.
+///
+/// NOT A STRUCTURAL CHECKER. It does not follow attributes, indexes, runs
+/// or the cluster bitmap; a volume this calls clean is one on which none of
+/// THESE is wrong, and Windows' chkdsk remains the authority. An error is a
+/// volume too damaged to answer the questions at all (no boot sector, no
+/// `$MFT`, no `$Volume`).
+pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, String> {
+    let dirty = is_dirty_io(io)?;
+    let logfile_empty = logfile_is_empty_io(io)?;
+    let params = crate::mft_io::read_boot_params_io(io)?;
+    let record_size = params.file_record_size;
+    let mut findings = Vec::new();
+
+    // Every in-use record reads as a record.
+    let bitmap = crate::mft_bitmap::locate_io(io)?;
+    let total = match &bitmap.layout {
+        crate::mft_bitmap::MftBitmapLayout::Resident { total_bits, .. } => *total_bits,
+        crate::mft_bitmap::MftBitmapLayout::NonResident { total_bits, .. } => *total_bits,
+    };
+    let mut records_scanned = 0;
+    let mut raw = vec![0u8; record_size as usize];
+    for record in 0..total {
+        if !crate::mft_bitmap::is_allocated_io(io, &bitmap, record)? {
+            continue;
+        }
+        records_scanned += 1;
+        if let Some(reason) = bad_record_reason(io, &params, record, &mut raw) {
+            findings.push(CheckFinding::BadRecord { record, reason });
+        }
+    }
+
+    // $MFTMirr agrees with $MFT, byte for byte, on disk (fixups included:
+    // the mirror is a copy of the stored record, not a re-encoding).
+    match read_mirror(io, record_size) {
+        Err(reason) => findings.push(CheckFinding::MirrorUnreadable { reason }),
+        Ok(mirror) => {
+            let mirrored = mirror.len() as u64 / record_size;
+            for record in 0..mirrored {
+                let at = crate::mft_io::mft_record_offset_io(io, &params, record)?;
+                io.read_exact_at(at, &mut raw)
+                    .map_err(|e| format!("read MFT record {record}: {e}"))?;
+                let start = (record * record_size) as usize;
+                if mirror.get(start..start + raw.len()) != Some(&raw[..]) {
+                    findings.push(CheckFinding::MirrorMismatch { record });
+                }
+            }
+        }
+    }
+
+    Ok(CheckReport {
+        dirty,
+        logfile_empty,
+        records_scanned,
+        findings,
+    })
+}
+
+/// The records `$MFTMirr` holds, as stored.
+fn read_mirror<T: FsckIo>(io: &mut T, record_size: u64) -> Result<Vec<u8>, String> {
+    let mirror_bytes = crate::read::read_stat(io, 1)?.size;
+    let mirrored = MIRRORED_RECORDS.min(mirror_bytes / record_size);
+    crate::read::read_attribute_range(
+        io,
+        1,
+        AttrType::Data,
+        None,
+        0,
+        (mirrored * record_size) as usize,
+    )
+}
+
+/// Why an in-use record does not read as one, or `None` when it does.
+fn bad_record_reason<T: FsckIo>(
+    io: &mut T,
+    params: &crate::mft_io::BootParams,
+    record: u64,
+    raw: &mut [u8],
+) -> Option<String> {
+    let at = match crate::mft_io::mft_record_offset_io(io, params, record) {
+        Ok(at) => at,
+        Err(e) => return Some(e),
+    };
+    if let Err(e) = io.read_exact_at(at, raw) {
+        return Some(format!("unreadable: {e}"));
+    }
+    if &raw[0..4] != b"FILE" {
+        return Some(format!(
+            "no FILE signature (found {:02x} {:02x} {:02x} {:02x})",
+            raw[0], raw[1], raw[2], raw[3]
+        ));
+    }
+    let mut fixed = raw.to_vec();
+    if let Err(e) = crate::mft_io::apply_fixup_on_read(&mut fixed, params.bytes_per_sector) {
+        return Some(format!("update sequence: {e}"));
+    }
+    if crate::mft_io::record_flags(&fixed) & crate::mft_io::MFT_FLAG_IN_USE == 0 {
+        return Some("the bitmap marks it in use and its header does not".to_string());
+    }
+    // The header's own lengths, as every reader of the record checks them.
+    if let Err(e) = crate::mft_io::read_mft_record_io(io, record) {
+        return Some(e);
+    }
+    None
+}
+
+/// Clear the dirty flag when that is all that is wrong and it is safe:
+/// only when `$LogFile` is empty, through [`fsck_io`]. A log that holds
+/// anything may hold transactions this crate cannot replay (#137), and
+/// clearing the flag over them would discard them; that is refused, with
+/// the reason, and nothing is written.
+///
+/// `Ok(true)` when the flag was cleared, `Ok(false)` when it was not set.
+pub fn repair_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
+    if !is_dirty_io(io)? {
+        return Ok(false);
+    }
+    if !logfile_is_empty_io(io)? {
+        return Err(
+            "$LogFile holds records, which may be transactions this library cannot replay \
+             (rust-fs-ntfs#137); clearing the dirty flag over them would discard them"
+                .to_string(),
+        );
+    }
+    Ok(fsck_io(io, None)?.dirty_cleared)
+}
+
+// ---------------------------------------------------------------------------
 // Internals — NTFS parsing via an IoReader<'_, T: FsckIo>
 // ---------------------------------------------------------------------------
 
@@ -1337,6 +1522,143 @@ mod fill_range_tests {
         assert!(
             overlaps((mft_at + mft_bytes, mft_at + mft_bytes + 4096)),
             "a range that was clear of the boot sector and $MFT alone must now be refused too"
+        );
+    }
+}
+
+#[cfg(test)]
+mod check_tests {
+    use super::*;
+    use crate::block_io::BlockIo;
+    use crate::mkfs::format_filesystem;
+
+    struct MemDev(Vec<u8>);
+
+    impl BlockIo for MemDev {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            let off = offset as usize;
+            let src = self.0.get(off..off + buf.len()).ok_or("read past end")?;
+            buf.copy_from_slice(src);
+            Ok(())
+        }
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            let off = offset as usize;
+            self.0[off..off + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn size(&self) -> u64 {
+            self.0.len() as u64
+        }
+    }
+
+    fn fresh() -> MemDev {
+        const SIZE: u64 = 64 << 20;
+        let mut dev = MemDev(vec![0u8; SIZE as usize]);
+        format_filesystem(
+            &mut dev as &mut dyn BlockIo,
+            SIZE,
+            4096,
+            4096,
+            None,
+            Some(7),
+        )
+        .expect("format");
+        dev
+    }
+
+    fn record_at(dev: &mut MemDev, record: u64) -> u64 {
+        let params = crate::mft_io::read_boot_params_io(dev).unwrap();
+        crate::mft_io::mft_record_offset_io(dev, &params, record).unwrap()
+    }
+
+    #[test]
+    fn a_fresh_volume_is_clean_and_every_in_use_record_is_read() {
+        let mut dev = fresh();
+        let report = check_io(&mut dev).expect("check");
+        assert!(!report.dirty);
+        assert_eq!(report.findings, vec![]);
+        assert!(report.records_scanned >= 16, "{}", report.records_scanned);
+        // mkfs writes format.com's restart pages and checkpoint record.
+        assert!(!report.logfile_empty);
+    }
+
+    #[test]
+    fn this_crates_own_dirty_flag_edits_keep_the_mirror_in_step() {
+        let mut dev = fresh();
+        set_dirty_io(&mut dev).unwrap();
+        let report = check_io(&mut dev).unwrap();
+        assert!(report.dirty);
+        assert_eq!(report.findings, vec![]);
+    }
+
+    #[test]
+    fn a_mirror_that_disagrees_is_found_by_record() {
+        let mut dev = fresh();
+        let params = crate::mft_io::read_boot_params_io(&mut dev).unwrap();
+        // $MFTMirr is one run at the LCN the boot sector names (+0x38).
+        let mirror_lcn = u64::from_le_bytes(dev.0[0x38..0x40].try_into().unwrap());
+        let at = (mirror_lcn * params.cluster_size + 2 * params.file_record_size + 100) as usize;
+        dev.0[at] ^= 0xff;
+        let report = check_io(&mut dev).unwrap();
+        assert_eq!(
+            report.findings,
+            vec![CheckFinding::MirrorMismatch { record: 2 }]
+        );
+    }
+
+    #[test]
+    fn an_in_use_record_without_its_signature_is_found() {
+        let mut dev = fresh();
+        let at = record_at(&mut dev, 13) as usize;
+        dev.0[at..at + 4].copy_from_slice(b"XXXX");
+        let report = check_io(&mut dev).unwrap();
+        assert!(
+            matches!(&report.findings[..], [CheckFinding::BadRecord { record: 13, reason }] if reason.contains("FILE")),
+            "{:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn a_torn_record_is_found_by_its_update_sequence() {
+        let mut dev = fresh();
+        let at = record_at(&mut dev, 14) as usize;
+        // The last two bytes of the record's first sector carry the update
+        // sequence number; a sector written without the rest disagrees.
+        dev.0[at + 510] ^= 0xff;
+        let report = check_io(&mut dev).unwrap();
+        assert!(
+            matches!(
+                &report.findings[..],
+                [CheckFinding::BadRecord { record: 14, .. }]
+            ),
+            "{:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn a_dirty_volume_whose_log_holds_records_is_refused_and_left_alone() {
+        let mut dev = fresh();
+        set_dirty_io(&mut dev).unwrap();
+        let before = dev.0.clone();
+        let err = repair_dirty_io(&mut dev).expect_err("a log with records is not discarded");
+        assert!(err.contains("#137"), "{err}");
+        assert!(dev.0 == before, "a refused repair wrote to the volume");
+    }
+
+    #[test]
+    fn a_dirty_volume_with_an_empty_log_is_repaired_and_then_clean() {
+        let mut dev = fresh();
+        reset_logfile_io(&mut dev, None).unwrap();
+        set_dirty_io(&mut dev).unwrap();
+        assert!(repair_dirty_io(&mut dev).expect("repair"));
+        let report = check_io(&mut dev).unwrap();
+        assert!(!report.dirty && report.logfile_empty);
+        assert_eq!(report.findings, vec![]);
+        assert!(
+            !repair_dirty_io(&mut dev).unwrap(),
+            "a clean volume needs nothing"
         );
     }
 }

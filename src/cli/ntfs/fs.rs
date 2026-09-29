@@ -153,10 +153,16 @@ fn command() -> Cmd {
         ))
         .subcommand(
             Cmd::new("set")
-                .about("Change a property (not implemented yet)")
+                .about("Change a property: dirty (true or false)")
                 .arg(Arg::new("key").value_name("KEY").required(true))
                 .arg(Arg::new("value").value_name("VALUE").required(true))
-                .after_help("Examples:\n  fs.ntfs disk.img set label BACKUP"),
+                .after_help(
+                    "Examples:\n  fs.ntfs disk.img set dirty false\n  \
+                     fs.ntfs disk.img set dirty true\n\n\
+                     `set dirty false` clears the flag without looking at $LogFile: use it \
+                     only on a volume known to be consistent. fsck.ntfs -y clears it only \
+                     when the log is empty.",
+                ),
         )
         .subcommand(
             Cmd::new("resize")
@@ -223,7 +229,8 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
                 sub.get_one::<String>("key").map(String::as_str),
             )
         }
-        "write" | "mkdir" | "set" => Err(CliError::not_implemented(format!(
+        "set" => set(target, offset, sub),
+        "write" | "mkdir" => Err(CliError::not_implemented(format!(
             "{verb}: not in this build of fs.ntfs yet"
         ))),
         "resize" => Err(CliError::not_implemented(
@@ -414,6 +421,54 @@ fn read(dev: &mut Device, path: &str, output: Option<&OsString>) -> Result<Outco
         }
     }
     Ok(Outcome::done())
+}
+
+/// `set KEY VALUE`. Every key is one value and nothing else; a key that
+/// is reported but cannot be written answers exit 3 by name.
+fn set(target: &OsString, offset: u64, sub: &ArgMatches) -> Result<Outcome, CliError> {
+    let key = sub.get_one::<String>("key").expect("clap requires the key");
+    let value = sub
+        .get_one::<String>("value")
+        .expect("clap requires the value");
+    match key.as_str() {
+        "dirty" => {
+            let want = match value.as_str() {
+                "true" => true,
+                "false" => false,
+                other => {
+                    return Err(CliError::usage(format!(
+                        "set dirty takes true or false, not {other:?}"
+                    )))
+                }
+            };
+            let mut dev = device::open(target, offset, true)?;
+            let changed = if want {
+                fs_ntfs::fsck::set_dirty_io(&mut dev)
+            } else {
+                fs_ntfs::fsck::clear_dirty_io(&mut dev)
+            }
+            .map_err(|e| CliError::failed(format!("set dirty: {e}")))?;
+            let report = Json::object([
+                ("dirty", Json::from(want)),
+                ("changed", Json::from(changed)),
+            ]);
+            Ok(Outcome::report(report).with_text(want.to_string()))
+        }
+        "label" => Err(CliError::not_implemented(
+            "set label: not in this build of fs.ntfs yet",
+        )),
+        k if KEYS.contains(&k) || k.starts_with("ntfs.") => Err(CliError::refused(format!(
+            "{k} is read-only{}",
+            if k == "total_bytes" {
+                "; resize changes the size"
+            } else {
+                ""
+            }
+        ))),
+        other => Err(CliError::usage(format!(
+            "no key {other:?}; the settable keys are dirty and label"
+        ))),
+    }
 }
 
 /// Whether `$Volume` carries the dirty flag: the volume was not cleanly

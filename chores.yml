@@ -257,7 +257,7 @@ tasks:
           exit 1
         fi
   build:cli:
-    desc: Build the rust-ntfs CLI the matrix drives (target/release/rust-ntfs) -- skipped when up to date
+    desc: Build the CLIs the matrix drives (target/release/rust-ntfs, and rust-fs-ntfs for the cli group) -- skipped when up to date
     # UP TO DATE MEANS THE SOURCES HAVE NOT CHANGED, by content: chore hashes
     # these files and skips the task while the hashes match and the binary
     # exists. cargo would also notice nothing changed, but only after
@@ -277,12 +277,16 @@ tasks:
       - '../rust-fs-core/src/**/*.rs'
     generates:
       - target/release/rust-ntfs
+      - target/release/rust-fs-ntfs
     # THE GATE, not the report: siblings:check prints a line per sibling
     # whether or not anything drifted, and `chore matrix` would wear those
     # two lines in front of every run. Same check, silent when it passes.
     deps: [siblings:gate]
     cmds:
       - cargo build --release --locked --bin rust-ntfs --quiet
+      # The command-line tools, which the `cli` scenarios run on the host
+      # (scripts/cli-oracle.sh).
+      - cargo build --release --locked --features cli --bin rust-fs-ntfs --quiet
 
   matrix:
     desc: 'Run matrix scenarios on the Windows VM: `chore matrix -- <group|filter>` (e.g. smoke, mac-format-tiny-32mib)'
@@ -481,8 +485,8 @@ tasks:
     # and in CI alike: each file prints `test result: ok. N passed`, and a
     # run that executed fewer checks than the floor fails although every
     # file passed. 41 checks executed when the tier was added (mkfs.ntfs and
-    # the names, on a Mac), 86 with fs.ntfs's read verbs; the floor is 82,
-    # about 95% of that.
+    # the names, on a Mac), 86 with fs.ntfs's read verbs, 135 with fsck.ntfs
+    # and `set dirty`; the floor is 128, about 95% of that.
     cmds:
       - 'scripts/tier.sh cli -- scripts/test-cli.sh'
 
@@ -496,10 +500,10 @@ tasks:
     # runs it with the fixtures the Windows job built.
     #
     # FLOOR: 27 checks executed when the tier was added (the Windows-authored
-    # read fixtures: eight files, the compressed file, three symlinks); the
-    # floor is 25.
+    # read fixtures: eight files, the compressed file, three symlinks), 35
+    # with fsck.ntfs on each Windows volume; the floor is 33.
     cmds:
-      - 'scripts/tier.sh cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=25 scripts/test-cli.sh'
+      - 'scripts/tier.sh cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=33 scripts/test-cli.sh'
 
   test:ignored:
     desc: 'The #[ignore]d tests: known defects, run so a fix cannot go unnoticed'

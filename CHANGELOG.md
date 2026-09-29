@@ -26,8 +26,26 @@
   `block_size`, `dirty`) with the volume info and stats nested under
   `ntfs`, or one key of it, `--text` giving the bare value. `--offset`
   addresses a volume inside a whole-disk image. `resize` answers `not
-  implemented` (exit 3): the library cannot resize a volume. `set`, `write`
-  and `mkdir` answer the same until they are wired.
+  implemented` (exit 3): the library cannot resize a volume. `write`,
+  `mkdir` and `set label` answer the same until they are wired.
+- **`fsck.ntfs` checks the dirty flag, `$LogFile`, `$MFTMirr` and every
+  in-use MFT record, with fsck(8)'s exit statuses** (0 clean, 1 corrected,
+  4 left uncorrected, 8 operational, 16 usage). Its JSON report lists what
+  it checked and says it is not a full structural check, so nobody reads 0
+  as "chkdsk would agree". `-y` clears the dirty flag only when `$LogFile`
+  is empty; a log holding records may hold transactions this library
+  cannot replay (#137), so that is refused and reported, and nothing is
+  written. Nothing else is repaired. `fs.ntfs set dirty true|false` sets
+  and clears the flag by hand.
+- **`fs_ntfs::fsck::check_io`**, a read-only check behind `fsck.ntfs`:
+  the dirty flag, whether `$LogFile` is empty, `$MFTMirr` against `$MFT`
+  byte for byte, and each in-use MFT record's signature, update sequence
+  and header lengths. **`repair_dirty_io`** clears the flag only over an
+  empty log. The Windows matrix grades both: a `cli` group of scenarios
+  (a mirror that disagrees, a destroyed record signature, a dirty flag set
+  by `fs.ntfs`) must be found by `fsck.ntfs` and by Windows (`chkdsk`,
+  `fsutil dirty query`), and `fsck.ntfs` must find nothing wrong with the
+  volumes Windows wrote.
 - **`fs_ntfs::reparse_link_target`** decodes a symlink's or mount point's
   target from a `$REPARSE_POINT` value, as `fs_ntfs_readlink` reports it.
 - **`chore test:cli:oracle`** reads volumes Windows formatted and wrote --

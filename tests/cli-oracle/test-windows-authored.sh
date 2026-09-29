@@ -20,7 +20,7 @@ need() {
         fi
     done
 }
-need ntfs-cli-read.img ntfs-cli-read.sha256.tsv ntfs-compressed.img ntfs-symlink.img ntfs-symlink.targets.tsv
+need ntfs-cli-read.img ntfs-cli-read.sha256.tsv ntfs-compressed.img ntfs-symlink.img ntfs-symlink.targets.tsv ntfs-attrlist.img
 
 sha256() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi
@@ -70,5 +70,14 @@ done <"$fixtures/ntfs-symlink.targets.tsv"
 check "Windows reported three link targets (got $links)" test "$links" -eq 3
 fs.ntfs "$fixtures/ntfs-symlink.img" read /rel-file >/dev/null 2>"$SANDBOX/link.err"
 jq_check "read of a symlink is refused, naming its target" '.code == 1 and (.error | test("is a link to"))' "$SANDBOX/link.err"
+
+# fsck.ntfs finds nothing wrong with any volume Windows wrote and cleanly
+# dismounted: its checks must not call a healthy Windows volume damaged.
+for f in ntfs-cli-read.img ntfs-compressed.img ntfs-symlink.img ntfs-attrlist.img; do
+    fsck.ntfs "$fixtures/$f" >"$SANDBOX/fsck.json" 2>"$SANDBOX/fsck.err"
+    check "fsck.ntfs on Windows' $f exits 0 ($(cat "$SANDBOX/fsck.err"))" test $? -eq 0
+    jq_check "fsck.ntfs on Windows' $f reports clean and read every in-use record" \
+        '.clean == true and .found == 0 and .scanned.mft_records > 16' "$SANDBOX/fsck.json"
+done
 
 finish
