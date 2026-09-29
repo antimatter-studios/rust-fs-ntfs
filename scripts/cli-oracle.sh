@@ -27,6 +27,12 @@
 # Bash is not promised to carry jq, and each check is one field.
 set -euo pipefail
 
+# Git Bash rewrites any argument that looks like a POSIX path before it
+# reaches a native program, so `fs.ntfs IMAGE mkdir /d` arrived as `D:/`.
+# The paths passed to the tool are paths inside the NTFS image, never on
+# the host: nothing here wants the rewrite.
+export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${RUST_FS_NTFS:-$REPO/target/release/rust-fs-ntfs}"
 
