@@ -233,24 +233,42 @@ fn mkfs_bin_help_advertises_only_record_sizes_the_formatter_can_build() {
 /// A packaged binary is identified by asking it, which is what a package
 /// manager's install test does. `mkfs.ntfs --version` used to be rejected as
 /// an unknown flag, so there was nothing for such a test to check.
+///
+/// `mkfs.ntfs` is the multi-call binary under that name (it was the
+/// `mkfs_ntfs` target). The repository-named form reaches the same tool by
+/// verb or by full name, and so does the binary started as `mkfs.ntfs`,
+/// which is how an install's link reaches it: it answers to the name in
+/// argv[0].
 #[test]
 fn mkfs_ntfs_version_names_the_tool_and_the_crate_version() {
+    let want = format!(
+        "mkfs.ntfs ({}) {}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
+    let entry = env!("CARGO_BIN_EXE_rust-fs-ntfs");
     for flag in ["--version", "-V"] {
-        let out = Command::new(env!("CARGO_BIN_EXE_mkfs_ntfs"))
-            .arg(flag)
-            .output()
-            .expect("spawn mkfs_ntfs");
-
-        assert!(out.status.success(), "{flag} must exit 0: {out:?}");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert_eq!(
-            stdout.trim_end(),
-            format!(
-                "mkfs.ntfs ({}) {}",
-                env!("CARGO_PKG_NAME"),
-                env!("CARGO_PKG_VERSION")
-            ),
-            "{flag} must print the conventional name and the crate version"
-        );
+        let mut invocations = vec![
+            Command::new(entry).args(["mkfs", flag]).output(),
+            Command::new(entry).args(["mkfs.ntfs", flag]).output(),
+        ];
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            invocations.push(Command::new(entry).arg0("mkfs.ntfs").arg(flag).output());
+        }
+        for (i, out) in invocations.into_iter().enumerate() {
+            let out = out.expect("spawn mkfs.ntfs");
+            assert!(
+                out.status.success(),
+                "form {i}, {flag} must exit 0: {out:?}"
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert_eq!(
+                stdout.trim_end(),
+                want,
+                "form {i}, {flag} must print the conventional name and the crate version"
+            );
+        }
     }
 }

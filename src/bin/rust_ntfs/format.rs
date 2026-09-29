@@ -5,6 +5,13 @@
 //! removable disk through a host application and formatting an image
 //! from this CLI exercise the same code path.
 //!
+//! SHARED WITH `mkfs.ntfs`. The command-line tools' binary includes this
+//! file through `#[path]` and parses its own command line with clap, then
+//! hands the same [`Opts`] to [`execute`]: one set of defaults, one set of
+//! checks and one set of messages, whichever front end parsed the flags.
+//! This hand parser stays because `rust-ntfs` is the test matrix's driver,
+//! built without the `cli` feature, and its accepted flags must not move.
+//!
 //! Convention: the device/file MUST already exist at the target size,
 //! same as every other mkfs.* tool. Use `truncate -s 256M out.img`
 //! (Linux/macOS) or `fsutil file createnew out.img 268435456`
@@ -50,18 +57,39 @@ Positional:
   device                   Path to a block device or pre-sized regular file.
 ";
 
-#[derive(Default)]
-struct Opts {
-    label: Option<String>,
-    cluster_size: Option<u32>,
-    mft_record_size: Option<u32>,
-    serial: Option<u64>,
-    force: bool,
-    quick: bool,
-    dry_run: bool,
-    quiet: bool,
-    create_size: Option<u64>,
-    device: Option<String>,
+/// The cluster size used when none is given.
+pub const DEFAULT_CLUSTER_SIZE: u32 = 4096;
+/// The MFT record size used when none is given.
+pub const DEFAULT_MFT_RECORD_SIZE: u32 = 4096;
+/// `$VOLUME_NAME` holds 64 bytes: 32 UTF-16 code units.
+pub const MAX_LABEL_UNITS: usize = 32;
+
+/// Everything a command line can ask of the formatter.
+#[derive(Default, Debug)]
+pub struct Opts {
+    pub label: Option<String>,
+    pub cluster_size: Option<u32>,
+    pub mft_record_size: Option<u32>,
+    pub serial: Option<u64>,
+    pub force: bool,
+    pub quick: bool,
+    pub dry_run: bool,
+    pub quiet: bool,
+    pub create_size: Option<u64>,
+    pub device: Option<String>,
+}
+
+/// What [`execute`] did. `rust-ntfs format` reports nothing on stdout and
+/// reads none of it; `mkfs.ntfs` turns it into its JSON report.
+#[allow(dead_code)]
+pub struct Done {
+    /// The target's size in bytes: for a dry run whose target does not
+    /// exist yet, the size `--create-size` would have made it.
+    pub device_bytes: Option<u64>,
+    /// Whether anything was written: false for a dry run.
+    pub formatted: bool,
+    pub cluster_size: u32,
+    pub mft_record_size: u32,
 }
 
 /// `prog` is the name this invocation should call itself by, in usage
@@ -86,9 +114,14 @@ fn run_inner(args: Vec<String>, prog: &str) -> Result<(), String> {
         .device
         .as_deref()
         .ok_or_else(|| format!("missing positional <device> argument\n\n{}", usage(prog)))?;
+    execute(&opts, device, prog).map(|_| ())
+}
 
-    let cluster_size = opts.cluster_size.unwrap_or(4096);
-    let mft_record_size = opts.mft_record_size.unwrap_or(4096);
+/// Format `device` as `opts` asks, calling itself `prog` in every message.
+/// Progress goes to stderr unless `opts.quiet`.
+pub fn execute(opts: &Opts, device: &str, prog: &str) -> Result<Done, String> {
+    let cluster_size = opts.cluster_size.unwrap_or(DEFAULT_CLUSTER_SIZE);
+    let mft_record_size = opts.mft_record_size.unwrap_or(DEFAULT_MFT_RECORD_SIZE);
 
     // THE CAP THE USAGE TEXT PROMISES, CHECKED BEFORE ANYTHING IS
     // TOUCHED. `-L` documents "max 32 UTF-16 code units after encode"
@@ -101,13 +134,7 @@ fn run_inner(args: Vec<String>, prog: &str) -> Result<(), String> {
     // goes in `$VOLUME_NAME`, so an emoji is two and an accented letter
     // may be one or two depending on how it is composed.
     if let Some(label) = opts.label.as_deref() {
-        let units = label.encode_utf16().count();
-        if units > 32 {
-            return Err(format!(
-                "--label: {units} UTF-16 code units, and the limit is 32. NTFS stores the label \
-                 in $VOLUME_NAME, which is 64 bytes. Shorten it: {label:?}"
-            ));
-        }
+        check_label(label)?;
     }
 
     if let Some(n) = opts.create_size {
@@ -127,7 +154,13 @@ fn run_inner(args: Vec<String>, prog: &str) -> Result<(), String> {
                     Err(_) => eprintln!("{prog}: dry-run — would create {device} ({n} bytes)"),
                 }
             }
-            return Ok(());
+            return Ok(Done {
+                // The size the target has, or would have been created at.
+                device_bytes: Some(std::fs::metadata(device).map_or(n, |m| m.len())),
+                formatted: false,
+                cluster_size,
+                mft_record_size,
+            });
         }
         match std::fs::metadata(device) {
             Ok(meta) => {
@@ -193,7 +226,12 @@ fn run_inner(args: Vec<String>, prog: &str) -> Result<(), String> {
             eprintln!("{prog}: dry-run — no writes performed");
         }
         let _ = (opts.force, opts.quick);
-        return Ok(());
+        return Ok(Done {
+            device_bytes: Some(size),
+            formatted: false,
+            cluster_size,
+            mft_record_size,
+        });
     }
 
     format_filesystem(
@@ -213,6 +251,23 @@ fn run_inner(args: Vec<String>, prog: &str) -> Result<(), String> {
 
     if !opts.quiet {
         eprintln!("{prog}: {device} formatted successfully");
+    }
+    Ok(Done {
+        device_bytes: Some(size),
+        formatted: true,
+        cluster_size,
+        mft_record_size,
+    })
+}
+
+/// THE CAP THE USAGE TEXT PROMISES: at most 32 UTF-16 code units.
+pub fn check_label(label: &str) -> Result<(), String> {
+    let units = label.encode_utf16().count();
+    if units > MAX_LABEL_UNITS {
+        return Err(format!(
+            "--label: {units} UTF-16 code units, and the limit is {MAX_LABEL_UNITS}. NTFS stores \
+             the label in $VOLUME_NAME, which is 64 bytes. Shorten it: {label:?}"
+        ));
     }
     Ok(())
 }
@@ -257,34 +312,7 @@ fn parse_args(args: Vec<String>, prog: &str) -> Result<Opts, String> {
                 let n: u32 = v
                     .parse()
                     .map_err(|_| format!("--mft-record-size: not a valid number: {v}"))?;
-                // The formatter's NTFS 3.1 `$Secure` record must contain
-                // `$STANDARD_INFORMATION`, `$FILE_NAME`, non-resident `$SDS`,
-                // and the resident `$SDH` / `$SII` view indexes. That layout
-                // is 120 bytes too large at 512 bytes. At 1024 bytes the
-                // populated root directory metadata is the next system record
-                // that cannot fit. Supporting either size would require a
-                // different, Windows-validated attribute-list layout;
-                // accepting the values and failing while formatting is not
-                // support. Reject them while parsing, before `--create-size`
-                // can create an image or the target is opened read-write.
-                let unsupported_reason = match n {
-                    512 => Some(
-                        "the mandatory $Secure metadata ($SDS, $SDH, and $SII) does not fit in \
-                         a 512-byte MFT record",
-                    ),
-                    1024 => Some(
-                        "the mandatory populated root directory metadata does not fit in a \
-                         1024-byte MFT record",
-                    ),
-                    _ => None,
-                };
-                if let Some(reason) = unsupported_reason {
-                    return Err(format!(
-                        "--mft-record-size {n} is unsupported: {reason}; the smallest supported \
-                         size is 2048 bytes"
-                    ));
-                }
-                opts.mft_record_size = Some(n);
+                opts.mft_record_size = Some(check_mft_record_size(n)?);
             }
             "--serial" => {
                 let v = iter
@@ -319,7 +347,40 @@ fn parse_args(args: Vec<String>, prog: &str) -> Result<Opts, String> {
     Ok(opts)
 }
 
-fn parse_size(s: &str) -> Result<u64, String> {
+/// The MFT record sizes the formatter cannot build are refused while the
+/// command line is read, before anything is created or opened.
+pub fn check_mft_record_size(n: u32) -> Result<u32, String> {
+    // The formatter's NTFS 3.1 `$Secure` record must contain
+    // `$STANDARD_INFORMATION`, `$FILE_NAME`, non-resident `$SDS`,
+    // and the resident `$SDH` / `$SII` view indexes. That layout
+    // is 120 bytes too large at 512 bytes. At 1024 bytes the
+    // populated root directory metadata is the next system record
+    // that cannot fit. Supporting either size would require a
+    // different, Windows-validated attribute-list layout;
+    // accepting the values and failing while formatting is not
+    // support. Reject them while parsing, before `--create-size`
+    // can create an image or the target is opened read-write.
+    let unsupported_reason = match n {
+        512 => Some(
+            "the mandatory $Secure metadata ($SDS, $SDH, and $SII) does not fit in \
+             a 512-byte MFT record",
+        ),
+        1024 => Some(
+            "the mandatory populated root directory metadata does not fit in a \
+             1024-byte MFT record",
+        ),
+        _ => None,
+    };
+    if let Some(reason) = unsupported_reason {
+        return Err(format!(
+            "--mft-record-size {n} is unsupported: {reason}; the smallest supported \
+             size is 2048 bytes"
+        ));
+    }
+    Ok(n)
+}
+
+pub fn parse_size(s: &str) -> Result<u64, String> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return Err("--create-size: empty size argument".to_string());
@@ -340,7 +401,7 @@ fn parse_size(s: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("--create-size: {s} overflows u64"))
 }
 
-fn parse_hex_u64(s: &str) -> Result<u64, String> {
+pub fn parse_hex_u64(s: &str) -> Result<u64, String> {
     let cleaned = s.trim_start_matches("0x").trim_start_matches("0X");
     if cleaned.is_empty() || cleaned.len() > 16 {
         return Err(format!(

@@ -393,7 +393,7 @@ tasks:
     cmds:
       - cargo fmt --check
       - scripts/agents-core-check.sh
-      - scripts/tier.sh clippy -- cargo clippy --locked --all-targets -- -D warnings
+      - scripts/tier.sh clippy -- cargo clippy --locked --all-targets --features cli -- -D warnings
 
   build:
     desc: Debug build
@@ -433,7 +433,7 @@ tasks:
     desc: 'The two fixture-free integration files -- ci.yml "fixture-free integration tests"'
     deps: [siblings:gate]
     cmds:
-      - scripts/tier.sh mkfs -- cargo test --release --locked --test mkfs_roundtrip --test mkfs_bin_smoke
+      - scripts/tier.sh mkfs -- cargo test --release --locked --features cli --test mkfs_roundtrip --test mkfs_bin_smoke
 
   test:suite:
     desc: 'Every unit and integration test, release -- ci.yml "full suite"'
@@ -442,18 +442,48 @@ tasks:
     # panic one test at a time, 4,755 lines of the same missing file.
     cmds:
       - test-disks/check-fixtures.sh
-      - scripts/tier.sh suite -- cargo test --release --locked --no-fail-fast
+      - scripts/tier.sh suite -- cargo test --release --locked --features cli --no-fail-fast
 
   test:
-    desc: 'Every test tier CI runs, quietly: unit, unit (debug), mkfs, the whole suite'
+    desc: 'Every test tier CI runs, quietly: unit, unit (debug), mkfs, the whole suite, the installed tools'
     # `-- --verbose` reaches every tier: CLI_ARGS is chore's, not the task's.
     cmds:
       - task: test:unit
       - task: test:unit:debug
       - task: test:mkfs
       - task: test:suite
+      # The command-line tools, built and staged from this checkout, then
+      # tested as installed. A separate invocation because test:cli reads
+      # PATH, and the staged directory has to come first on it.
+      - task: cli:install
+      - 'PATH="$(scripts/cli-install.sh --print-bin-dir):$PATH" "{{.CHORE_EXE}}" test:cli'
       # THE LAST LINE: one number across the tiers, and where the detail is.
-      - scripts/test-verdict.sh unit unit-debug mkfs suite
+      - scripts/test-verdict.sh unit unit-debug mkfs suite cli
+
+  cli:install:
+    desc: 'Build the command-line tools (release, --features cli) and stage them as an install prefix in tmp/cli: bin/rust-fs-ntfs and every dotted name linked to it'
+    # The layout an install has, and the release tarball's: the multi-call
+    # binary as rust-fs-ntfs and each dotted name a relative symlink to it.
+    # It prints the PATH line; `test:cli` tests whatever PATH finds, so that
+    # directory goes first.
+    cmds: ['scripts/cli-install.sh']
+
+  test:cli:
+    desc: 'The command-line tools AS INSTALLED, found on PATH: doctor first, then every tests/cli/test-*.sh'
+    # Tests the installed artifact, not a cargo target: the same suite
+    # checks `chore cli:install`'s staging (`chore test` puts it first on
+    # PATH) and a Homebrew install. `rust-fs-ntfs doctor` runs before any
+    # tool is tested and fails the tier if a name is missing or shadowed,
+    # naming the fix. Nothing skips: a tool or jq missing from PATH fails the
+    # tier, naming what provides it. See scripts/test-cli.sh.
+    #
+    # THE FLOOR is in scripts/test-cli.sh (CLI_FLOOR), because it gates here
+    # and in CI alike: each file prints `test result: ok. N passed`, and a
+    # run that executed fewer checks than the floor fails although every
+    # file passed. 41 checks executed when the tier was added (mkfs.ntfs and
+    # the names, on a Mac); the floor is 39, about 95% of that.
+    cmds:
+      - 'scripts/tier.sh cli -- scripts/test-cli.sh'
 
   test:ignored:
     desc: 'The #[ignore]d tests: known defects, run so a fix cannot go unnoticed'

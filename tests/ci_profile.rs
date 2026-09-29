@@ -843,7 +843,13 @@ fn ci_ok_covers_every_gating_job_and_preserves_windows_filter() {
     );
     assert_eq!(
         needs(job("ci-ok")),
-        ["test", "integration", "changes", "validate-mkfs-windows"]
+        [
+            "test",
+            "integration",
+            "changes",
+            "validate-mkfs-windows",
+            "cli"
+        ]
     );
     assert_eq!(
         field(job("ci-ok"), "if").and_then(Yaml::as_str),

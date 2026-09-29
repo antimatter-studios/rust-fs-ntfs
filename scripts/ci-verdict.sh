@@ -14,7 +14,7 @@ case "${1:-}" in
         ;;
     aggregate)
         filter='[.test.result, .integration.result, .changes.result,
-                 .["validate-mkfs-windows"].result] | all(. == "success")'
+                 .["validate-mkfs-windows"].result, .cli.result] | all(. == "success")'
         ;;
     *)
         echo 'usage: ci-verdict.sh windows|aggregate' >&2

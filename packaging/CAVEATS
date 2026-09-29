@@ -1,2 +1,2 @@
-The mkfs.ntfs on your PATH is this one: `mkfs.ntfs --version` names am-fs-ntfs.
+Run `rust-fs-ntfs doctor` if a tool behaves unexpectedly: it names the program PATH runs for each tool, and the fix.
 On Linux, ntfs-3g also installs a mkfs.ntfs; only one of the two can be linked.

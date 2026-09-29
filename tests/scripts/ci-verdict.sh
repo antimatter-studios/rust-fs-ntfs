@@ -22,7 +22,7 @@ check() {
 
 windows_true='{"changes":{"result":"success","outputs":{"mkfs":"true"}},"validate-mkfs-windows-run":{"result":"success"}}'
 windows_false='{"changes":{"result":"success","outputs":{"mkfs":"false"}},"validate-mkfs-windows-run":{"result":"skipped"}}'
-aggregate='{"test":{"result":"success"},"integration":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"}}'
+aggregate='{"test":{"result":"success"},"integration":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"},"cli":{"result":"success"}}'
 
 check windows-required-ran windows pass "$windows_true"
 check windows-unneeded-skipped windows pass "$windows_false"
@@ -33,13 +33,14 @@ check windows-missing-run windows fail '{"changes":{"result":"success","outputs"
 check windows-missing-decision windows fail '{"changes":{"result":"success"},"validate-mkfs-windows-run":{"result":"skipped"}}'
 
 check aggregate-green aggregate pass "$aggregate"
-for job in test integration changes validate-mkfs-windows; do
+for job in test integration changes validate-mkfs-windows cli; do
     for result in failure cancelled skipped; do
         check "aggregate-$job-$result" aggregate fail \
             "$(jq -c --arg job "$job" --arg result "$result" '.[$job].result=$result' <<< "$aggregate")"
     done
 done
-check aggregate-missing-integration aggregate fail '{"test":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"}}'
+check aggregate-missing-integration aggregate fail '{"test":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"},"cli":{"result":"success"}}'
+check aggregate-missing-cli aggregate fail '{"test":{"result":"success"},"integration":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"}}'
 check aggregate-invalid-json aggregate fail '{'
 
 printf 'ci verdict: %d passed, %d failed\n' "$pass" "$fail"

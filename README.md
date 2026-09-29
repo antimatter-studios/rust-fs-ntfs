@@ -517,8 +517,31 @@ Standard cargo:
 ```sh
 cargo build --release
 # → target/release/libfs_ntfs.{a,rlib}
-# → target/release/rust-ntfs   (CLI: format / ls / touch / mkdir / write / rm / rmdir / set_dirty)
+# → target/release/rust-ntfs   (the test matrix's driver: format / ls / touch / mkdir / write / rm / rmdir / set_dirty)
 ```
+
+### Command-line tools
+
+The user-facing tools are one multi-call binary, `rust-fs-ntfs`, behind
+the `cli` feature so the static library gains no dependency from them. It
+answers to the name it is started under, so an install links each dotted
+name to it:
+
+```sh
+cargo build --release --features cli --bin rust-fs-ntfs
+chore cli:install                  # stage tmp/cli/bin/{rust-fs-ntfs,mkfs.ntfs}
+export PATH="$PWD/tmp/cli/bin:$PATH"
+mkfs.ntfs --size 64M --label BACKUP disk.img   # a JSON report on stdout
+rust-fs-ntfs mkfs --help           # the same tool; nothing can shadow this name
+rust-fs-ntfs doctor                # is every name on PATH this program?
+chore test:cli                     # the tools as installed: doctor, then tests/cli/
+```
+
+Reports are JSON on stdout (`--text` for people); a failure is
+`{"error": "...", "code": N}` on stderr, `N` being the exit status. A
+release attaches `am-fs-ntfs-<version>-<platform>.tar.gz` for macOS arm64
+and Linux x86_64, laid out as an install prefix (`bin/`,
+`share/rust-fs-ntfs/CAVEATS`, the licences).
 
 Universal macOS static lib (aarch64 + x86_64 lipo'd):
 
