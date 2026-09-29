@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # The release tarball has the layout an installer copies as-is --
-# bin/rust-fs-ntfs (the multi-call binary), bin/mkfs.ntfs a relative symlink
-# to it, share/rust-fs-ntfs/CAVEATS and the licences, nothing else -- and
-# every name in it runs and identifies itself.
+# bin/rust-fs-ntfs (the multi-call binary), each dotted name a relative
+# symlink to it, a man page and three completions per name under share/,
+# share/rust-fs-ntfs/CAVEATS and the licences, nothing else -- and every
+# name in it runs and identifies itself.
 #
 # Cargo refuses a dot in a target name, so the tools build as one binary,
 # `rust-fs-ntfs`, that dispatches on the name it was started under.
@@ -34,8 +35,10 @@ crate="$(sed -n 's/^name = "\(.*\)"$/\1/p' "$ROOT/Cargo.toml" | head -n 1)"
 
 # A stand-in for the built multi-call binary. $1 is the version it reports,
 # $2 the exit status of --help, $3 where it goes (its file name is the
-# binary's), $4 the names `generate names` lists. Like the real one, it
-# answers --version as the name it was started under.
+# binary's), $4 the names `generate names` lists, $5 the names it writes
+# docs for (default: all of them). Like the real one, it answers --version
+# as the name it was started under, and `generate man|completions SHARE`
+# writes a page and three completions per name and prints their paths.
 stub() {
     local path="$sandbox/$3"
     mkdir -p "$(dirname "$path")"
@@ -45,7 +48,29 @@ name="\$(basename "\$0")"
 case "\$1" in
     --help)    echo "Usage: \$name [options]"; exit $2 ;;
     --version) echo "\$name ($crate) $1" ;;
-    generate)  [ "\$2" = names ] && printf '%s\n' ${4-mkfs.ntfs} ;;
+    generate)
+        case "\$2" in
+            names) printf '%s\n' ${4-mkfs.ntfs} ;;
+            man | completions)
+                share="\$3"
+                echo "["
+                for n in ${5-${4-mkfs.ntfs}} rust-fs-ntfs; do
+                    case "\$n" in mkfs.* | fsck.*) s=8 ;; *) s=1 ;; esac
+                    if [ "\$2" = man ]; then
+                        files="\$share/man/man\$s/\$n.\$s"
+                    else
+                        files="\$share/zsh/site-functions/_\$n \$share/bash-completion/completions/\$n \$share/fish/vendor_completions.d/\$n.fish"
+                    fi
+                    for f in \$files; do
+                        mkdir -p "\$(dirname "\$f")"
+                        echo "doc for \$n" >"\$f"
+                        echo "  \\"\$f\\","
+                    done
+                done
+                echo "]"
+                ;;
+        esac
+        ;;
     *)         exit 2 ;;
 esac
 STUB
@@ -96,8 +121,13 @@ esac
 if [ -f "$tarball" ]; then
     listing="$(tar -tzf "$tarball" | sort | tr '\n' ' ')"
     files="$(tar -tzf "$tarball" | sed 's|^\./||' | grep -v '/$' | sort | tr '\n' ' ')"
-    [ "$files" = "LICENSE-APACHE LICENSE-MIT bin/mkfs.ntfs bin/rust-fs-ntfs share/rust-fs-ntfs/CAVEATS " ] && ok \
-        || bad "tarball holds exactly the binary, its links, the CAVEATS and the licences, got: $files"
+    want_files="LICENSE-APACHE LICENSE-MIT bin/mkfs.ntfs bin/rust-fs-ntfs"
+    want_files="$want_files share/bash-completion/completions/mkfs.ntfs share/bash-completion/completions/rust-fs-ntfs"
+    want_files="$want_files share/fish/vendor_completions.d/mkfs.ntfs.fish share/fish/vendor_completions.d/rust-fs-ntfs.fish"
+    want_files="$want_files share/man/man1/rust-fs-ntfs.1 share/man/man8/mkfs.ntfs.8 share/rust-fs-ntfs/CAVEATS"
+    want_files="$want_files share/zsh/site-functions/_mkfs.ntfs share/zsh/site-functions/_rust-fs-ntfs "
+    [ "$files" = "$want_files" ] && ok \
+        || bad "tarball holds exactly the binary, its links, the man pages, the completions, the CAVEATS and the licences, got: $files"
 
     case "$listing" in
         *mkfs_ntfs*) bad "the old cargo target name reached the tarball: $listing" ;;
@@ -146,6 +176,7 @@ refused "a binary whose --help fails" 9.9.9 darwin-arm64 "$(dirname "$(stub 9.9.
 refused "a binary reporting a version other than the tag's" 9.9.9 darwin-arm64 "$(dirname "$(stub 1.0.0 0 wrongver/rust-fs-ntfs)")"
 refused "a binary that lists no tool names" 9.9.9 darwin-arm64 "$(dirname "$(stub 9.9.9 0 nonames/rust-fs-ntfs "")")"
 refused "a binary listing a name that is a path" 9.9.9 darwin-arm64 "$(dirname "$(stub 9.9.9 0 pathname/rust-fs-ntfs "../mkfs.ntfs")")"
+refused "a binary that writes no man page for one of its names" 9.9.9 darwin-arm64 "$(dirname "$(stub 9.9.9 0 nodocs/rust-fs-ntfs "mkfs.ntfs fs.ntfs" "mkfs.ntfs")")"
 refused "a build of the old mkfs_ntfs target only" 9.9.9 darwin-arm64 "$(dirname "$(stub 9.9.9 0 old/mkfs_ntfs)")"
 refused "a missing label" 9.9.9 "" "$(dirname "$good")"
 refused "a missing version" "" darwin-arm64 "$(dirname "$good")"

@@ -576,8 +576,10 @@ jobs:
   # `rust-fs-ntfs`, behind the `cli` feature; scripts/package-cli.sh links
   # each dotted name the binary lists (`mkfs.ntfs`, ...) to it as a relative
   # symlink, because cargo refuses a dot in a target name. The tarball is
-  # laid out as an install prefix -- bin/, share/rust-fs-ntfs/CAVEATS and the
-  # licences -- so an installer copies it whole and never names a tool. The
+  # laid out as an install prefix -- bin/, the man pages and zsh, bash and
+  # fish completions the binary generates from its own clap commands under
+  # share/, share/rust-fs-ntfs/CAVEATS and the licences -- so an installer
+  # copies it whole and never names a tool. The
   # script also checks the tarball it made -- exactly those members, every
   # link relative, every name answering --help and a --version naming this
   # tag's version -- and fails the leg otherwise. The pull-request `cli`

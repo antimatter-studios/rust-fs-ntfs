@@ -529,7 +529,7 @@ name to it:
 
 ```sh
 cargo build --release --features cli --bin rust-fs-ntfs
-chore cli:install                  # stage tmp/cli/bin/{rust-fs-ntfs,mkfs.ntfs}
+chore cli:install                  # stage tmp/cli/bin (every name) and tmp/cli/share (man pages, completions)
 export PATH="$PWD/tmp/cli/bin:$PATH"
 mkfs.ntfs --size 64M --label BACKUP disk.img   # a JSON report on stdout
 rust-fs-ntfs mkfs --help           # the same tool; nothing can shadow this name
@@ -550,7 +550,8 @@ Reports are JSON on stdout (`--text` for people); a failure is
 `{"error": "...", "code": N}` on stderr, `N` being the exit status. A
 release attaches `am-fs-ntfs-<version>-<platform>.tar.gz` for macOS arm64
 and Linux x86_64, laid out as an install prefix (`bin/`,
-`share/rust-fs-ntfs/CAVEATS`, the licences).
+`share/man`, the zsh, bash and fish completions, `share/rust-fs-ntfs/CAVEATS`,
+the licences).
 
 Universal macOS static lib (aarch64 + x86_64 lipo'd):
 

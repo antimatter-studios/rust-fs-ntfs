@@ -486,8 +486,8 @@ tasks:
     # run that executed fewer checks than the floor fails although every
     # file passed. 41 checks executed when the tier was added (mkfs.ntfs and
     # the names, on a Mac), 86 with fs.ntfs's read verbs, 135 with fsck.ntfs
-    # and `set dirty`, 215 with write, mkdir and set label; the floor is 205,
-    # about 95% of that.
+    # and `set dirty`, 215 with write, mkdir and set label, 257 with the man
+    # pages and completions; the floor is 244, about 95% of that.
     cmds:
       - 'scripts/tier.sh cli -- scripts/test-cli.sh'
 
