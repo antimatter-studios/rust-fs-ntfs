@@ -41,7 +41,7 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TESTS="${CLI_TESTS:-$REPO/tests/cli}"
 # Measured: see `test:cli` in chores.yml for the count this is taken from.
-FLOOR="${CLI_FLOOR:-82}"
+FLOOR="${CLI_FLOOR:-128}"
 CRATE="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$REPO/Cargo.toml" | head -n 1)"
 INSTALL="build and stage it with \`chore cli:install\` (it prints the PATH line to use), or install it with \`brew install antimatter-studios/tap/rust-fs-ntfs\`"
 

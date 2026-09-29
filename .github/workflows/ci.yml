@@ -691,7 +691,7 @@ jobs:
           # merge without reading the gate.
           changed=$(git diff --name-only "$BASE_SHA"...HEAD)
           echo "$changed" | sed 's/^/  /'
-          if echo "$changed" | grep -qE '^(src/(mkfs|sds|record_build|idx_block|index_io|write)\.rs|src/bin/rust_ntfs/format\.rs|src/cli/|test-matrix\.json|fs-windows-test-harness\.toml|scripts/fs-windows-test-harness/|\.github/workflows/ci\.yml)'; then
+          if echo "$changed" | grep -qE '^(src/(mkfs|sds|record_build|idx_block|index_io|write|fsck)\.rs|src/bin/rust_ntfs/format\.rs|src/cli/|scripts/cli-oracle\.sh|test-matrix\.json|fs-windows-test-harness\.toml|scripts/fs-windows-test-harness/|\.github/workflows/ci\.yml)'; then
               echo "mkfs=true" >> "$GITHUB_OUTPUT"
               echo "::notice::this pull request changes format-relevant code, so the Windows chkdsk gate will run"
           else
@@ -817,6 +817,20 @@ jobs:
         shell: bash
         run: |
           bash scripts/run-matrix.sh mac-format-mac-split-routed-leaf-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
+      # The command-line tools' Windows half (the `cli` group): mkfs.ntfs,
+      # fs.ntfs set and fsck.ntfs change the image on this runner, and
+      # Windows grades it -- chkdsk, fsutil dirty query. chore has no
+      # Windows build, so this calls the suite's Windows half directly, as
+      # the steps above do.
+      - name: Build the command-line tools (Windows)
+        run: cargo build --release --locked --features cli --bin rust-fs-ntfs
+      - name: Validate the command-line tools on Windows
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh cli \
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix

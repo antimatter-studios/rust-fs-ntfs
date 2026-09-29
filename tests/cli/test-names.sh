@@ -5,7 +5,7 @@ source "$(dirname "$0")/lib.sh"
 
 # The names are written here, not read from the binary: a binary that
 # forgot one would otherwise agree with itself.
-EXPECTED="mkfs.ntfs fs.ntfs"
+EXPECTED="mkfs.ntfs fsck.ntfs fs.ntfs"
 
 version="$(rust-fs-ntfs --version | sed -n "s/^rust-fs-ntfs ($CRATE) //p")"
 check "rust-fs-ntfs --version names a version" test -n "$version"

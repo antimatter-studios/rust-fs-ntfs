@@ -44,6 +44,15 @@ smoke = [
   "mac-format-mac-write-win-repeat-mount-3-win-chkdsk",
   "mac-format-win-write-many-win-delete-half-win-chkdsk",
 ]
+# cli -- the command-line tools (mkfs.ntfs, fsck.ntfs, fs.ntfs) make and
+# change the image on the host; Windows grades it. CI's Windows job runs
+# this group; `chore matrix -- cli` runs it on the local VM.
+cli = [
+  "cli-mkfs-win-chkdsk",
+  "cli-set-dirty-fsck-win-dirty-chkdsk",
+  "cli-corrupt-mirror-fsck-win-chkdsk",
+  "cli-corrupt-signature-fsck-win-chkdsk",
+]
 
 [project]
 name        = "rust-fs-ntfs"
@@ -232,6 +241,40 @@ host = "host"
 command = "{binary} set-dirty {image_dir}/{run_id}/{scenario.image}"
 expect_exit = 0
 
+# ----- the command-line tools -----
+#
+# Each runs one step of scripts/cli-oracle.sh, which invokes the multi-call
+# binary (target/release/rust-fs-ntfs, built with `--features cli`) under
+# its repository name and checks what the tool itself reported, so a
+# scenario fails at the step that went wrong. Windows then grades the image.
+
+[ops.cli-mkfs]
+# mkfs.ntfs --size {size_mib}M --label {label}: the image is created by the
+# tool, at the scenario's size, and the report must read the label back.
+host = "host"
+command = "bash scripts/cli-oracle.sh mkfs {image_dir}/{run_id}/{scenario.image} {scenario.volume_params.size_mib} '{scenario.volume_params.label}'"
+expect_exit = 0
+
+[ops.cli-set-dirty]
+# fs.ntfs set dirty true, and get dirty must then say true.
+host = "host"
+command = "bash scripts/cli-oracle.sh set-dirty {image_dir}/{run_id}/{scenario.image}"
+expect_exit = 0
+
+[ops.cli-corrupt]
+# Damage the volume by its on-disk layout, read from the boot sector:
+#   what -- `mirror` (one byte of $MFTMirr's copy of record 0) or
+#           `signature` (in-use record 13's FILE signature destroyed).
+host = "host"
+command = "bash scripts/cli-oracle.sh corrupt {image_dir}/{run_id}/{scenario.image} {step.what}"
+expect_exit = 0
+
+[ops.cli-fsck-finds]
+# fsck.ntfs must exit 4 (errors left) and report a finding of `kind`.
+host = "host"
+command = "bash scripts/cli-oracle.sh fsck-finds {image_dir}/{run_id}/{scenario.image} {step.kind}"
+expect_exit = 0
+
 # ============================================================
 # Win-side (vm) ops
 # ============================================================
@@ -255,6 +298,17 @@ expect_exit = 0
 # every op command — single source of truth at `[vm].workdir` above.
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-chkdsk.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Modes '{step.modes?}' -VerdictShape '{step.verdict_shape?}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
+[ops.win-dirty-query]
+# Mount the .img and ask `fsutil dirty query`: Windows' own reading of the
+# dirty flag, through ntfs.sys.
+#
+# Step fields:
+#   expect       -- `Dirty` or `Clean`
+#   keep_image?  -- `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-dirty-query.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Expect '{step.expect}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-enumerate]

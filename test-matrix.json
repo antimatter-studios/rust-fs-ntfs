@@ -2066,6 +2066,138 @@
         }
       ],
       "_notes": "Sparse-file write (sparse). mac creates + writes a sparse $DATA (holes for all-zero clusters), ships to VM, chkdsk must report Clean (validates SPARSE flag + hole mapping-pairs + allocated_size)."
+    },
+    "cli-mkfs-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "CLIMKFS",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-mkfs"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-mkfs-win-chkdsk.img",
+      "_notes": "The installed mkfs.ntfs (the multi-call binary's mkfs), graded by chkdsk. Same formatter as rust-ntfs format, reached through the command-line tools' own argument parsing and report."
+    },
+    "cli-set-dirty-fsck-win-dirty-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "CLIDIRTY",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-mkfs"
+        },
+        {
+          "op": "cli-set-dirty"
+        },
+        {
+          "op": "cli-fsck-finds",
+          "kind": "dirty"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-dirty-query",
+          "expect": "Dirty",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "RepairRequired"
+        }
+      ],
+      "image": "nfs-cli-set-dirty-fsck-win-dirty-chkdsk.img",
+      "_notes": "fs.ntfs set dirty true, and fsck.ntfs's dirty finding, against Windows: fsutil dirty query must say Dirty, and chkdsk must find something to repair and repair it."
+    },
+    "cli-corrupt-mirror-fsck-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "CLIMIRR",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-mkfs"
+        },
+        {
+          "op": "cli-corrupt",
+          "what": "mirror"
+        },
+        {
+          "op": "cli-fsck-finds",
+          "kind": "mft_mirror_mismatch"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Damaged"
+        }
+      ],
+      "image": "nfs-cli-corrupt-mirror-fsck-win-chkdsk.img",
+      "_notes": "One byte of $MFTMirr's copy of record 0 changed: fsck.ntfs reports mft_mirror_mismatch, and chkdsk must agree there is something to repair."
+    },
+    "cli-corrupt-signature-fsck-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "CLISIG",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-mkfs"
+        },
+        {
+          "op": "cli-corrupt",
+          "what": "signature"
+        },
+        {
+          "op": "cli-fsck-finds",
+          "kind": "bad_mft_record"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Damaged"
+        }
+      ],
+      "image": "nfs-cli-corrupt-signature-fsck-win-chkdsk.img",
+      "_notes": "The FILE signature of in-use record 13 destroyed: fsck.ntfs reports bad_mft_record, and chkdsk must agree there is something to repair."
     }
   },
   "_consolidated_by": "chore matrix (fs-windows-test-harness runner)",
