@@ -17,10 +17,14 @@ name: Release
 # Trusted publishing (OIDC) via crates-io-auth-action; no stored token.
 #
 # The same two gates also stand in front of the binary release: once both
-# pass, `package-cli` builds `mkfs.ntfs` natively on each platform and
+# pass, `package-cli` builds the command-line tools natively on each platform and
 # `release` publishes the tarballs as the tag's GitHub release, which is what
-# a package manager installs from. Only the formatter ships; `rust-ntfs`, the
-# CLI the test matrix drives, does not.
+# a package manager installs from. The `cli` feature's multi-call binary
+# ships; `rust-ntfs`, the CLI the test matrix drives, does not.
+#
+# `--features cli` on the suite and on clippy: the multi-call target
+# requires it, and cargo silently leaves out a target whose features are
+# off -- its tests and its lints with it.
 
 on:
   push:
@@ -181,14 +185,14 @@ jobs:
       # executed on 2026-09-17 in run 34985102618, floor 1350.
       - name: full suite with an executed-test floor
         run: |
-          scripts/tier.sh suite -- cargo test --release --locked --no-fail-fast
+          scripts/tier.sh suite -- cargo test --release --locked --features cli --no-fail-fast
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
           echo "tests executed: $n (floor 1350)"
           if [ "$n" -lt 1350 ]; then
               echo "::error::only $n tests executed, floor is 1350 -- 1427 ran on 2026-09-17 in run 34985102618. The suite passed, so something stopped tests from being selected rather than failing them. This job gates cargo publish; read tmp/logs/suite.log, uploaded as test-logs-release."
               exit 1
           fi
-      - run: scripts/tier.sh clippy -- cargo clippy --locked --all-targets -- -D warnings
+      - run: scripts/tier.sh clippy -- cargo clippy --locked --all-targets --features cli -- -D warnings
       - name: upload test logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -563,19 +567,21 @@ jobs:
         run: cargo publish
 
   # ---------------------------------------------------------------------------
-  # The formatter as a downloadable binary, so it can be installed with a
-  # package manager rather than `cargo install`. Gated on the same two jobs
-  # as the crates.io publish: a binary Windows' chkdsk has not passed is not
-  # one to hand out.
+  # The command-line tools as a downloadable tarball, so they can be
+  # installed with a package manager rather than `cargo install`. Gated on
+  # the same two jobs as the crates.io publish: a binary Windows' chkdsk has
+  # not passed is not one to hand out.
   #
-  # THE BINARY IS RENAMED, by scripts/package-cli.sh: cargo refuses a dot in
-  # a target name, so the target is `mkfs_ntfs` and the published binary is
-  # `mkfs.ntfs`. The tarball is laid out as an install prefix --
-  # bin/mkfs.ntfs, share/rust-fs-ntfs/CAVEATS and the licences -- so an
-  # installer copies it whole and never names a tool. The script also
-  # checks the tarball it made -- exactly those files, a tool that answers
-  # --help, and a --version naming this tag's version -- and fails the leg
-  # otherwise.
+  # ONE BINARY, MANY NAMES. The tools are one multi-call target,
+  # `rust-fs-ntfs`, behind the `cli` feature; scripts/package-cli.sh links
+  # each dotted name the binary lists (`mkfs.ntfs`, ...) to it as a relative
+  # symlink, because cargo refuses a dot in a target name. The tarball is
+  # laid out as an install prefix -- bin/, share/rust-fs-ntfs/CAVEATS and the
+  # licences -- so an installer copies it whole and never names a tool. The
+  # script also checks the tarball it made -- exactly those members, every
+  # link relative, every name answering --help and a --version naming this
+  # tag's version -- and fails the leg otherwise. The pull-request `cli`
+  # job runs the same script, so a release is not the tarball's first build.
   # tests/scripts/package-cli.sh holds the script to that.
   #
   # Native builds, one runner per platform: cross-compiling needs a cross
@@ -587,7 +593,7 @@ jobs:
   # holds a write token.
   # ---------------------------------------------------------------------------
   package-cli:
-    name: package mkfs.ntfs (${{ matrix.label }})
+    name: package the command-line tools (${{ matrix.label }})
     needs: [crates-test, validate-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     strategy:
@@ -619,11 +625,11 @@ jobs:
         with:
           toolchain: 1.95.0
 
-      - name: build mkfs_ntfs
+      - name: build the command-line tools
         shell: bash
-        run: cargo build --release --locked --bin mkfs_ntfs
+        run: cargo build --release --locked --features cli --bin rust-fs-ntfs
 
-      - name: package and check mkfs.ntfs
+      - name: package and check the command-line tools
         id: pack
         shell: bash
         run: |
@@ -643,7 +649,7 @@ jobs:
       - name: keep the tarball for the release job
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: mkfs-ntfs-${{ matrix.label }}
+          name: cli-tarball-${{ matrix.label }}
           path: ${{ steps.pack.outputs.tarball }}
           if-no-files-found: error
           retention-days: 7
@@ -666,7 +672,7 @@ jobs:
       - name: collect every leg's tarball
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: mkfs-ntfs-*
+          pattern: cli-tarball-*
           path: dist
           merge-multiple: true
 

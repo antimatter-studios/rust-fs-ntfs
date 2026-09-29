@@ -4,22 +4,47 @@
 
 ### Added
 
-- **A release publishes `mkfs.ntfs` as a prebuilt binary.** A version tag
-  now also builds the formatter on macOS (arm64) and Linux (x86_64), once
-  the full suite and Windows `chkdsk` have passed, and attaches
+- **The command-line tools are one multi-call binary, `rust-fs-ntfs`,
+  behind a new `cli` cargo feature.** It dispatches on the name it was
+  started under: `mkfs.ntfs ...` and `rust-fs-ntfs mkfs ...` are the same
+  program, and the repository-named form is the one nothing else on PATH
+  can shadow. The static library gains no dependency: the target has
+  `required-features = ["cli"]`, and clap (MIT/Apache-2.0) is optional.
+  `mkfs.ntfs` reports what it wrote as JSON on stdout, read back from the
+  volume (`--text` prints nothing there, as before); failures are
+  `{"error": "...", "code": N}` on stderr, with `N` the exit status (1
+  failed, 2 wrong command line). Every flag it took is still taken, `-n`
+  gains `--dry-run`, and `--size` is the shared spelling of `--create-size`,
+  which stays. `rust-fs-ntfs doctor` says, for every dotted name on PATH,
+  whether the program found is ours, and if not what wins and the fix.
+- **A release publishes the command-line tools as prebuilt tarballs.** A
+  version tag builds them on macOS (arm64) and Linux (x86_64), once the
+  full suite and Windows `chkdsk` have passed, and attaches
   `am-fs-ntfs-<version>-<platform>.tar.gz` to the tag's GitHub release.
   Each tarball is laid out as an install prefix and holds nothing else:
-  `bin/mkfs.ntfs`, `share/rust-fs-ntfs/CAVEATS` (from `packaging/CAVEATS`,
-  the notes an installer shows) and the two licence files. The cargo
-  target's `mkfs_ntfs` name does not appear in it, and `rust-ntfs` is not
-  shipped. `scripts/package-cli.sh` builds and checks each tarball, and
-  `tests/scripts/package-cli.sh` tests that script. The release job attests
-  each tarball's build provenance, checkable with `gh attestation verify
-  <tarball> --repo christhomas/rust-fs-ntfs --signer-workflow
+  `bin/rust-fs-ntfs`, `bin/mkfs.ntfs` as a relative symlink to it,
+  `share/rust-fs-ntfs/CAVEATS` (from `packaging/CAVEATS`, at most four
+  lines an installer shows) and the two licence files. `rust-ntfs` is not
+  shipped. `scripts/package-cli.sh` builds and checks each tarball, the
+  pull-request `cli` job runs it too, and `tests/scripts/package-cli.sh`
+  tests that script. The release job attests each tarball's build
+  provenance, checkable with `gh attestation verify <tarball> --repo
+  christhomas/rust-fs-ntfs --signer-workflow
   christhomas/rust-fs-ntfs/.github/workflows/release.yml`.
+- **A `cli` test tier tests the tools as installed.** `chore cli:install`
+  stages them in `tmp/cli` and `chore test:cli` runs `rust-fs-ntfs doctor`
+  first and then `tests/cli/*.sh` against whatever PATH finds, failing
+  (never skipping) when a tool or `jq` is missing, with a measured output
+  budget and an executed-check floor. `chore test` runs both.
 - **`mkfs.ntfs --version` (and `-V`) prints the tool name and crate
   version**, e.g. `mkfs.ntfs (am-fs-ntfs) 0.5.0`. It was rejected as an
   unknown flag. `rust-ntfs format --version` answers the same way.
+
+### Removed
+
+- **The `mkfs_ntfs` cargo target.** The formatter is the `mkfs` tool of the
+  `rust-fs-ntfs` binary (`cargo install am-fs-ntfs --features cli`). It was
+  never in a release under that name.
 
 ## [0.5.0] — 2026-09-27
 

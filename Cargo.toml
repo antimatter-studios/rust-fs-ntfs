@@ -30,13 +30,26 @@ crate-type = ["staticlib", "rlib"]
 name = "rust-ntfs"
 path = "src/bin/rust_ntfs/main.rs"
 
-# The formatter under the name the convention uses. Shares
-# rust_ntfs/format.rs with the subcommand above via #[path], so there is
-# one implementation. Underscore because cargo rejects a dot in a target
-# name; the release job packages it as `mkfs.ntfs`.
+# THE COMMAND-LINE TOOLS: one multi-call binary, named for the repository.
+# It dispatches on argv[0], the way busybox and e2fsprogs do, so a release
+# installs it once as `rust-fs-ntfs` and links `mkfs.ntfs` to it (cargo
+# refuses a dot in a target name, so the dotted names are never cargo's).
+# `rust-fs-ntfs <tool> ...` is the form nothing else on PATH can shadow, and
+# `cargo run --features cli -- mkfs ...` works before anything is installed.
+# The formatter was the `mkfs_ntfs` target; it is this binary's `mkfs` now.
+#
+# BEHIND THE `cli` FEATURE, so the static library a consumer links gains no
+# dependency from the tools: `required-features` keeps the target out of a
+# build that did not ask for it. The test tiers, clippy and the release ask
+# for it, so the tests, the lints and the tarball all reach it.
 [[bin]]
-name = "mkfs_ntfs"
-path = "src/bin/mkfs_ntfs.rs"
+name = "rust-fs-ntfs"
+path = "src/cli/main.rs"
+required-features = ["cli"]
+
+[features]
+# The command-line tools and nothing else. clap is MIT/Apache-2.0.
+cli = ["dep:clap"]
 
 [dependencies]
 # `log` is the de-facto standard logging facade. Consumers (FSKit
@@ -60,6 +73,10 @@ log = "0.4"
 # adds a bridge module so external `fs_core::BlockDevice` implementors
 # (a `Qcow2Reader`, a `SliceReader`, etc.) can be driven by ntfs.
 am-fs-core = { version = "0.2.13" }
+# The command-line tools' argument parser, behind the `cli` feature (see
+# the `rust-fs-ntfs` target above). No derive: the builder API keeps each
+# tool's command a function the documentation can later be made from.
+clap = { version = "4.5", optional = true, default-features = false, features = ["std", "help", "usage", "error-context", "suggestions"] }
 
 [dev-dependencies]
 # YAML parser for tests/ci_profile.rs, which reads .github/workflows/ci.yml

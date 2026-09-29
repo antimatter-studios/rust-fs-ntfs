@@ -120,7 +120,7 @@ jobs:
       # Run it on both Linux architectures; macOS adds nothing x86 lacks.
       - name: cargo clippy
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm'
-        run: scripts/tier.sh clippy -- cargo clippy --locked --all-targets -- -D warnings
+        run: scripts/tier.sh clippy -- cargo clippy --locked --all-targets --features cli -- -D warnings
 
       # The shell tests (tests/scripts/*.sh): the scripts that turn the
       # Windows VM's output into verdicts. By glob, like `chore test:scripts`.
@@ -207,7 +207,7 @@ jobs:
       # zero catches nothing. Raise it when the files grow.
       - name: fixture-free integration tests with an executed-test floor
         run: |
-          scripts/tier.sh mkfs -- cargo test --release --locked --test mkfs_roundtrip --test mkfs_bin_smoke
+          scripts/tier.sh mkfs -- cargo test --release --locked --features cli --test mkfs_roundtrip --test mkfs_bin_smoke
           # Measured 16 executed (mkfs_roundtrip 9 + mkfs_bin_smoke 7) on
           # 2026-09-29, when mkfs_bin_smoke gained the --version test. Floor 15.
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/mkfs.log | awk '{s+=$4} END{print s+0}')
@@ -465,14 +465,14 @@ jobs:
 
       - name: full suite with an executed-test floor
         run: |
-          scripts/tier.sh suite -- cargo test --release --locked --no-fail-fast
+          scripts/tier.sh suite -- cargo test --release --locked --features cli --no-fail-fast
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
           echo "tests executed: $n (floor 1350)"
           if [ "$n" -lt 1350 ]; then
               echo "::error::only $n tests executed, floor is 1350 -- 1427 ran on 2026-09-17 in run 34985102618. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
               exit 1
           fi
-      - run: scripts/tier.sh clippy -- cargo clippy --locked --all-targets -- -D warnings
+      - run: scripts/tier.sh clippy -- cargo clippy --locked --all-targets --features cli -- -D warnings
       - name: upload test logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -689,7 +689,7 @@ jobs:
           # merge without reading the gate.
           changed=$(git diff --name-only "$BASE_SHA"...HEAD)
           echo "$changed" | sed 's/^/  /'
-          if echo "$changed" | grep -qE '^(src/(mkfs|sds|record_build|idx_block|index_io|write)\.rs|src/bin/mkfs_ntfs\.rs|test-matrix\.json|fs-windows-test-harness\.toml|scripts/fs-windows-test-harness/|\.github/workflows/ci\.yml)'; then
+          if echo "$changed" | grep -qE '^(src/(mkfs|sds|record_build|idx_block|index_io|write)\.rs|src/bin/rust_ntfs/format\.rs|src/cli/|test-matrix\.json|fs-windows-test-harness\.toml|scripts/fs-windows-test-harness/|\.github/workflows/ci\.yml)'; then
               echo "mkfs=true" >> "$GITHUB_OUTPUT"
               echo "::notice::this pull request changes format-relevant code, so the Windows chkdsk gate will run"
           else
@@ -1033,6 +1033,70 @@ jobs:
           chkdsk_after_outcome: ${{ steps.chkdsk_after.outcome }}
           chkdsk_after_exit: ${{ steps.chkdsk_after.outputs.scan_exit }}
 
+  # THE COMMAND-LINE TOOLS, AS INSTALLED. The multi-call binary is built in
+  # release mode and staged by `chore cli:install` under every name it
+  # answers to, first on PATH; `chore test:cli` then runs `rust-fs-ntfs
+  # doctor` and tests/cli/*.sh against whatever PATH finds -- the program a
+  # user would run, not a cargo target. A change that breaks a tool fails the
+  # pull request, not the release.
+  #
+  # The same job builds the release tarball with scripts/package-cli.sh and
+  # lets it check its own layout (the binary, a relative symlink per dotted
+  # name, the CAVEATS and the licences, every name answering --version as
+  # this crate), so a release is never the first time the tarball is put
+  # together.
+  cli:
+    name: cli (the installed tools, on PATH)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install chore and check out sibling repos
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/antimatter-studios/chore/releases/download/v0.11.0/chore-0.11.0-linux-x86_64.tar.gz" \
+            | sudo tar xz -C /usr/local/bin chore
+          chore siblings
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cli-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: chore cli:install
+        run: chore cli:install
+      # FIRST on PATH, so a distribution's mkfs.ntfs later on PATH is the one
+      # doctor reports as present and not run.
+      - name: The staged tools first on PATH
+        run: scripts/cli-install.sh --print-bin-dir >> "$GITHUB_PATH"
+      - name: chore test:cli
+        id: tier
+        run: chore test:cli
+      - name: The release tarball, packaged and its layout checked
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          mkdir -p tmp/package
+          cd tmp/package
+          tarball="$(../../scripts/package-cli.sh "$version" linux-x86_64 ../../target/release)"
+          tar -tvzf "$tarball"
+      - name: Keep the tier log
+        # Not before the tier ran: there is no log then, and this step's red
+        # would hide the real one.
+        if: always() && steps.tier.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-cli
+          path: tmp/logs/*.log
+          if-no-files-found: error
+
   # Keep the existing required-check name while making an intentional Windows
   # skip report as success. A failed or missing run must report failure.
   validate-mkfs-windows:
@@ -1052,7 +1116,7 @@ jobs:
     name: ci-ok
     runs-on: ubuntu-latest
     if: always()
-    needs: [test, integration, changes, validate-mkfs-windows]
+    needs: [test, integration, changes, validate-mkfs-windows, cli]
     steps:
       - uses: actions/checkout@v4
       - name: Check every gating job
