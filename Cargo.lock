@@ -13,9 +13,14 @@ dependencies = [
 
 [[package]]
 name = "am-fs-core"
-version = "0.2.13"
+version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da6291fceae2064cfcd753174bd64d89584b4927ba62b918c14da6f8614089d8"
+checksum = "49893bd1e199021b81b02a4745e182d5db41d70b08de90a1cdd617b165ef3367"
+dependencies = [
+ "clap",
+ "clap_complete",
+ "clap_mangen",
+]
 
 [[package]]
 name = "am-fs-ntfs"
@@ -23,8 +28,6 @@ version = "0.6.0"
 dependencies = [
  "am-fs-core",
  "clap",
- "clap_complete",
- "clap_mangen",
  "criterion",
  "libtest-mimic",
  "log",
