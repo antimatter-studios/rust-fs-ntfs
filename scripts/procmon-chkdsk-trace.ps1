@@ -34,7 +34,7 @@
 #   chkdsk-trace-summary.xml    -- tracerpt summary
 #   chkdsk-trace-filtered.csv   -- chkdsk.exe events only
 #
-# Requires: vhd_tool on PATH (installed by scripts/setup-windows-vm.ps1
+# Requires: rust-img-vhd on PATH (installed by scripts/setup-windows-vm.ps1
 # via `cargo install` from antimatter-studios/rust-img-vhd), administrator
 # privileges (for VHD mount + raw PhysicalDrive write + wpr's ETW session).
 
@@ -65,7 +65,7 @@ if (Test-Path $VhdPath) {
 }
 
 $wrapperSizeBytes = [int64]$WrapperSizeMb * 1MB
-& vhd_tool create-fixed $VhdPath $wrapperSizeBytes | Out-Null
+& rust-img-vhd img $VhdPath create $wrapperSizeBytes --type fixed | Out-Null
 & fsutil sparse setflag $VhdPath 0 | Out-Null
 
 $Vhd = Mount-DiskImage -ImagePath $VhdPath -PassThru

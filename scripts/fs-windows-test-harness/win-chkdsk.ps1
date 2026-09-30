@@ -30,7 +30,7 @@
 #                  chkdsk-<mode>.txt        - chkdsk's stdout
 #                  chkdsk-<mode>-exit.txt   - exit code marker
 #                  mount-eventlog.txt       - Disk/Ntfs/partmgr events
-#                  wrapper-create.txt       - vhd_tool output
+#                  wrapper-create.txt       - rust-img-vhd output
 #                  verdict.json             - final pass/fail summary
 #
 # Exit code:
@@ -40,7 +40,7 @@
 #   2 for config errors (bad -VerdictShape, missing /scan in
 #     RepairRequired modes, no modes at all for Damaged)
 #
-# Phase 1e (done): this script invokes `vhd_tool create-fixed` from
+# Phase 1e (done): this script invokes `rust-img-vhd img <vhd> create --type fixed` from
 # antimatter-studios/rust-img-vhd to wrap the .img into a VHD before
 # mounting (replaced the prior qemu-img dep). The rest of the
 # lifecycle (mount, initialize, dd, chkdsk) is unchanged.

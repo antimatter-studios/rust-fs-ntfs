@@ -637,7 +637,7 @@ in the harness. It covers the VMware network (a host-only adapter with a
 static address, so `VM_HOST` never moves), OpenSSH and key login, the
 firewall profile, and the encrypted VM's password. Then
 `scripts/setup-windows-vm.sh` provisions what this crate needs on it
-(`format.com` / `chkdsk` tooling and `vhd_tool`).
+(`format.com` / `chkdsk` tooling and `rust-img-vhd`).
 
 This machine's VM settings go in a gitignored `.test-env` at the repo
 root. The harness reads it as shell, so **quote any value with a space**:

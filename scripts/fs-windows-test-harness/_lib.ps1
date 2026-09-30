@@ -17,8 +17,8 @@
 # dance that ntfs.sys requires after a fresh raw write — used by
 # every op after the volume's bytes are in place.
 
-# vhd_tool is on the PATH via setup-windows-vm.ps1 (cargo install
-# --bin vhd_tool puts it in ~/.cargo/bin which rustup adds to PATH).
+# rust-img-vhd is on the PATH via setup-windows-vm.ps1 (cargo install
+# --bin rust-img-vhd puts it in ~/.cargo/bin which rustup adds to PATH).
 $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
 
 # ── Drive-letter mutex ────────────────────────────────────────────────────────
@@ -111,7 +111,7 @@ function Initialize-VhdFromImg {
     } catch { }
 
     # Already-streamed VHD from a prior op — fast path: skip the
-    # vhd_tool + stream phase, just return the path.
+    # rust-img-vhd + stream phase, just return the path.
     #
     # Stale-VHD detection: if the .img is *newer* than the .vhd, a
     # mac-side op (or a re-ship-to-vm) modified the source bytes after
@@ -134,17 +134,17 @@ function Initialize-VhdFromImg {
         }
     }
 
-    # Sized just larger than the .img so the GPT slack fits. vhd_tool's
-    # create-fixed takes raw bytes (no MB suffix), so multiply by 1MB
-    # explicitly before passing.
+    # Sized just larger than the .img so the GPT slack fits, in bytes.
+    # `create` rounds a size up to a whole CHS geometry, so the wrapper
+    # can come out a little larger than asked; the slack absorbs it.
     $rawSize          = (Get-Item $ImagePath).Length
     $rawSizeMb        = [int][Math]::Ceiling($rawSize / 1MB)
     $wrapperMb        = $rawSizeMb + 64
     $wrapperSizeBytes = [int64]$wrapperMb * 1MB
 
-    & vhd_tool create-fixed $Vhd $wrapperSizeBytes *> "$Diag\wrapper-create.txt"
+    & rust-img-vhd img $Vhd create $wrapperSizeBytes --type fixed *> "$Diag\wrapper-create.txt"
     if ($LASTEXITCODE -ne 0) {
-        throw "vhd_tool create-fixed failed exit=$LASTEXITCODE (see wrapper-create.txt)"
+        throw "rust-img-vhd img create failed exit=$LASTEXITCODE (see wrapper-create.txt)"
     }
     fsutil sparse setflag $Vhd 0 | Out-Null
 

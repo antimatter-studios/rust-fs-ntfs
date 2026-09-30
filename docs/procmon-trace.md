@@ -18,7 +18,7 @@ This doc describes the harness for that capture.
 
 - Windows 10/11.
 - PowerShell ≥ 5.
-- `vhd_tool.exe` on PATH (installed by `scripts/setup-windows-vm.ps1`
+- `rust-img-vhd.exe` on PATH (installed by `scripts/setup-windows-vm.ps1`
   via `cargo install` from `antimatter-studios/rust-img-vhd`).
 - Administrator (the script's VHD mount + raw `\\.\PhysicalDrive`
   write + ETW kernel-session start all need elevation).

@@ -15,7 +15,7 @@
 #   * Rustup     ~50 MB  / ~30 s
 #   * gnullvm    ~600 MB / ~2 min  (Rust toolchain + std)
 #   * LLVM-MinGW ~250 MB / ~30 s
-#   * vhd_tool   ~built locally from rust-img-vhd source / <1 min
+#   * rust-img-vhd   ~built locally from rust-img-vhd source / <1 min
 #   Total: ~900 MB / ~4 min over a typical home connection.
 
 set -euo pipefail

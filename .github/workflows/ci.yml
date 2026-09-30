@@ -312,13 +312,14 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
-      - name: Install vhd_tool from rust-img-vhd
+      - name: Install rust-img-vhd
         shell: pwsh
         run: |
+          $vhd = (Select-String -Path chores.yml -Pattern '^\s*IMG_VHD_REF:\s*(\S+)').Matches[0].Groups[1].Value
           $core = (Select-String -Path chores.yml -Pattern '^\s*FS_CORE_REF:\s*(\S+)').Matches[0].Groups[1].Value
-          git clone --depth 1 --branch v0.3.5 https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
+          git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
           git clone --depth 1 --branch $core https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
-          cargo install --path $env:RUNNER_TEMP/rust-img-vhd --bin vhd_tool
+          cargo install --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
       - name: Build Windows-authored fixtures
         shell: pwsh
         run: pwsh -File test-disks/build-windows-native-read-fixtures.ps1
@@ -659,7 +660,7 @@ jobs:
   # residue of this design and is deliberate.
   #
   # Windows Mount-DiskImage doesn't accept raw .img files, so we wrap
-  # the binary's output in a VHD container via vhd_tool (from
+  # the binary's output in a VHD container via rust-img-vhd (from
   # antimatter-studios/rust-img-vhd, an MIT-licensed in-house writer).
   #
   # Diagnostics are aggressive: we capture chkdsk's full output,
@@ -764,25 +765,24 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
-      - name: Install vhd_tool from rust-img-vhd
-        # Builds the in-house VHD writer (~30 s with no cache). Pinned
-        # so a future push to main cannot silently break CI. The binary
+      - name: Install rust-img-vhd
+        # Builds the in-house VHD writer (~30 s with no cache). The binary
         # lands in ~/.cargo/bin which is on PATH after
         # dtolnay/rust-toolchain.
         #
-        # v0.3.5 RATHER THAN v0.2.0. The release workflow's copy of this
-        # was three releases behind and moved; this one was left, so the
-        # two jobs built their test images with different versions of the
-        # same tool -- and this one with a version predating that crate's
-        # own hardening.
+        # THE PINS COME FROM chores.yml (#190). This copy once spelled
+        # its refs inline and was left behind when the release
+        # workflow's moved, so the two jobs built their test images with
+        # different versions of the same tool (#387). am-img-vhd
+        # path-deps am-fs-core (`../rust-fs-core`), so that sibling sits
+        # beside it.
         shell: pwsh
         run: |
-          git clone --depth 1 --branch v0.3.5 https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
-          # am-img-vhd path-deps am-fs-core (`../rust-fs-core`), so the
-          # sibling must sit beside it, at a version satisfying its
-          # `version = "0.2"` requirement.
-          git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
-          cargo install --path $env:RUNNER_TEMP/rust-img-vhd --bin vhd_tool
+          $vhd = (Select-String -Path chores.yml -Pattern '^\s*IMG_VHD_REF:\s*(\S+)').Matches[0].Groups[1].Value
+          $core = (Select-String -Path chores.yml -Pattern '^\s*FS_CORE_REF:\s*(\S+)').Matches[0].Groups[1].Value
+          git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
+          git clone --depth 1 --branch $core https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
+          cargo install --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
       - name: Make this runner its own Windows VM (sshd, key auth, PowerShell)
         shell: pwsh
         run: |

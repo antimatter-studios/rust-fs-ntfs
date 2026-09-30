@@ -2818,3 +2818,48 @@ fn every_pin_a_workflow_reads_is_declared_in_chores_yml() {
         "these workflows read a pin chores.yml does not declare: {undeclared:?}"
     );
 }
+
+/// No workflow clones a sibling at a ref written into the workflow.
+///
+/// The previous test proves every pin a workflow *reads* is declared; it
+/// cannot see a pin that is never read. `ci.yml` cloned rust-img-vhd at a
+/// literal `v0.3.5` in two jobs, and rust-fs-core at a literal `v0.2.14`
+/// in one, while `release.yml`'s chkdsk job read `VHD_TOOL_REF` -- so
+/// moving the pin in `chores.yml` moved one job of four, which is the
+/// drift #190 declared the pin in one place to stop (#387).
+#[test]
+fn every_sibling_clone_takes_its_ref_from_a_variable() {
+    let dir = manifest_dir().join(".github").join("workflows");
+    let mut clones = 0;
+    let mut literal = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("read .github/workflows") {
+        let path = entry.expect("workflow entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            continue;
+        }
+        let file = path.file_name().unwrap().to_string_lossy().into_owned();
+        for (n, line) in read_or_panic(&path).lines().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with('#') || !code.contains("git clone") {
+                continue;
+            }
+            let Some(at) = code.find("--branch ") else {
+                continue;
+            };
+            clones += 1;
+            let r#ref = code[at + "--branch ".len()..].trim_start_matches('"');
+            if !r#ref.starts_with('$') {
+                literal.push(format!("{file}:{}: {code}", n + 1));
+            }
+        }
+    }
+    assert!(
+        clones >= 8,
+        "expected the workflows to clone their siblings; found {clones} clones"
+    );
+    assert!(
+        literal.is_empty(),
+        "these clones name their ref in the workflow rather than reading chores.yml:\n{}",
+        literal.join("\n")
+    );
+}

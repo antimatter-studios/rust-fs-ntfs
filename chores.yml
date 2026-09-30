@@ -55,11 +55,13 @@ vars:
   # version runs the matrix.
   HARNESS_REF: v4.2.0
 
-  # The in-house VHD writer (rust-img-vhd) the Windows chkdsk jobs build
-  # to wrap a raw image for Windows. Not a cargo dependency, so this is
-  # the only thing that decides which version runs. release.yml reads it
-  # here; the ci.yml copies still spell the same ref inline.
-  VHD_TOOL_REF: v0.3.5
+  # The in-house VHD writer (rust-img-vhd) the Windows jobs build to wrap
+  # a raw image for Windows. Not a cargo dependency, so this is the only
+  # thing that decides which version runs, and every workflow reads it
+  # here (tests/ci_profile.rs fails a clone that names its own ref). From
+  # v0.5.0 the tool is the `rust-img-vhd` multi-call binary, built with
+  # the `cli` feature; the `vhd_tool` it replaced is gone (#387).
+  IMG_VHD_REF: v0.5.1
 
   # THE WINDOWS TEST VM is driven by scripts/vm.sh (vmrun, trove for the
   # encryption password, the fixed host-only address). See that file and
