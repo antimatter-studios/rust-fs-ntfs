@@ -26,7 +26,7 @@ use std::ffi::OsString;
 
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command as Cmd};
 
-use crate::common::{CliError, Json, Outcome, Tool};
+use fs_core::cli::{CliError, Json, Outcome, Tool};
 use fs_ntfs::fsck::{check_io, repair_dirty_io, CheckFinding, CheckReport, LogfileState};
 
 /// fsck(8): no errors.
@@ -127,7 +127,7 @@ fn command() -> Cmd {
                 )
                 .value_parser(value_parser!(u64)),
         )
-        .args(crate::common::format_args())
+        .args(fs_core::cli::format_args())
         .after_help(
             "Examples:\n  fsck.ntfs disk.img                 check, change nothing\n  \
              fsck.ntfs -fn disk.img             the same, as fsck(8) front-ends spell it\n  \

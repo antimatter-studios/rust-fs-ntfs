@@ -4,7 +4,7 @@
 use std::ffi::OsStr;
 use std::path::Path;
 
-use crate::common::CliError;
+use fs_core::cli::CliError;
 use fs_ntfs::block_io::{BlockIo, PathIo};
 
 /// A target, `offset` bytes into a file or device. Every position the

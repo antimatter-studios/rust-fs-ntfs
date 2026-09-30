@@ -20,14 +20,14 @@ use std::path::Path;
 use clap::{Arg, ArgAction, ArgMatches, Command as Cmd};
 
 use super::format::{self, Opts, DEFAULT_CLUSTER_SIZE, DEFAULT_MFT_RECORD_SIZE};
-use crate::common::{CliError, Json, Outcome, Tool};
+use fs_core::cli::{CliError, Json, Outcome, Tool};
 use fs_ntfs::block_io::PathIo;
 
 pub const TOOL: Tool = Tool {
     name: "mkfs.ntfs",
     verb: "mkfs",
     section: 8,
-    usage_exit: crate::common::output::EXIT_USAGE,
+    usage_exit: fs_core::cli::output::EXIT_USAGE,
     about: "Create an NTFS filesystem on a device or an image file",
     command,
     run,
@@ -133,7 +133,7 @@ fn command() -> Cmd {
                 )
                 .value_parser(format::parse_size),
         )
-        .args(crate::common::format_args())
+        .args(fs_core::cli::format_args())
         .after_help(
             "Examples:\n  \
              mkfs.ntfs --size 64M --label BACKUP disk.img\n  \
