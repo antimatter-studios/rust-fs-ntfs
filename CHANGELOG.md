@@ -61,6 +61,18 @@
   whatever it holds: resident content through `write_file_contents_io`,
   non-resident content shrunk or grown in place and then written.
   `write_file_contents_io` refused a non-resident file outright.
+- **The tools write their own man pages and shell completions.**
+  `rust-fs-ntfs generate man SHARE` and `generate completions SHARE` render
+  them from the clap commands the tools parse with (`clap_mangen`,
+  `clap_complete`, both MIT/Apache-2.0 and behind `cli`), so they cannot
+  describe a flag a tool does not take: section 8 for `mkfs.ntfs` and
+  `fsck.ntfs`, section 1 for `fs.ntfs`, `rust-fs-ntfs` and a page per
+  subcommand, and zsh, bash and fish completions for every name. The
+  release tarball and `chore cli:install` lay them out under `share/`,
+  where Homebrew links them from, and `scripts/package-cli.sh` refuses a
+  tarball missing any name's page or completions. `tests/cli/test-docs.sh`
+  finds each page with `man -w` from PATH and checks it names every
+  subcommand, and that every subcommand's `--help` has an example.
 - **`fs_ntfs::reparse_link_target`** decodes a symlink's or mount point's
   target from a `$REPARSE_POINT` value, as `fs_ntfs_readlink` reports it.
 - **`chore test:cli:oracle`** reads volumes Windows formatted and wrote --
@@ -73,7 +85,8 @@
   full suite and Windows `chkdsk` have passed, and attaches
   `am-fs-ntfs-<version>-<platform>.tar.gz` to the tag's GitHub release.
   Each tarball is laid out as an install prefix and holds nothing else:
-  `bin/rust-fs-ntfs`, `bin/mkfs.ntfs` as a relative symlink to it,
+  `bin/rust-fs-ntfs`, `bin/mkfs.ntfs`, `bin/fsck.ntfs` and `bin/fs.ntfs` as
+  relative symlinks to it, the man pages and completions under `share/`,
   `share/rust-fs-ntfs/CAVEATS` (from `packaging/CAVEATS`, at most four
   lines an installer shows) and the two licence files. `rust-ntfs` is not
   shipped. `scripts/package-cli.sh` builds and checks each tarball, the
