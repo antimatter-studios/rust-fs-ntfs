@@ -20,8 +20,6 @@ on:
         description: "Seconds the workload runs"
         required: false
         default: "40"
-  push:
-    branches: ['test/366-*']
 
 permissions:
   contents: read
