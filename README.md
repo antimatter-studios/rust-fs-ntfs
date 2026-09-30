@@ -247,6 +247,24 @@ are documented there.
 Reverse chronological highlights from `git log`. Full per-commit
 history available via `git log` in the repo.
 
+### 2026-09-30 — 0.6.0
+
+- The command-line tools are one multi-call binary, `rust-fs-ntfs`,
+  behind a new `cli` cargo feature: `mkfs.ntfs`, `fsck.ntfs` and
+  `fs.ntfs` are names it answers to, and `rust-fs-ntfs doctor` says
+  whether each name on PATH is ours.
+- `fs.ntfs` lists, reads and reports a volume without mounting it, and
+  writes files from stdin, makes directories and sets the label and the
+  dirty flag; Windows reads every write back and finds the volume clean.
+- `fsck.ntfs` checks the dirty flag, `$LogFile`, `$MFTMirr` and every
+  in-use MFT record, with fsck(8)'s exit statuses, and clears the dirty
+  flag only over an empty log.
+- The tools write their own man pages and shell completions, and a
+  release attaches them as attested install-prefix tarballs for macOS
+  (arm64) and Linux (x86_64).
+- The `mkfs_ntfs` cargo target is gone; the formatter is the `mkfs`
+  tool of `rust-fs-ntfs`.
+
 ### 2026-09-27 — 0.5.0
 
 - **Breaking:** `fs_ntfs_readlink` follows the readlink contract shared
