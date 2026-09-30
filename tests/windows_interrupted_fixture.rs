@@ -40,8 +40,13 @@ mod common;
 
 use fs_ntfs::facade::{FileType, Filesystem};
 use fs_ntfs::fsck;
+use fs_ntfs::{
+    fs_ntfs_mount, fs_ntfs_mount_rw_with_fs_core_device, fs_ntfs_mount_with_fs_core_device,
+    fs_ntfs_umount,
+};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::ffi::CString;
 use std::fs::File;
 use std::process::{Command, Stdio};
 
@@ -197,6 +202,62 @@ fn fsck_refuses_a_volume_windows_left_mid_write_and_writes_nothing() {
             "snapshot {k}: a refused fsck wrote to the volume"
         );
     }
+}
+
+#[test]
+fn a_read_write_mount_refuses_a_volume_windows_left_mid_write_and_writes_nothing() {
+    // The dirty flag is clear on both, so a guard that reads only the flag
+    // opens them for writing, and the first write -- the version upgrade --
+    // lands on metadata whose committed changes are still in the log
+    // (#137). A read-only mount stays allowed.
+    for k in [1, 6] {
+        let img = unpack(&format!("windows-interrupted-{k}"));
+        let before = std::fs::read(&img).unwrap();
+
+        Filesystem::mount(&img).expect("a read-only mount is allowed");
+        let err = Filesystem::mount_rw(&img).expect_err("mount_rw over a log holding work");
+        assert!(err.0.contains("$LogFile"), "snapshot {k}: {err}");
+
+        let c_path = CString::new(img.as_str()).unwrap();
+        assert!(
+            fs_ntfs_mount(c_path.as_ptr()).is_null(),
+            "snapshot {k}: fs_ntfs_mount opened a log holding work"
+        );
+        assert!(
+            last_error().contains("$LogFile"),
+            "snapshot {k}: {}",
+            last_error()
+        );
+
+        let dev = unsafe { fs_core::ffi::fs_core_file_open(c_path.as_ptr(), true) };
+        assert!(!dev.is_null(), "snapshot {k}: open fs-core device");
+        let ro = fs_ntfs_mount_with_fs_core_device(dev);
+        assert!(!ro.is_null(), "snapshot {k}: read-only: {}", last_error());
+        fs_ntfs_umount(ro);
+        let rw = fs_ntfs_mount_rw_with_fs_core_device(dev);
+        let why = last_error();
+        unsafe { fs_core::ffi::fs_core_device_close(dev) };
+        assert!(
+            rw.is_null(),
+            "snapshot {k}: fs_ntfs_mount_rw_with_fs_core_device opened a log holding work"
+        );
+        assert!(why.contains("$LogFile"), "snapshot {k}: {why}");
+
+        assert!(
+            std::fs::read(&img).unwrap() == before,
+            "snapshot {k}: a refused read-write mount wrote to the volume"
+        );
+    }
+}
+
+fn last_error() -> String {
+    let p = fs_ntfs::fs_ntfs_last_error();
+    if p.is_null() {
+        return String::new();
+    }
+    unsafe { std::ffi::CStr::from_ptr(p) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[test]

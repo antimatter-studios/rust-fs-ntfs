@@ -128,7 +128,8 @@ Concrete user-observable list, end-to-end:
 - Add / remove ADS, reparse points, EAs; create symlinks.
 - Patch any combination of the four NT timestamps in
   `$STANDARD_INFORMATION`; toggle `FILE_ATTRIBUTE_*` flags.
-- Detect dirty volumes and refuse writable mounts. `fs_ntfs_fsck`
+- Refuse a writable mount of a volume that is dirty or whose `$LogFile`
+  may hold transactions (Windows 8+ leaves the flag clear). `fs_ntfs_fsck`
   can clear dirty when `$LogFile` is empty; callback transport reports
   progress during a permitted reset.
 - Drive everything from C, Go (cgo), or Swift via the stable
@@ -138,8 +139,9 @@ Concrete user-observable list, end-to-end:
 
 Specific limits, current as of HEAD:
 
-- **`$LogFile` replay.** Not implemented. A dirty volume remains
-  readable, but writable mounts are refused. `fsck` refuses a dirty
+- **`$LogFile` replay.** Not implemented. A dirty volume, or one whose
+  log may hold transactions, remains readable, but writable mounts are
+  refused. `fsck` refuses a dirty
   volume with nonempty log data and does not validate metadata
   consistency. Explicit log reset is only for volumes independently
   known consistent.
