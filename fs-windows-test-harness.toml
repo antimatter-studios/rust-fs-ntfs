@@ -52,6 +52,7 @@ cli = [
   "cli-set-dirty-fsck-win-dirty-chkdsk",
   "cli-corrupt-mirror-fsck-win-chkdsk",
   "cli-corrupt-signature-fsck-win-chkdsk",
+  "cli-populate-win-verify-chkdsk",
 ]
 
 [project]
@@ -269,6 +270,14 @@ host = "host"
 command = "bash scripts/cli-oracle.sh corrupt {image_dir}/{run_id}/{scenario.image} {step.what}"
 expect_exit = 0
 
+[ops.cli-populate]
+# fs.ntfs mkdir, write (every size that changes how NTFS stores a file,
+# replacements shorter and longer) and set label {label}, then a clean
+# fsck.ntfs. Writes <image>.manifest, which win-cli-verify checks.
+host = "host"
+command = "bash scripts/cli-oracle.sh populate {image_dir}/{run_id}/{scenario.image} '{scenario.volume_params.label}'"
+expect_exit = 0
+
 [ops.cli-fsck-finds]
 # fsck.ntfs must exit 4 (errors left) and report a finding of `kind`.
 host = "host"
@@ -309,6 +318,17 @@ expect_exit = 0
 #   keep_image?  -- `true` keeps .img + .vhd for a follow-on op (default `false`)
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-dirty-query.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Expect '{step.expect}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
+[ops.win-cli-verify]
+# Mount the .img and check, through ntfs.sys, every line of the manifest
+# cli-populate wrote: each file's length and Get-FileHash SHA-256, each
+# directory, the volume label.
+#
+# Step fields:
+#   keep_image?  -- `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-cli-verify.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Manifest '{vm.workdir}/{scenario.image}.manifest' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-enumerate]

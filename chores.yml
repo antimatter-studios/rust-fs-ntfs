@@ -486,24 +486,27 @@ tasks:
     # run that executed fewer checks than the floor fails although every
     # file passed. 41 checks executed when the tier was added (mkfs.ntfs and
     # the names, on a Mac), 86 with fs.ntfs's read verbs, 135 with fsck.ntfs
-    # and `set dirty`; the floor is 128, about 95% of that.
+    # and `set dirty`, 215 with write, mkdir and set label; the floor is 205,
+    # about 95% of that.
     cmds:
       - 'scripts/tier.sh cli -- scripts/test-cli.sh'
 
   test:cli:oracle:
-    desc: 'The installed tools against something that is not us: volumes Windows wrote, read by fs.ntfs (tests/cli-oracle/)'
+    desc: 'The installed tools against something that is not us: volumes Windows wrote, read by fs.ntfs, and volumes fs.ntfs wrote, read by ntfs-3g (tests/cli-oracle/)'
     # The same gate as test:cli (doctor first, nothing skips, a floor), over
     # tests/cli-oracle/test-*.sh. Those need what only another platform can
     # provide -- the Windows-authored fixtures from
-    # test-disks/build-windows-native-read-fixtures.ps1 -- and FAIL naming
-    # it when it is missing, so this is not in `chore test`: CI's `cli` job
-    # runs it with the fixtures the Windows job built.
+    # test-disks/build-windows-native-read-fixtures.ps1, and ntfs-3g's tools
+    # (`apt-get install ntfs-3g`) -- and FAIL naming it when it is missing,
+    # so this is not in `chore test`: CI's `cli` job runs it with the
+    # fixtures the Windows job built and ntfs-3g installed.
     #
     # FLOOR: 27 checks executed when the tier was added (the Windows-authored
     # read fixtures: eight files, the compressed file, three symlinks), 35
-    # with fsck.ntfs on each Windows volume; the floor is 33.
+    # with fsck.ntfs on each Windows volume, 57 with ntfs-3g reading what
+    # fs.ntfs wrote; the floor is 54.
     cmds:
-      - 'scripts/tier.sh cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=33 scripts/test-cli.sh'
+      - 'scripts/tier.sh cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=54 scripts/test-cli.sh'
 
   test:ignored:
     desc: 'The #[ignore]d tests: known defects, run so a fix cannot go unnoticed'

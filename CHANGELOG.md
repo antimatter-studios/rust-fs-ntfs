@@ -26,8 +26,7 @@
   `block_size`, `dirty`) with the volume info and stats nested under
   `ntfs`, or one key of it, `--text` giving the bare value. `--offset`
   addresses a volume inside a whole-disk image. `resize` answers `not
-  implemented` (exit 3): the library cannot resize a volume. `write`,
-  `mkdir` and `set label` answer the same until they are wired.
+  implemented` (exit 3): the library cannot resize a volume.
 - **`fsck.ntfs` checks the dirty flag, `$LogFile`, `$MFTMirr` and every
   in-use MFT record, with fsck(8)'s exit statuses** (0 clean, 1 corrected,
   4 left uncorrected, 8 operational, 16 usage). Its JSON report lists what
@@ -46,6 +45,22 @@
   by `fs.ntfs`) must be found by `fsck.ntfs` and by Windows (`chkdsk`,
   `fsutil dirty query`), and `fsck.ntfs` must find nothing wrong with the
   volumes Windows wrote.
+- **`fs.ntfs <target> write <path>` and `mkdir <path>`, and `set label`.**
+  `write` reads stdin whole before opening the image, then creates the
+  file or replaces its content (its parent must exist); `mkdir` makes one
+  directory; `set label` takes at most 32 UTF-16 code units and `""`
+  removes the label. A dirty volume is refused before anything is written,
+  as the C ABI's read-write mount refuses it. Windows grades the result: a
+  `cli-populate` matrix scenario writes every size that changes how NTFS
+  stores a file, replacements shorter and longer, directories and a label,
+  and Windows must read each file back with the same `Get-FileHash`, see
+  the directories and the label, and find the volume clean under chkdsk.
+  On Linux, ntfs-3g's `ntfscat`, `ntfsls` and `ntfslabel` read the same
+  writes back, and refuse a volume `set dirty true` marked.
+- **`fs_ntfs::write::replace_file_contents_io`** replaces a file's content
+  whatever it holds: resident content through `write_file_contents_io`,
+  non-resident content shrunk or grown in place and then written.
+  `write_file_contents_io` refused a non-resident file outright.
 - **`fs_ntfs::reparse_link_target`** decodes a symlink's or mount point's
   target from a `$REPARSE_POINT` value, as `fs_ntfs_readlink` reports it.
 - **`chore test:cli:oracle`** reads volumes Windows formatted and wrote --

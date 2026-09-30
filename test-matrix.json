@@ -2198,6 +2198,44 @@
       ],
       "image": "nfs-cli-corrupt-signature-fsck-win-chkdsk.img",
       "_notes": "The FILE signature of in-use record 13 destroyed: fsck.ntfs reports bad_mft_record, and chkdsk must agree there is something to repair."
+    },
+    "cli-populate-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "CLI VERIFY",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-mkfs"
+        },
+        {
+          "op": "cli-populate"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        {
+          "op": "win-cli-verify",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-populate-win-verify-chkdsk.img",
+      "_notes": "fs.ntfs mkdir, write and set label, graded by Windows: every file reads back with the SHA-256 fs.ntfs wrote (Get-FileHash), the directories exist, the label is the one set, and chkdsk finds the volume clean."
     }
   },
   "_consolidated_by": "chore matrix (fs-windows-test-harness runner)",
