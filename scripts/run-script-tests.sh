@@ -21,7 +21,11 @@ failed=()
 shopt -s nullglob
 for t in "$dir"/*.sh; do
     ran=$((ran + 1))
-    bash "$t" || failed+=("$(basename "$t") (exit $?)")
+    # The status is taken before anything else runs: `$?` inside the entry
+    # below would be basename's, always 0 (#390).
+    bash "$t"
+    rc=$?
+    [ "$rc" -eq 0 ] || failed+=("$(basename "$t") (exit $rc)")
 done
 
 if [ "$ran" -eq 0 ]; then
