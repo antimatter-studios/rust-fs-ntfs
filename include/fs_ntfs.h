@@ -350,12 +350,17 @@ typedef struct fs_ntfs_dir_iter fs_ntfs_dir_iter_t;
 fs_ntfs_dir_iter_t *fs_ntfs_dir_open(fs_ntfs_fs_t *fs,
                                               const char *path);
 
+/*
+ * Next entry, or NULL at the end of the listing and on failure. The
+ * errno tells them apart: fs_ntfs_last_errno() is 0 at a clean end, and
+ * EINVAL for a NULL iterator.
+ */
 const fs_ntfs_dirent_t *fs_ntfs_dir_next(fs_ntfs_dir_iter_t *iter);
 
 /*
  * How many index entries were silently skipped while opening this
  * iterator (e.g. malformed rows on a dirty volume). Returns -1 on a
- * NULL iterator, otherwise a count. A non-zero value means the
+ * NULL iterator (errno EINVAL), otherwise a count. A non-zero value means the
  * listing the caller is iterating is incomplete; common causes are
  * dirty-volume metadata damage or upstream parser failures on rare
  * NTFS shapes.
@@ -398,18 +403,30 @@ int fs_ntfs_readlink(fs_ntfs_fs_t *fs, const char *path,
 
 /* ---- Error reporting ---- */
 
+/*
+ * Every call that fails records a message and an errno for the calling
+ * thread, and every call resets the errno to 0 on entry -- so after a
+ * successful call it is 0, however an earlier call on the thread ended.
+ * The message is kept until the next failure.
+ */
+
+/*
+ * The message of the most recent failure on this thread, or "" if none.
+ * The pointer is valid until the next call on this thread that fails.
+ */
 const char *fs_ntfs_last_error(void);
 
 /*
- * Companion to fs_ntfs_last_error. Returns a POSIX-style errno code
- * (ENOENT, EEXIST, ENOSPC, EINVAL, ENOTDIR, EISDIR, ENOTEMPTY, EPERM,
- * or EIO as a fallback). `0` means no error recorded on this thread.
- * Inferred heuristically from the error message content.
+ * The POSIX errno of the most recent call on this thread: 0 when it
+ * succeeded, what went wrong when it failed (ENOENT, EEXIST, ENOSPC,
+ * EINVAL, ENOTDIR, EISDIR, ENOTEMPTY, EPERM, ERANGE, or EIO as a
+ * fallback). Not sticky, unlike errno(3). A rejected argument -- a NULL
+ * pointer, a path that is not UTF-8 -- is EINVAL.
  */
 int fs_ntfs_last_errno(void);
 
 /*
- * Reset the thread-local error state.
+ * Reset the thread-local error state: the message to "" and the errno to 0.
  */
 void fs_ntfs_clear_last_error(void);
 

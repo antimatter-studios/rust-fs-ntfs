@@ -31,6 +31,16 @@
 
 ### Fixed
 
+- **`fs_ntfs_last_errno` is 0 after a successful call** (#381). Every entry
+  point resets it on entry, so a clean end of directory reads as errno 0
+  even on a thread where an earlier lookup failed; before, the errno of the
+  thread's last failure stayed until the next one. The message is kept until
+  the next failure. The calls that returned their failure sentinel without
+  recording anything -- a NULL argument or a non-UTF-8 path to
+  `fs_ntfs_stat`, `fs_ntfs_dir_open` and `fs_ntfs_read_file`, a NULL
+  argument to `fs_ntfs_get_volume_info{,_v2}`, a NULL iterator to
+  `fs_ntfs_dir_next` and `fs_ntfs_dir_skipped` -- now record EINVAL, as does
+  a `fs_ntfs_read_file` length past `isize::MAX`, which read as EIO.
 - **`fsck` clears the dirty flag on a volume whose `$LogFile` records
   nothing to replay, and keeps the log** (#375). It used to refuse any
   log that was not all `0xFF`, including the one `mkfs` writes. The new
