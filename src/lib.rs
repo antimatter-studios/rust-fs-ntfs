@@ -4364,7 +4364,17 @@ mod ffi_guard_tests {
             }
             let first = lines.next().unwrap_or("").trim_start();
             checked += 1;
-            if !first.starts_with("ffi_guard(") {
+            // The three error-state accessors catch panics without the
+            // errno reset `ffi_guard` does on entry, so reading the errno
+            // is not what clears it (#381). Every other entry point must
+            // use `ffi_guard` itself.
+            let reads_error_state = matches!(
+                name.as_str(),
+                "fs_ntfs_last_error" | "fs_ntfs_last_errno" | "fs_ntfs_clear_last_error"
+            );
+            let guarded = first.starts_with("ffi_guard(")
+                || (reads_error_state && first.starts_with("catch_panic("));
+            if !guarded {
                 bare.push(name);
             }
         }
