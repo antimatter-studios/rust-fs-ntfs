@@ -104,6 +104,26 @@ fn set_error_errno(msg: &str, errno: c_int) {
     LAST_ERRNO.with(|cell| *cell.borrow_mut() = errno);
 }
 
+/// Record a rejected argument: a NULL pointer, a path that is not UTF-8,
+/// a length out of range. Always EINVAL, whatever the message says.
+fn set_einval(msg: &str) {
+    set_error_errno(msg, ERRNO_EINVAL);
+}
+
+/// Reset this thread's errno to 0, keeping the message.
+///
+/// Every entry point does this on entry, through [`ffi_guard`], so the
+/// errno describes the most recent call rather than the most recent
+/// failure: 0 after a success, and 0 at the NULL that ends a directory
+/// listing, however an earlier call on the thread ended (#381).
+///
+/// The message is left alone because a caller may still hold the pointer
+/// `fs_ntfs_last_error` returned for it; it is replaced by the next
+/// failure, as before.
+fn reset_errno() {
+    LAST_ERRNO.with(|cell| *cell.borrow_mut() = 0);
+}
+
 /// `<errno.h>` values the C ABI promises by contract rather than infers.
 /// Identical on Linux, macOS and Windows UCRT.
 const ERRNO_EINVAL: c_int = 22;
@@ -160,34 +180,36 @@ fn infer_errno_from_message(msg: &str) -> c_int {
     }
 }
 
-/// Return the last error message recorded on this thread as a NUL-terminated
-/// C string, or an empty string if no error has been recorded.  The pointer
-/// is valid until the next FFI call on this thread that may set an error (i.e.
-/// any non-trivial call).  Copy the string before making further calls if you
-/// need it to persist.
+/// Return the message of the most recent failure on this thread as a
+/// NUL-terminated C string, or an empty string if nothing has failed. It is
+/// kept until the next failure, so after a successful call it still names
+/// the last one; `fs_ntfs_last_errno` says whether the most recent call
+/// failed. The pointer is valid until the next FFI call on this thread that
+/// fails. Copy the string before making further calls if you need it to
+/// persist.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_last_error() -> *const c_char {
-    ffi_guard("fs_ntfs_last_error", std::ptr::null(), move || {
+    catch_panic("fs_ntfs_last_error", std::ptr::null(), move || {
         LAST_ERROR.with(|cell| cell.borrow().as_ptr())
     })
 }
 
-/// Companion to `fs_ntfs_last_error`. Returns a POSIX-style errno
-/// inferred from the most recent error message. `0` means "no error
-/// recorded on this thread." FFI consumers can dispatch on this value
-/// without parsing the error string.
+/// Companion to `fs_ntfs_last_error`: the POSIX errno of the most recent
+/// call on this thread -- 0 when it succeeded, what went wrong when it
+/// failed. Not sticky, unlike errno(3): every entry point resets it on
+/// entry. FFI consumers can dispatch on this value without parsing the
+/// error string.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_last_errno() -> c_int {
-    ffi_guard("fs_ntfs_last_errno", -1, move || {
+    catch_panic("fs_ntfs_last_errno", -1, move || {
         LAST_ERRNO.with(|cell| *cell.borrow())
     })
 }
 
-/// Reset the thread-local error state. Primarily useful in tests /
-/// after a caller has consumed the last error.
+/// Reset the thread-local error state, message and errno both.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_clear_last_error() {
-    ffi_guard("fs_ntfs_clear_last_error", (), move || {
+    catch_panic("fs_ntfs_clear_last_error", (), move || {
         LAST_ERROR.with(|cell| {
             *cell.borrow_mut() = CString::new("").unwrap();
         });
@@ -239,7 +261,17 @@ pub extern "C" fn fs_ntfs_clear_last_error() {
 ///
 /// The sibling ext4 and btrfs drivers have had the same wrapper since
 /// they were written; this file had none.
+///
+/// It also resets the errno on entry (see [`reset_errno`]), which is why
+/// the three accessors of the error state use [`catch_panic`] instead:
+/// reading the errno must not be what clears it.
 fn ffi_guard<T, F: FnOnce() -> T>(what: &str, fallback: T, body: F) -> T {
+    reset_errno();
+    catch_panic(what, fallback, body)
+}
+
+/// [`ffi_guard`] without the reset, for the error-state accessors.
+fn catch_panic<T, F: FnOnce() -> T>(what: &str, fallback: T, body: F) -> T {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(value) => value,
         Err(_) => {
@@ -1052,6 +1084,7 @@ pub extern "C" fn fs_ntfs_get_volume_info(
 ) -> c_int {
     ffi_guard("fs_ntfs_get_volume_info", -1, move || {
         if fs.is_null() || info.is_null() {
+            set_einval("fs_ntfs_get_volume_info: null argument");
             return -1;
         }
 
@@ -1096,6 +1129,7 @@ pub extern "C" fn fs_ntfs_get_volume_info_v2(
 ) -> c_int {
     ffi_guard("fs_ntfs_get_volume_info_v2", -1, move || {
         if fs.is_null() || info.is_null() {
+            set_einval("fs_ntfs_get_volume_info_v2: null argument");
             return -1;
         }
         let bridge = unsafe { &*fs };
@@ -1224,13 +1258,17 @@ pub extern "C" fn fs_ntfs_stat(
 ) -> c_int {
     ffi_guard("fs_ntfs_stat", -1, move || {
         if fs.is_null() || path.is_null() || attr.is_null() {
+            set_einval("fs_ntfs_stat: null argument");
             return -1;
         }
 
         let bridge = unsafe { &*fs };
         let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
             Ok(s) => s,
-            Err(_) => return -1,
+            Err(_) => {
+                set_einval("fs_ntfs_stat: non-UTF-8 path");
+                return -1;
+            }
         };
         let out = unsafe { &mut *attr };
 
@@ -1335,13 +1373,17 @@ pub extern "C" fn fs_ntfs_dir_open(
 ) -> *mut FsNtfsDirIter {
     ffi_guard("fs_ntfs_dir_open", std::ptr::null_mut(), move || {
         if fs.is_null() || path.is_null() {
+            set_einval("fs_ntfs_dir_open: null argument");
             return std::ptr::null_mut();
         }
 
         let bridge = unsafe { &*fs };
         let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
             Ok(s) => s,
-            Err(_) => return std::ptr::null_mut(),
+            Err(_) => {
+                set_einval("fs_ntfs_dir_open: non-UTF-8 path");
+                return std::ptr::null_mut();
+            }
         };
 
         // Native read layer: resolve, then materialise the whole listing.
@@ -1404,6 +1446,7 @@ pub extern "C" fn fs_ntfs_dir_open(
 pub extern "C" fn fs_ntfs_dir_skipped(iter: *const FsNtfsDirIter) -> i64 {
     ffi_guard("fs_ntfs_dir_skipped", -1, move || {
         if iter.is_null() {
+            set_einval("fs_ntfs_dir_skipped: null iterator");
             return -1;
         }
         let it = unsafe { &*iter };
@@ -1420,11 +1463,13 @@ pub extern "C" fn fs_ntfs_dir_skipped(iter: *const FsNtfsDirIter) -> i64 {
 pub extern "C" fn fs_ntfs_dir_next(iter: *mut FsNtfsDirIter) -> *const FsNtfsDirent {
     ffi_guard("fs_ntfs_dir_next", std::ptr::null(), move || {
         if iter.is_null() {
+            set_einval("fs_ntfs_dir_next: null iterator");
             return std::ptr::null();
         }
 
         let it = unsafe { &mut *iter };
         if it.pos >= it.entries.len() {
+            // The clean end: NULL with errno 0, which `ffi_guard` set.
             return std::ptr::null();
         }
         // Widen the lightweight record into the fixed-size C dirent on demand,
@@ -1469,6 +1514,7 @@ pub extern "C" fn fs_ntfs_read_file(
 ) -> i64 {
     ffi_guard("fs_ntfs_read_file", -1, move || {
         if fs.is_null() || path.is_null() || buf.is_null() {
+            set_einval("fs_ntfs_read_file: null argument");
             return -1;
         }
 
@@ -1478,7 +1524,7 @@ pub extern "C" fn fs_ntfs_read_file(
         // a 32-bit target, to fit in `usize` at all). Reject anything larger up
         // front rather than risk UB / a truncating cast.
         if length > isize::MAX as u64 {
-            set_error("fs_ntfs_read_file: length exceeds isize::MAX");
+            set_einval("fs_ntfs_read_file: length exceeds isize::MAX");
             return -1;
         }
         let length = length as usize;
@@ -1486,7 +1532,10 @@ pub extern "C" fn fs_ntfs_read_file(
         let bridge = unsafe { &*fs };
         let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
             Ok(s) => s,
-            Err(_) => return -1,
+            Err(_) => {
+                set_einval("fs_ntfs_read_file: non-UTF-8 path");
+                return -1;
+            }
         };
 
         // Native read layer: build a read-only `BlockIo` from the mount source
@@ -4315,7 +4364,17 @@ mod ffi_guard_tests {
             }
             let first = lines.next().unwrap_or("").trim_start();
             checked += 1;
-            if !first.starts_with("ffi_guard(") {
+            // The three error-state accessors catch panics without the
+            // errno reset `ffi_guard` does on entry, so reading the errno
+            // is not what clears it (#381). Every other entry point must
+            // use `ffi_guard` itself.
+            let reads_error_state = matches!(
+                name.as_str(),
+                "fs_ntfs_last_error" | "fs_ntfs_last_errno" | "fs_ntfs_clear_last_error"
+            );
+            let guarded = first.starts_with("ffi_guard(")
+                || (reads_error_state && first.starts_with("catch_panic("));
+            if !guarded {
                 bare.push(name);
             }
         }
