@@ -19,7 +19,7 @@
 #   -Diag        Directory to write diag artefacts into:
 #                  enumerate.txt        - one line per entry, full path
 #                  enumerate-error.txt  - if Get-ChildItem raised
-#                  wrapper-create.txt   - vhd_tool output (if first op)
+#                  wrapper-create.txt   - rust-img-vhd output (if first op)
 #
 # Exit code:
 #   0 always for now (matches v1's win:enumerate semantics: it's an

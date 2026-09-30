@@ -11,9 +11,9 @@
 #      `aarch64-w64-mingw32-clang.exe`, the linker the gnullvm target
 #      requires for build scripts that compile native code (proc-macro2,
 #      quote, etc.). ~200 MB self-contained.
-#   4. vhd_tool from antimatter-studios/rust-img-vhd -- creates the
+#   4. rust-img-vhd (antimatter-studios/rust-img-vhd) -- creates the
 #      VHD wrapper used by the harness (Mount-DiskImage refuses raw
-#      images, only VHD/VHDX/ISO; vhd_tool builds the wrapper).
+#      images, only VHD/VHDX/ISO; rust-img-vhd builds the wrapper).
 #
 # Why these specific components:
 #   - We picked gnullvm over MSVC because MSVC pulls in 3+ GB of Visual
@@ -24,7 +24,7 @@
 #     to get aarch64-w64-mingw32-clang on Windows ARM64. Rustup's
 #     gnullvm target ships rust-lld but expects this clang for build
 #     scripts.
-#   - vhd_tool creates the GPT-partitioned wrapper that lets
+#   - rust-img-vhd creates the GPT-partitioned wrapper that lets
 #     Mount-DiskImage attach our raw .img -- Windows Mount-DiskImage
 #     refuses raw images, only VHD/VHDX/ISO. See
 #     `docs/chkdsk-findings.md` iter1-2 for why this wrapper is needed.
@@ -94,13 +94,14 @@ if (-not (Test-Path $workdirPath)) {
 }
 Write-Host "[setup] workdir: $workdirPath"
 
-# ---------- 5. vhd_tool from rust-img-vhd (wrapper writer) ---------------
+# ---------- 5. rust-img-vhd (wrapper writer) ------------------------------
 # Clones antimatter-studios/rust-img-vhd into the workdir, builds + installs
-# `vhd_tool` to ~/.cargo/bin (which is on PATH after rustup setup). The
-# harness's _lib.ps1::Initialize-VhdFromImg invokes `vhd_tool create-fixed`
-# directly. We build vhd_tool on the VM rather than cross-compile from
-# the Mac so the binary matches the VM's gnullvm toolchain target and
-# CPU arch without us maintaining a cross-build pipeline.
+# its `rust-img-vhd` tool (the `cli` feature) to ~/.cargo/bin (which is on
+# PATH after rustup setup). The harness's _lib.ps1::Initialize-VhdFromImg
+# invokes `rust-img-vhd img <vhd> create` directly. We build it on the VM
+# rather than cross-compile from the Mac so the binary matches the VM's
+# gnullvm toolchain target and CPU arch without us maintaining a
+# cross-build pipeline.
 $vhdRepoDir = Join-Path $workdirPath "rust-img-vhd"
 if (-not (Test-Path $vhdRepoDir)) {
     Write-Host "[setup] cloning rust-img-vhd into $vhdRepoDir"
@@ -113,9 +114,9 @@ if (-not (Test-Path $vhdRepoDir)) {
     Pop-Location
 }
 
-Write-Host "[setup] cargo install --path $vhdRepoDir --bin vhd_tool --locked"
+Write-Host "[setup] cargo install --path $vhdRepoDir --features cli --bin rust-img-vhd --locked"
 Push-Location $vhdRepoDir
-cargo install --path . --bin vhd_tool --locked 2>&1 |
+cargo install --path . --features cli --bin rust-img-vhd --locked 2>&1 |
     Select-Object -Last 3 | ForEach-Object { Write-Host "        $_" }
 Pop-Location
 
@@ -126,11 +127,11 @@ Write-Host ""
 Write-Host "=== Verification ==="
 & rustc --version 2>&1 | Select-Object -First 1
 & cargo --version 2>&1 | Select-Object -First 1
-$vhdToolBin = Get-Command vhd_tool -ErrorAction SilentlyContinue
+$vhdToolBin = Get-Command rust-img-vhd -ErrorAction SilentlyContinue
 if ($vhdToolBin) {
-    Write-Host "vhd_tool: $($vhdToolBin.Source)"
+    Write-Host "rust-img-vhd: $($vhdToolBin.Source)"
 } else {
-    Write-Host "WARN: vhd_tool not on PATH; new shell may be needed"
+    Write-Host "WARN: rust-img-vhd not on PATH; new shell may be needed"
 }
 $mingwClang = Get-Command "aarch64-w64-mingw32-clang*" -ErrorAction SilentlyContinue |
     Select-Object -First 1

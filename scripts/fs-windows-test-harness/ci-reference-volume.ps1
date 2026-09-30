@@ -11,7 +11,7 @@ $rawSize = 256MB
 # offset), but format with Microsoft's format.exe. Dismount it
 # while still mounted to capture pristine post-format bytes.
 $refWrapperBytes = [int64](384MB)
-vhd_tool create-fixed reference.vhd $refWrapperBytes
+rust-img-vhd img reference.vhd create $refWrapperBytes --type fixed
 fsutil sparse setflag reference.vhd 0
 $refVhd = Mount-DiskImage -ImagePath "$pwd\reference.vhd" -PassThru
 Start-Sleep -Seconds 2

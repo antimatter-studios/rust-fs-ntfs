@@ -6,7 +6,7 @@
 #   * ntfs-cli-read.img: files Windows wrote, plus ntfs-cli-read.sha256.tsv,
 #     each file's path, size and the SHA-256 Windows itself computes
 #
-# Run from the repository root on an elevated Windows host. vhd_tool must be
+# Run from the repository root on an elevated Windows host. rust-img-vhd must be
 # on PATH; CI installs the pinned rust-img-vhd release before invoking this.
 
 $ErrorActionPreference = 'Stop'

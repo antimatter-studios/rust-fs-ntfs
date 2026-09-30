@@ -66,9 +66,8 @@ $bpbReport | Tee-Object diag/nfs-img-bpb.txt
 # when the wrapper was sized too tight against the partition's
 # request — Windows GPT reserves 33 LBA at each end. 384 MiB
 # gives 256 MiB partition + slack with headroom to spare.
-# vhd_tool create-fixed takes raw bytes (no MB suffix).
 $wrapperBytes = [int64](384MB)
-vhd_tool create-fixed wrapper.vhd $wrapperBytes
+rust-img-vhd img wrapper.vhd create $wrapperBytes --type fixed
 # Strip the NTFS host-FS sparse flag in case the host carrier
 # set it (harmless on the fixed VHD, kept for parity with
 # the per-scenario matrix scripts).

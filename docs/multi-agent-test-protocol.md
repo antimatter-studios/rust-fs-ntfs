@@ -93,7 +93,7 @@ outside of these scripts.
 - **VM**: Windows ARM64 11, reachable at `chris@192.168.213.145` via
   SSH key authentication (no password, no further prompts). The host
   is fully provisioned by `scripts/setup-windows-vm.sh` and includes
-  `rustup` (gnullvm toolchain), `LLVM-MinGW`, and `vhd_tool` (built
+  `rustup` (gnullvm toolchain), `LLVM-MinGW`, and `rust-img-vhd` (built
   from `antimatter-studios/rust-img-vhd`). See
   `docs/local-test-pipeline.md`.
 

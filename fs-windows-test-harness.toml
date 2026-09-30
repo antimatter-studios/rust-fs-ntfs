@@ -77,7 +77,7 @@ workdir        = "${VM_WORKDIR}"
 image_dir      = "${HOST_IMAGE_DIR:-diskimages}"
 rust_toolchain = "stable-aarch64-pc-windows-gnullvm"
 scripts_dir    = "scripts/fs-windows-test-harness"
-# The wrapper toolchain (vhd_tool from antimatter-studios/rust-img-vhd)
+# The wrapper toolchain (rust-img-vhd, from antimatter-studios/rust-img-vhd)
 # is installed by scripts/setup-windows-vm.ps1 directly. Consumers don't
 # declare additional packages here.
 packages = []
@@ -293,7 +293,7 @@ expect_exit = 0
 # gives per-step granularity, so each op gets its own small script.
 #
 # The VHD-wrap path inside `win-chkdsk.ps1` (and every other op
-# routed through `_lib.ps1`) uses `vhd_tool create-fixed` from
+# routed through `_lib.ps1`) uses `rust-img-vhd img <vhd> create --type fixed` from
 # antimatter-studios/rust-img-vhd — see docs/phase-1e-design.md.
 
 [ops.win-chkdsk]
