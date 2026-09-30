@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`fsck` clears the dirty flag on a volume whose `$LogFile` records
+  nothing to replay, and keeps the log** (#375). It used to refuse any
+  log that was not all `0xFF`, including the one `mkfs` writes. The new
+  `logfile` module reads the restart area: a log marked clean
+  (`RESTART_VOLUME_IS_CLEAN`), one with no client open, or one whose last
+  record is a checkpoint with no open transaction and no dirty page holds
+  nothing to redo or undo. Any other log is still refused before anything
+  is written (#137). Checked against the `$LogFile` Windows left on a
+  cleanly detached volume (`test-disks/windows-clean-logfile.bin.gz`) and
+  against ntfs-3g. `CheckReport` gains `logfile: LogfileState`, and
+  `fsck.ntfs` reports `"logfile": "clean"` and a dirty volume over a clean
+  log as repairable.
+- **A volume `mkfs` makes is one ntfs-3g mounts read-write** (#377). Its
+  `$LogFile` restart pages said LFS 2.0 with a client open and the clean
+  flag clear -- a volume still mounted, captured from format.com mid-run
+  -- which ntfs-3g refuses as an unclean shutdown and as metadata kept in
+  Windows' cache. They now say LFS 1.1 and `RESTART_VOLUME_IS_CLEAN`, what
+  Windows writes when it dismounts a volume cleanly.
+
 ## [0.6.0] — 2026-09-30
 
 ### Added

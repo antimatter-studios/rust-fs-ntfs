@@ -106,7 +106,11 @@ const SD_SYSFILE_RW: &[u8] = &[
 //
 // Layout of the 12 KiB:
 //   * page 0 (offset 0x0000)  — authoritative RSTR (cur_lsn=0x104408,
-//                               oldest_lsn=0x100000, flags=0x0000 clean)
+//                               oldest_lsn=0x100000). The capture's flags
+//                               are 0x0000, which is NOT clean: with a
+//                               client in use it reads as an unclean
+//                               shutdown. RESTART_VOLUME_IS_CLEAN is set
+//                               at write time -- see `logfile_head` below
 //   * page 1 (offset 0x1000)  — stale backup RSTR (cur_lsn=0x100000;
 //                               ntfs.sys ignores it as older)
 //   * page 2 (offset 0x2000)  — single RCRD record page (lsn=0x104408;
@@ -119,6 +123,47 @@ const SD_SYSFILE_RW: &[u8] = &[
 // NTFS reimplementations consulted.
 //
 const LOGFILE_CANONICAL: &[u8] = include_bytes!("logfile-canonical-12k.bin");
+
+/// The first 12 KiB of `$LogFile` as written: [`LOGFILE_CANONICAL`] with
+/// both restart pages made to say what Windows writes when it dismounts a
+/// volume cleanly (#377).
+///
+/// The capture was taken while the volume was in use, and says so twice:
+///
+/// * its restart areas have a client in use and `RESTART_VOLUME_IS_CLEAN`
+///   clear -- an unclean shutdown. ntfs-3g refuses such a volume
+///   read-write ("The disk contains an unclean file system"), and this
+///   crate's own `fsck` cannot tell it from a log holding transactions
+///   (#375);
+/// * its restart pages are LFS 2.0, the version Windows 8 and later run a
+///   mounted log at, and keep on a Fast Startup shutdown with metadata
+///   still cached. ntfs-3g refuses any 2.0 log read-write for exactly that
+///   reason ("Metadata kept in Windows cache, refused to mount").
+///
+/// A volume Windows formatted, wrote to and cleanly detached carries LFS
+/// 1.1 restart pages with flags `0x0002` and a client still in use -- read
+/// off four of them, `test-disks/windows-clean-logfile.bin.gz` among them
+/// -- so that is what is written here.
+///
+/// The version (page offsets 0x1A / 0x1C) and the flags (restart-area
+/// offset 0x0E) sit inside each page's first sector and clear of its last
+/// two bytes, so the update sequence array does not cover them and needs
+/// no recompute.
+fn logfile_head() -> Vec<u8> {
+    use crate::logfile::{RESTART_AREA_FLAGS_OFFSET, RESTART_VOLUME_IS_CLEAN};
+    let mut head = LOGFILE_CANONICAL.to_vec();
+    for page in [0usize, 4096] {
+        // LFS 1.1: minor version, then major version.
+        head[page + 0x1A..page + 0x1C].copy_from_slice(&1u16.to_le_bytes());
+        head[page + 0x1C..page + 0x1E].copy_from_slice(&1u16.to_le_bytes());
+        let ra = u16::from_le_bytes([head[page + 0x18], head[page + 0x19]]) as usize;
+        let at = page + ra + RESTART_AREA_FLAGS_OFFSET;
+        debug_assert!(at % 512 < 510, "restart flags must not sit under the USA");
+        let flags = u16::from_le_bytes([head[at], head[at + 1]]) | RESTART_VOLUME_IS_CLEAN;
+        head[at..at + 2].copy_from_slice(&flags.to_le_bytes());
+    }
+    head
+}
 
 /// `$FILE_NAME` namespace values (MS-FSCC §2.4.4).
 ///
@@ -450,7 +495,7 @@ pub fn format_filesystem(
     // on every subsequent write.
     let log_size_bytes = logfile_clusters * cluster_size as u64;
     let logfile_off = logfile_lcn * cluster_size as u64;
-    dev.write_all_at(logfile_off, LOGFILE_CANONICAL)?;
+    dev.write_all_at(logfile_off, &logfile_head())?;
     let pad_off = logfile_off + LOGFILE_CANONICAL.len() as u64;
     let pad_len = log_size_bytes - LOGFILE_CANONICAL.len() as u64;
     write_filled(dev, pad_off, pad_len, 0xFF)?;

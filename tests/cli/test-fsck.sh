@@ -29,9 +29,11 @@ jq_check "the report counts the MFT records it read" '.scanned.mft_records >= 16
 check "fsck.ntfs --text says clean" grep -q ': clean' <<<"$(fsck.ntfs --text "$img")"
 check "rust-fs-ntfs fsck is the same program" test "$(rust-fs-ntfs fsck --text "$img")" = "$(fsck.ntfs --text "$img")"
 
-# Dirty: reported, exit 4; -y cannot clear it, because the log a fresh
-# volume carries holds a record this library cannot replay (#137), so it
-# changes nothing and says why; `set dirty false` is the explicit override.
+# Dirty: reported, exit 4. -y clears it and exits 1: the log a fresh volume
+# carries is marked clean, as Windows marks a cleanly dismounted one, so
+# there is nothing to replay and the log is kept (#375). A log that may
+# hold transactions is still refused; tests/logfile_state.rs and the unit
+# tests in src/fsck.rs make one. `set dirty false` is the explicit override.
 fs.ntfs "$img" set dirty true >"$SANDBOX/set.json" 2>"$SANDBOX/set.err"
 check "set dirty true exits 0 ($(cat "$SANDBOX/set.err"))" test $? -eq 0
 jq_check "set dirty true reports the new value" '.dirty == true' "$SANDBOX/set.json"
@@ -40,13 +42,17 @@ fsck.ntfs "$img" >"$SANDBOX/dirty.json" 2>/dev/null
 check "fsck.ntfs on a dirty volume exits 4" test $? -eq 4
 jq_check "the dirty flag is the finding" \
     '.clean == false and .dirty == true and .exit == 4 and any(.findings[]; .kind == "dirty")' "$SANDBOX/dirty.json"
-cp "$img" "$SANDBOX/dirty-before.img"
+jq_check "a dirty volume with a clean log is repairable" \
+    '.logfile == "clean" and (.findings[] | select(.kind == "dirty") | .repairable == true)' \
+    "$SANDBOX/dirty.json"
 fsck.ntfs -y "$img" >"$SANDBOX/y.json" 2>/dev/null
-check "fsck.ntfs -y on a dirty volume whose log holds records exits 4" test $? -eq 4
-jq_check "-y says the log holds records it cannot replay" \
-    '.repaired == 0 and .remaining >= 1 and (.findings[] | select(.kind == "dirty") | .repairable == false and (.why | test("LogFile")))' \
+check "fsck.ntfs -y on a dirty volume whose log is clean exits 1" test $? -eq 1
+jq_check "-y cleared the flag and kept the clean log" \
+    '.repaired == 1 and .remaining == 0 and .dirty == false and .logfile == "clean"' \
     "$SANDBOX/y.json"
-check "-y changed nothing on the volume it could not repair" cmp -s "$img" "$SANDBOX/dirty-before.img"
+fsck.ntfs "$img" >/dev/null 2>&1
+check "fsck.ntfs exits 0 after -y" test $? -eq 0
+fs.ntfs "$img" set dirty true >/dev/null 2>&1
 fs.ntfs "$img" set dirty false >/dev/null 2>&1
 check "set dirty false exits 0" test $? -eq 0
 check "get dirty is false again" test "$(fs.ntfs "$img" get dirty --text)" = false

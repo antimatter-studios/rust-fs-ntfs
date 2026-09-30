@@ -58,6 +58,7 @@ pub mod fs_core_bridge;
 pub mod fsck;
 pub mod idx_block;
 pub mod index_io;
+pub mod logfile;
 pub mod mft_bitmap;
 pub mod mft_io;
 pub mod mkfs;

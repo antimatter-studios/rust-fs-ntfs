@@ -15,8 +15,11 @@
 //!    reinitialize on mount" signal documented in Windows Internals
 //!    7th ed. ch. "NTFS Logging".
 //!
-//! Neither operation replays in-progress transactions. `fsck` refuses to
-//! reset a dirty volume whose log contains non-empty bytes. The explicit
+//! Neither operation replays in-progress transactions. On a dirty volume
+//! `fsck` reads `$LogFile`'s restart area ([`crate::logfile`]): an empty
+//! log is reset and the flag cleared, a log recording nothing to redo or
+//! undo is kept and only the flag cleared, and any other log is refused
+//! before anything is written (#375, #137). The explicit
 //! `reset_logfile` and `clear_dirty` operations require the caller to know
 //! independently that metadata is consistent; using them on a crashed
 //! volume can destroy recoverable changes.
@@ -43,6 +46,7 @@ use std::path::Path;
 
 use crate::attr_io::AttrType;
 use crate::block_io::BlockIo;
+pub use crate::logfile::LogfileState;
 
 /// `$Volume` / `$LogFile` MFT record numbers (fixed by the NTFS spec).
 const VOLUME_RECORD_NUMBER: u64 = 3;
@@ -430,25 +434,33 @@ pub fn fsck_io<'cb, T: FsckIo>(
     io: &mut T,
     mut progress: Option<&mut (dyn FnMut(&str, u64, u64) + 'cb)>,
 ) -> Result<FsckReport, String> {
+    // A DIRTY VOLUME IS DECIDED BY WHAT ITS LOG HOLDS (#375). An empty log
+    // is reset and the flag cleared, as before. A log whose restart area
+    // records nothing to redo or undo is LEFT AS IT IS -- it is the log
+    // Windows expects to find -- and only the flag is cleared. Anything
+    // else may be transactions this crate cannot replay (#137), and is
+    // refused before a byte is written.
+    //
+    // A volume that is NOT dirty still has its log reset whatever it holds;
+    // that is rust-fs-ntfs#376.
+    let mut keep_log = false;
     if is_dirty_io(io)? {
-        let (logfile_disk_offset, logfile_size) = locate_logfile_data_io(io)?;
-        let mut buf = [0u8; LOGFILE_CHUNK];
-        let mut checked = 0;
-        while checked < logfile_size {
-            let n = std::cmp::min(logfile_size - checked, LOGFILE_CHUNK as u64) as usize;
-            io.read_exact_at(logfile_disk_offset + checked, &mut buf[..n])
-                .map_err(|e| format!("read $LogFile: {e}"))?;
-            if buf[..n].iter().any(|&byte| byte != LOGFILE_EMPTY_FILL) {
-                return Err(
-                    "dirty volume has nonempty $LogFile; fsck refuses to discard unreplayed records"
-                        .to_string(),
-                );
+        match logfile_state_io(io)? {
+            LogfileState::Empty => {}
+            LogfileState::Clean(_) => keep_log = true,
+            LogfileState::Pending(why) => {
+                return Err(format!(
+                    "dirty volume: {why}; fsck refuses to discard unreplayed records"
+                ));
             }
-            checked += n as u64;
         }
     }
 
-    let logfile_bytes = reset_logfile_io(io, progress.as_deref_mut())?;
+    let logfile_bytes = if keep_log {
+        0
+    } else {
+        reset_logfile_io(io, progress.as_deref_mut())?
+    };
 
     if let Some(cb) = progress
         .as_mut()
@@ -504,6 +516,11 @@ pub struct CheckReport {
     /// that is not empty may hold transactions, and this crate cannot
     /// replay them (#137), so a dirty volume with one is not repaired.
     pub logfile_empty: bool,
+    /// What `$LogFile` holds as far as replay is concerned: empty, clean
+    /// (a restart area recording nothing to redo or undo), or possibly
+    /// transactions. A dirty volume is repairable unless this is
+    /// [`LogfileState::Pending`] (#375).
+    pub logfile: LogfileState,
     /// How many MFT records the bitmap marks in use, each of which was read.
     pub records_scanned: u64,
     pub findings: Vec<CheckFinding>,
@@ -526,6 +543,26 @@ pub fn logfile_is_empty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
     Ok(true)
 }
 
+/// What `$LogFile` holds, as far as replay is concerned. Reads the whole
+/// log only to see whether it is all `0xFF`; otherwise the two restart
+/// pages and at most the one page holding the last checkpoint. Writes
+/// nothing. See [`crate::logfile`].
+pub fn logfile_state_io<T: FsckIo>(io: &mut T) -> Result<LogfileState, String> {
+    if logfile_is_empty_io(io)? {
+        return Ok(LogfileState::Empty);
+    }
+    let (logfile_disk_offset, logfile_size) = locate_logfile_data_io(io)?;
+    Ok(crate::logfile::state_of_nonempty(&mut |off, len| {
+        let end = off.checked_add(len as u64)?;
+        if end > logfile_size {
+            return None;
+        }
+        let mut buf = vec![0u8; len];
+        io.read_exact_at(logfile_disk_offset + off, &mut buf).ok()?;
+        Some(buf)
+    }))
+}
+
 /// Check a volume WITHOUT WRITING ANYTHING: the dirty flag, whether
 /// `$LogFile` is empty, `$MFTMirr` against `$MFT`, and the header of every
 /// MFT record `$MFT`'s bitmap marks in use.
@@ -537,7 +574,8 @@ pub fn logfile_is_empty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
 /// `$MFT`, no `$Volume`).
 pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, String> {
     let dirty = is_dirty_io(io)?;
-    let logfile_empty = logfile_is_empty_io(io)?;
+    let logfile = logfile_state_io(io)?;
+    let logfile_empty = logfile == LogfileState::Empty;
     let params = crate::mft_io::read_boot_params_io(io)?;
     let record_size = params.file_record_size;
     let mut findings = Vec::new();
@@ -581,6 +619,7 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, String> {
     Ok(CheckReport {
         dirty,
         logfile_empty,
+        logfile,
         records_scanned,
         findings,
     })
@@ -635,22 +674,21 @@ fn bad_record_reason<T: FsckIo>(
 }
 
 /// Clear the dirty flag when that is all that is wrong and it is safe:
-/// only when `$LogFile` is empty, through [`fsck_io`]. A log that holds
-/// anything may hold transactions this crate cannot replay (#137), and
-/// clearing the flag over them would discard them; that is refused, with
-/// the reason, and nothing is written.
+/// when `$LogFile` is empty, or its restart area records nothing to redo
+/// or undo (#375), through [`fsck_io`]. Any other log may hold
+/// transactions this crate cannot replay (#137), and clearing the flag
+/// over them would discard them; that is refused, with the reason, and
+/// nothing is written.
 ///
 /// `Ok(true)` when the flag was cleared, `Ok(false)` when it was not set.
 pub fn repair_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
     if !is_dirty_io(io)? {
         return Ok(false);
     }
-    if !logfile_is_empty_io(io)? {
-        return Err(
-            "$LogFile holds records, which may be transactions this library cannot replay \
-             (rust-fs-ntfs#137); clearing the dirty flag over them would discard them"
-                .to_string(),
-        );
+    if let LogfileState::Pending(why) = logfile_state_io(io)? {
+        return Err(format!(
+            "{why}; clearing the dirty flag over them would discard them"
+        ));
     }
     Ok(fsck_io(io, None)?.dirty_cleared)
 }
@@ -1578,8 +1616,67 @@ mod check_tests {
         assert!(!report.dirty);
         assert_eq!(report.findings, vec![]);
         assert!(report.records_scanned >= 16, "{}", report.records_scanned);
-        // mkfs writes format.com's restart pages and checkpoint record.
+        // mkfs writes format.com's restart pages and checkpoint record,
+        // marked clean as Windows marks a cleanly dismounted volume (#377).
         assert!(!report.logfile_empty);
+        assert_eq!(
+            report.logfile,
+            LogfileState::Clean(crate::logfile::CleanBecause::MarkedClean)
+        );
+    }
+
+    /// Make the log say records were written after its last checkpoint:
+    /// the clean flag cleared and the authoritative restart area's
+    /// `current_lsn` moved past the client's restart LSN. Neither field
+    /// sits under the page's update sequence array.
+    fn unclean_log(dev: &mut MemDev) {
+        let (log, _) = locate_logfile_data_io(dev).unwrap();
+        let page = log as usize;
+        let ra = page + u16::from_le_bytes([dev.0[page + 0x18], dev.0[page + 0x19]]) as usize;
+        let flags = ra + crate::logfile::RESTART_AREA_FLAGS_OFFSET;
+        dev.0[flags] &= !(crate::logfile::RESTART_VOLUME_IS_CLEAN as u8);
+        let lsn = u64::from_le_bytes(dev.0[ra..ra + 8].try_into().unwrap()) + 0x100;
+        dev.0[ra..ra + 8].copy_from_slice(&lsn.to_le_bytes());
+    }
+
+    #[test]
+    fn a_dirty_volume_whose_log_is_clean_is_repaired_and_its_log_kept() {
+        let mut dev = fresh();
+        let (log, len) = locate_logfile_data_io(&mut dev).unwrap();
+        let (log, len) = (log as usize, len as usize);
+        let log_before = dev.0[log..log + len].to_vec();
+        set_dirty_io(&mut dev).unwrap();
+        assert!(repair_dirty_io(&mut dev).expect("repair"));
+        assert!(
+            dev.0[log..log + len] == log_before[..],
+            "a clean log is kept, not overwritten"
+        );
+        let report = check_io(&mut dev).unwrap();
+        assert!(!report.dirty);
+        assert_eq!(report.findings, vec![]);
+    }
+
+    #[test]
+    fn a_checkpoint_with_nothing_after_it_is_clean_without_the_flag() {
+        let mut dev = fresh();
+        let (log, len) = locate_logfile_data_io(&mut dev).unwrap();
+        let page = log as usize;
+        let ra = page + u16::from_le_bytes([dev.0[page + 0x18], dev.0[page + 0x19]]) as usize;
+        dev.0[ra + crate::logfile::RESTART_AREA_FLAGS_OFFSET] &=
+            !(crate::logfile::RESTART_VOLUME_IS_CLEAN as u8);
+        // mkfs's checkpoint record is at 0x2000, not where its LSN resolves
+        // (0x22040, #377), so without the flag the log cannot be shown to
+        // be clean and is treated as holding work.
+        assert!(logfile_state_io(&mut dev).unwrap().needs_replay());
+        // Put the record where its LSN says it is, and the checkpoint alone
+        // proves there is nothing to redo or undo.
+        let rcrd = dev.0[page + 0x2000..page + 0x3000].to_vec();
+        dev.0[page + 0x22000..page + 0x23000].copy_from_slice(&rcrd);
+        assert!(len as usize > 0x23000);
+        assert_eq!(
+            logfile_state_io(&mut dev).unwrap(),
+            LogfileState::Clean(crate::logfile::CleanBecause::CheckpointOnly)
+        );
     }
 
     #[test]
@@ -1640,6 +1737,7 @@ mod check_tests {
     #[test]
     fn a_dirty_volume_whose_log_holds_records_is_refused_and_left_alone() {
         let mut dev = fresh();
+        unclean_log(&mut dev);
         set_dirty_io(&mut dev).unwrap();
         let before = dev.0.clone();
         let err = repair_dirty_io(&mut dev).expect_err("a log with records is not discarded");
