@@ -7,7 +7,8 @@
 # the `test:scripts` task in chores.yml and the `shell tests` step in ci.yml --
 # points it at a scratch directory, and requires:
 #
-#   * a failing test that is NOT last fails the tier, and is named;
+#   * a failing test that is NOT last fails the tier, and is named with the
+#     status it exited with;
 #   * the tests after it still run, so one run reports every failure;
 #   * a directory of passing tests passes;
 #   * a directory with no tests fails, because nothing ran.
@@ -47,7 +48,9 @@ ci_cmd="$(awk '
 # Scratch test directories.
 mixed="$sandbox/mixed"; passing="$sandbox/passing"; empty="$sandbox/empty"
 mkdir -p "$mixed" "$passing" "$empty"
-printf '#!/usr/bin/env bash\nexit 1\n' > "$mixed/a-fails.sh"
+# 3, not 1: a status nothing else in the run produces, so the report can
+# only have taken it from the test.
+printf '#!/usr/bin/env bash\nexit 3\n' > "$mixed/a-fails.sh"
 printf '#!/usr/bin/env bash\ntouch "%s/ran-b"\nexit 0\n' "$sandbox" > "$mixed/b-passes.sh"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$passing/a-passes.sh"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$passing/b-passes.sh"
@@ -75,6 +78,8 @@ check_cmd() {
     fi
     grep -q 'a-fails\.sh' "$sandbox/out" && ok \
         || bad "$where: the failing test is named in the tier's output"
+    grep -q 'a-fails\.sh (exit 3)' "$sandbox/out" && ok \
+        || bad "$where: the failing test's own exit status is named, not $(grep 'a-fails' "$sandbox/out")"
     [ -f "$sandbox/ran-b" ] && ok \
         || bad "$where: the tests after a failure still run"
 
