@@ -76,7 +76,7 @@ fn child_vcn_in_node(
     let total = read_u32_le(buf, ih + IH_TOTAL_SIZE_OF_ENTRIES)
         .ok_or(Error::io("missing index size"))? as usize;
     if first < INDEX_HEADER_SIZE || !first.is_multiple_of(8) || first > total {
-        return Err(Error::invalid("invalid interior index first-entry offset"));
+        return Err(Error::io("invalid interior index first-entry offset"));
     }
     let end = ih
         .checked_add(total)
@@ -97,7 +97,7 @@ fn child_vcn_in_node(
                 as usize;
         let flags = u16::from_le_bytes([buf[cursor + IE_FLAGS], buf[cursor + IE_FLAGS + 1]]);
         if len < IE_KEY_START + 8 || !len.is_multiple_of(8) || cursor + len > end {
-            return Err(Error::invalid("invalid interior index entry length"));
+            return Err(Error::io("invalid interior index entry length"));
         }
         if flags & IE_FLAG_HAS_SUBNODE == 0 {
             return Err(Error::io("interior index entry has no child VCN"));
@@ -138,7 +138,7 @@ pub(crate) fn index_root_child_vcn(
     upcase: Option<&crate::upcase::UpcaseTable>,
 ) -> Result<u64, Error> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or(Error::not_found("$INDEX_ROOT:$I30 not found"))?;
+        .ok_or(Error::io("$INDEX_ROOT:$I30 not found"))?;
     let start = ir.attr_offset
         + ir.resident_value_offset
             .ok_or(Error::io("no value_offset"))? as usize;
@@ -295,7 +295,7 @@ pub(crate) fn lookup_index_root_node(
     upcase: &crate::upcase::UpcaseTable,
 ) -> Result<IndexNodeLookup, Error> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or_else(|| Error::not_found("$INDEX_ROOT:$I30 not found"))?;
+        .ok_or_else(|| Error::io("$INDEX_ROOT:$I30 not found"))?;
     if !ir.is_resident {
         return Err(Error::io(
             "$INDEX_ROOT is non-resident (impossible per spec)",
@@ -420,7 +420,7 @@ pub fn find_index_entry(
     upcase: Option<&crate::upcase::UpcaseTable>,
 ) -> Result<Option<IndexEntryLocation>, Error> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or_else(|| Error::not_found("$INDEX_ROOT:$I30 not found"))?;
+        .ok_or_else(|| Error::io("$INDEX_ROOT:$I30 not found"))?;
     if !ir.is_resident {
         return Err(Error::io(
             "$INDEX_ROOT is non-resident (impossible per spec)",
@@ -543,7 +543,7 @@ pub fn find_index_entry(
 /// Used by `rmdir` to verify a directory is empty.
 pub fn index_root_has_real_entries(record: &[u8]) -> Result<bool, Error> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or_else(|| Error::not_found("$INDEX_ROOT:$I30 not found"))?;
+        .ok_or_else(|| Error::io("$INDEX_ROOT:$I30 not found"))?;
     if !ir.is_resident {
         return Err(Error::io("$INDEX_ROOT unexpectedly non-resident"));
     }
@@ -827,7 +827,7 @@ fn collect_entries(
 /// Enumerate the `$FILE_NAME` entries in a directory's resident `$INDEX_ROOT`.
 pub fn collect_index_root_entries(record: &[u8], out: &mut Vec<DirEntryRaw>) -> Result<(), Error> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or_else(|| Error::not_found("$INDEX_ROOT:$I30 not found"))?;
+        .ok_or_else(|| Error::io("$INDEX_ROOT:$I30 not found"))?;
     // BY CHECK, NOT BY CONSEQUENCE.
     //
     // `find_index_entry` and `index_root_has_real_entries` both refuse
@@ -1329,9 +1329,7 @@ pub(crate) fn promote_index_root_to_first_indx(
     let total = read_u32_le(record, ih + IH_TOTAL_SIZE_OF_ENTRIES)
         .ok_or(Error::io("$INDEX_ROOT has no total size"))? as usize;
     if first < INDEX_HEADER_SIZE || !first.is_multiple_of(8) || first > total {
-        return Err(Error::invalid(
-            "$INDEX_ROOT has an invalid first-entry offset",
-        ));
+        return Err(Error::io("$INDEX_ROOT has an invalid first-entry offset"));
     }
     let entries_start = ih
         .checked_add(first)
@@ -1427,7 +1425,7 @@ pub(crate) fn split_indx_leaf(
         .checked_add(total)
         .ok_or(Error::io("INDX size overflow"))?;
     if first < INDEX_HEADER_SIZE || !first.is_multiple_of(8) || end > block.len() {
-        return Err(Error::invalid("invalid INDX entry bounds"));
+        return Err(Error::io("invalid INDX entry bounds"));
     }
 
     let mut entries: Vec<Vec<u8>> = Vec::new();
@@ -1524,10 +1522,10 @@ pub(crate) fn route_add_split_in_index_root(
     let total = read_u32_le(record, ih + IH_TOTAL_SIZE_OF_ENTRIES)
         .ok_or(Error::io("short index root"))? as usize;
     if first != INDEX_HEADER_SIZE || total < first || ih + total > value_end {
-        return Err(Error::invalid("invalid root routing bounds"));
+        return Err(Error::io("invalid root routing bounds"));
     }
     let name = String::from_utf16(&entry_name(separator, 0, separator.len())?)
-        .map_err(|_| Error::invalid("separator name is invalid UTF-16"))?;
+        .map_err(|_| Error::io("separator name is invalid UTF-16"))?;
     if index_root_child_vcn(record, &name, upcase)? != left_vcn {
         return Err(Error::io("split separator does not route to the old leaf"));
     }
@@ -1540,7 +1538,7 @@ pub(crate) fn route_add_split_in_index_root(
         let len =
             u16::from_le_bytes([entries[at + IE_LENGTH], entries[at + IE_LENGTH + 1]]) as usize;
         if len < 24 || !len.is_multiple_of(8) || at + len > entries.len() {
-            return Err(Error::invalid("invalid root routing entry length"));
+            return Err(Error::io("invalid root routing entry length"));
         }
         let child_at = at + len - 8;
         if u64::from_le_bytes(entries[child_at..child_at + 8].try_into().unwrap()) == left_vcn {

@@ -51,6 +51,15 @@
   counts; each site keeps the errno its own wording used to give it. Words
   in a function's name no longer count either: `fs_ntfs_read_si_full`'s NULL
   arguments were ENOSPC and are EINVAL.
+- **Errnos that followed their message's wording follow the failure**
+  (#394). A full volume ("no contiguous free run of N clusters") is ENOSPC,
+  not EIO. Hard-linking a directory and renaming the root are EPERM, not
+  EIO; the first says "refusing", which the old search for "refuse"
+  missed. A volume missing metadata every file or directory has --
+  `$STANDARD_INFORMATION`, `$INDEX_ROOT:$I30`, `$INDEX_ALLOCATION:$I30`,
+  `$Bitmap:$I30`, or a VCN or record its run list does not map -- is EIO,
+  not ENOENT, which said the name did not exist. A corrupt run list, LZNT1 chunk, EA list or index node is
+  EIO, not EINVAL, which blamed the caller's arguments.
 - **ENOTEMPTY is the platform's** (#382). It was hard-coded to 66, macOS's
   value; Linux's is 39, so a Linux caller never saw ENOTEMPTY. Every errno
   now comes from `libc` for the platform the crate is built for.

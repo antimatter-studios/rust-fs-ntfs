@@ -351,7 +351,7 @@ pub fn mft_record_offset_io<T: BlockIo + ?Sized>(
     record_number: u64,
 ) -> Result<u64, Error> {
     mft_record_offset_maybe_io(io, params, record_number)?
-        .ok_or_else(|| Error::not_found(format!("MFT record {record_number} is not mapped")))
+        .ok_or_else(|| Error::io(format!("MFT record {record_number} is not mapped")))
 }
 
 fn mft_record_offset_maybe_io<T: BlockIo + ?Sized>(

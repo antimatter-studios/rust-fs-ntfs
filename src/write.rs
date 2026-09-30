@@ -83,7 +83,7 @@ pub fn set_times_by_record_number_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     update_mft_record_io(io, record_number, |record| {
         let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
-            .ok_or_else(|| Error::not_found("$STANDARD_INFORMATION not found"))?;
+            .ok_or_else(|| Error::io("$STANDARD_INFORMATION not found"))?;
         let data_start = attr_io::resident_value_start(&loc)
             .ok_or_else(|| Error::io("$STANDARD_INFORMATION not resident"))?;
         let value_length = loc
@@ -153,7 +153,7 @@ pub fn read_security_id_io<T: BlockIo + ?Sized>(
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
     let loc = attr_io::find_attribute(&record, AttrType::StandardInformation, None)
-        .ok_or_else(|| Error::not_found("$STANDARD_INFORMATION not found"))?;
+        .ok_or_else(|| Error::io("$STANDARD_INFORMATION not found"))?;
     let data_start = attr_io::resident_value_start(&loc)
         .ok_or_else(|| Error::io("$STANDARD_INFORMATION not resident"))?;
     let value_length = loc
@@ -226,7 +226,7 @@ pub fn read_si_full_io<T: BlockIo + ?Sized>(
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
     let loc = attr_io::find_attribute(&record, AttrType::StandardInformation, None)
-        .ok_or_else(|| Error::not_found("$STANDARD_INFORMATION not found"))?;
+        .ok_or_else(|| Error::io("$STANDARD_INFORMATION not found"))?;
     let data_start = attr_io::resident_value_start(&loc)
         .ok_or_else(|| Error::io("$STANDARD_INFORMATION not resident"))?;
     let value_length = loc
@@ -317,7 +317,7 @@ pub fn set_security_id_io<T: BlockIo + ?Sized>(
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     update_mft_record_io(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
-            .ok_or_else(|| Error::not_found("$STANDARD_INFORMATION not found"))?;
+            .ok_or_else(|| Error::io("$STANDARD_INFORMATION not found"))?;
         let data_start = attr_io::resident_value_start(&loc)
             .ok_or_else(|| Error::io("$STANDARD_INFORMATION not resident"))?;
         let value_length = loc
@@ -380,7 +380,7 @@ pub fn set_file_attributes_by_record_number_io<T: BlockIo + ?Sized>(
     }
     update_mft_record_io(io, record_number, |record| {
         let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
-            .ok_or_else(|| Error::not_found("$STANDARD_INFORMATION not found"))?;
+            .ok_or_else(|| Error::io("$STANDARD_INFORMATION not found"))?;
         let data_start = attr_io::resident_value_start(&loc)
             .ok_or_else(|| Error::io("$STANDARD_INFORMATION not resident"))?;
         let value_length = loc
@@ -1023,7 +1023,7 @@ pub fn grow_nonresident_by_record_number_io<T: BlockIo + ?Sized>(
         .find_map(|r| r.lcn.map(|lcn| lcn + r.length))
         .unwrap_or(params.mft_lcn.saturating_add(32));
     let new_lcn = bitmap::find_free_run_io(io, &bm, need_clusters, hint)?.ok_or_else(|| {
-        Error::io(format!(
+        Error::no_space(format!(
             "no contiguous free run of {need_clusters} clusters available"
         ))
     })?;
@@ -2593,7 +2593,7 @@ pub(crate) fn remove_attribute_at(
             .checked_add(attr_length)
             .is_none_or(|end| end > bytes_used)
     {
-        return Err(Error::invalid(format!(
+        return Err(Error::io(format!(
             "remove_attribute: invalid range (off={attr_offset}, len={attr_length}, bytes_used={bytes_used}, record_len={})",
             record.len()
         )));
@@ -3325,7 +3325,7 @@ pub fn link_io<T: BlockIo + ?Sized>(
     let (_, target_record_bytes) = read_mft_record_io(io, target_rec)?;
     let target_flags = crate::mft_io::record_flags(&target_record_bytes);
     if target_flags & crate::mft_io::MFT_FLAG_DIRECTORY != 0 {
-        return Err(Error::io(format!(
+        return Err(Error::refused(format!(
             "link: refusing to hardlink directory '{existing_path}'"
         )));
     }
@@ -3475,7 +3475,7 @@ fn find_file_name_attr(
 
 fn set_si_file_attributes_bit(record: &mut [u8], bit: u32, set: bool) -> Result<(), Error> {
     let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
-        .ok_or_else(|| Error::not_found("$STANDARD_INFORMATION not found"))?;
+        .ok_or_else(|| Error::io("$STANDARD_INFORMATION not found"))?;
     let data_start = attr_io::resident_value_start(&loc)
         .ok_or_else(|| Error::io("$STANDARD_INFORMATION not resident"))?;
     // The file-attributes word sits 0x20 into the value, so the value
@@ -3807,7 +3807,9 @@ pub fn promote_resident_data_to_nonresident_io<T: BlockIo + ?Sized>(
     let n_clusters = new_size.div_ceil(cluster_size).max(1);
     let bm = crate::bitmap::locate_bitmap_io(io)?;
     let new_lcn = crate::bitmap::find_free_run_io(io, &bm, n_clusters, params.mft_lcn)?
-        .ok_or_else(|| Error::io(format!("no contiguous free run of {n_clusters} clusters")))?;
+        .ok_or_else(|| {
+            Error::no_space(format!("no contiguous free run of {n_clusters} clusters"))
+        })?;
     crate::bitmap::allocate_io(io, &bm, new_lcn, n_clusters)?;
     let allocated_length = n_clusters * cluster_size;
 
@@ -4036,7 +4038,7 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
         };
         let n = *clusters;
         let lcn = crate::bitmap::find_free_run_io(io, bm, n, hint)?
-            .ok_or_else(|| Error::io(format!("no contiguous free run of {n} clusters")))?;
+            .ok_or_else(|| Error::no_space(format!("no contiguous free run of {n} clusters")))?;
         crate::bitmap::allocate_io(io, bm, lcn, n)
             .map_err(|e| e.context(format!("allocate {n}@{lcn}")))?;
         allocated.push((lcn, n));
@@ -4116,7 +4118,7 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
     // non-resident sparse attribute.
     update_mft_record_io(io, rec, |record| {
         let si = attr_io::find_attribute(record, AttrType::StandardInformation, None)
-            .ok_or(Error::not_found("$STANDARD_INFORMATION not found"))?;
+            .ok_or(Error::io("$STANDARD_INFORMATION not found"))?;
         let si_val = attr_io::resident_value_start(&si)
             .ok_or(Error::io("$STANDARD_INFORMATION not resident"))?;
         // The value has to reach its own file-attributes word; see
@@ -4264,7 +4266,9 @@ pub fn promote_attribute_to_nonresident_io<T: BlockIo + ?Sized>(
     let n_clusters = new_size.div_ceil(cluster_size).max(1);
     let bm = crate::bitmap::locate_bitmap_io(io)?;
     let new_lcn = crate::bitmap::find_free_run_io(io, &bm, n_clusters, params.mft_lcn)?
-        .ok_or_else(|| Error::io(format!("no contiguous free run of {n_clusters} clusters")))?;
+        .ok_or_else(|| {
+            Error::no_space(format!("no contiguous free run of {n_clusters} clusters"))
+        })?;
     crate::bitmap::allocate_io(io, &bm, new_lcn, n_clusters)?;
     let allocated_length = n_clusters * cluster_size;
 
@@ -5161,7 +5165,7 @@ fn resolve_parent_and_child_io<T: BlockIo + ?Sized>(
 ) -> Result<(u64, u64, String), Error> {
     let p = old_path.trim_start_matches('/');
     if p.is_empty() {
-        return Err(Error::io("cannot rename root"));
+        return Err(Error::refused("cannot rename root"));
     }
     let (parent_path, basename) = match p.rsplit_once('/') {
         Some((par, base)) => (par, base),

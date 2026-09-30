@@ -81,7 +81,7 @@ pub fn decode_runs(bytes: &[u8]) -> Result<Vec<DataRun>, Error> {
             )));
         }
         if length_bytes > 8 || lcn_bytes > 8 {
-            return Err(Error::invalid(format!(
+            return Err(Error::io(format!(
                 "run at offset {p}: invalid header {header:#04x}"
             )));
         }
@@ -930,5 +930,15 @@ mod tests {
         let encoded = encode_runs(&runs).unwrap();
         let decoded = decode_runs(&encoded).unwrap();
         assert_eq!(decoded, runs);
+    }
+
+    /// A run header claiming more than eight length or LCN bytes is a
+    /// corrupt volume, not a bad argument: EIO, not the EINVAL "invalid"
+    /// used to earn it (#394).
+    #[test]
+    fn a_corrupt_run_header_is_an_io_error() {
+        let e = decode_runs(&[0x19, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap_err();
+        assert!(e.contains("invalid header"), "{e}");
+        assert_eq!(e.kind(), crate::error::Kind::Io);
     }
 }
