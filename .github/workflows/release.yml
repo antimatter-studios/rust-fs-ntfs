@@ -43,6 +43,9 @@ jobs:
     name: Windows-authored native read fixtures
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
+    # Measured at 1.8 to 2.2 minutes. Without a bound, a step that hangs holds
+    # the runner for GitHub's six hours and prints nothing (#388).
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -211,6 +214,9 @@ jobs:
     name: validate rust-ntfs format (Windows chkdsk)
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
+    # Measured at 1.6 to 1.8 minutes. Without a bound, a step that hangs holds
+    # the runner for GitHub's six hours and prints nothing (#388).
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: check out sibling repos
