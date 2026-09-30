@@ -222,11 +222,9 @@ fn fsck_fills_out_params() {
     let img = dirty_copy("fsck_out", true, false);
     empty_logfile(&img);
     let c = CString::new(img.as_str()).unwrap();
-    let mut bytes: u64 = 0;
     let mut cleared: u8 = 0;
-    let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), &mut bytes, &mut cleared) };
+    let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), &mut cleared) };
     assert_eq!(rc, 0, "expected success; last_error={}", last_error());
-    assert!(bytes > 0);
     assert_eq!(cleared, 1);
 
     assert!(!read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
@@ -238,12 +236,11 @@ fn fsck_rejects_dirty_nonempty_log_without_writing_or_out_params() {
     let img = dirty_copy("refuse_pending", true, true);
     let before = std::fs::read(&img).expect("snapshot image");
     let c = CString::new(img.as_str()).expect("CString");
-    let mut bytes = 77_u64;
     let mut cleared = 9_u8;
-    let rc = fs_ntfs_fsck(c.as_ptr(), &mut bytes, &mut cleared);
+    let rc = fs_ntfs_fsck(c.as_ptr(), &mut cleared);
     assert_eq!(rc, -1);
     assert!(last_error().contains("$LogFile"));
-    assert_eq!((bytes, cleared), (77, 9));
+    assert_eq!(cleared, 9);
     assert_eq!(std::fs::read(&img).expect("read image"), before);
 }
 
@@ -254,7 +251,7 @@ fn fsck_accepts_null_out_params() {
     let img = dirty_copy("fsck_null_out", true, false);
     empty_logfile(&img);
     let c = CString::new(img.as_str()).unwrap();
-    let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut()) };
+    let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), std::ptr::null_mut()) };
     assert_eq!(rc, 0);
     assert!(!read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
 }
@@ -266,7 +263,7 @@ fn fsck_end_to_end_with_upstream_mount() {
     let img = dirty_copy("fsck_e2e", true, false);
     empty_logfile(&img);
     let c = CString::new(img.as_str()).unwrap();
-    let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), std::ptr::null_mut(), std::ptr::null_mut()) };
+    let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), std::ptr::null_mut()) };
     assert_eq!(rc, 0);
 
     let (ntfs, mut reader) = common::open(&img);

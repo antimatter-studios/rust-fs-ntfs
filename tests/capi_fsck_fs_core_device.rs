@@ -190,20 +190,17 @@ fn is_dirty_with_fs_core_device_neg1_on_null() {
 }
 
 #[test]
-fn fsck_with_fs_core_device_clears_dirty_and_resets_log() {
+fn fsck_with_fs_core_device_clears_dirty() {
     let img = dirty_copy("full", true, false);
     empty_logfile(&img);
     let h = open_dev(&img, true); // writable
 
-    let mut bytes: u64 = 0;
     let mut cleared: u8 = 0;
-    let rc = unsafe {
-        fs_ntfs_fsck_with_fs_core_device(h, None, std::ptr::null_mut(), &mut bytes, &mut cleared)
-    };
+    let rc =
+        unsafe { fs_ntfs_fsck_with_fs_core_device(h, None, std::ptr::null_mut(), &mut cleared) };
     unsafe { fs_core_device_close(h) };
 
     assert_eq!(rc, 0, "expected success; last_error={}", last_error());
-    assert!(bytes > 0, "expected non-zero logfile bytes overwritten");
     assert_eq!(cleared, 1, "expected dirty bit cleared");
 
     // Verify the writes hit disk: re-read flags by parsing the file again.
@@ -219,13 +216,7 @@ fn fsck_with_fs_core_device_refuses_dirty_nonempty_log_without_writes() {
     let img = dirty_copy("refuse_pending", true, true);
     let before = std::fs::read(&img).expect("snapshot image");
     let h = open_dev(&img, true);
-    let rc = fs_ntfs_fsck_with_fs_core_device(
-        h,
-        None,
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-    );
+    let rc = fs_ntfs_fsck_with_fs_core_device(h, None, std::ptr::null_mut(), std::ptr::null_mut());
     unsafe { fs_core_device_close(h) };
     assert_eq!(rc, -1);
     assert!(last_error().contains("$LogFile"));
@@ -237,11 +228,9 @@ fn fsck_with_fs_core_device_no_op_on_clean() {
     let img = dirty_copy("noop", false, false);
     let h = open_dev(&img, true);
 
-    let mut bytes: u64 = 0;
     let mut cleared: u8 = 0;
-    let rc = unsafe {
-        fs_ntfs_fsck_with_fs_core_device(h, None, std::ptr::null_mut(), &mut bytes, &mut cleared)
-    };
+    let rc =
+        unsafe { fs_ntfs_fsck_with_fs_core_device(h, None, std::ptr::null_mut(), &mut cleared) };
     unsafe { fs_core_device_close(h) };
 
     assert_eq!(
@@ -259,11 +248,9 @@ fn fsck_with_fs_core_device_rejects_ro_handle() {
     // Open RO — fsck must refuse since it needs to write.
     let h = open_dev(&img, false);
 
-    let mut bytes: u64 = 0;
     let mut cleared: u8 = 0;
-    let rc = unsafe {
-        fs_ntfs_fsck_with_fs_core_device(h, None, std::ptr::null_mut(), &mut bytes, &mut cleared)
-    };
+    let rc =
+        unsafe { fs_ntfs_fsck_with_fs_core_device(h, None, std::ptr::null_mut(), &mut cleared) };
     unsafe { fs_core_device_close(h) };
 
     assert_eq!(rc, -1, "expected -1 on RO device");
@@ -276,14 +263,12 @@ fn fsck_with_fs_core_device_rejects_ro_handle() {
 
 #[test]
 fn fsck_with_fs_core_device_neg1_on_null() {
-    let mut bytes: u64 = 0;
     let mut cleared: u8 = 0;
     let rc = unsafe {
         fs_ntfs_fsck_with_fs_core_device(
             std::ptr::null_mut(),
             None,
             std::ptr::null_mut(),
-            &mut bytes,
             &mut cleared,
         )
     };
@@ -313,16 +298,9 @@ fn fsck_with_fs_core_device_progress_callback_fires() {
 
     EVENTS.lock().expect("lock").clear();
 
-    let mut bytes: u64 = 0;
     let mut cleared: u8 = 0;
     let rc = unsafe {
-        fs_ntfs_fsck_with_fs_core_device(
-            h,
-            Some(on_progress),
-            std::ptr::null_mut(),
-            &mut bytes,
-            &mut cleared,
-        )
+        fs_ntfs_fsck_with_fs_core_device(h, Some(on_progress), std::ptr::null_mut(), &mut cleared)
     };
     unsafe { fs_core_device_close(h) };
 
@@ -332,10 +310,15 @@ fn fsck_with_fs_core_device_progress_callback_fires() {
         !events.is_empty(),
         "expected progress callbacks to fire during fsck"
     );
-    // Sanity: at least one phase identifier should appear.
     let phases: Vec<&str> = events.iter().map(|(p, _, _)| p.as_str()).collect();
-    assert!(
-        phases.iter().any(|p| !p.is_empty()),
-        "phases were all empty: {phases:?}"
+    assert_eq!(
+        phases,
+        [
+            "check_logfile",
+            "check_logfile",
+            "clear_dirty",
+            "clear_dirty"
+        ],
+        "fsck never resets the log, so no reset_logfile phase (#376)"
     );
 }

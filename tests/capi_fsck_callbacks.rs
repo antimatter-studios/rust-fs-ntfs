@@ -275,13 +275,9 @@ fn fsck_with_callbacks_clears_dirty_and_resets_log() {
         write: Some(write_cb),
     };
 
-    let mut bytes: u64 = 0;
     let mut cleared: u8 = 0;
-    let rc = unsafe {
-        fs_ntfs_fsck_with_callbacks(&cfg, None, std::ptr::null_mut(), &mut bytes, &mut cleared)
-    };
+    let rc = unsafe { fs_ntfs_fsck_with_callbacks(&cfg, None, std::ptr::null_mut(), &mut cleared) };
     assert_eq!(rc, 0, "expected success; last_error={}", last_error());
-    assert!(bytes > 0);
     assert_eq!(cleared, 1);
 
     // The callbacks wrote through to the file — re-read via path to
@@ -302,13 +298,7 @@ fn fsck_with_callbacks_refuses_dirty_nonempty_log_without_writes() {
         size_bytes: size,
         write: Some(write_cb),
     };
-    let rc = fs_ntfs_fsck_with_callbacks(
-        &cfg,
-        None,
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-    );
+    let rc = fs_ntfs_fsck_with_callbacks(&cfg, None, std::ptr::null_mut(), std::ptr::null_mut());
     assert_eq!(rc, -1);
     assert!(last_error().contains("$LogFile"));
     drop(ctx);
@@ -326,13 +316,7 @@ fn fsck_with_callbacks_errors_without_write_cb() {
         write: None, // no write callback → fsck must refuse
     };
     let rc = unsafe {
-        fs_ntfs_fsck_with_callbacks(
-            &cfg,
-            None,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+        fs_ntfs_fsck_with_callbacks(&cfg, None, std::ptr::null_mut(), std::ptr::null_mut())
     };
     assert_eq!(rc, -1);
     let err = last_error();
@@ -381,29 +365,23 @@ fn fsck_with_callbacks_emits_progress() {
             Some(progress_cb),
             &mut log as *mut ProgressLog as *mut c_void,
             std::ptr::null_mut(),
-            std::ptr::null_mut(),
         )
     };
     assert_eq!(rc, 0, "last_error={}", last_error());
 
-    // Both phases must appear.
-    assert!(
-        log.0.iter().any(|(p, _, _)| p == "reset_logfile"),
-        "expected reset_logfile phase; got {:?}",
-        log.0
+    // fsck reads the log and clears the flag. It never resets the log, so
+    // the `reset_logfile` phase is not emitted (#376) -- the C ABI change
+    // this pins.
+    let phases: Vec<(&str, u64, u64)> =
+        log.0.iter().map(|(p, d, t)| (p.as_str(), *d, *t)).collect();
+    assert_eq!(
+        phases,
+        [
+            ("check_logfile", 0, 1),
+            ("check_logfile", 1, 1),
+            ("clear_dirty", 0, 1),
+            ("clear_dirty", 1, 1)
+        ],
+        "progress phases"
     );
-    assert!(
-        log.0.iter().any(|(p, _, _)| p == "clear_dirty"),
-        "expected clear_dirty phase; got {:?}",
-        log.0
-    );
-
-    // The last reset_logfile tick should have done == total (>0).
-    let last_reset = log
-        .0
-        .iter()
-        .rev()
-        .find(|(p, _, _)| p == "reset_logfile")
-        .expect("some reset_logfile tick");
-    assert!(last_reset.1 > 0 && last_reset.1 == last_reset.2);
 }

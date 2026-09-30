@@ -3269,29 +3269,23 @@ pub extern "C" fn fs_ntfs_set_object_id_extended_h(
     })
 }
 
-/// Reset `$LogFile` and clear dirty only when a dirty volume's log is empty.
-/// A dirty volume with non-`0xFF` log data is refused without writes; no
-/// transaction replay or metadata consistency check is performed.
+/// Clear the dirty flag when `$LogFile` records nothing to replay (empty, or
+/// a restart area with nothing to redo or undo). Any other log is refused
+/// without writes, whether or not the volume is marked dirty, and the log is
+/// never written (#376). No transaction replay or metadata consistency check
+/// is performed.
 ///
-/// Optional out-params report what the call did:
-/// * `out_logfile_bytes`: bytes of `$LogFile` overwritten (non-null to receive)
+/// Optional out-param:
 /// * `out_dirty_cleared`: `1` if the dirty flag was found set and cleared,
 ///   `0` if the volume was already clean (non-null to receive)
 ///
 /// Returns `0` on success, `-1` on error.
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_ntfs_fsck(
-    path: *const c_char,
-    out_logfile_bytes: *mut u64,
-    out_dirty_cleared: *mut u8,
-) -> c_int {
+pub extern "C" fn fs_ntfs_fsck(path: *const c_char, out_dirty_cleared: *mut u8) -> c_int {
     ffi_guard("fs_ntfs_fsck", -1, move || {
         cstr_or_return!(path, "fs_ntfs_fsck", "path", -1);
         match fsck::fsck(path) {
             Ok(report) => {
-                if !out_logfile_bytes.is_null() {
-                    unsafe { *out_logfile_bytes = report.logfile_bytes };
-                }
                 if !out_dirty_cleared.is_null() {
                     unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };
                 }
@@ -3414,8 +3408,8 @@ pub extern "C" fn fs_ntfs_is_dirty_with_callbacks(cfg: *const FsNtfsBlockdevCfg)
 /// Progress callback matching the `fs_ntfs_fsck_progress_fn` C typedef.
 type FsckProgressCallback = unsafe extern "C" fn(*mut c_void, *const c_char, u64, u64) -> c_int;
 
-/// Combined recovery via callbacks: reset `$LogFile` + clear the dirty
-/// bit. Requires both `cfg->read` and `cfg->write` to be set. Emits
+/// [`fs_ntfs_fsck`] via callbacks: read `$LogFile`, then clear the dirty
+/// bit when the log records nothing to replay. Requires both `cfg->read` and `cfg->write` to be set. Emits
 /// progress via `progress_cb` when non-NULL. Returns `0` on success,
 /// `-1` on error.
 #[unsafe(no_mangle)]
@@ -3423,7 +3417,6 @@ pub extern "C" fn fs_ntfs_fsck_with_callbacks(
     cfg: *const FsNtfsBlockdevCfg,
     progress_cb: Option<FsckProgressCallback>,
     progress_ctx: *mut c_void,
-    out_logfile_bytes: *mut u64,
     out_dirty_cleared: *mut u8,
 ) -> c_int {
     ffi_guard("fs_ntfs_fsck_with_callbacks", -1, move || {
@@ -3477,9 +3470,6 @@ pub extern "C" fn fs_ntfs_fsck_with_callbacks(
 
         match fsck::fsck_io(&mut io, progress) {
             Ok(report) => {
-                if !out_logfile_bytes.is_null() {
-                    unsafe { *out_logfile_bytes = report.logfile_bytes };
-                }
                 if !out_dirty_cleared.is_null() {
                     unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };
                 }
@@ -3529,15 +3519,14 @@ pub extern "C" fn fs_ntfs_is_dirty_with_fs_core_device(
     })
 }
 
-/// `fs_core` counterpart of [`fs_ntfs_fsck_with_callbacks`]. Resets
-/// `$LogFile` and clears the dirty bit through an `FsCoreDevice`
-/// handle. The device must report `is_writable() == true`; otherwise
-/// the call fails up front. Dirty volumes with nonempty logs are refused;
+/// `fs_core` counterpart of [`fs_ntfs_fsck_with_callbacks`]: reads
+/// `$LogFile` and clears the dirty bit through an `FsCoreDevice` handle
+/// when the log records nothing to replay. The device must report
+/// `is_writable() == true`; otherwise the call fails up front. Any other
+/// log is refused, dirty or not, and the log is never written (#376);
 /// this entry point does not replay transactions.
 ///
-/// On success `out_logfile_bytes` (if non-NULL) receives the byte
-/// count overwritten in `$LogFile` during recovery, and
-/// `out_dirty_cleared` (if non-NULL) is set to `1` if the dirty bit
+/// On success `out_dirty_cleared` (if non-NULL) is set to `1` if the dirty bit
 /// was actually cleared (meaning the volume was dirty before the
 /// call). Returns `0` on success, `-1` on error.
 ///
@@ -3553,7 +3542,6 @@ pub extern "C" fn fs_ntfs_fsck_with_fs_core_device(
     handle: *mut fs_core::ffi::FsCoreDevice,
     progress_cb: Option<FsckProgressCallback>,
     progress_ctx: *mut c_void,
-    out_logfile_bytes: *mut u64,
     out_dirty_cleared: *mut u8,
 ) -> c_int {
     ffi_guard("fs_ntfs_fsck_with_fs_core_device", -1, move || {
@@ -3592,9 +3580,6 @@ pub extern "C" fn fs_ntfs_fsck_with_fs_core_device(
 
         match fsck::fsck_io(&mut io, progress) {
             Ok(report) => {
-                if !out_logfile_bytes.is_null() {
-                    unsafe { *out_logfile_bytes = report.logfile_bytes };
-                }
                 if !out_dirty_cleared.is_null() {
                     unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };
                 }

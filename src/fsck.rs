@@ -15,11 +15,12 @@
 //!    reinitialize on mount" signal documented in Windows Internals
 //!    7th ed. ch. "NTFS Logging".
 //!
-//! Neither operation replays in-progress transactions. On a dirty volume
-//! `fsck` reads `$LogFile`'s restart area ([`crate::logfile`]): an empty
-//! log is reset and the flag cleared, a log recording nothing to redo or
-//! undo is kept and only the flag cleared, and any other log is refused
-//! before anything is written (#375, #137). The explicit
+//! Neither operation replays in-progress transactions. `fsck` uses only the
+//! first: it reads `$LogFile`'s restart area ([`crate::logfile`]) on every
+//! volume, and clears the dirty flag when the log is empty or records
+//! nothing to redo or undo. Any other log is refused before anything is
+//! written, whether or not the flag is set, and `fsck` never writes the log
+//! (#375, #376, #137). The explicit
 //! `reset_logfile` and `clear_dirty` operations require the caller to know
 //! independently that metadata is consistent; using them on a crashed
 //! volume can destroy recoverable changes.
@@ -271,9 +272,10 @@ pub fn reset_logfile(path: impl AsRef<Path>) -> Result<u64, String> {
     reset_logfile_io(&mut io, None)
 }
 
-/// Reset the log and clear dirty on the same image only when a dirty volume's
-/// log is entirely `0xFF`. A dirty volume with any other log byte is refused
-/// before either write. A clean volume is treated as already consistent.
+/// Clear the dirty flag when `$LogFile` records nothing to replay: an empty
+/// log, or a restart area recording nothing to redo or undo. Any other log
+/// is refused before anything is written, whether or not the volume is
+/// marked dirty (#376). The log itself is never written.
 pub fn fsck(path: impl AsRef<Path>) -> Result<FsckReport, String> {
     let p = path.as_ref();
     log::info!(target: "fs_ntfs::fsck", "fsck path={}", p.display());
@@ -282,17 +284,20 @@ pub fn fsck(path: impl AsRef<Path>) -> Result<FsckReport, String> {
     if let Ok(r) = &report {
         log::info!(
             target: "fs_ntfs::fsck",
-            "fsck done dirty_cleared={} logfile_bytes={}",
-            r.dirty_cleared, r.logfile_bytes,
+            "fsck done dirty_cleared={} logfile={:?}",
+            r.dirty_cleared, r.logfile,
         );
     }
     report
 }
 
 /// Summary of what [`fsck`] did.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsckReport {
-    pub logfile_bytes: u64,
+    /// What `$LogFile` held: [`LogfileState::Empty`] or
+    /// [`LogfileState::Clean`], since fsck refuses anything else. fsck
+    /// never writes the log (#376).
+    pub logfile: LogfileState,
     pub dirty_cleared: bool,
 }
 
@@ -302,8 +307,9 @@ pub struct FsckReport {
 
 /// Progress callback type used by the long-running phases of [`fsck_io`]
 /// / [`reset_logfile_io`]. Signature: `(phase, done, total)`:
-/// * `phase` — short identifier string, e.g. `"reset_logfile"` or
-///   `"clear_dirty"`.
+/// * `phase` — short identifier string: `"check_logfile"` and
+///   `"clear_dirty"` from [`fsck_io`], `"reset_logfile"` from
+///   [`reset_logfile_io`].
 /// * `done` / `total` — bytes (or 0/1 for trivial single-write phases)
 ///   completed in the named phase.
 ///
@@ -434,50 +440,40 @@ pub fn fsck_io<'cb, T: FsckIo>(
     io: &mut T,
     mut progress: Option<&mut (dyn FnMut(&str, u64, u64) + 'cb)>,
 ) -> Result<FsckReport, String> {
-    // A DIRTY VOLUME IS DECIDED BY WHAT ITS LOG HOLDS (#375). An empty log
-    // is reset and the flag cleared, as before. A log whose restart area
-    // records nothing to redo or undo is LEFT AS IT IS -- it is the log
-    // Windows expects to find -- and only the flag is cleared. Anything
-    // else may be transactions this crate cannot replay (#137), and is
-    // refused before a byte is written.
+    // THE LOG DECIDES, WHATEVER THE DIRTY FLAG SAYS (#375, #376). The flag
+    // and the log are separate facts: a volume hibernated or shut down with
+    // Fast Startup can have a clear flag over a log that still records
+    // work. So the log is read first, on every volume, and fsck NEVER
+    // WRITES IT:
     //
-    // A volume that is NOT dirty still has its log reset whatever it holds;
-    // that is rust-fs-ntfs#376.
-    let mut keep_log = false;
-    if is_dirty_io(io)? {
-        match logfile_state_io(io)? {
-            LogfileState::Empty => {}
-            LogfileState::Clean(_) => keep_log = true,
-            LogfileState::Pending(why) => {
-                return Err(format!(
-                    "dirty volume: {why}; fsck refuses to discard unreplayed records"
-                ));
-            }
+    // * empty (all 0xFF): nothing to replay, and nothing to rewrite;
+    // * clean (a restart area recording nothing to redo or undo): kept as
+    //   it is, the log Windows expects to find;
+    // * anything else may be transactions this crate cannot replay (#137),
+    //   and is refused before a byte is written.
+    //
+    // Then the dirty flag, if set, is cleared. `reset_logfile_io` remains,
+    // for a caller that has made the volume consistent by other means.
+    let mut emit = |phase: &str, done: u64, total: u64| {
+        if let Some(cb) = progress.as_deref_mut() {
+            cb(phase, done, total);
         }
-    }
-
-    let logfile_bytes = if keep_log {
-        0
-    } else {
-        reset_logfile_io(io, progress.as_deref_mut())?
     };
+    emit("check_logfile", 0, 1);
+    let logfile = logfile_state_io(io)?;
+    if let LogfileState::Pending(why) = &logfile {
+        return Err(format!(
+            "{why}; fsck will not clear the dirty flag or rewrite the log over them"
+        ));
+    }
+    emit("check_logfile", 1, 1);
 
-    if let Some(cb) = progress
-        .as_mut()
-        .map(|c| &mut **c as &mut (dyn FnMut(&str, u64, u64) + 'cb))
-    {
-        cb("clear_dirty", 0, 1);
-    }
+    emit("clear_dirty", 0, 1);
     let dirty_cleared = clear_dirty_io(io)?;
-    if let Some(cb) = progress
-        .as_mut()
-        .map(|c| &mut **c as &mut (dyn FnMut(&str, u64, u64) + 'cb))
-    {
-        cb("clear_dirty", 1, 1);
-    }
+    emit("clear_dirty", 1, 1);
 
     Ok(FsckReport {
-        logfile_bytes,
+        logfile,
         dirty_cleared,
     })
 }
@@ -684,11 +680,6 @@ fn bad_record_reason<T: FsckIo>(
 pub fn repair_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
     if !is_dirty_io(io)? {
         return Ok(false);
-    }
-    if let LogfileState::Pending(why) = logfile_state_io(io)? {
-        return Err(format!(
-            "{why}; clearing the dirty flag over them would discard them"
-        ));
     }
     Ok(fsck_io(io, None)?.dirty_cleared)
 }
@@ -1277,8 +1268,11 @@ mod tests {
         let report = fsck_io(&mut dev, None::<&mut dyn FnMut(&str, u64, u64)>).unwrap();
         // Fresh volume is clean so dirty_cleared = false.
         assert!(!report.dirty_cleared);
-        // $LogFile is present and non-empty.
-        assert!(report.logfile_bytes > 0);
+        // mkfs writes a log marked clean (#377), which fsck keeps.
+        assert!(
+            matches!(report.logfile, LogfileState::Clean(_)),
+            "{report:?}"
+        );
     }
 
     #[test]
@@ -1307,13 +1301,15 @@ mod tests {
             }),
         )
         .unwrap();
-        assert!(
-            events.iter().any(|e| e == "reset_logfile"),
-            "reset_logfile event expected"
-        );
-        assert!(
-            events.iter().any(|e| e == "clear_dirty"),
-            "clear_dirty event expected"
+        assert_eq!(
+            events,
+            [
+                "check_logfile",
+                "check_logfile",
+                "clear_dirty",
+                "clear_dirty"
+            ],
+            "fsck reads the log and clears the flag; it never resets the log (#376)"
         );
     }
 }
@@ -1456,8 +1452,8 @@ mod fill_range_tests {
 
     /// The fill's range comes from the `$LogFile` record on the image
     /// being repaired -- exactly the class of image where that record
-    /// is expected to be damaged -- and `fsck_io` runs the reset
-    /// FIRST. Requiring the range to be on the device stops it leaving
+    /// is expected to be damaged -- and `reset_logfile_io` fills
+    /// whatever it is given. Requiring the range to be on the device stops it leaving
     /// the volume and says nothing about a run aimed at the volume's
     /// own structures.
     #[test]
@@ -1747,6 +1743,32 @@ mod check_tests {
         let err = repair_dirty_io(&mut dev).expect_err("a log with records is not discarded");
         assert!(err.contains("#137"), "{err}");
         assert!(dev.0 == before, "a refused repair wrote to the volume");
+    }
+
+    /// #376: the dirty flag and the log are separate facts. A volume whose
+    /// flag is clear can still have a log recording an unclean shutdown --
+    /// hibernation, Fast Startup -- and fsck must not discard it.
+    #[test]
+    fn a_clean_flag_volume_whose_log_holds_records_is_refused_and_left_alone() {
+        let mut dev = fresh();
+        unclean_log(&mut dev);
+        assert!(!is_dirty_io(&mut dev).unwrap());
+        let before = dev.0.clone();
+        let err = fsck_io(&mut dev, None).expect_err("a log with records is not discarded");
+        assert!(err.contains("#137"), "{err}");
+        assert!(dev.0 == before, "a refused fsck wrote to the volume");
+    }
+
+    #[test]
+    fn fsck_on_a_clean_volume_leaves_its_log_alone() {
+        let mut dev = fresh();
+        let before = dev.0.clone();
+        let report = fsck_io(&mut dev, None).expect("fsck");
+        assert!(!report.dirty_cleared);
+        assert!(
+            dev.0 == before,
+            "fsck wrote to a volume with nothing to repair"
+        );
     }
 
     #[test]

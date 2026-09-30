@@ -323,14 +323,14 @@ fn reset_logfile_fills_entire_logfile() {
 }
 
 #[test]
-fn fsck_convenience_resets_both() {
+fn fsck_clears_the_flag_over_an_empty_log() {
     let img = dirty_copy("fsck_both", true, false);
     empty_logfile(&img);
     assert!(read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
 
     let report = fsck::fsck(&img).expect("fsck");
     assert!(report.dirty_cleared);
-    assert!(report.logfile_bytes > 0);
+    assert_eq!(report.logfile, fsck::LogfileState::Empty);
 
     assert!(!read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
     assert!(read_logfile_first_page(&img).iter().all(|&b| b == 0xFF));
