@@ -58,7 +58,7 @@ pub fn decompress_unit(input: &[u8], max_len: usize) -> Result<Vec<u8>, Error> {
         // so a corrupt header isn't silently decoded as a valid chunk.
         let signature = (header >> 12) & 0x7;
         if signature != 3 {
-            return Err(Error::invalid(format!(
+            return Err(Error::io(format!(
                 "LZNT1: invalid chunk header signature {signature:#x} (expected 0b011)"
             )));
         }
@@ -298,5 +298,15 @@ mod tests {
         stream.extend_from_slice(&body);
         let err = decompress_unit(&stream, 65536).unwrap_err();
         assert!(err.contains("overruns"), "got: {err}");
+    }
+
+    /// A chunk header with the wrong signature is a corrupt volume: EIO,
+    /// not EINVAL (#394).
+    #[test]
+    fn a_corrupt_chunk_signature_is_an_io_error() {
+        // Signature bits 12-14 = 0b000 instead of 0b011.
+        let e = decompress_unit(&[0x05, 0x80, 0, 0, 0, 0, 0, 0], 16).unwrap_err();
+        assert!(e.contains("invalid chunk header signature"), "{e}");
+        assert_eq!(e.kind(), crate::error::Kind::Io);
     }
 }

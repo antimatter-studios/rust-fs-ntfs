@@ -115,7 +115,7 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Ea>, Error> {
             break;
         }
         if next_off < 8 || cursor + next_off > bytes.len() {
-            return Err(Error::invalid(format!(
+            return Err(Error::io(format!(
                 "EA entry at {cursor} has invalid next_offset {next_off}"
             )));
         }
@@ -446,5 +446,17 @@ mod tests {
     fn remove_by_name_from_empty_list() {
         let mut list: Vec<Ea> = vec![];
         assert!(!remove_by_name(&mut list, b"X"));
+    }
+
+    /// An EA list whose next-entry offset points nowhere is a corrupt
+    /// volume: EIO, not EINVAL (#394).
+    #[test]
+    fn a_corrupt_next_offset_is_an_io_error() {
+        let mut bytes = encode(&[ea(b"A", b"1")]).unwrap();
+        // next_offset (u32 at 0) = 4: nonzero but shorter than a header.
+        bytes[0..4].copy_from_slice(&4u32.to_le_bytes());
+        let e = decode(&bytes).unwrap_err();
+        assert!(e.contains("invalid next_offset"), "{e}");
+        assert_eq!(e.kind(), crate::error::Kind::Io);
     }
 }
