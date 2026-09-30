@@ -21,6 +21,7 @@
 use crate::attr_io::{self, AttrType};
 use crate::block_io::{BlockIo, PathIo};
 use crate::data_runs::{self, DataRun};
+use crate::error::Error;
 use crate::mft_io::{read_mft_record_io, update_mft_record_io, BootParams};
 
 use std::path::Path;
@@ -78,29 +79,33 @@ impl MftBitmap {
     }
 }
 
-pub fn locate(image: &Path) -> Result<MftBitmap, String> {
+pub fn locate(image: &Path) -> Result<MftBitmap, Error> {
     let mut io = PathIo::open_ro(image)?;
     locate_io(&mut io)
 }
 
-pub fn locate_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<MftBitmap, String> {
+pub fn locate_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<MftBitmap, Error> {
     let (params, record) = read_mft_record_io(io, MFT_RECORD_NUMBER)?;
 
     // $MFT's unnamed $Bitmap (attribute type 0xB0, name "").
     let bm = attr_io::find_attribute(&record, AttrType::Bitmap, None)
-        .ok_or_else(|| "$MFT has no unnamed $Bitmap".to_string())?;
+        .ok_or_else(|| Error::io("$MFT has no unnamed $Bitmap"))?;
 
     let layout = if bm.is_resident {
-        let val_off = bm.resident_value_offset.ok_or("no value_offset")? as usize;
-        let val_len = bm.resident_value_length.ok_or("no value_length")? as usize;
+        let val_off = bm
+            .resident_value_offset
+            .ok_or(Error::io("no value_offset"))? as usize;
+        let val_len = bm
+            .resident_value_length
+            .ok_or(Error::io("no value_length"))? as usize;
         let data_offset_in_record = bm.attr_offset + val_off;
         if data_offset_in_record + val_len > record.len() {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "resident $MFT:$Bitmap [{data_offset_in_record}..\
                  {}] extends past record end {}",
                 data_offset_in_record + val_len,
                 record.len()
-            ));
+            )));
         }
         MftBitmapLayout::Resident {
             data_offset_in_record,
@@ -110,10 +115,12 @@ pub fn locate_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<MftBitmap, String> {
     } else {
         let mpo = bm
             .non_resident_mapping_pairs_offset
-            .ok_or("no mapping_pairs_offset")? as usize;
+            .ok_or(Error::io("no mapping_pairs_offset"))? as usize;
         let runs =
             data_runs::decode_runs(&record[bm.attr_offset + mpo..bm.attr_offset + bm.attr_length])?;
-        let data_length = bm.non_resident_value_length.ok_or("no value_length")?;
+        let data_length = bm
+            .non_resident_value_length
+            .ok_or(Error::io("no value_length"))?;
         MftBitmapLayout::NonResident {
             runs,
             total_bits: data_length * 8,
@@ -124,7 +131,7 @@ pub fn locate_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<MftBitmap, String> {
 }
 
 /// Is MFT record `n` marked in-use in `$MFT:$Bitmap`?
-pub fn is_allocated(image: &Path, bm: &MftBitmap, n: u64) -> Result<bool, String> {
+pub fn is_allocated(image: &Path, bm: &MftBitmap, n: u64) -> Result<bool, Error> {
     let mut io = PathIo::open_ro(image)?;
     is_allocated_io(&mut io, bm, n)
 }
@@ -133,7 +140,7 @@ pub fn is_allocated_io<T: BlockIo + ?Sized>(
     io: &mut T,
     bm: &MftBitmap,
     n: u64,
-) -> Result<bool, String> {
+) -> Result<bool, Error> {
     let byte_idx = n / 8;
     let bit = (n % 8) as u8;
     let byte = read_bitmap_byte_io(io, bm, byte_idx)?;
@@ -143,7 +150,7 @@ pub fn is_allocated_io<T: BlockIo + ?Sized>(
 /// Find the first free MFT record number at or after `hint`. Returns
 /// `None` if the bitmap is fully allocated. (Growing `$MFT` itself is
 /// a separate concern — future W2.6 work.)
-pub fn find_free_record(image: &Path, bm: &MftBitmap, hint: u64) -> Result<Option<u64>, String> {
+pub fn find_free_record(image: &Path, bm: &MftBitmap, hint: u64) -> Result<Option<u64>, Error> {
     let mut io = PathIo::open_ro(image)?;
     find_free_record_io(&mut io, bm, hint)
 }
@@ -152,7 +159,7 @@ pub fn find_free_record_io<T: BlockIo + ?Sized>(
     io: &mut T,
     bm: &MftBitmap,
     hint: u64,
-) -> Result<Option<u64>, String> {
+) -> Result<Option<u64>, Error> {
     let total = bm.total_bits();
     // Two passes: [hint..total), then [0..hint).
     for (begin, finish) in [(hint, total), (0, hint.min(total))] {
@@ -174,7 +181,7 @@ pub fn find_free_record_io<T: BlockIo + ?Sized>(
 pub fn find_or_grow_free_record_io<T: BlockIo + ?Sized>(
     io: &mut T,
     hint: u64,
-) -> Result<(MftBitmap, u64), String> {
+) -> Result<(MftBitmap, u64), Error> {
     let current = locate_io(io)?;
     if let Some(record) = find_free_record_io(io, &current, hint)? {
         return Ok((current, record));
@@ -182,28 +189,32 @@ pub fn find_or_grow_free_record_io<T: BlockIo + ?Sized>(
     grow_io(io, &current)?;
     let grown = locate_io(io)?;
     let record = find_free_record_io(io, &grown, current.total_bits())?
-        .ok_or("$MFT growth exposed no free records")?;
+        .ok_or(Error::io("$MFT growth exposed no free records"))?;
     Ok((grown, record))
 }
 
 /// Append storage for 64 records and extend `$MFT:$Bitmap` to describe them.
-fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), String> {
+fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), Error> {
     const RECORDS_PER_GROWTH: u64 = 64;
     let params = old.params;
     let bytes = params
         .file_record_size
         .checked_mul(RECORDS_PER_GROWTH)
-        .ok_or("$MFT growth size overflows")?;
+        .ok_or(Error::io("$MFT growth size overflows"))?;
     let clusters = bytes.div_ceil(params.cluster_size);
     let volume_bitmap = crate::bitmap::locate_bitmap_io(io)?;
     let lcn = crate::bitmap::find_free_run_io(io, &volume_bitmap, clusters, params.mft_lcn)?
-        .ok_or_else(|| format!("no contiguous free run of {clusters} clusters for $MFT growth"))?;
+        .ok_or_else(|| {
+            Error::io(format!(
+                "no contiguous free run of {clusters} clusters for $MFT growth"
+            ))
+        })?;
     crate::bitmap::allocate_io(io, &volume_bitmap, lcn, clusters)?;
 
     let result = (|| {
         let span = clusters
             .checked_mul(params.cluster_size)
-            .ok_or("$MFT growth span overflows")?;
+            .ok_or(Error::io("$MFT growth span overflows"))?;
         let at = crate::mft_io::cluster_span(&params, lcn, 0, 0, span, io.size())?;
         io.write_all_at(at, &vec![0u8; span as usize])?;
         io.sync()?;
@@ -217,19 +228,22 @@ fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), Strin
                 }
             }
             MftBitmapLayout::Resident { .. } => {
-                return Err("growing a resident $MFT:$Bitmap is not supported".to_string())
+                return Err(Error::io(
+                    "growing a resident $MFT:$Bitmap is not supported",
+                ))
             }
         }
 
         crate::mft_io::update_mft_record_io(io, MFT_RECORD_NUMBER, |record| {
             let data = attr_io::find_attribute(record, AttrType::Data, None)
-                .ok_or("$MFT has no unnamed $DATA")?;
+                .ok_or(Error::io("$MFT has no unnamed $DATA"))?;
             if data.is_resident {
-                return Err("$MFT's unnamed $DATA is resident".to_string());
+                return Err(Error::io("$MFT's unnamed $DATA is resident"));
             }
             let mpo = data
                 .non_resident_mapping_pairs_offset
-                .ok_or("$MFT:$DATA has no mapping-pairs offset")? as usize;
+                .ok_or(Error::io("$MFT:$DATA has no mapping-pairs offset"))?
+                as usize;
             let mapping_start = data.attr_offset + mpo;
             let mapping_end = data.attr_offset + data.attr_length;
             let mut runs = data_runs::decode_runs(&record[mapping_start..mapping_end])?;
@@ -254,7 +268,7 @@ fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), Strin
             let new_bytes = next_vcn
                 .checked_add(clusters)
                 .and_then(|n| n.checked_mul(params.cluster_size))
-                .ok_or("grown $MFT length overflows")?;
+                .ok_or(Error::io("grown $MFT length overflows"))?;
             // A new run often needs more mapping-pairs bytes than the
             // formatter reserved. Grow the attribute within record zero,
             // moving the following $Bitmap attribute with it.
@@ -278,10 +292,10 @@ fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), Strin
                 let value = file_name.attr_offset
                     + file_name
                         .resident_value_offset
-                        .ok_or("$MFT:$FILE_NAME has no resident value offset")?
+                        .ok_or(Error::io("$MFT:$FILE_NAME has no resident value offset"))?
                         as usize;
                 if value + 56 > record.len() {
-                    return Err("$MFT:$FILE_NAME value is truncated".to_string());
+                    return Err(Error::io("$MFT:$FILE_NAME value is truncated"));
                 }
                 record[value + 40..value + 48].copy_from_slice(&new_bytes.to_le_bytes());
                 record[value + 48..value + 56].copy_from_slice(&new_bytes.to_le_bytes());
@@ -290,9 +304,11 @@ fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), Strin
             crate::attr_resize::replace_attribute(record, data.attr_offset, &new_data)?;
 
             let bitmap = attr_io::find_attribute(record, AttrType::Bitmap, None)
-                .ok_or("$MFT has no unnamed $Bitmap")?;
+                .ok_or(Error::io("$MFT has no unnamed $Bitmap"))?;
             if bitmap.is_resident {
-                return Err("growing a resident $MFT:$Bitmap is not supported".to_string());
+                return Err(Error::io(
+                    "growing a resident $MFT:$Bitmap is not supported",
+                ));
             }
             let allocated = u64::from_le_bytes(
                 record[bitmap.attr_offset + 0x28..bitmap.attr_offset + 0x30]
@@ -300,7 +316,7 @@ fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), Strin
                     .expect("eight bytes"),
             );
             if new_bitmap_bytes > allocated {
-                return Err("$MFT:$Bitmap backing allocation is full".to_string());
+                return Err(Error::no_space("$MFT:$Bitmap backing allocation is full"));
             }
             for off in [0x30usize, 0x38] {
                 record[bitmap.attr_offset + off..bitmap.attr_offset + off + 8]
@@ -312,9 +328,8 @@ fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), Strin
 
     if let Err(error) = result {
         if let Err(rollback) = crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters) {
-            return Err(format!(
-                "{error}; also failed to release $MFT growth: {rollback}"
-            ));
+            return Err(error
+                .map_message(|m| format!("{m}; also failed to release $MFT growth: {rollback}")));
         }
         return Err(error);
     }
@@ -325,12 +340,12 @@ fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), Strin
 }
 
 /// Count free MFT record slots in `$MFT:$Bitmap`.
-pub fn count_free(image: &Path, bm: &MftBitmap) -> Result<u64, String> {
+pub fn count_free(image: &Path, bm: &MftBitmap) -> Result<u64, Error> {
     let mut io = PathIo::open_ro(image)?;
     count_free_io(&mut io, bm)
 }
 
-pub fn count_free_io<T: BlockIo + ?Sized>(io: &mut T, bm: &MftBitmap) -> Result<u64, String> {
+pub fn count_free_io<T: BlockIo + ?Sized>(io: &mut T, bm: &MftBitmap) -> Result<u64, Error> {
     // One loop for both layouts: `read_bitmap_byte_io` is the only reader
     // of either, so this cannot drift away from what the allocator sees.
     let total_bits = bm.total_bits();
@@ -342,22 +357,22 @@ pub fn count_free_io<T: BlockIo + ?Sized>(io: &mut T, bm: &MftBitmap) -> Result<
 }
 
 /// Mark MFT record `n` as allocated (set bit = 1).
-pub fn allocate(image: &Path, bm: &MftBitmap, n: u64) -> Result<(), String> {
+pub fn allocate(image: &Path, bm: &MftBitmap, n: u64) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     allocate_io(&mut io, bm, n)
 }
 
-pub fn allocate_io<T: BlockIo + ?Sized>(io: &mut T, bm: &MftBitmap, n: u64) -> Result<(), String> {
+pub fn allocate_io<T: BlockIo + ?Sized>(io: &mut T, bm: &MftBitmap, n: u64) -> Result<(), Error> {
     mutate_bit_io(io, bm, n, true)
 }
 
 /// Mark MFT record `n` as free (set bit = 0).
-pub fn free(image: &Path, bm: &MftBitmap, n: u64) -> Result<(), String> {
+pub fn free(image: &Path, bm: &MftBitmap, n: u64) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     free_io(&mut io, bm, n)
 }
 
-pub fn free_io<T: BlockIo + ?Sized>(io: &mut T, bm: &MftBitmap, n: u64) -> Result<(), String> {
+pub fn free_io<T: BlockIo + ?Sized>(io: &mut T, bm: &MftBitmap, n: u64) -> Result<(), Error> {
     mutate_bit_io(io, bm, n, false)
 }
 
@@ -366,16 +381,16 @@ fn mutate_bit_io<T: BlockIo + ?Sized>(
     bm: &MftBitmap,
     n: u64,
     set: bool,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let byte_idx = n / 8;
     let bit = (n % 8) as u8;
     let mut byte = read_bitmap_byte_io(io, bm, byte_idx)?;
     let cur = (byte >> bit) & 1 != 0;
     if set && cur {
-        return Err(format!("MFT record {n} already allocated"));
+        return Err(Error::io(format!("MFT record {n} already allocated")));
     }
     if !set && !cur {
-        return Err(format!("MFT record {n} already free"));
+        return Err(Error::io(format!("MFT record {n} already free")));
     }
     if set {
         byte |= 1 << bit;
@@ -389,7 +404,7 @@ fn read_bitmap_byte_io<T: BlockIo + ?Sized>(
     io: &mut T,
     bm: &MftBitmap,
     byte_idx: u64,
-) -> Result<u8, String> {
+) -> Result<u8, Error> {
     match &bm.layout {
         MftBitmapLayout::Resident {
             data_offset_in_record,
@@ -398,9 +413,9 @@ fn read_bitmap_byte_io<T: BlockIo + ?Sized>(
         } => {
             let i = byte_idx as usize;
             if i >= *value_length {
-                return Err(format!(
+                return Err(Error::io(format!(
                     "byte_idx {i} past resident bitmap length {value_length}"
-                ));
+                )));
             }
             // Read through to $MFT's own record — the same record
             // `write_bitmap_byte_io` writes to. Reading a snapshot taken at
@@ -409,7 +424,7 @@ fn read_bitmap_byte_io<T: BlockIo + ?Sized>(
             record
                 .get(data_offset_in_record + i)
                 .copied()
-                .ok_or_else(|| format!("byte_idx {byte_idx} past record end"))
+                .ok_or_else(|| Error::io(format!("byte_idx {byte_idx} past record end")))
         }
         MftBitmapLayout::NonResident { runs, .. } => {
             let (_, disk_offset) = disk_offset_for_byte(bm, runs, byte_idx, io.size())?;
@@ -426,7 +441,7 @@ fn write_bitmap_byte_io<T: BlockIo + ?Sized>(
     bm: &MftBitmap,
     byte_idx: u64,
     v: u8,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     match &bm.layout {
         MftBitmapLayout::Resident {
             data_offset_in_record,
@@ -437,7 +452,7 @@ fn write_bitmap_byte_io<T: BlockIo + ?Sized>(
             update_mft_record_io(io, MFT_RECORD_NUMBER, |record| {
                 let i = dor + byte_idx as usize;
                 if i >= record.len() {
-                    return Err(format!("byte_idx {byte_idx} past record end"));
+                    return Err(Error::io(format!("byte_idx {byte_idx} past record end")));
                 }
                 record[i] = v;
                 Ok(())
@@ -447,7 +462,7 @@ fn write_bitmap_byte_io<T: BlockIo + ?Sized>(
             let (_, disk_offset) = disk_offset_for_byte(bm, runs, byte_idx, io.size())?;
             io.write_all_at(disk_offset, &[v])
                 .map_err(|e| format!("write mftbm: {e}"))?;
-            io.sync()
+            Ok(io.sync()?)
         }
     }
 }
@@ -460,15 +475,19 @@ fn disk_offset_for_byte(
     runs: &[DataRun],
     byte_idx: u64,
     device_bytes: u64,
-) -> Result<(DataRun, u64), String> {
+) -> Result<(DataRun, u64), Error> {
     let vcn = byte_idx / bm.params.cluster_size;
     let off_in_cluster = byte_idx % bm.params.cluster_size;
     let run = runs
         .iter()
         .find(|r| vcn >= r.starting_vcn && vcn < r.starting_vcn + r.length)
         .copied()
-        .ok_or_else(|| format!("byte_idx {byte_idx} (VCN {vcn}) not mapped in $MFT:$Bitmap"))?;
-    let lcn = run.lcn.ok_or("sparse $MFT bitmap run")?;
+        .ok_or_else(|| {
+            Error::not_found(format!(
+                "byte_idx {byte_idx} (VCN {vcn}) not mapped in $MFT:$Bitmap"
+            ))
+        })?;
+    let lcn = run.lcn.ok_or(Error::io("sparse $MFT bitmap run"))?;
     // Checked and bounded by the volume; see `mft_io::cluster_span`.
     let disk = crate::mft_io::cluster_span(
         &bm.params,

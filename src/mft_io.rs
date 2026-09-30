@@ -41,6 +41,7 @@
 //! write to an MFT record must re-apply this encoding correctly or the
 //! volume becomes unmountable.
 
+use crate::error::Error;
 use std::path::Path;
 
 use crate::attr_io::read_u16_le;
@@ -127,14 +128,14 @@ impl BootParams {
 /// Parse the 512-byte boot sector at offset 0 for the subset of fields we
 /// need. Does not validate the NTFS magic ("NTFS    " at +3) or checksum
 /// — upstream `Ntfs::new` already does that during read-side parsing.
-pub fn read_boot_params(path: &Path) -> Result<BootParams, String> {
+pub fn read_boot_params(path: &Path) -> Result<BootParams, Error> {
     let mut io = PathIo::open_ro(path)?;
     read_boot_params_io(&mut io)
 }
 
 /// Parse the boot sector via an arbitrary `BlockIo`. Used directly by
 /// the handle-based mutator stack.
-pub fn read_boot_params_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BootParams, String> {
+pub fn read_boot_params_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BootParams, Error> {
     let mut boot = [0u8; 512];
     io.read_exact_at(0, &mut boot)?;
     let params = parse_boot_params_from_bytes(&boot)?;
@@ -157,13 +158,13 @@ pub fn read_boot_params_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BootParams
     Ok(params)
 }
 
-fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> {
+fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, Error> {
     let bytes_per_sector = read_u16_le(boot, BOOT_OFF_BYTES_PER_SECTOR)
-        .ok_or_else(|| "boot sector too short to read bytes_per_sector".to_string())?;
+        .ok_or_else(|| Error::io("boot sector too short to read bytes_per_sector"))?;
     if !is_power_of_two(bytes_per_sector) {
-        return Err(format!(
+        return Err(Error::io(format!(
             "bytes_per_sector {bytes_per_sector} not a power of two"
-        ));
+        )));
     }
 
     // sectors_per_cluster has two forms, and this used to say it had
@@ -193,16 +194,16 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
     let sectors_per_cluster: u64 = if spc_raw > MAX_LITERAL_SECTORS_PER_CLUSTER {
         let exponent = -(spc_raw as i8) as i16;
         if exponent > MAX_SECTORS_PER_CLUSTER_EXPONENT {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "sectors_per_cluster {spc_raw:#04x} is a binary exponent of {exponent},                  past the {MAX_SECTORS_PER_CLUSTER_EXPONENT} NTFS defines"
-            ));
+            )));
         }
         1u64 << exponent
     } else {
         if spc_raw == 0 || !spc_raw.is_power_of_two() {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "sectors_per_cluster {spc_raw:#04x} is not a power of two"
-            ));
+            )));
         }
         spc_raw as u64
     };
@@ -214,9 +215,9 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
     // volume -- the reads that follow would not fail, they would land at
     // consistently wrong offsets and return whatever is there.
     if !cluster_size.is_power_of_two() {
-        return Err(format!(
+        return Err(Error::io(format!(
             "cluster_size {cluster_size} ({bytes_per_sector} x {sectors_per_cluster})              is not a power of two"
-        ));
+        )));
     }
 
     let mft_lcn = u64::from_le_bytes(
@@ -240,17 +241,17 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
         match 1u64.checked_shl((-(cpmr as i16)) as u32) {
             Some(size) => size,
             None => {
-                return Err(format!(
+                return Err(Error::io(format!(
                     "clusters_per_mft_record {cpmr} asks for a record of 2^{} bytes",
                     -(cpmr as i16)
-                ))
+                )))
             }
         }
     };
     if !(512..=16384).contains(&file_record_size) {
-        return Err(format!(
+        return Err(Error::io(format!(
             "file_record_size {file_record_size} out of plausible range"
-        ));
+        )));
     }
     // THE FIXUP CHECK NEEDS AT LEAST TWO STRIDES TO CHECK ANYTHING.
     // NTFS's update sequence array is the torn-write detector: the last
@@ -272,11 +273,11 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, String> 
     // sector: no stride fits, the array has nothing to check, and the
     // detector passes on every record, torn or not.
     if bytes_per_sector as u64 > file_record_size {
-        return Err(format!(
+        return Err(Error::io(format!(
             "bytes_per_sector {bytes_per_sector} is larger than file_record_size \
              {file_record_size}: no fixup stride fits in a record, so the torn-write check \
              has nothing to compare and would pass on a record written in half"
-        ));
+        )));
     }
 
     // Same signed encoding as clusters_per_mft_record.
@@ -348,16 +349,16 @@ pub fn mft_record_offset_io<T: BlockIo + ?Sized>(
     io: &mut T,
     params: &BootParams,
     record_number: u64,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     mft_record_offset_maybe_io(io, params, record_number)?
-        .ok_or_else(|| format!("MFT record {record_number} is not mapped"))
+        .ok_or_else(|| Error::not_found(format!("MFT record {record_number} is not mapped")))
 }
 
 fn mft_record_offset_maybe_io<T: BlockIo + ?Sized>(
     io: &mut T,
     params: &BootParams,
     record_number: u64,
-) -> Result<Option<u64>, String> {
+) -> Result<Option<u64>, Error> {
     if record_number == 0 {
         return Ok(Some(mft_record_offset(params, 0)));
     }
@@ -370,19 +371,19 @@ fn mft_record_offset_maybe_io<T: BlockIo + ?Sized>(
         return Ok(Some(mft_record_offset(params, record_number)));
     }
     let data = crate::attr_io::find_attribute(&record0, crate::attr_io::AttrType::Data, None)
-        .ok_or("$MFT has no unnamed $DATA")?;
+        .ok_or(Error::io("$MFT has no unnamed $DATA"))?;
     if data.is_resident {
-        return Err("$MFT's unnamed $DATA is resident".to_string());
+        return Err(Error::io("$MFT's unnamed $DATA is resident"));
     }
     let mpo = data
         .non_resident_mapping_pairs_offset
-        .ok_or("$MFT:$DATA has no mapping-pairs offset")? as usize;
+        .ok_or(Error::io("$MFT:$DATA has no mapping-pairs offset"))? as usize;
     let runs = crate::data_runs::decode_runs(
         &record0[data.attr_offset + mpo..data.attr_offset + data.attr_length],
     )?;
     let byte = record_number
         .checked_mul(params.file_record_size)
-        .ok_or("MFT record byte offset overflows")?;
+        .ok_or(Error::io("MFT record byte offset overflows"))?;
     let vcn = byte / params.cluster_size;
     let within = byte % params.cluster_size;
     let run = runs
@@ -391,13 +392,17 @@ fn mft_record_offset_maybe_io<T: BlockIo + ?Sized>(
     let Some(run) = run else {
         return Ok(None);
     };
-    let lcn = run.lcn.ok_or("MFT record lies in a sparse run")?;
+    let lcn = run
+        .lcn
+        .ok_or(Error::io("MFT record lies in a sparse run"))?;
     let clusters_needed = within
         .checked_add(params.file_record_size)
-        .ok_or("MFT record span overflows")?
+        .ok_or(Error::io("MFT record span overflows"))?
         .div_ceil(params.cluster_size);
     if vcn - run.starting_vcn + clusters_needed > run.length {
-        return Err(format!("MFT record {record_number} crosses a run boundary"));
+        return Err(Error::io(format!(
+            "MFT record {record_number} crosses a run boundary"
+        )));
     }
     cluster_span(
         params,
@@ -430,22 +435,28 @@ pub fn cluster_span(
     byte_offset: u64,
     len: u64,
     device_bytes: u64,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let start = lcn
         .checked_add(within_run)
         .and_then(|cluster| cluster.checked_mul(params.cluster_size))
         .and_then(|at| at.checked_add(byte_offset))
-        .ok_or_else(|| format!("cluster {lcn} plus {within_run} leaves the address space"))?;
-    let end = start
-        .checked_add(len)
-        .ok_or_else(|| format!("a transfer at {start} of {len} bytes leaves the address space"))?;
+        .ok_or_else(|| {
+            Error::io(format!(
+                "cluster {lcn} plus {within_run} leaves the address space"
+            ))
+        })?;
+    let end = start.checked_add(len).ok_or_else(|| {
+        Error::io(format!(
+            "a transfer at {start} of {len} bytes leaves the address space"
+        ))
+    })?;
     // The volume as the boot sector describes it, and the device as it
     // really is: a transfer has to be inside both.
     let volume = params.volume_bytes().min(device_bytes);
     if end > volume {
-        return Err(format!(
+        return Err(Error::io(format!(
             "a transfer spans [{start}, {end}) on a volume of {volume} bytes"
-        ));
+        )));
     }
     Ok(start)
 }
@@ -530,7 +541,7 @@ pub fn next_sequence_for_allocation_io<T: BlockIo + ?Sized>(
     io: &mut T,
     params: &BootParams,
     record_number: u64,
-) -> Result<u16, String> {
+) -> Result<u16, Error> {
     let offset = mft_record_offset_io(io, params, record_number)?;
     let mut slot = vec![0u8; params.file_record_size as usize];
     io.read_exact_at(offset, &mut slot)
@@ -541,7 +552,7 @@ pub fn next_sequence_for_allocation_io<T: BlockIo + ?Sized>(
 /// Apply the on-disk → in-memory fixup. Validates the FILE magic and
 /// verifies every sector-end pair matches the USN; returns Err on mismatch
 /// (indicates a torn write or corrupted record).
-pub fn apply_fixup_on_read(record: &mut [u8], bytes_per_sector: u16) -> Result<(), String> {
+pub fn apply_fixup_on_read(record: &mut [u8], bytes_per_sector: u16) -> Result<(), Error> {
     apply_fixup_on_read_magic(record, bytes_per_sector, FILE_MAGIC)
 }
 
@@ -552,7 +563,7 @@ pub fn apply_fixup_on_read_magic(
     record: &mut [u8],
     bytes_per_sector: u16,
     expected_magic: &[u8; 4],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // A BUFFER TOO SHORT TO HOLD A MAGIC IS AN ERROR, NOT A PANIC. This
     // sliced `record[0..4]` first, so anything shorter than four bytes
     // took the process down before the magic could be checked -- found
@@ -563,18 +574,18 @@ pub fn apply_fixup_on_read_magic(
     // bytes and cannot be short, but this is `pub` on a published crate
     // and the INDX variant is handed block sizes that come off the disk.
     if record.len() < 4 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "a record of {} bytes is too short to hold a {:?} magic",
             record.len(),
             std::str::from_utf8(expected_magic).unwrap_or("?")
-        ));
+        )));
     }
     if &record[0..4] != expected_magic {
-        return Err(format!(
+        return Err(Error::io(format!(
             "magic mismatch: expected {:?}, got {:02x?}",
             std::str::from_utf8(expected_magic).unwrap_or("?"),
             &record[0..4]
-        ));
+        )));
     }
     let (usa_offset, usa_count) = read_usa_header(record)?;
     validate_usa_geometry(record.len(), bytes_per_sector, usa_offset, usa_count)?;
@@ -585,11 +596,11 @@ pub fn apply_fixup_on_read_magic(
         let sector_end = (sector + 1) * bytes_per_sector as usize;
         let check = sector_end - SECTOR_TAIL_BYTES;
         if record[check..check + SECTOR_TAIL_BYTES] != usn_bytes {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "USN mismatch at sector {sector} (offset {check:#x}): \
                  expected {usn_bytes:02x?}, found {:02x?}",
                 &record[check..check + 2]
-            ));
+            )));
         }
         let saved = usa_offset + 2 + sector * 2;
         record[check] = record[saved];
@@ -602,7 +613,7 @@ pub fn apply_fixup_on_read_magic(
 /// current sector-end bytes into the USA, and overwrites the sector-ends
 /// with the new USN. Call after mutating the record and immediately
 /// before writing back.
-pub fn apply_fixup_on_write(record: &mut [u8], bytes_per_sector: u16) -> Result<(), String> {
+pub fn apply_fixup_on_write(record: &mut [u8], bytes_per_sector: u16) -> Result<(), Error> {
     apply_fixup_on_write_magic(record, bytes_per_sector, FILE_MAGIC)
 }
 
@@ -612,21 +623,21 @@ pub fn apply_fixup_on_write_magic(
     record: &mut [u8],
     bytes_per_sector: u16,
     expected_magic: &[u8; 4],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // Same short-buffer guard as the read side (#296).
     if record.len() < 4 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "a record of {} bytes is too short to hold a {:?} magic",
             record.len(),
             std::str::from_utf8(expected_magic).unwrap_or("?")
-        ));
+        )));
     }
     if &record[0..4] != expected_magic {
-        return Err(format!(
+        return Err(Error::io(format!(
             "magic mismatch: expected {:?}, got {:02x?}",
             std::str::from_utf8(expected_magic).unwrap_or("?"),
             &record[0..4]
-        ));
+        )));
     }
     let (usa_offset, usa_count) = read_usa_header(record)?;
     validate_usa_geometry(record.len(), bytes_per_sector, usa_offset, usa_count)?;
@@ -651,18 +662,18 @@ pub fn apply_fixup_on_write_magic(
     Ok(())
 }
 
-fn read_usa_header(record: &[u8]) -> Result<(usize, usize), String> {
+fn read_usa_header(record: &[u8]) -> Result<(usize, usize), Error> {
     if record.len() < 8 {
-        return Err("record too small to contain USA header".to_string());
+        return Err(Error::io("record too small to contain USA header"));
     }
     let usa_offset = read_u16_le(record, OFF_USA_OFFSET)
-        .ok_or_else(|| "record too short to read USA offset".to_string())?
+        .ok_or_else(|| Error::io("record too short to read USA offset"))?
         as usize;
     let usa_count = read_u16_le(record, OFF_USA_COUNT)
-        .ok_or_else(|| "record too short to read USA count".to_string())?
+        .ok_or_else(|| Error::io("record too short to read USA count"))?
         as usize;
     if usa_count == 0 {
-        return Err("USA count is zero (record has no fixup array)".to_string());
+        return Err(Error::io("USA count is zero (record has no fixup array)"));
     }
     Ok((usa_offset, usa_count))
 }
@@ -672,31 +683,35 @@ fn validate_usa_geometry(
     bytes_per_sector: u16,
     usa_offset: usize,
     usa_count: usize,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let bps = bytes_per_sector as usize;
     let sectors_expected = record_len / bps;
     // USA needs usa_count slots of 2 bytes each starting at usa_offset.
     let usa_end = usa_offset
-        .checked_add(usa_count.checked_mul(2).ok_or("usa_count overflow")?)
-        .ok_or("usa bounds overflow")?;
+        .checked_add(
+            usa_count
+                .checked_mul(2)
+                .ok_or(Error::io("usa_count overflow"))?,
+        )
+        .ok_or(Error::io("usa bounds overflow"))?;
     if usa_end > record_len {
-        return Err(format!(
+        return Err(Error::io(format!(
             "USA [{:#x}..{:#x}] extends past record end {:#x}",
             usa_offset, usa_end, record_len
-        ));
+        )));
     }
     if usa_count - 1 != sectors_expected {
-        return Err(format!(
+        return Err(Error::io(format!(
             "USA count {usa_count} inconsistent with record size {record_len} \
              / bytes_per_sector {bytes_per_sector} (expected {} slots)",
             sectors_expected + 1
-        ));
+        )));
     }
     Ok(())
 }
 
 /// Read an MFT record, apply fixup, and return the clean bytes.
-pub fn read_mft_record(path: &Path, record_number: u64) -> Result<(BootParams, Vec<u8>), String> {
+pub fn read_mft_record(path: &Path, record_number: u64) -> Result<(BootParams, Vec<u8>), Error> {
     let mut io = PathIo::open_ro(path)?;
     read_mft_record_io(&mut io, record_number)
 }
@@ -707,7 +722,7 @@ pub fn read_mft_record(path: &Path, record_number: u64) -> Result<(BootParams, V
 pub fn read_mft_record_io<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
-) -> Result<(BootParams, Vec<u8>), String> {
+) -> Result<(BootParams, Vec<u8>), Error> {
     let params = read_boot_params_io(io)?;
     let offset = mft_record_offset_io(io, &params, record_number)?;
     let size = params.file_record_size as usize;
@@ -742,7 +757,7 @@ const REC_BYTES_ALLOCATED: usize = 0x1C;
 /// A free record is left alone: it has no attributes, its header is
 /// zeroed or stale, and `update_mft_record_io` refuses to write to it
 /// on its own IN_USE check.
-fn check_record_header(record: &[u8], record_number: u64) -> Result<(), String> {
+fn check_record_header(record: &[u8], record_number: u64) -> Result<(), Error> {
     if &record[0..4] != FILE_MAGIC || record_flags(record) & MFT_FLAG_IN_USE == 0 {
         return Ok(());
     }
@@ -756,17 +771,17 @@ fn check_record_header(record: &[u8], record_number: u64) -> Result<(), String> 
     let bytes_allocated = read_u32(REC_BYTES_ALLOCATED);
     let attrs_offset = read_u16(REC_ATTRS_OFFSET);
     if bytes_used > record.len() || bytes_allocated > record.len() {
-        return Err(format!(
+        return Err(Error::io(format!(
             "MFT record {record_number} says it uses {bytes_used} of {bytes_allocated} \
              bytes, in a record of {}",
             record.len()
-        ));
+        )));
     }
     if attrs_offset > bytes_used {
-        return Err(format!(
+        return Err(Error::io(format!(
             "MFT record {record_number} puts its attributes at {attrs_offset}, past the \
              {bytes_used} bytes it says it uses"
-        ));
+        )));
     }
     Ok(())
 }
@@ -779,9 +794,9 @@ fn check_record_header(record: &[u8], record_number: u64) -> Result<(), String> 
 /// Refuses to operate on a record whose `in use` flag is clear — writing
 /// to a free record is almost certainly a bug and could corrupt
 /// subsequent allocations.
-pub fn update_mft_record<F>(path: &Path, record_number: u64, mutate: F) -> Result<(), String>
+pub fn update_mft_record<F>(path: &Path, record_number: u64, mutate: F) -> Result<(), Error>
 where
-    F: FnOnce(&mut [u8]) -> Result<(), String>,
+    F: FnOnce(&mut [u8]) -> Result<(), Error>,
 {
     let mut io = PathIo::open_rw(path)?;
     update_mft_record_io(&mut io, record_number, mutate)
@@ -789,17 +804,17 @@ where
 
 /// `BlockIo`-based equivalent of [`update_mft_record`]. Shares one
 /// underlying open file / callback pair across the read and the write.
-pub fn update_mft_record_io<T, F>(io: &mut T, record_number: u64, mutate: F) -> Result<(), String>
+pub fn update_mft_record_io<T, F>(io: &mut T, record_number: u64, mutate: F) -> Result<(), Error>
 where
     T: BlockIo + ?Sized,
-    F: FnOnce(&mut [u8]) -> Result<(), String>,
+    F: FnOnce(&mut [u8]) -> Result<(), Error>,
 {
     update_mft_record_io_typed(io, record_number, mutate)
 }
 
 /// Typed-error equivalent of [`update_mft_record_io`] for callers whose
 /// mutator has a control-flow outcome that must not be encoded in prose.
-/// Device and record errors are converted with `E::from(String)`; the
+/// Device and record errors are converted with `E::from(Error)`; the
 /// mutator's own variant survives unchanged.
 pub(crate) fn update_mft_record_io_typed<T, F, E>(
     io: &mut T,
@@ -809,32 +824,32 @@ pub(crate) fn update_mft_record_io_typed<T, F, E>(
 where
     T: BlockIo + ?Sized,
     F: FnOnce(&mut [u8]) -> Result<(), E>,
-    E: From<String>,
+    E: From<Error>,
 {
     let params = read_boot_params_io(io).map_err(E::from)?;
     let Some(offset) = mft_record_offset_maybe_io(io, &params, record_number).map_err(E::from)?
     else {
-        return Err(E::from(format!(
+        return Err(E::from(Error::io(format!(
             "refusing to write to MFT record {record_number}: IN_USE flag is clear"
-        )));
+        ))));
     };
     let mut record = vec![0u8; params.file_record_size as usize];
     io.read_exact_at(offset, &mut record)
-        .map_err(|e| E::from(format!("read record {record_number}: {e}")))?;
+        .map_err(|e| E::from(Error::io(format!("read record {record_number}: {e}"))))?;
     apply_fixup_on_read(&mut record, params.bytes_per_sector).map_err(E::from)?;
     check_record_header(&record, record_number).map_err(E::from)?;
     if record_flags(&record) & MFT_FLAG_IN_USE == 0 {
-        return Err(E::from(format!(
+        return Err(E::from(Error::io(format!(
             "refusing to write to MFT record {record_number}: IN_USE flag is clear"
-        )));
+        ))));
     }
 
     mutate(&mut record)?;
     apply_fixup_on_write(&mut record, params.bytes_per_sector).map_err(E::from)?;
 
     io.write_all_at(offset, &record)
-        .map_err(|e| E::from(format!("write record {record_number}: {e}")))?;
-    io.sync().map_err(E::from)?;
+        .map_err(|e| E::from(Error::io(format!("write record {record_number}: {e}"))))?;
+    io.sync().map_err(|e| E::from(Error::from(e)))?;
     Ok(())
 }
 
@@ -881,7 +896,7 @@ where
 pub fn sync_mftmirr_record_io<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     /// `$MFTMirr` mirrors records 0..MIRRORED-1. Same constant as
     /// `mkfs::MFTMIRR_RECORDS`, which sizes the mirror when it is built.
     const MIRRORED: u64 = 4;
@@ -894,24 +909,30 @@ pub fn sync_mftmirr_record_io<T: BlockIo + ?Sized>(
     // $DATA's first run is the mirror itself.
     let (_p, mirr_record) = read_mft_record_io(io, 1)?;
     let loc = crate::attr_io::find_attribute(&mirr_record, crate::attr_io::AttrType::Data, None)
-        .ok_or("$MFTMirr has no unnamed $DATA")?;
+        .ok_or(Error::io("$MFTMirr has no unnamed $DATA"))?;
     if loc.is_resident {
-        return Err("$MFTMirr's $DATA is resident, which is not a volume this crate wrote".into());
+        return Err(Error::io(
+            "$MFTMirr's $DATA is resident, which is not a volume this crate wrote",
+        ));
     }
     let mpo = loc
         .non_resident_mapping_pairs_offset
-        .ok_or("$MFTMirr's $DATA has no mapping-pairs offset")? as usize;
+        .ok_or(Error::io("$MFTMirr's $DATA has no mapping-pairs offset"))? as usize;
     let runs = crate::data_runs::decode_runs(
         &mirr_record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length],
     )?;
-    let first = runs.first().ok_or("$MFTMirr's $DATA has no runs")?;
-    let lcn = first.lcn.ok_or("$MFTMirr's first run is sparse")?;
+    let first = runs
+        .first()
+        .ok_or(Error::io("$MFTMirr's $DATA has no runs"))?;
+    let lcn = first
+        .lcn
+        .ok_or(Error::io("$MFTMirr's first run is sparse"))?;
 
     // The record as it now stands, fixups and all: the mirror holds the
     // same on-disk bytes, so this is a copy rather than a re-encode.
     let at_in_mirror = record_number
         .checked_mul(params.file_record_size)
-        .ok_or("mirror offset overflows")?;
+        .ok_or(Error::io("mirror offset overflows"))?;
     let mirror_at = cluster_span(
         &params,
         lcn,
@@ -924,7 +945,7 @@ pub fn sync_mftmirr_record_io<T: BlockIo + ?Sized>(
     let source_at = mft_record_offset_io(io, &params, record_number)?;
     io.read_exact_at(source_at, &mut raw)?;
     io.write_all_at(mirror_at, &raw)?;
-    io.sync()
+    Ok(io.sync()?)
 }
 
 /// the error it returns, because nothing further can repair it.
@@ -932,15 +953,15 @@ pub fn restore_mft_record_io<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
     saved: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     update_mft_record_io(io, record_number, |record| {
         if record.len() != saved.len() {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "cannot restore record {record_number}: saved copy is {} bytes, \
                  the record is {}",
                 saved.len(),
                 record.len()
-            ));
+            )));
         }
         // THE USN MUST MOVE PAST WHAT IS ON DISK, and copying `saved`
         // wholesale used to take it backwards (#242).
@@ -1609,7 +1630,7 @@ mod tests {
         let mut dev = formatted_dev();
         let (_, rec_before) = read_mft_record_io(&mut dev, 3).unwrap();
         let result = update_mft_record_io(&mut dev, 3, |_rec: &mut [u8]| {
-            Err("intentional failure".to_string())
+            Err(Error::io("intentional failure"))
         });
         assert!(result.is_err());
         // Record must be unchanged.

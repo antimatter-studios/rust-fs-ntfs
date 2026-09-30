@@ -219,7 +219,7 @@ fn update_propagates_mutator_error() {
     let err = update_mft_record(
         std::path::Path::new(&img),
         KnownNtfsFileRecordNumber::Volume as u64,
-        |_| Err("test-only sentinel".to_string()),
+        |_| Err("test-only sentinel".into()),
     )
     .unwrap_err();
     assert!(err.contains("sentinel"), "{err:?}");

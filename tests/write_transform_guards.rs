@@ -79,7 +79,7 @@ fn set_data_flag(img: &str, flag: u16) {
 /// refusal from somewhere else does not count, and `flags=` so the
 /// failure is the one that inspected the attribute.
 fn assert_refused_by_the_transform_guard<T: std::fmt::Debug>(
-    got: &Result<T, String>,
+    got: &Result<T, fs_ntfs::error::Error>,
     entry_point: &str,
     what: &str,
 ) {

@@ -11,6 +11,7 @@
 use crate::attr_io::{self, AttrType};
 use crate::block_io::{BlockIo, PathIo};
 use crate::data_runs::{self, DataRun};
+use crate::error::Error;
 use crate::mft_io::{
     apply_fixup_on_read_magic, apply_fixup_on_write_magic, read_mft_record_io, BootParams,
 };
@@ -66,7 +67,7 @@ impl IndexAllocation {
 pub fn load_for_directory(
     image: &Path,
     parent_record_number: u64,
-) -> Result<IndexAllocation, String> {
+) -> Result<IndexAllocation, Error> {
     let mut io = PathIo::open_ro(image)?;
     load_for_directory_io(&mut io, parent_record_number)
 }
@@ -74,20 +75,24 @@ pub fn load_for_directory(
 pub fn load_for_directory_io<T: BlockIo + ?Sized>(
     io: &mut T,
     parent_record_number: u64,
-) -> Result<IndexAllocation, String> {
+) -> Result<IndexAllocation, Error> {
     let (params, record) = read_mft_record_io(io, parent_record_number)?;
 
     // Get block_size from $INDEX_ROOT:$I30.
     let ir = attr_io::find_attribute(&record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or_else(|| "$INDEX_ROOT:$I30 not found on parent".to_string())?;
-    let ir_val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
-    let ir_val_len = ir.resident_value_length.ok_or("no value_length")? as usize;
+        .ok_or_else(|| Error::not_found("$INDEX_ROOT:$I30 not found on parent"))?;
+    let ir_val_off = ir
+        .resident_value_offset
+        .ok_or(Error::io("no value_offset"))? as usize;
+    let ir_val_len = ir
+        .resident_value_length
+        .ok_or(Error::io("no value_length"))? as usize;
     // The block size sits at 0x08..0x0C of the $INDEX_ROOT value, so
     // there has to be that much value to read it from.
     if ir_val_len < 0x10 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$INDEX_ROOT:$I30 value is {ir_val_len} bytes, too short to hold an index header"
-        ));
+        )));
     }
     let ir_data_start = ir.attr_offset + ir_val_off;
     let block_size = u32::from_le_bytes([
@@ -104,28 +109,30 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
     if !(u64::from(params.bytes_per_sector)..=MAX_INDEX_BLOCK_SIZE).contains(&block_size)
         || !block_size.is_power_of_two()
     {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$INDEX_ROOT:$I30 says its blocks are {block_size} bytes, which is not an \
              index block size"
-        ));
+        )));
     }
 
     // Get $INDEX_ALLOCATION:$I30 data runs.
     let ia = attr_io::find_attribute(&record, AttrType::IndexAllocation, Some(stream::I30))
-        .ok_or_else(|| "$INDEX_ALLOCATION:$I30 not found".to_string())?;
+        .ok_or_else(|| Error::not_found("$INDEX_ALLOCATION:$I30 not found"))?;
     if ia.is_resident {
-        return Err("$INDEX_ALLOCATION unexpectedly resident".to_string());
+        return Err(Error::io("$INDEX_ALLOCATION unexpectedly resident"));
     }
     let mpo = ia
         .non_resident_mapping_pairs_offset
-        .ok_or("no mapping_pairs_offset")? as usize;
+        .ok_or(Error::io("no mapping_pairs_offset"))? as usize;
     let runs =
         data_runs::decode_runs(&record[ia.attr_offset + mpo..ia.attr_offset + ia.attr_length])?;
-    let data_length = ia.non_resident_value_length.ok_or("no value_length")?;
+    let data_length = ia
+        .non_resident_value_length
+        .ok_or(Error::io("no value_length"))?;
 
     // Get $Bitmap:$I30.
     let bm_attr = attr_io::find_attribute(&record, AttrType::Bitmap, Some(stream::I30))
-        .ok_or_else(|| "$Bitmap:$I30 not found".to_string())?;
+        .ok_or_else(|| Error::not_found("$Bitmap:$I30 not found"))?;
     // A DIRECTORY BIG ENOUGH PUSHES ITS OWN BITMAP OUT OF THE RECORD, and
     // this used to refuse it: "non-resident $Bitmap:$I30 unsupported in
     // this MVP". `load_for_directory_io` is the single door to
@@ -139,8 +146,12 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
     // at 4 KiB blocks. Reading it is the same non-resident read every
     // other attribute gets.
     let bitmap = if bm_attr.is_resident {
-        let off = bm_attr.resident_value_offset.ok_or("no value_offset")? as usize;
-        let len = bm_attr.resident_value_length.ok_or("no value_length")? as usize;
+        let off = bm_attr
+            .resident_value_offset
+            .ok_or(Error::io("no value_offset"))? as usize;
+        let len = bm_attr
+            .resident_value_length
+            .ok_or(Error::io("no value_length"))? as usize;
         record[bm_attr.attr_offset + off..bm_attr.attr_offset + off + len].to_vec()
     } else {
         crate::read::read_attribute_value(
@@ -149,7 +160,7 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
             AttrType::Bitmap,
             Some(stream::I30),
         )
-        .map_err(|e| format!("reading a non-resident $Bitmap:$I30: {e}"))?
+        .map_err(|e| e.context("reading a non-resident $Bitmap:$I30"))?
     };
 
     Ok(IndexAllocation {
@@ -191,11 +202,7 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
 /// `device_bytes` is the size of the device the transfer will land on;
 /// this used to pass `u64::MAX`, which left `cluster_span` bounding
 /// against the volume alone -- the weaker of the two limits it applies.
-pub fn vcn_to_disk_offset(
-    ia: &IndexAllocation,
-    vcn: u64,
-    device_bytes: u64,
-) -> Result<u64, String> {
+pub fn vcn_to_disk_offset(ia: &IndexAllocation, vcn: u64, device_bytes: u64) -> Result<u64, Error> {
     check_declared_block_extent(ia, vcn)?;
     let run = ia
         .runs
@@ -205,8 +212,10 @@ pub fn vcn_to_disk_offset(
                 .checked_add(r.length)
                 .is_some_and(|end| vcn >= r.starting_vcn && vcn < end)
         })
-        .ok_or_else(|| format!("VCN {vcn} not mapped in $INDEX_ALLOCATION"))?;
-    let lcn = run.lcn.ok_or_else(|| format!("VCN {vcn} in sparse run"))?;
+        .ok_or_else(|| Error::not_found(format!("VCN {vcn} not mapped in $INDEX_ALLOCATION")))?;
+    let lcn = run
+        .lcn
+        .ok_or_else(|| Error::io(format!("VCN {vcn} in sparse run")))?;
 
     let block_clusters = ia.block_size.div_ceil(ia.params.cluster_size.max(1));
     let run_end_vcn = run.starting_vcn.checked_add(run.length).ok_or_else(|| {
@@ -217,13 +226,13 @@ pub fn vcn_to_disk_offset(
     })?;
     let block_end_vcn = vcn
         .checked_add(block_clusters)
-        .ok_or_else(|| format!("an index block at VCN {vcn} has no end"))?;
+        .ok_or_else(|| Error::io(format!("an index block at VCN {vcn} has no end")))?;
     if block_end_vcn > run_end_vcn {
-        return Err(format!(
+        return Err(Error::io(format!(
             "index block at VCN {vcn} spans {block_clusters} clusters, past the end of \
              its run at VCN {run_end_vcn}; a block that straddles a run boundary is not \
              read or written as one transfer"
-        ));
+        )));
     }
 
     // Checked and bounded by the volume and the device, for the whole
@@ -245,16 +254,16 @@ struct MappedChunk {
     len: usize,
 }
 
-fn check_declared_block_extent(ia: &IndexAllocation, vcn: u64) -> Result<(), String> {
+fn check_declared_block_extent(ia: &IndexAllocation, vcn: u64) -> Result<(), Error> {
     let end = vcn
         .checked_mul(ia.params.cluster_size)
         .and_then(|start| start.checked_add(ia.block_size))
-        .ok_or_else(|| format!("index block at VCN {vcn} has no byte end"))?;
+        .ok_or_else(|| Error::io(format!("index block at VCN {vcn} has no byte end")))?;
     if end > ia.data_length {
-        return Err(format!(
+        return Err(Error::io(format!(
             "index block at VCN {vcn} ends at byte {end}, past $INDEX_ALLOCATION length {}",
             ia.data_length
-        ));
+        )));
     }
     Ok(())
 }
@@ -266,17 +275,17 @@ fn map_indx_block(
     ia: &IndexAllocation,
     vcn: u64,
     device_bytes: u64,
-) -> Result<Vec<MappedChunk>, String> {
+) -> Result<Vec<MappedChunk>, Error> {
     check_declared_block_extent(ia, vcn)?;
     let cluster_size = ia.params.cluster_size;
     if cluster_size == 0 {
-        return Err("$INDEX_ALLOCATION has a zero-byte cluster size".to_string());
+        return Err(Error::io("$INDEX_ALLOCATION has a zero-byte cluster size"));
     }
 
     let block_len = usize::try_from(ia.block_size)
         .map_err(|_| format!("index block size {} does not fit in memory", ia.block_size))?;
     if block_len == 0 {
-        return Err("index block size is zero".to_string());
+        return Err(Error::io("index block size is zero"));
     }
     let mut chunks = Vec::new();
     let mut cursor = 0usize;
@@ -284,7 +293,7 @@ fn map_indx_block(
     while cursor < block_len {
         let logical_cluster = vcn
             .checked_add(cursor as u64 / cluster_size)
-            .ok_or_else(|| format!("an index block at VCN {vcn} has no end"))?;
+            .ok_or_else(|| Error::io(format!("an index block at VCN {vcn} has no end")))?;
         let byte_in_cluster = cursor as u64 % cluster_size;
         let run = ia
             .runs
@@ -294,10 +303,14 @@ fn map_indx_block(
                     .checked_add(r.length)
                     .is_some_and(|end| logical_cluster >= r.starting_vcn && logical_cluster < end)
             })
-            .ok_or_else(|| format!("VCN {logical_cluster} not mapped in $INDEX_ALLOCATION"))?;
+            .ok_or_else(|| {
+                Error::not_found(format!(
+                    "VCN {logical_cluster} not mapped in $INDEX_ALLOCATION"
+                ))
+            })?;
         let lcn = run
             .lcn
-            .ok_or_else(|| format!("VCN {logical_cluster} in sparse run"))?;
+            .ok_or_else(|| Error::io(format!("VCN {logical_cluster} in sparse run")))?;
         let run_end_vcn = run.starting_vcn.checked_add(run.length).ok_or_else(|| {
             format!(
                 "$INDEX_ALLOCATION run at VCN {} has no end",
@@ -317,10 +330,10 @@ fn map_indx_block(
         let len = usize::try_from(bytes_in_run.min((block_len - cursor) as u64))
             .map_err(|_| "index block transfer does not fit in memory".to_string())?;
         if len == 0 {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "$INDEX_ALLOCATION run at VCN {} contributes no bytes to the block",
                 run.starting_vcn
-            ));
+            )));
         }
         let disk_offset = crate::mft_io::cluster_span(
             &ia.params,
@@ -345,7 +358,7 @@ fn read_raw_indx_block_io<T: BlockIo + ?Sized>(
     io: &mut T,
     ia: &IndexAllocation,
     vcn: u64,
-) -> Result<(Vec<u8>, Vec<MappedChunk>), String> {
+) -> Result<(Vec<u8>, Vec<MappedChunk>), Error> {
     let chunks = map_indx_block(ia, vcn, io.size())?;
     let mut block = vec![0u8; ia.block_size as usize];
     for chunk in &chunks {
@@ -361,7 +374,7 @@ fn read_raw_indx_block_io<T: BlockIo + ?Sized>(
 /// Read an INDX block at the given VCN, applying fixup. Returns the
 /// clean block bytes. The caller must know `block_size` from the
 /// `IndexAllocation` handle.
-pub fn read_indx_block(image: &Path, ia: &IndexAllocation, vcn: u64) -> Result<Vec<u8>, String> {
+pub fn read_indx_block(image: &Path, ia: &IndexAllocation, vcn: u64) -> Result<Vec<u8>, Error> {
     let mut io = PathIo::open_ro(image)?;
     read_indx_block_io(&mut io, ia, vcn)
 }
@@ -370,14 +383,14 @@ pub fn read_indx_block_io<T: BlockIo + ?Sized>(
     io: &mut T,
     ia: &IndexAllocation,
     vcn: u64,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let (mut buf, chunks) = read_raw_indx_block_io(io, ia, vcn)?;
     if &buf[0..4] != b"INDX" {
-        return Err(format!(
+        return Err(Error::io(format!(
             "block at VCN {vcn} (disk {:#x}) is not an INDX record: {:02x?}",
             chunks[0].disk_offset,
             &buf[0..4]
-        ));
+        )));
     }
     apply_fixup_on_read_magic(&mut buf, ia.params.bytes_per_sector, b"INDX")?;
     Ok(buf)
@@ -391,9 +404,9 @@ pub fn update_indx_block<F>(
     ia: &IndexAllocation,
     vcn: u64,
     mutate: F,
-) -> Result<(), String>
+) -> Result<(), Error>
 where
-    F: FnOnce(&mut [u8]) -> Result<(), String>,
+    F: FnOnce(&mut [u8]) -> Result<(), Error>,
 {
     let mut io = PathIo::open_rw(image)?;
     update_indx_block_io(&mut io, ia, vcn, mutate)
@@ -404,10 +417,10 @@ pub fn update_indx_block_io<T, F>(
     ia: &IndexAllocation,
     vcn: u64,
     mutate: F,
-) -> Result<(), String>
+) -> Result<(), Error>
 where
     T: BlockIo + ?Sized,
-    F: FnOnce(&mut [u8]) -> Result<(), String>,
+    F: FnOnce(&mut [u8]) -> Result<(), Error>,
 {
     let (previous, chunks) = read_raw_indx_block_io(io, ia, vcn)?;
     let mut block = previous.clone();
@@ -420,7 +433,7 @@ where
             chunk.disk_offset,
             &block[chunk.cursor..chunk.cursor + chunk.len],
         ) {
-            let failure = format!("write indx: {e}");
+            let failure = Error::io(format!("write indx: {e}"));
             let mut rollback_failure = None;
             // The failing write may itself have written a prefix, so restore it
             // along with every earlier chunk that definitely landed.
@@ -437,12 +450,14 @@ where
             let sync_failure = io.sync().err();
             return Err(match (rollback_failure, sync_failure) {
                 (None, None) => failure,
-                (Some(rollback), _) => format!(
-                    "{failure}; and rolling the INDX block back failed too ({rollback}) — run chkdsk"
-                ),
-                (None, Some(sync)) => format!(
-                    "{failure}; the INDX rollback was written but syncing it failed ({sync}) — run chkdsk"
-                ),
+                (Some(rollback), _) => failure.map_message(|m| {
+                    format!("{m}; and rolling the INDX block back failed too ({rollback}) — run chkdsk")
+                }),
+                (None, Some(sync)) => failure.map_message(|m| {
+                    format!(
+                        "{m}; the INDX rollback was written but syncing it failed ({sync}) — run chkdsk"
+                    )
+                }),
             });
         }
     }

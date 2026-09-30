@@ -50,7 +50,9 @@ fn boot_image(tag: &str, bytes_per_sector: u16, spc_raw: u8) -> String {
 
 fn cluster_size(tag: &str, bytes_per_sector: u16, spc_raw: u8) -> Result<u64, String> {
     let img = boot_image(tag, bytes_per_sector, spc_raw);
-    read_boot_params(Path::new(&img)).map(|p| p.cluster_size)
+    read_boot_params(Path::new(&img))
+        .map(|p| p.cluster_size)
+        .map_err(String::from)
 }
 
 #[test]

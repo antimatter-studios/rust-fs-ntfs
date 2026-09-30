@@ -156,7 +156,7 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         match repair_dirty_io(&mut dev) {
             Ok(true) => repaired += 1,
             Ok(false) => {}
-            Err(why) => dirty_refused = Some(why),
+            Err(why) => dirty_refused = Some(String::from(why)),
         }
     }
     let after = if repaired > 0 {

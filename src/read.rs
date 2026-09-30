@@ -14,6 +14,7 @@ use crate::attr_io::{self, attr_off, AttrType};
 use crate::block_io::BlockIo;
 use crate::compression;
 use crate::data_runs;
+use crate::error::Error;
 use crate::idx_block;
 use crate::index_io::{self, IH_FLAG_HAS_SUBNODES};
 use crate::mft_io::{read_mft_record_io, record_flags, MFT_FLAG_DIRECTORY};
@@ -48,11 +49,11 @@ pub const ROOT_RECORD_NUMBER: u64 = 5;
 /// (Note: the *write* path's dedup still uses the shared exact-match
 /// `index_io::find_index_entry` — making that collation-aware is the
 /// write-affecting half of C5, handled when `write.rs`'s resolver is flipped.)
-pub fn resolve_path<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<u64, String> {
+pub fn resolve_path<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<u64, Error> {
     // Load $UpCase once for the whole walk. Required for correct collation —
     // propagate failure instead of silently matching case-sensitively.
     let upcase = UpcaseTable::load_io(io)
-        .map_err(|e| format!("resolve_path: load $UpCase for collation: {e}"))?;
+        .map_err(|e| e.context("resolve_path: load $UpCase for collation"))?;
     let mut record_number = ROOT_RECORD_NUMBER;
 
     for component in path.split('/') {
@@ -71,13 +72,13 @@ pub fn resolve_path<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<u64, 
 
         let (_, dir_bytes) = read_mft_record_io(io, record_number)?;
         if record_flags(&dir_bytes) & MFT_FLAG_DIRECTORY == 0 {
-            return Err(format!(
+            return Err(Error::not_directory(format!(
                 "resolve_path: '{component}' parent (record {record_number}) is not a directory"
-            ));
+            )));
         }
 
         record_number = lookup_in_directory(io, record_number, &dir_bytes, component, &upcase)?
-            .ok_or_else(|| format!("resolve_path: '{component}' not found"))?;
+            .ok_or_else(|| Error::not_found(format!("resolve_path: '{component}' not found")))?;
     }
 
     Ok(record_number)
@@ -104,16 +105,16 @@ fn refuse_if_stale(
     record_number: u64,
     reference_sequence: u16,
     name: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // Zero means "not recorded" in a file reference; nothing to compare.
     if reference_sequence == 0 {
         return Ok(());
     }
     let on_record = crate::mft_io::record_sequence(record);
     if on_record != reference_sequence {
-        return Err(format!(
+        return Err(Error::io(format!(
             "the index entry for '{name}' points at record {record_number} with sequence              {reference_sequence}, and that record's sequence is {on_record}: the entry is stale              and the record now holds a different file"
-        ));
+        )));
     }
     Ok(())
 }
@@ -131,13 +132,13 @@ fn lookup_in_directory<T: BlockIo + ?Sized>(
     dir_bytes: &[u8],
     name: &str,
     upcase: &UpcaseTable,
-) -> Result<Option<u64>, String> {
+) -> Result<Option<u64>, Error> {
     let want: Vec<u16> = name.encode_utf16().collect();
 
     // The reference's sequence is checked against the record it lands on
     // before the number is handed back, so no caller can follow a stale
     // entry (#257).
-    let checked = |io: &mut T, rec: u64, seq: u16| -> Result<Option<u64>, String> {
+    let checked = |io: &mut T, rec: u64, seq: u16| -> Result<Option<u64>, Error> {
         let (_params, record) = read_mft_record_io(io, rec)?;
         refuse_if_stale(&record, rec, seq, name)?;
         Ok(Some(rec))
@@ -165,14 +166,14 @@ fn lookup_in_directory<T: BlockIo + ?Sized>(
             index_io::IndexNodeLookup::Descend(vcn) => vcn,
         };
         if allocated_vcns.binary_search(&vcn).is_err() {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "directory record {dir_record} routes lookup for '{name}' to unallocated VCN {vcn}"
-            ));
+            )));
         }
         if !visited.insert(vcn) {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "directory record {dir_record} has a cycle at index VCN {vcn}"
-            ));
+            )));
         }
         let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
         node = index_io::lookup_indx_node(&block, &want, upcase)?;
@@ -195,11 +196,11 @@ pub fn read_attribute_value<T: BlockIo + ?Sized>(
     record_number: u64,
     attr_type: AttrType,
     name: Option<&str>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     read_attribute_value_if_present(io, record_number, attr_type, name)?.ok_or_else(|| {
-        format!(
+        Error::not_found(format!(
             "read_attribute_value: attribute {attr_type:?} (name {name:?}) not found in record {record_number}"
-        )
+        ))
     })
 }
 
@@ -211,7 +212,7 @@ pub fn read_attribute_value_if_present<T: BlockIo + ?Sized>(
     record_number: u64,
     attr_type: AttrType,
     name: Option<&str>,
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<Option<Vec<u8>>, Error> {
     match locate_attribute(io, record_number, attr_type, name)? {
         Some((params, holder, record, loc)) => {
             if attr_type == AttrType::Data && name.is_none() {
@@ -269,7 +270,7 @@ fn refuse_wof_compressed<T: BlockIo + ?Sized>(
     record: &[u8],
     holder_record_number: u64,
     record_number: u64,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // `record` holds `$DATA`. If that is the base record and the base
     // record has no `$ATTRIBUTE_LIST`, this file's attributes are all
     // here and the local scan is the whole answer -- no extra read. If
@@ -294,10 +295,10 @@ fn refuse_wof_compressed<T: BlockIo + ?Sized>(
         && u32::from_le_bytes([value[0], value[1], value[2], value[3]])
             == crate::record_build::reparse_tag::WOF
     {
-        return Err(format!(
+        return Err(Error::io(format!(
             "record {record_number} is WOF-compressed (IO_REPARSE_TAG_WOF); \
              decompression not yet supported"
-        ));
+        )));
     }
     Ok(())
 }
@@ -335,7 +336,7 @@ fn locate_attribute<T: BlockIo + ?Sized>(
         Vec<u8>,
         attr_io::AttrLocation,
     )>,
-    String,
+    Error,
 > {
     let (params, record) = read_mft_record_io(io, record_number)?;
 
@@ -364,21 +365,21 @@ fn locate_attribute<T: BlockIo + ?Sized>(
             // the half of it that must not wait, because the other
             // behaviour is a short read reported as a complete one.
             if matching.iter().any(|e| e.starting_vcn != 0) {
-                return Err(format!(
+                return Err(Error::io(format!(
                     "locate_attribute: {attr_type:?} (name {name:?}) in record {record_number} is \
                      split across {} records ($ATTRIBUTE_LIST multi-extent stitching not yet \
                      supported)",
                     matching.len()
-                ));
+                )));
             }
             let entry = matching
                 .iter()
                 .find(|e| e.starting_vcn == 0)
                 .ok_or_else(|| {
-                    format!(
-                    "locate_attribute: $ATTRIBUTE_LIST lists {attr_type:?} (name {name:?}) for \
-                     record {record_number} with no VCN-0 segment"
-                )
+                    Error::io(format!(
+                        "locate_attribute: $ATTRIBUTE_LIST lists {attr_type:?} (name {name:?}) \
+                         for record {record_number} with no VCN-0 segment"
+                    ))
                 })?;
             if entry.record_number != record_number {
                 let (ext_params, ext) = read_mft_record_io(io, entry.record_number)?;
@@ -431,15 +432,15 @@ fn read_value_from_record<T: BlockIo + ?Sized>(
     record: &[u8],
     loc: &attr_io::AttrLocation,
     holes: Holes,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     if loc.is_resident {
         let vo = loc.attr_offset
             + loc
                 .resident_value_offset
-                .ok_or("resident attr has no value offset")? as usize;
+                .ok_or(Error::io("resident attr has no value offset"))? as usize;
         let vl = loc
             .resident_value_length
-            .ok_or("resident attr has no value length")? as usize;
+            .ok_or(Error::io("resident attr has no value length"))? as usize;
         // Bounds-check before slicing: corrupt on-disk offset/length must
         // produce an Err, not a panic.
         let end = vo
@@ -459,7 +460,9 @@ fn read_value_from_record<T: BlockIo + ?Sized>(
         record[loc.attr_offset + attr_off::FLAGS + 1],
     ]);
     if flags & ATTR_FLAG_ENCRYPTED != 0 {
-        return Err("read_attribute_value: encrypted attribute ($EFS) unsupported".to_string());
+        return Err(Error::io(
+            "read_attribute_value: encrypted attribute ($EFS) unsupported",
+        ));
     }
     if flags & ATTR_FLAG_COMPRESSED != 0 {
         return read_compressed_nonresident(io, params, record, loc);
@@ -479,7 +482,7 @@ fn read_value_from_record<T: BlockIo + ?Sized>(
     ) as usize;
     let mpo = loc
         .non_resident_mapping_pairs_offset
-        .ok_or("non-resident attr has no mapping-pairs offset")? as usize;
+        .ok_or(Error::io("non-resident attr has no mapping-pairs offset"))? as usize;
     let runs =
         data_runs::decode_runs(&record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length])?;
 
@@ -494,16 +497,16 @@ fn read_value_from_record<T: BlockIo + ?Sized>(
         // The caller is going to parse this value, so a zero it did not
         // write is a terminator it did not mean (#220).
         if init_size < data_size {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "a value of {data_size} bytes is initialized to only {init_size}; the rest would                  read as zeros and parse as the end of it"
-            ));
+            )));
         }
         if let Some(vcn) =
             (0..cluster_count as u64).find(|&v| data_runs::vcn_to_lcn(&runs, v).is_none())
         {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "a value of {data_size} bytes has no run behind VCN {vcn}; the hole would read as                  zeros and parse as the end of it"
-            ));
+            )));
         }
     }
     for vcn in 0..cluster_count as u64 {
@@ -541,10 +544,10 @@ pub fn read_attribute_range<T: BlockIo + ?Sized>(
     name: Option<&str>,
     offset: u64,
     len: usize,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let (params, holder, record, loc) = locate_attribute(io, record_number, attr_type, name)?
         .ok_or_else(|| {
-            format!("read_attribute_range: attribute {attr_type:?} (name {name:?}) not found in record {record_number}")
+            Error::not_found(format!("read_attribute_range: attribute {attr_type:?} (name {name:?}) not found in record {record_number}"))
         })?;
     if attr_type == AttrType::Data && name.is_none() {
         refuse_wof_compressed(io, &params, &record, holder, record_number)?;
@@ -579,10 +582,10 @@ fn read_nonresident_range<T: BlockIo + ?Sized>(
     loc: &attr_io::AttrLocation,
     offset: u64,
     len: usize,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let data_size = loc
         .non_resident_value_length
-        .ok_or("non-resident attr has no data size")?;
+        .ok_or(Error::io("non-resident attr has no data size"))?;
     if len == 0 || offset >= data_size {
         return Ok(Vec::new());
     }
@@ -594,7 +597,7 @@ fn read_nonresident_range<T: BlockIo + ?Sized>(
     );
     let mpo = loc
         .non_resident_mapping_pairs_offset
-        .ok_or("non-resident attr has no mapping-pairs offset")? as usize;
+        .ok_or(Error::io("non-resident attr has no mapping-pairs offset"))? as usize;
     let runs =
         data_runs::decode_runs(&record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length])?;
 
@@ -671,14 +674,14 @@ fn bounded_value_length(
     declared: &Option<u64>,
     what: &str,
     device_bytes: u64,
-) -> Result<usize, String> {
-    let declared = declared.ok_or(format!("{what} attr has no data size"))?;
+) -> Result<usize, Error> {
+    let declared = declared.ok_or(Error::io(format!("{what} attr has no data size")))?;
     let volume = params.volume_bytes().min(device_bytes);
     if declared > volume {
-        return Err(format!(
+        return Err(Error::io(format!(
             "{what} attribute says its value is {declared} bytes, and the smaller of the \
              volume's own size and the device's is {volume}"
-        ));
+        )));
     }
     Ok(declared as usize)
 }
@@ -698,7 +701,7 @@ fn read_compressed_nonresident<T: BlockIo + ?Sized>(
     params: &crate::mft_io::BootParams,
     record: &[u8],
     loc: &attr_io::AttrLocation,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let data_size = bounded_value_length(
         params,
         &loc.non_resident_value_length,
@@ -716,15 +719,15 @@ fn read_compressed_nonresident<T: BlockIo + ?Sized>(
     // whose product with the cluster size wrapped to 0 -- and the loop
     // below advances by that product, so a release build hung.
     if cu_exp == 0 || cu_exp > MAX_COMPRESSION_UNIT {
-        return Err(format!(
+        return Err(Error::io(format!(
             "compression_unit is {cu_exp}, where {MAX_COMPRESSION_UNIT} is the largest \
              unit NTFS compresses in"
-        ));
+        )));
     }
     let unit_clusters = 1usize << cu_exp;
     let mpo = loc
         .non_resident_mapping_pairs_offset
-        .ok_or("compressed attr has no mapping-pairs offset")? as usize;
+        .ok_or(Error::io("compressed attr has no mapping-pairs offset"))? as usize;
     let runs =
         data_runs::decode_runs(&record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length])?;
 
@@ -824,26 +827,28 @@ pub struct Stat {
 
 /// Read a record's metadata: directory flag, `$STANDARD_INFORMATION`
 /// timestamps + attributes, and the unnamed `$DATA` size.
-pub fn read_stat<T: BlockIo + ?Sized>(io: &mut T, record_number: u64) -> Result<Stat, String> {
+pub fn read_stat<T: BlockIo + ?Sized>(io: &mut T, record_number: u64) -> Result<Stat, Error> {
     let (_, record) = read_mft_record_io(io, record_number)?;
     let is_dir = record_flags(&record) & MFT_FLAG_DIRECTORY != 0;
     let link_count = u16::from_le_bytes([record[0x12], record[0x13]]);
 
-    let si = attr_io::find_attribute(&record, AttrType::StandardInformation, None)
-        .ok_or("read_stat: $STANDARD_INFORMATION not found")?;
+    let si = attr_io::find_attribute(&record, AttrType::StandardInformation, None).ok_or(
+        Error::not_found("read_stat: $STANDARD_INFORMATION not found"),
+    )?;
     if !si.is_resident {
-        return Err(
-            "read_stat: $STANDARD_INFORMATION is non-resident (impossible per spec)".into(),
-        );
+        return Err(Error::io(
+            "read_stat: $STANDARD_INFORMATION is non-resident (impossible per spec)",
+        ));
     }
     let v = si.attr_offset
-        + si.resident_value_offset
-            .ok_or("read_stat: $STANDARD_INFORMATION has no value offset")? as usize;
-    let u64_at = |off: usize| -> Result<u64, String> {
+        + si.resident_value_offset.ok_or(Error::io(
+            "read_stat: $STANDARD_INFORMATION has no value offset",
+        ))? as usize;
+    let u64_at = |off: usize| -> Result<u64, Error> {
         record
             .get(off..off + 8)
             .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
-            .ok_or_else(|| "read_stat: $STANDARD_INFORMATION truncated".to_string())
+            .ok_or_else(|| Error::io("read_stat: $STANDARD_INFORMATION truncated"))
     };
     let created_nt = u64_at(v + SI_CREATION)?;
     let modified_nt = u64_at(v + SI_MODIFICATION)?;
@@ -852,7 +857,7 @@ pub fn read_stat<T: BlockIo + ?Sized>(io: &mut T, record_number: u64) -> Result<
     let file_attributes = u32::from_le_bytes(
         record
             .get(v + SI_FILE_ATTRIBUTES..v + SI_FILE_ATTRIBUTES + 4)
-            .ok_or("read_stat: file_attributes truncated")?
+            .ok_or(Error::io("read_stat: file_attributes truncated"))?
             .try_into()
             .unwrap(),
     );
@@ -884,12 +889,12 @@ pub fn read_stat<T: BlockIo + ?Sized>(io: &mut T, record_number: u64) -> Result<
 pub fn read_parent_record<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let fname = read_attribute_value(io, record_number, AttrType::FileName, None)?;
     if fname.len() < 8 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "read_parent_record: $FILE_NAME of record {record_number} too short"
-        ));
+        )));
     }
     let parent_ref = u64::from_le_bytes(fname[0..8].try_into().unwrap());
     Ok(parent_ref & 0x0000_FFFF_FFFF_FFFF)
@@ -931,7 +936,7 @@ pub struct VolumeInfo {
 /// `$VOLUME_INFORMATION` (version + flags) and `$VOLUME_NAME` (label) from the
 /// `$Volume` record (number 3). Replaces the upstream `Ntfs` parse used by the
 /// volume-info / volume-stats entry points.
-pub fn read_volume_info<T: BlockIo + ?Sized>(io: &mut T) -> Result<VolumeInfo, String> {
+pub fn read_volume_info<T: BlockIo + ?Sized>(io: &mut T) -> Result<VolumeInfo, Error> {
     // One boot-sector read; `BootParams` now carries serial + total_sectors +
     // oem_id alongside the geometry, so no second read is needed.
     let params = crate::mft_io::read_boot_params_io(io)?;
@@ -941,11 +946,11 @@ pub fn read_volume_info<T: BlockIo + ?Sized>(io: &mut T) -> Result<VolumeInfo, S
     // affected; but this entry point replaced `Ntfs::new`, which used to reject
     // non-NTFS (FAT/exFAT/raw) images at +0x03 before any structural parse.
     if &params.oem_id != crate::mft_io::NTFS_OEM_ID {
-        return Err(format!(
+        return Err(Error::io(format!(
             "not an NTFS volume: OEM id {:?} != {:?}",
             params.oem_id,
             crate::mft_io::NTFS_OEM_ID
-        ));
+        )));
     }
 
     // Volume size: total_sectors × bytes_per_sector. Matches what the upstream
@@ -963,7 +968,10 @@ pub fn read_volume_info<T: BlockIo + ?Sized>(io: &mut T) -> Result<VolumeInfo, S
     // $VOLUME_INFORMATION (record 3, attr 0x70).
     let vi = read_attribute_value(io, VOLUME_RECORD_NUMBER, AttrType::VolumeInformation, None)?;
     if vi.len() < VI_FLAGS + 2 {
-        return Err(format!("$VOLUME_INFORMATION too short: {} bytes", vi.len()));
+        return Err(Error::io(format!(
+            "$VOLUME_INFORMATION too short: {} bytes",
+            vi.len()
+        )));
     }
     let version_major = vi[VI_MAJOR];
     let version_minor = vi[VI_MAJOR + 1];
@@ -1017,25 +1025,27 @@ pub fn resident_value_disk_offset<T: BlockIo + ?Sized>(
     attr_type: AttrType,
     name: Option<&str>,
     min_value_len: usize,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let (params, holder, _record, loc) = locate_attribute(io, record_number, attr_type, name)?
         .ok_or_else(|| {
-            format!("resident_value_disk_offset: {attr_type:?} not found in record {record_number}")
+            Error::not_found(format!(
+                "resident_value_disk_offset: {attr_type:?} not found in record {record_number}"
+            ))
         })?;
     if !loc.is_resident {
-        return Err(format!(
+        return Err(Error::io(format!(
             "resident_value_disk_offset: {attr_type:?} in record {record_number} is non-resident"
-        ));
+        )));
     }
     let value_len = loc.resident_value_length.unwrap_or(0) as usize;
     if value_len < min_value_len {
-        return Err(format!(
+        return Err(Error::io(format!(
             "resident_value_disk_offset: {attr_type:?} value is {value_len} bytes, need >= {min_value_len}"
-        ));
+        )));
     }
     let value_offset = loc
         .resident_value_offset
-        .ok_or("resident attribute has no value offset")? as u64;
+        .ok_or(Error::io("resident attribute has no value offset"))? as u64;
     // Use `holder` (the record actually containing the attribute, which may be
     // an `$ATTRIBUTE_LIST` extension record), not the base `record_number`.
     Ok(crate::mft_io::mft_record_offset(&params, holder) + loc.attr_offset as u64 + value_offset)
@@ -1053,24 +1063,24 @@ pub fn nonresident_contiguous_disk_range<T: BlockIo + ?Sized>(
     record_number: u64,
     attr_type: AttrType,
     name: Option<&str>,
-) -> Result<(u64, u64), String> {
+) -> Result<(u64, u64), Error> {
     let (params, _holder, record, loc) =
         locate_attribute(io, record_number, attr_type, name)?.ok_or_else(|| {
-            format!(
+            Error::not_found(format!(
                 "nonresident_contiguous_disk_range: {attr_type:?} not found in record {record_number}"
-            )
+            ))
         })?;
     if loc.is_resident {
-        return Err(format!(
+        return Err(Error::io(format!(
             "nonresident_contiguous_disk_range: {attr_type:?} in record {record_number} is resident"
-        ));
+        )));
     }
     let length = loc
         .non_resident_value_length
-        .ok_or("non-resident attribute has no data length")?;
-    let mpo = loc
-        .non_resident_mapping_pairs_offset
-        .ok_or("non-resident attribute has no mapping-pairs offset")? as usize;
+        .ok_or(Error::io("non-resident attribute has no data length"))?;
+    let mpo = loc.non_resident_mapping_pairs_offset.ok_or(Error::io(
+        "non-resident attribute has no mapping-pairs offset",
+    ))? as usize;
     let runs =
         data_runs::decode_runs(&record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length])?;
 
@@ -1078,16 +1088,16 @@ pub fn nonresident_contiguous_disk_range<T: BlockIo + ?Sized>(
     // treat the result as a single flat range, so refuse fragmented / sparse
     // layouts rather than risk writing into clusters between runs.
     if runs.len() != 1 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "nonresident_contiguous_disk_range: {attr_type:?} in record {record_number} is not a \
              single extent ({} runs); refusing flat-range access",
             runs.len()
-        ));
+        )));
     }
     let run = &runs[0];
-    let lcn = run
-        .lcn
-        .ok_or("non-resident attribute's only run is a sparse hole")?;
+    let lcn = run.lcn.ok_or(Error::io(
+        "non-resident attribute's only run is a sparse hole",
+    ))?;
     // THE RANGE HAS TO BE ON THE DEVICE.
     //
     // The only guard here used to compare two fields of the same
@@ -1101,25 +1111,27 @@ pub fn nonresident_contiguous_disk_range<T: BlockIo + ?Sized>(
     let extent_bytes = run
         .length
         .checked_mul(params.cluster_size)
-        .ok_or_else(|| format!("{attr_type:?} extent length overflows"))?;
+        .ok_or_else(|| Error::io(format!("{attr_type:?} extent length overflows")))?;
     if extent_bytes < length {
-        return Err(format!(
+        return Err(Error::io(format!(
             "nonresident_contiguous_disk_range: {attr_type:?} extent ({extent_bytes} bytes) shorter \
              than value length ({length})"
-        ));
+        )));
     }
-    let start = lcn
-        .checked_mul(params.cluster_size)
-        .ok_or_else(|| format!("{attr_type:?} extent starts past the address space"))?;
+    let start = lcn.checked_mul(params.cluster_size).ok_or_else(|| {
+        Error::io(format!(
+            "{attr_type:?} extent starts past the address space"
+        ))
+    })?;
     let end = start
         .checked_add(length)
-        .ok_or_else(|| format!("{attr_type:?} extent ends past the address space"))?;
+        .ok_or_else(|| Error::io(format!("{attr_type:?} extent ends past the address space")))?;
     let device = io.size();
     if end > device {
-        return Err(format!(
+        return Err(Error::io(format!(
             "nonresident_contiguous_disk_range: {attr_type:?} in record {record_number} spans \
              [{start}, {end}) on a device of {device} bytes"
-        ));
+        )));
     }
     Ok((start, length))
 }
@@ -1291,9 +1303,9 @@ fn nonresident_disk_ranges_io<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
     name: Option<&str>,
-) -> Result<Vec<(u64, u64)>, String> {
+) -> Result<Vec<(u64, u64)>, Error> {
     let (params, _holder, record, loc) = locate_attribute(io, record_number, AttrType::Data, name)?
-        .ok_or_else(|| format!("record {record_number}: no $DATA named {name:?}"))?;
+        .ok_or_else(|| Error::io(format!("record {record_number}: no $DATA named {name:?}")))?;
     if loc.is_resident {
         // NOT A FAILURE. A resident attribute's bytes live inside the
         // MFT record itself, not in clusters `$Bitmap` tracks -- there
@@ -1308,9 +1320,9 @@ fn nonresident_disk_ranges_io<T: BlockIo + ?Sized>(
         // function exists to avoid causing.
         return Ok(Vec::new());
     }
-    let mpo = loc
-        .non_resident_mapping_pairs_offset
-        .ok_or("non-resident attribute has no mapping-pairs offset")? as usize;
+    let mpo = loc.non_resident_mapping_pairs_offset.ok_or(Error::io(
+        "non-resident attribute has no mapping-pairs offset",
+    ))? as usize;
     let runs =
         data_runs::decode_runs(&record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length])?;
     // The attribute's own declared size, which `run_protected_range`
@@ -1518,12 +1530,12 @@ pub struct DirEntry {
 pub fn read_dir_entries<T: BlockIo + ?Sized>(
     io: &mut T,
     dir_record: u64,
-) -> Result<Vec<DirEntry>, String> {
+) -> Result<Vec<DirEntry>, Error> {
     let (_, dir_bytes) = read_mft_record_io(io, dir_record)?;
     if record_flags(&dir_bytes) & MFT_FLAG_DIRECTORY == 0 {
-        return Err(format!(
+        return Err(Error::not_directory(format!(
             "read_dir_entries: record {dir_record} is not a directory"
-        ));
+        )));
     }
 
     let mut raw = Vec::new();
@@ -1546,8 +1558,11 @@ pub fn read_dir_entries<T: BlockIo + ?Sized>(
     // the unreachability depends on; the day that test has to change,
     // this line is what stands between a short listing and a caller
     // that believes it.
-    let ir_flags = index_io::index_root_flags(&dir_bytes)
-        .ok_or_else(|| format!("directory record {dir_record} has no readable $INDEX_ROOT"))?;
+    let ir_flags = index_io::index_root_flags(&dir_bytes).ok_or_else(|| {
+        Error::io(format!(
+            "directory record {dir_record} has no readable $INDEX_ROOT"
+        ))
+    })?;
     if ir_flags & IH_FLAG_HAS_SUBNODES != 0 {
         let ia = idx_block::load_for_directory_io(io, dir_record)?;
         for vcn in ia.allocated_block_vcns() {
@@ -1590,7 +1605,7 @@ pub struct AttrListEntry {
 /// type(4) length(2) name_len(1) name_off(1) starting_vcn(8)
 /// base_file_reference(8) attribute_id(2) name(name_len × UTF-16). Entries are
 /// walked by their `length` field until the value is exhausted.
-pub fn parse_attribute_list(value: &[u8]) -> Result<Vec<AttrListEntry>, String> {
+pub fn parse_attribute_list(value: &[u8]) -> Result<Vec<AttrListEntry>, Error> {
     let mut out = Vec::new();
     let mut cursor = 0usize;
     while cursor + 0x1A <= value.len() {
@@ -1600,9 +1615,9 @@ pub fn parse_attribute_list(value: &[u8]) -> Result<Vec<AttrListEntry>, String> 
             break;
         }
         if cursor + length > value.len() {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "$ATTRIBUTE_LIST entry at {cursor} (len {length}) overruns the value"
-            ));
+            )));
         }
         let name_length = value[cursor + 6] as usize;
         let name_offset = value[cursor + 7] as usize;
@@ -1615,9 +1630,9 @@ pub fn parse_attribute_list(value: &[u8]) -> Result<Vec<AttrListEntry>, String> 
         } else {
             let ns = cursor + name_offset;
             if ns + name_length * 2 > value.len() {
-                return Err(format!(
+                return Err(Error::io(format!(
                     "$ATTRIBUTE_LIST entry at {cursor} name overruns the value"
-                ));
+                )));
             }
             Some(
                 char::decode_utf16(

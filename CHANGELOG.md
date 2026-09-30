@@ -28,9 +28,32 @@
   - **Rust:** `FsckReport.logfile_bytes: u64` is replaced by
     `FsckReport.logfile: LogfileState` (`Empty` or `Clean`), and
     `FsckReport` is no longer `Copy`.
+- **The Rust API's errors are `fs_ntfs::error::Error`, not `String`**
+  (#382). Every function in `read`, `write`, `fsck`, `mkfs`, `index_io`,
+  `mft_io` and the other modules that returned `Result<_, String>` returns
+  `Result<_, Error>`: the message, character for character as before, and a
+  `Kind` saying what went wrong. `Error` derefs to `str`, compares equal to a
+  `&str`, and converts into a `String`, so code that reads the message
+  mostly reads it unchanged. The `BlockIo` trait still speaks `String`, and
+  a `String` error converts to `Kind::Io`. The facade's `Error` is
+  unchanged.
 
 ### Fixed
 
+- **The errno is decided where the error is raised, not read out of its
+  message** (#382). `fs_ntfs_last_errno` used to be inferred by searching
+  the message for "not found", "already exists", "full", "invalid" and the
+  like, and many messages quote a name the caller chose, so the name decided
+  the errno: creating `x` under a regular file called `already exists`
+  reported EEXIST, `full` ENOSPC and `invalid` EINVAL, not ENOTDIR, and a
+  lookup through a regular file reported whatever the next component's name
+  suggested. Every raise site now names its kind, so the name no longer
+  counts; each site keeps the errno its own wording used to give it. Words
+  in a function's name no longer count either: `fs_ntfs_read_si_full`'s NULL
+  arguments were ENOSPC and are EINVAL.
+- **ENOTEMPTY is the platform's** (#382). It was hard-coded to 66, macOS's
+  value; Linux's is 39, so a Linux caller never saw ENOTEMPTY. Every errno
+  now comes from `libc` for the platform the crate is built for.
 - **`fs_ntfs_last_errno` is 0 after a successful call** (#381). Every entry
   point resets it on entry, so a clean end of directory reads as errno 0
   even on a thread where an earlier lookup failed; before, the errno of the

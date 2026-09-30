@@ -92,7 +92,7 @@ fn fill_until_full(img: &str, dir: &str, prefix: &str) -> (usize, String) {
         let name = format!("{prefix}{i:04}.txt");
         match write::create_file(Path::new(img), &dir_path, &name) {
             Ok(_) => created += 1,
-            Err(e) => return (created, e),
+            Err(e) => return (created, e.into()),
         }
     }
     (created, String::new())
@@ -302,7 +302,7 @@ fn root_dir_fills_gracefully_at_capacity() {
         match write::create_file(Path::new(&img), "/", &name) {
             Ok(_) => created += 1,
             Err(e) => {
-                err = e;
+                err = e.into();
                 break;
             }
         }

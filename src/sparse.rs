@@ -18,6 +18,7 @@
 //! Internals 7th ed. ch. "NTFS On-Disk Structure" and MS-FSCC §2.4.
 
 use crate::data_runs::DataRun;
+use crate::error::Error;
 
 /// Attribute-header data-flag (`+0x0C`, u16 LE) marking a non-resident
 /// attribute as sparse.
@@ -133,7 +134,7 @@ pub fn allocated_clusters(segments: &[SparseSegment]) -> u64 {
 ///
 /// `data_lcns` must have exactly one entry per `Data` segment (the starting
 /// LCN of the contiguous run the I/O layer allocated for it).
-pub fn build_runs(segments: &[SparseSegment], data_lcns: &[u64]) -> Result<Vec<DataRun>, String> {
+pub fn build_runs(segments: &[SparseSegment], data_lcns: &[u64]) -> Result<Vec<DataRun>, Error> {
     let mut runs = Vec::with_capacity(segments.len());
     let mut lcn_iter = data_lcns.iter();
     for seg in segments {
@@ -153,7 +154,7 @@ pub fn build_runs(segments: &[SparseSegment], data_lcns: &[u64]) -> Result<Vec<D
             } => {
                 let lcn = *lcn_iter
                     .next()
-                    .ok_or("build_runs: fewer LCNs than Data segments")?;
+                    .ok_or(Error::io("build_runs: fewer LCNs than Data segments"))?;
                 runs.push(DataRun {
                     starting_vcn: *start_vcn,
                     length: *clusters,
@@ -163,7 +164,7 @@ pub fn build_runs(segments: &[SparseSegment], data_lcns: &[u64]) -> Result<Vec<D
         }
     }
     if lcn_iter.next().is_some() {
-        return Err("build_runs: more LCNs than Data segments".to_string());
+        return Err(Error::io("build_runs: more LCNs than Data segments"));
     }
     Ok(runs)
 }

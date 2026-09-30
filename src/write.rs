@@ -11,6 +11,7 @@ use crate::attr_io::{self, AttrType};
 use crate::bitmap;
 use crate::block_io::{BlockIo, PathIo};
 use crate::data_runs::{self, DataRun};
+use crate::error::Error;
 use crate::idx_block;
 use crate::index_io;
 use crate::mft_bitmap;
@@ -51,7 +52,7 @@ const SI_SECURITY_ID: usize = 0x34;
 /// `$STANDARD_INFORMATION`; does not touch the duplicate times in the
 /// parent directory's `$FILE_NAME` index (Windows itself only updates
 /// them on rename/create).
-pub fn set_times(path: &Path, file_path: &str, times: FileTimes) -> Result<(), String> {
+pub fn set_times(path: &Path, file_path: &str, times: FileTimes) -> Result<(), Error> {
     let mut io = PathIo::open_rw(path)?;
     set_times_io(&mut io, file_path, times)
 }
@@ -60,7 +61,7 @@ pub fn set_times_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     times: FileTimes,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     set_times_by_record_number_io(io, rec, times)
 }
@@ -70,7 +71,7 @@ pub fn set_times_by_record_number(
     path: &Path,
     record_number: u64,
     times: FileTimes,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut io = PathIo::open_rw(path)?;
     set_times_by_record_number_io(&mut io, record_number, times)
 }
@@ -79,19 +80,21 @@ pub fn set_times_by_record_number_io<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
     times: FileTimes,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     update_mft_record_io(io, record_number, |record| {
         let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
-            .ok_or_else(|| "$STANDARD_INFORMATION not found".to_string())?;
+            .ok_or_else(|| Error::not_found("$STANDARD_INFORMATION not found"))?;
         let data_start = attr_io::resident_value_start(&loc)
-            .ok_or_else(|| "$STANDARD_INFORMATION not resident".to_string())?;
-        let value_length = loc.resident_value_length.ok_or("no value length")? as usize;
+            .ok_or_else(|| Error::io("$STANDARD_INFORMATION not resident"))?;
+        let value_length = loc
+            .resident_value_length
+            .ok_or(Error::io("no value length"))? as usize;
         // First 32 bytes hold the four u64 timestamps; present in every
         // NTFS version (1.x = 48 bytes, 3.x+ = 72 bytes).
         if value_length < 0x20 {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "$STANDARD_INFORMATION unexpectedly short: {value_length}"
-            ));
+            )));
         }
         write_u64_at(record, data_start + SI_CREATION, times.creation);
         write_u64_at(record, data_start + SI_MODIFICATION, times.modification);
@@ -138,7 +141,7 @@ pub mod file_attr {
 /// `0` is "no security descriptor assigned" (treated as the default
 /// inherited DACL), and `0x100` is the canonical entry mkfs ships for
 /// system files.
-pub fn read_security_id(path: &Path, file_path: &str) -> Result<Option<u32>, String> {
+pub fn read_security_id(path: &Path, file_path: &str) -> Result<Option<u32>, Error> {
     let mut io = PathIo::open_ro(path)?;
     read_security_id_io(&mut io, file_path)
 }
@@ -146,14 +149,16 @@ pub fn read_security_id(path: &Path, file_path: &str) -> Result<Option<u32>, Str
 pub fn read_security_id_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
-) -> Result<Option<u32>, String> {
+) -> Result<Option<u32>, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
     let loc = attr_io::find_attribute(&record, AttrType::StandardInformation, None)
-        .ok_or_else(|| "$STANDARD_INFORMATION not found".to_string())?;
+        .ok_or_else(|| Error::not_found("$STANDARD_INFORMATION not found"))?;
     let data_start = attr_io::resident_value_start(&loc)
-        .ok_or_else(|| "$STANDARD_INFORMATION not resident".to_string())?;
-    let value_length = loc.resident_value_length.ok_or("no value length")? as usize;
+        .ok_or_else(|| Error::io("$STANDARD_INFORMATION not resident"))?;
+    let value_length = loc
+        .resident_value_length
+        .ok_or(Error::io("no value length"))? as usize;
     if value_length < SI_SECURITY_ID + 4 {
         // 48-byte v1.x form: security_id field is absent. Caller can
         // either accept this as "default DACL" or call set_security_id
@@ -209,7 +214,7 @@ const SI_USN: usize = 0x40;
 /// targeted `read_security_id`, this exposes the full 48-byte common
 /// header plus the optional 24-byte NTFS 3.x trailer (Owner/Security
 /// IDs, Quota, USN) when present.
-pub fn read_si_full(image: &Path, file_path: &str) -> Result<StandardInformationFull, String> {
+pub fn read_si_full(image: &Path, file_path: &str) -> Result<StandardInformationFull, Error> {
     let mut io = PathIo::open_ro(image)?;
     read_si_full_io(&mut io, file_path)
 }
@@ -217,21 +222,23 @@ pub fn read_si_full(image: &Path, file_path: &str) -> Result<StandardInformation
 pub fn read_si_full_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
-) -> Result<StandardInformationFull, String> {
+) -> Result<StandardInformationFull, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
     let loc = attr_io::find_attribute(&record, AttrType::StandardInformation, None)
-        .ok_or_else(|| "$STANDARD_INFORMATION not found".to_string())?;
+        .ok_or_else(|| Error::not_found("$STANDARD_INFORMATION not found"))?;
     let data_start = attr_io::resident_value_start(&loc)
-        .ok_or_else(|| "$STANDARD_INFORMATION not resident".to_string())?;
-    let value_length = loc.resident_value_length.ok_or("no value length")? as usize;
+        .ok_or_else(|| Error::io("$STANDARD_INFORMATION not resident"))?;
+    let value_length = loc
+        .resident_value_length
+        .ok_or(Error::io("no value length"))? as usize;
     // v1.x = 48 bytes (stops after class_id at 0x30). v3.x = 72 bytes
     // (adds owner_id/security_id/quota/usn). Anything below 48 is
     // structurally broken.
     if value_length < 0x30 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$STANDARD_INFORMATION value too short: {value_length} bytes (need ≥ 48)"
-        ));
+        )));
     }
     let read_u32 = |off: usize| {
         u32::from_le_bytes([
@@ -290,14 +297,14 @@ pub fn read_si_full_io<T: BlockIo + ?Sized>(
 /// `mkdir`) ship that form unconditionally; system files written by
 /// mkfs use the 48-byte NTFS 1.x form and can't be retargeted via
 /// this API (`security_id` field is absent). Returns
-/// `Err("STANDARD_INFORMATION too small …")` in that case.
+/// `Err(Error::io("STANDARD_INFORMATION too small …"))` in that case.
 ///
 /// NOTE: this writer assumes the new `security_id` already has a
 /// corresponding entry in `$Secure:$SDS` / `$SDH` / `$SII`. Adding
 /// new SD entries is a larger piece of work (§3.4 "full ACL
 /// support") — this API is the minimal "point a file at the
 /// existing catalog entry" surface.
-pub fn set_security_id(path: &Path, file_path: &str, security_id: u32) -> Result<(), String> {
+pub fn set_security_id(path: &Path, file_path: &str, security_id: u32) -> Result<(), Error> {
     let mut io = PathIo::open_rw(path)?;
     set_security_id_io(&mut io, file_path, security_id)
 }
@@ -306,19 +313,21 @@ pub fn set_security_id_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     security_id: u32,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     update_mft_record_io(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
-            .ok_or_else(|| "$STANDARD_INFORMATION not found".to_string())?;
+            .ok_or_else(|| Error::not_found("$STANDARD_INFORMATION not found"))?;
         let data_start = attr_io::resident_value_start(&loc)
-            .ok_or_else(|| "$STANDARD_INFORMATION not resident".to_string())?;
-        let value_length = loc.resident_value_length.ok_or("no value length")? as usize;
+            .ok_or_else(|| Error::io("$STANDARD_INFORMATION not resident"))?;
+        let value_length = loc
+            .resident_value_length
+            .ok_or(Error::io("no value length"))? as usize;
         if value_length < SI_SECURITY_ID + 4 {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "$STANDARD_INFORMATION too small for security_id: {value_length} bytes (need ≥ {})",
                 SI_SECURITY_ID + 4
-            ));
+            )));
         }
         let off = data_start + SI_SECURITY_ID;
         record[off..off + 4].copy_from_slice(&security_id.to_le_bytes());
@@ -334,7 +343,7 @@ pub fn set_file_attributes(
     path: &Path,
     file_path: &str,
     change: FileAttributesChange,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut io = PathIo::open_rw(path)?;
     set_file_attributes_io(&mut io, file_path, change)
 }
@@ -343,7 +352,7 @@ pub fn set_file_attributes_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     change: FileAttributesChange,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     set_file_attributes_by_record_number_io(io, rec, change)
 }
@@ -353,7 +362,7 @@ pub fn set_file_attributes_by_record_number(
     path: &Path,
     record_number: u64,
     change: FileAttributesChange,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut io = PathIo::open_rw(path)?;
     set_file_attributes_by_record_number_io(&mut io, record_number, change)
 }
@@ -362,23 +371,25 @@ pub fn set_file_attributes_by_record_number_io<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
     change: FileAttributesChange,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     if change.add & change.remove != 0 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "add and remove overlap: add={:#x} remove={:#x}",
             change.add, change.remove
-        ));
+        )));
     }
     update_mft_record_io(io, record_number, |record| {
         let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
-            .ok_or_else(|| "$STANDARD_INFORMATION not found".to_string())?;
+            .ok_or_else(|| Error::not_found("$STANDARD_INFORMATION not found"))?;
         let data_start = attr_io::resident_value_start(&loc)
-            .ok_or_else(|| "$STANDARD_INFORMATION not resident".to_string())?;
-        let value_length = loc.resident_value_length.ok_or("no value length")? as usize;
+            .ok_or_else(|| Error::io("$STANDARD_INFORMATION not resident"))?;
+        let value_length = loc
+            .resident_value_length
+            .ok_or(Error::io("no value length"))? as usize;
         if value_length < SI_FILE_ATTRIBUTES + 4 {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "$STANDARD_INFORMATION too short for file_attributes field: {value_length}"
-            ));
+            )));
         }
         let off = data_start + SI_FILE_ATTRIBUTES;
         let current = u32::from_le_bytes([
@@ -404,7 +415,7 @@ pub fn set_file_attributes_by_record_number_io<T: BlockIo + ?Sized>(
 /// `offset` is a byte offset within the file's logical data; `data` is
 /// written starting there. Returns the number of bytes written on
 /// success. A zero-length write is a no-op.
-pub fn write_at(image: &Path, file_path: &str, offset: u64, data: &[u8]) -> Result<u64, String> {
+pub fn write_at(image: &Path, file_path: &str, offset: u64, data: &[u8]) -> Result<u64, Error> {
     if data.is_empty() {
         return Ok(0);
     }
@@ -417,7 +428,7 @@ pub fn write_at_io<T: BlockIo + ?Sized>(
     file_path: &str,
     offset: u64,
     data: &[u8],
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     if data.is_empty() {
         return Ok(0);
     }
@@ -431,7 +442,7 @@ pub fn write_at_by_record_number(
     record_number: u64,
     offset: u64,
     data: &[u8],
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     // Before the open, as `write_at` does it: a write of nothing has no
     // reason to take the image read-write. See #218.
     if data.is_empty() {
@@ -446,7 +457,7 @@ pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
     record_number: u64,
     offset: u64,
     data: &[u8],
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     // THE GUARD THE OTHER TWO ENTRY POINTS HAVE, AND THIS ONE IS THE
     // DEEPEST OF THE FOUR.
     //
@@ -479,19 +490,18 @@ pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
     let cluster_size = params.cluster_size;
 
     let loc = attr_io::find_attribute(&record, AttrType::Data, None)
-        .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+        .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
     if loc.is_resident {
-        return Err(
-            "write_at only supports non-resident $DATA in W1 (resident grow lands in W2)"
-                .to_string(),
-        );
+        return Err(Error::io(
+            "write_at only supports non-resident $DATA in W1 (resident grow lands in W2)",
+        ));
     }
 
     refuse_transformed_data(&record, &loc, "write_at")?;
 
     let value_length = loc
         .non_resident_value_length
-        .ok_or("missing non-resident value_length")?;
+        .ok_or(Error::io("missing non-resident value_length"))?;
     // Everything from initialized_length to data_length reads as zeros
     // whatever is on the clusters -- `read.rs` clamps to
     // `min(data_size, init_size)`, and so does Windows. A write that
@@ -506,21 +516,21 @@ pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
     .min(value_length);
     let end = offset
         .checked_add(data.len() as u64)
-        .ok_or("offset + len overflow")?;
+        .ok_or(Error::io("offset + len overflow"))?;
     if end > value_length {
-        return Err(format!(
+        return Err(Error::io(format!(
             "write past EOF: offset={offset} len={} > value_length={value_length}",
             data.len()
-        ));
+        )));
     }
 
     let mapping_offset = loc
         .non_resident_mapping_pairs_offset
-        .ok_or("missing mapping_pairs_offset")? as usize;
+        .ok_or(Error::io("missing mapping_pairs_offset"))? as usize;
     let mapping_start = loc.attr_offset + mapping_offset;
     let mapping_end = loc.attr_offset + loc.attr_length;
     if mapping_end > record.len() || mapping_start >= mapping_end {
-        return Err("mapping_pairs range out of record".to_string());
+        return Err(Error::io("mapping_pairs range out of record"));
     }
     let runs = data_runs::decode_runs(&record[mapping_start..mapping_end])?;
 
@@ -528,11 +538,11 @@ pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
     let vcn_last = (end - 1) / cluster_size;
     let n_clusters = vcn_last - vcn_first + 1;
     if data_runs::range_has_hole_or_past_end(&runs, vcn_first, n_clusters) {
-        return Err(format!(
+        return Err(Error::io(format!(
             "write range covers a sparse hole or extends past mapped clusters \
              (vcn {vcn_first}..{}); W2 will handle allocation",
             vcn_first + n_clusters
-        ));
+        )));
     }
 
     // A write that starts past initialized_length leaves a gap, and
@@ -551,7 +561,8 @@ pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
     while cursor_in_data < data.len() {
         let vcn = file_offset / cluster_size;
         let off_in_cluster = file_offset % cluster_size;
-        let run = find_run_for_vcn(&runs, vcn).ok_or_else(|| format!("no run for VCN {vcn}"))?;
+        let run = find_run_for_vcn(&runs, vcn)
+            .ok_or_else(|| Error::io(format!("no run for VCN {vcn}")))?;
         let lcn = run.lcn.expect("hole already rejected");
         // bytes we can write without crossing this run's end:
         let max_in_this_run = bytes_to_run_end(run, cluster_size, file_offset)?;
@@ -588,7 +599,7 @@ pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
     if end > initialized_length {
         update_mft_record_io(io, record_number, |record| {
             let loc = attr_io::find_attribute(record, AttrType::Data, None)
-                .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+                .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
             record[loc.attr_offset + NONRES_INITIALIZED_LENGTH
                 ..loc.attr_offset + NONRES_INITIALIZED_LENGTH + 8]
                 .copy_from_slice(&end.to_le_bytes());
@@ -616,7 +627,7 @@ fn zero_fill_range_io<T: BlockIo + ?Sized>(
     runs: &[DataRun],
     from: u64,
     to: u64,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     if to <= from {
         return Ok(());
     }
@@ -676,14 +687,17 @@ fn refuse_transformed_data(
     record: &[u8],
     loc: &attr_io::AttrLocation,
     what: &str,
-) -> Result<(), String> {
-    let flags = attr_io::attribute_flags(record, loc)
-        .ok_or_else(|| format!("{what}: record too short to read the $DATA attribute flags"))?;
+) -> Result<(), Error> {
+    let flags = attr_io::attribute_flags(record, loc).ok_or_else(|| {
+        Error::io(format!(
+            "{what}: record too short to read the $DATA attribute flags"
+        ))
+    })?;
     if flags & attr_io::attr_flags::TRANSFORMED != 0 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "{what}: non-resident $DATA is {} (flags={flags:#06x})",
             attr_io::describe_transform_flags(flags)
-        ));
+        )));
     }
     Ok(())
 }
@@ -730,7 +744,7 @@ fn find_run_for_vcn(runs: &[DataRun], vcn: u64) -> Option<&DataRun> {
 /// `file_offset` sitting exactly on the run's end byte would spin
 /// forever. It cannot happen for a run `find_run_for_vcn` selected, which
 /// is why it is an error and not a special case.
-fn bytes_to_run_end(run: &DataRun, cluster_size: u64, file_offset: u64) -> Result<u64, String> {
+fn bytes_to_run_end(run: &DataRun, cluster_size: u64, file_offset: u64) -> Result<u64, Error> {
     let run_end_vcn = run.starting_vcn.checked_add(run.length).ok_or_else(|| {
         format!(
             "run at VCN {} has no end: length {} overflows the VCN space",
@@ -744,10 +758,10 @@ fn bytes_to_run_end(run: &DataRun, cluster_size: u64, file_offset: u64) -> Resul
         )
     })?;
     match run_end_offset.checked_sub(file_offset) {
-        Some(0) | None => Err(format!(
+        Some(0) | None => Err(Error::io(format!(
             "write offset {file_offset} is not inside the run that maps it, \
              which ends at byte {run_end_offset}"
-        )),
+        ))),
         Some(n) => Ok(n),
     }
 }
@@ -769,7 +783,7 @@ fn bytes_to_run_end(run: &DataRun, cluster_size: u64, file_offset: u64) -> Resul
 ///
 /// Rejects: grow (new_size &gt; current size), resident `$DATA`,
 /// compressed / sparse / encrypted flag set.
-pub fn truncate(image: &Path, file_path: &str, new_size: u64) -> Result<u64, String> {
+pub fn truncate(image: &Path, file_path: &str, new_size: u64) -> Result<u64, Error> {
     let mut io = PathIo::open_rw(image)?;
     truncate_io(&mut io, file_path, new_size)
 }
@@ -778,7 +792,7 @@ pub fn truncate_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     new_size: u64,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     truncate_by_record_number_io(io, rec, new_size)
 }
@@ -793,7 +807,7 @@ pub fn truncate_by_record_number(
     image: &Path,
     record_number: u64,
     new_size: u64,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let mut io = PathIo::open_rw(image)?;
     truncate_by_record_number_io(&mut io, record_number, new_size)
 }
@@ -802,18 +816,20 @@ pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
     new_size: u64,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let (params, record) = read_mft_record_io(io, record_number)?;
     let cluster_size = params.cluster_size;
 
     let loc = attr_io::find_attribute(&record, AttrType::Data, None)
-        .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+        .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
     if loc.is_resident {
-        return Err("truncate: resident $DATA unsupported in W2 MVP".to_string());
+        return Err(Error::io("truncate: resident $DATA unsupported in W2 MVP"));
     }
     refuse_transformed_data(&record, &loc, "truncate")?;
 
-    let current_len = loc.non_resident_value_length.ok_or("no value_length")?;
+    let current_len = loc
+        .non_resident_value_length
+        .ok_or(Error::io("no value_length"))?;
     if new_size > current_len {
         // Growing a non-resident file is exactly what grow_nonresident does
         // (allocate clusters, extend data_size, leave initialized_length so
@@ -828,7 +844,7 @@ pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
     // Decode existing runs.
     let mapping_offset = loc
         .non_resident_mapping_pairs_offset
-        .ok_or("missing mapping_pairs_offset")? as usize;
+        .ok_or(Error::io("missing mapping_pairs_offset"))? as usize;
     let mapping_start = loc.attr_offset + mapping_offset;
     let mapping_end = loc.attr_offset + loc.attr_length;
     let runs = data_runs::decode_runs(&record[mapping_start..mapping_end])?;
@@ -846,11 +862,11 @@ pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
     let new_mapping = data_runs::encode_runs(&new_runs)?;
     let mapping_capacity = mapping_end - mapping_start;
     if new_mapping.len() > mapping_capacity {
-        return Err(format!(
+        return Err(Error::io(format!(
             "trimmed mapping_pairs exceed attr header capacity ({} > {})",
             new_mapping.len(),
             mapping_capacity
-        ));
+        )));
     }
 
     let new_allocated = new_last_vcn.map(|lv| (lv + 1) * cluster_size).unwrap_or(0);
@@ -861,11 +877,11 @@ pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
     // about to free. Then free clusters in $Bitmap.
     update_mft_record_io(io, record_number, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, None)
-            .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+            .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
         let attr_start = loc.attr_offset;
-        let mapping_offset = loc
-            .non_resident_mapping_pairs_offset
-            .ok_or("missing mapping_pairs_offset")? as usize;
+        let mapping_offset =
+            loc.non_resident_mapping_pairs_offset
+                .ok_or(Error::io("missing mapping_pairs_offset"))? as usize;
         let mapping_abs = attr_start + mapping_offset;
         let mapping_end_abs = attr_start + loc.attr_length;
 
@@ -905,7 +921,7 @@ pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
             // undo the earlier record update — the file size change has
             // committed.
             bitmap::free_io(io, &bm, *lcn, *n)
-                .map_err(|e| format!("free clusters [{lcn}..{}]: {e}", lcn + n))?;
+                .map_err(|e| e.context(format!("free clusters [{lcn}..{}]", lcn + n)))?;
         }
     }
 
@@ -927,7 +943,7 @@ pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
 /// * The new mapping-pairs must fit within the existing attribute
 ///   header's reserved space (we don't shift following attributes —
 ///   that's W2.1 work). Most grows need 0 or 1 extra encoded bytes.
-pub fn grow_nonresident(image: &Path, file_path: &str, new_size: u64) -> Result<u64, String> {
+pub fn grow_nonresident(image: &Path, file_path: &str, new_size: u64) -> Result<u64, Error> {
     let mut io = PathIo::open_rw(image)?;
     grow_nonresident_io(&mut io, file_path, new_size)
 }
@@ -936,7 +952,7 @@ pub fn grow_nonresident_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     new_size: u64,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     grow_nonresident_by_record_number_io(io, rec, new_size)
 }
@@ -945,7 +961,7 @@ pub fn grow_nonresident_by_record_number(
     image: &Path,
     record_number: u64,
     new_size: u64,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let mut io = PathIo::open_rw(image)?;
     grow_nonresident_by_record_number_io(&mut io, record_number, new_size)
 }
@@ -954,27 +970,31 @@ pub fn grow_nonresident_by_record_number_io<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
     new_size: u64,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let (params, record) = read_mft_record_io(io, record_number)?;
     let cluster_size = params.cluster_size;
 
     let loc = attr_io::find_attribute(&record, AttrType::Data, None)
-        .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+        .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
     if loc.is_resident {
-        return Err("grow_nonresident: refusing resident $DATA (use W2.2 promotion)".to_string());
+        return Err(Error::io(
+            "grow_nonresident: refusing resident $DATA (use W2.2 promotion)",
+        ));
     }
     refuse_transformed_data(&record, &loc, "grow")?;
 
-    let current_len = loc.non_resident_value_length.ok_or("no value_length")?;
+    let current_len = loc
+        .non_resident_value_length
+        .ok_or(Error::io("no value_length"))?;
     if new_size <= current_len {
-        return Err(format!(
+        return Err(Error::io(format!(
             "grow: new_size {new_size} not greater than current {current_len}"
-        ));
+        )));
     }
 
     let mapping_offset = loc
         .non_resident_mapping_pairs_offset
-        .ok_or("missing mapping_pairs_offset")? as usize;
+        .ok_or(Error::io("missing mapping_pairs_offset"))? as usize;
     let mapping_start = loc.attr_offset + mapping_offset;
     let mapping_end = loc.attr_offset + loc.attr_length;
     let mapping_capacity = mapping_end - mapping_start;
@@ -1002,8 +1022,11 @@ pub fn grow_nonresident_by_record_number_io<T: BlockIo + ?Sized>(
         .rev()
         .find_map(|r| r.lcn.map(|lcn| lcn + r.length))
         .unwrap_or(params.mft_lcn.saturating_add(32));
-    let new_lcn = bitmap::find_free_run_io(io, &bm, need_clusters, hint)?
-        .ok_or_else(|| format!("no contiguous free run of {need_clusters} clusters available"))?;
+    let new_lcn = bitmap::find_free_run_io(io, &bm, need_clusters, hint)?.ok_or_else(|| {
+        Error::io(format!(
+            "no contiguous free run of {need_clusters} clusters available"
+        ))
+    })?;
     bitmap::allocate_io(io, &bm, new_lcn, need_clusters)?;
 
     // EVERYTHING BELOW THE ALLOCATION IS FALLIBLE AND ROLLED BACK ONCE.
@@ -1063,7 +1086,7 @@ fn grow_commit_io<T: BlockIo + ?Sized>(
     new_allocated: u64,
     new_last_vcn: u64,
     mapping_capacity: usize,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     // THE ALLOCATED EXTENT HAS TO BE ONE THE VOLUME CAN ADDRESS.
     //
     // This path committed with no `cluster_span` call anywhere, unlike
@@ -1078,9 +1101,15 @@ fn grow_commit_io<T: BlockIo + ?Sized>(
     // back instead of persisting it. See #223.
     let span_bytes = need_clusters
         .checked_mul(params.cluster_size)
-        .ok_or_else(|| format!("grow: {need_clusters} clusters is not an addressable span"))?;
+        .ok_or_else(|| {
+            Error::io(format!(
+                "grow: {need_clusters} clusters is not an addressable span"
+            ))
+        })?;
     crate::mft_io::cluster_span(params, new_lcn, 0, 0, span_bytes, io.size()).map_err(|e| {
-        format!("grow: the {need_clusters} clusters at LCN {new_lcn} are not on the volume: {e}")
+        e.context(format!(
+            "grow: the {need_clusters} clusters at LCN {new_lcn} are not on the volume"
+        ))
     })?;
 
     // Build new run list. If the new allocation is contiguous with the
@@ -1103,21 +1132,21 @@ fn grow_commit_io<T: BlockIo + ?Sized>(
 
     let new_mapping = data_runs::encode_runs(&new_runs)?;
     if new_mapping.len() > mapping_capacity {
-        return Err(format!(
+        return Err(Error::io(format!(
             "new mapping_pairs ({} bytes) {MAPPING_CAPACITY_EXCEEDED} ({}). Attribute resize (W2.1) required.",
             new_mapping.len(),
             mapping_capacity
-        ));
+        )));
     }
 
     // Commit: rewrite MFT record with new mapping + lengths.
     update_mft_record_io(io, record_number, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, None)
-            .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+            .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
         let attr_start = loc.attr_offset;
-        let mapping_offset = loc
-            .non_resident_mapping_pairs_offset
-            .ok_or("missing mapping_pairs_offset")? as usize;
+        let mapping_offset =
+            loc.non_resident_mapping_pairs_offset
+                .ok_or(Error::io("missing mapping_pairs_offset"))? as usize;
         let mapping_abs = attr_start + mapping_offset;
         let mapping_end_abs = attr_start + loc.attr_length;
 
@@ -1149,10 +1178,10 @@ fn apply_grow_lengths_io<T: BlockIo + ?Sized>(
     record_number: u64,
     new_size: u64,
     new_allocated: u64,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     update_mft_record_io(io, record_number, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, None)
-            .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+            .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
         let attr_start = loc.attr_offset;
         record[attr_start + NONRES_ALLOCATED_LENGTH..attr_start + NONRES_ALLOCATED_LENGTH + 8]
             .copy_from_slice(&new_allocated.to_le_bytes());
@@ -1235,7 +1264,7 @@ fn write_u64_at(record: &mut [u8], off: usize, v: Option<u64>) {
 /// — NTFS formatter lays out `/` with `$INDEX_ALLOCATION` even when small.
 /// Walking + patching `$INDEX_ALLOCATION` blocks is a separate
 /// primitive (index_io::find_in_index_allocation, future work).
-pub fn rename_same_length(image: &Path, old_path: &str, new_name: &str) -> Result<(), String> {
+pub fn rename_same_length(image: &Path, old_path: &str, new_name: &str) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     rename_same_length_io(&mut io, old_path, new_name)
 }
@@ -1244,7 +1273,7 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
     io: &mut T,
     old_path: &str,
     new_name: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // The directory index is ordered by COLLATION_FILE_NAME, so a
     // lookup in it has to fold case the same way the insert did;
     // see `index_io::find_index_entry`.
@@ -1256,9 +1285,9 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
     let old_u16_len = current_basename.encode_utf16().count();
     let new_u16_len = new_name.encode_utf16().count();
     if old_u16_len != new_u16_len {
-        return Err(format!(
+        return Err(Error::io(format!(
             "same-length rename required (old {old_u16_len}, new {new_u16_len} UTF-16 units)"
-        ));
+        )));
     }
 
     // 1) Patch the parent's index entry. First check whether it lives
@@ -1266,7 +1295,7 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
     //    dispatch accordingly.
     let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
-        .ok_or_else(|| "no $INDEX_ROOT on parent".to_string())?;
+        .ok_or_else(|| Error::io("no $INDEX_ROOT on parent"))?;
 
     // Reject a destination that already exists: two $I30 entries with the
     // same key is corruption (chkdsk flags it) and a silent clobber leaks
@@ -1300,11 +1329,11 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
                 .as_ref()
                 .is_some_and(|own| own.record_offset == clash.record_offset);
             if !is_own_entry {
-                return Err(format!(
+                return Err(Error::exists(format!(
                     "'{new_name}' already exists (record {}), and it is a different index entry \
                      from the one being renamed",
                     clash.file_record_number
-                ));
+                )));
             }
         }
         if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
@@ -1322,12 +1351,12 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
                         .as_ref()
                         .is_some_and(|own| own.record_offset == clash.record_offset);
                     if !is_own_entry {
-                        return Err(format!(
+                        return Err(Error::exists(format!(
                             "'{new_name}' already exists in this directory (record {}, INDX block \
                              VCN {vcn}), and it is a different index entry from the one being \
                              renamed",
                             clash.file_record_number
-                        ));
+                        )));
                     }
                 }
             }
@@ -1340,15 +1369,15 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
         index_io::find_index_entry(&parent_record_bytes, &current_basename, Some(&upcase))?;
     if let Some(entry_found) = in_root {
         if entry_found.file_record_number != file_rec {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "parent's $INDEX_ROOT entry for '{current_basename}' points at record {} \
                  but the resolved path points at {file_rec}",
                 entry_found.file_record_number
-            ));
+            )));
         }
         update_mft_record_io(io, parent_rec, |record| {
             let entry = index_io::find_index_entry(record, &current_basename, Some(&upcase))?
-                .ok_or_else(|| "race: $INDEX_ROOT entry vanished during RMW".to_string())?;
+                .ok_or_else(|| Error::io("race: $INDEX_ROOT entry vanished during RMW"))?;
             index_io::rename_index_entry_same_length(record, &entry, new_name)
         })?;
     } else if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
@@ -1361,10 +1390,10 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
                 index_io::find_entry_in_indx_block(&block, &current_basename, Some(&upcase))?
             {
                 if entry.file_record_number != file_rec {
-                    return Err(format!(
+                    return Err(Error::io(format!(
                         "INDX entry at VCN {vcn} points at {} but resolved {file_rec}",
                         entry.file_record_number
-                    ));
+                    )));
                 }
                 idx_block::update_indx_block_io(io, &ia, vcn, |block| {
                     let entry = index_io::find_entry_in_indx_block(
@@ -1372,7 +1401,7 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
                         &current_basename,
                         Some(&upcase),
                     )?
-                    .ok_or_else(|| "race: INDX entry vanished".to_string())?;
+                    .ok_or_else(|| Error::io("race: INDX entry vanished"))?;
                     index_io::rename_index_entry_same_length(block, &entry, new_name)
                 })?;
                 patched = true;
@@ -1380,15 +1409,15 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
             }
         }
         if !patched {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "no matching index entry for '{current_basename}' in parent record {parent_rec}"
-            ));
+            )));
         }
     } else {
-        return Err(format!(
+        return Err(Error::io(format!(
             "no entry for '{current_basename}' in parent's resident $INDEX_ROOT \
              (parent has no $INDEX_ALLOCATION spillover)"
-        ));
+        )));
     }
 
     // 2) Patch the file's own $FILE_NAME attributes.
@@ -1416,15 +1445,19 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
             &upcase,
         );
         return Err(match undo {
-            Ok(()) => format!(
-                "renaming the file's own $FILE_NAME failed ({e}); the directory entry was put \
-                 back, so the file is still '{current_basename}'"
-            ),
-            Err(ue) => format!(
-                "renaming the file's own $FILE_NAME failed ({e}), and putting the directory \
-                 entry back failed too ({ue}): the directory now says '{new_name}' and the \
-                 file's own $FILE_NAME says '{current_basename}' — run chkdsk"
-            ),
+            Ok(()) => e.map_message(|m| {
+                format!(
+                    "renaming the file's own $FILE_NAME failed ({m}); the directory entry was put \
+                     back, so the file is still '{current_basename}'"
+                )
+            }),
+            Err(ue) => e.map_message(|m| {
+                format!(
+                    "renaming the file's own $FILE_NAME failed ({m}), and putting the directory \
+                     entry back failed too ({ue}): the directory now says '{new_name}' and the \
+                     file's own $FILE_NAME says '{current_basename}' — run chkdsk"
+                )
+            }),
         });
     }
 
@@ -1445,7 +1478,7 @@ fn undo_index_rename_same_length<T: BlockIo + ?Sized>(
     from: &str,
     to: &str,
     upcase: &crate::upcase::UpcaseTable,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     update_mft_record_io(io, parent_rec, |record| {
         match index_io::find_index_entry(record, from, Some(upcase))? {
             Some(entry) => index_io::rename_index_entry_same_length(record, &entry, to),
@@ -1459,10 +1492,10 @@ fn undo_index_rename_same_length<T: BlockIo + ?Sized>(
         return Ok(());
     }
     if ir_flags & index_io::IH_FLAG_HAS_SUBNODES == 0 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "the entry for '{from}' is no longer in the parent's resident $INDEX_ROOT, and the \
              directory has no $INDEX_ALLOCATION to look in"
-        ));
+        )));
     }
     let ia = idx_block::load_for_directory_io(io, parent_rec)?;
     for vcn in ia.allocated_block_vcns() {
@@ -1470,14 +1503,14 @@ fn undo_index_rename_same_length<T: BlockIo + ?Sized>(
         if index_io::find_entry_in_indx_block(&block, from, Some(upcase))?.is_some() {
             return idx_block::update_indx_block_io(io, &ia, vcn, |block| {
                 let entry = index_io::find_entry_in_indx_block(block, from, Some(upcase))?
-                    .ok_or_else(|| "race: INDX entry vanished during rollback".to_string())?;
+                    .ok_or_else(|| Error::io("race: INDX entry vanished during rollback"))?;
                 index_io::rename_index_entry_same_length(block, &entry, to)
             });
         }
     }
-    Err(format!(
+    Err(Error::io(format!(
         "could not find the entry for '{from}' to put it back"
-    ))
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -1510,9 +1543,9 @@ fn undo_index_rename_same_length<T: BlockIo + ?Sized>(
 /// A host passing a name straight through from a POSIX API, where `:`
 /// and `\` are ordinary characters, produces these as a matter of
 /// course rather than as an edge case.
-fn validate_basename(name: &str) -> Result<(), String> {
+fn validate_basename(name: &str) -> Result<(), Error> {
     if name.is_empty() || name == "." || name == ".." {
-        return Err(format!("invalid basename: '{name}'"));
+        return Err(Error::invalid(format!("invalid basename: '{name}'")));
     }
     // The Win32 reserved set, and the control range. `/` is here as well
     // as in the check above, because it is both "not a component" and a
@@ -1520,19 +1553,19 @@ fn validate_basename(name: &str) -> Result<(), String> {
     if let Some(bad) = name.chars().find(|c| {
         matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (*c as u32) < 0x20
     }) {
-        return Err(format!(
+        return Err(Error::invalid(format!(
             "invalid basename '{name}': Windows cannot address a name containing {bad:?}. \
              Reserved: \\ / : * ? \" < > | and the control characters"
-        ));
+        )));
     }
     // A TRAILING SPACE OR PERIOD IS UNADDRESSABLE FOR THE SAME REASON:
     // Windows strips both when it parses a path, so "report." names the
     // file "report" and can never reach the one actually on the volume.
     if name.ends_with(' ') || name.ends_with('.') {
-        return Err(format!(
+        return Err(Error::invalid(format!(
             "invalid basename '{name}': Windows strips a trailing space or period when it \
              parses a path, so this name could never be opened by the name it has"
-        ));
+        )));
     }
     Ok(())
 }
@@ -1546,7 +1579,7 @@ fn validate_basename(name: &str) -> Result<(), String> {
 ///   refused before the new record is allocated.
 /// * Filename collation is case-insensitive ASCII-only (proper
 ///   NTFS upcase-table collation is future work).
-pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u64, String> {
+pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Error> {
     let mut io = PathIo::open_rw(image)?;
     create_file_io(&mut io, parent_path, basename)
 }
@@ -1624,8 +1657,8 @@ fn undo_cluster_allocation_io<T: BlockIo + ?Sized>(
     io: &mut T,
     bm: &crate::bitmap::BitmapLocation,
     allocated: &[(u64, u64)],
-    cause: String,
-) -> String {
+    cause: Error,
+) -> Error {
     let mut failures: Vec<String> = Vec::new();
     for &(lcn, n_clusters) in allocated {
         if let Err(e) = crate::bitmap::free_io(io, bm, lcn, n_clusters) {
@@ -1635,10 +1668,12 @@ fn undo_cluster_allocation_io<T: BlockIo + ?Sized>(
     if failures.is_empty() {
         cause
     } else {
-        format!(
-            "{cause} (rollback incomplete, clusters leaked in $Bitmap: {})",
-            failures.join("; ")
-        )
+        cause.map_message(|m| {
+            format!(
+                "{m} (rollback incomplete, clusters leaked in $Bitmap: {})",
+                failures.join("; ")
+            )
+        })
     }
 }
 
@@ -1647,8 +1682,8 @@ fn undo_new_record_io<T: BlockIo + ?Sized>(
     mbm: &mft_bitmap::MftBitmap,
     new_rec: u64,
     state: NewRecordState,
-    cause: String,
-) -> String {
+    cause: Error,
+) -> Error {
     let mut failures: Vec<String> = Vec::new();
     let mut in_use_cleared = state != NewRecordState::RecordWritten;
     if state == NewRecordState::RecordWritten {
@@ -1697,17 +1732,19 @@ fn undo_new_record_io<T: BlockIo + ?Sized>(
         ),
         (true, true) => unreachable!("failures is non-empty, so one of the two must have failed"),
     };
-    format!(
-        "{cause} (rollback incomplete, {shape}: {})",
-        failures.join("; ")
-    )
+    cause.map_message(|m| {
+        format!(
+            "{m} (rollback incomplete, {shape}: {})",
+            failures.join("; ")
+        )
+    })
 }
 
 pub fn create_file_io<T: BlockIo + ?Sized>(
     io: &mut T,
     parent_path: &str,
     basename: &str,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     // The directory index is ordered by COLLATION_FILE_NAME, so a
     // lookup in it has to fold case the same way the insert did;
     // see `index_io::find_index_entry`.
@@ -1721,22 +1758,28 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
     let (params, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let parent_flags = crate::mft_io::record_flags(&parent_record_bytes);
     if parent_flags & crate::mft_io::MFT_FLAG_DIRECTORY == 0 {
-        return Err(format!("parent '{parent_path}' is not a directory"));
+        return Err(Error::not_directory(format!(
+            "parent '{parent_path}' is not a directory"
+        )));
     }
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
-        .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
+        .ok_or_else(|| Error::io("parent has no $INDEX_ROOT"))?;
     let parent_has_overflow = ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0;
 
     // Reject if the entry already exists anywhere (resident or INDX block).
     if index_io::find_index_entry(&parent_record_bytes, basename, Some(&upcase))?.is_some() {
-        return Err(format!("'{basename}' already exists in '{parent_path}'"));
+        return Err(Error::exists(format!(
+            "'{basename}' already exists in '{parent_path}'"
+        )));
     }
     if parent_has_overflow {
         let ia = idx_block::load_for_directory_io(io, parent_rec)?;
         for vcn in ia.allocated_block_vcns() {
             let blk = idx_block::read_indx_block_io(io, &ia, vcn)?;
             if index_io::find_entry_in_indx_block(&blk, basename, Some(&upcase))?.is_some() {
-                return Err(format!("'{basename}' already exists in '{parent_path}'"));
+                return Err(Error::exists(format!(
+                    "'{basename}' already exists in '{parent_path}'"
+                )));
             }
         }
         preflight_parent_insert_io(
@@ -1792,7 +1835,7 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
             &mbm,
             new_rec,
             NewRecordState::BitmapOnly,
-            format!("write new record: {e}"),
+            Error::io(format!("write new record: {e}")),
         ));
     }
     if let Err(e) = io.sync() {
@@ -1801,7 +1844,7 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
             &mbm,
             new_rec,
             NewRecordState::BitmapOnly,
-            format!("fsync new record: {e}"),
+            Error::io(format!("fsync new record: {e}")),
         ));
     }
 
@@ -1822,7 +1865,7 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
             &mbm,
             new_rec,
             NewRecordState::RecordWritten,
-            format!("insert index entry: {e}"),
+            e.context("insert index entry"),
         ));
     }
 
@@ -1840,7 +1883,7 @@ fn insert_entry_in_parent(
     parent_has_overflow: bool,
     entry_bytes: &[u8],
     basename: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     insert_entry_in_parent_io(
         &mut io,
@@ -1857,7 +1900,7 @@ fn insert_entry_in_parent_io<T: BlockIo + ?Sized>(
     parent_has_overflow: bool,
     entry_bytes: &[u8],
     basename: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // Load the upcase table once so sorted insertion matches NTFS
     // collation (COLLATION_FILE_NAME) on non-ASCII names. Falls back
     // to the ASCII upcase-fold if $UpCase can't be loaded (shouldn't
@@ -1901,9 +1944,9 @@ fn insert_entry_in_parent_io<T: BlockIo + ?Sized>(
         Err(e) if e.contains("INDX block has no room") => {
             split_index_leaf_io(io, parent_rec, &ia, vcn, entry_bytes, upcase.as_ref())
         }
-        Err(e) => Err(format!(
+        Err(e) => Err(e.context(
             "$INDEX_ALLOCATION insertion is not supported: the target leaf cannot fit \
-             the entry (W3.2): {e}"
+             the entry (W3.2)",
         )),
     }
 }
@@ -1914,16 +1957,16 @@ fn routed_leaf_io<T: BlockIo + ?Sized>(
     root: &[u8],
     basename: &str,
     upcase: Option<&crate::upcase::UpcaseTable>,
-) -> Result<(idx_block::IndexAllocation, u64, Vec<u8>), String> {
+) -> Result<(idx_block::IndexAllocation, u64, Vec<u8>), Error> {
     let ia = idx_block::load_for_directory_io(io, parent_rec)?;
     let mut vcn = index_io::index_root_child_vcn(root, basename, upcase)?;
     let allocated = ia.allocated_block_vcns();
     let mut visited = std::collections::HashSet::new();
     loop {
         if !allocated.contains(&vcn) || !visited.insert(vcn) {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "$INDEX_ALLOCATION routing points to unallocated or repeated VCN {vcn}"
-            ));
+            )));
         }
         let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
         let flags = block[idx_block::INDX_INDEX_HEADER_OFFSET + index_io::IH_FLAGS_OFFSET];
@@ -1943,7 +1986,7 @@ fn preflight_parent_insert_io<T: BlockIo + ?Sized>(
     basename: &str,
     is_dir: bool,
     upcase: &crate::upcase::UpcaseTable,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let entry = index_io::build_file_name_index_entry(0, 0, basename, 0, is_dir)?;
     let (ia, vcn, mut leaf) = routed_leaf_io(io, parent_rec, root, basename, Some(upcase))?;
     match index_io::insert_entry_into_indx_block_with_collation(
@@ -1959,7 +2002,7 @@ fn preflight_parent_insert_io<T: BlockIo + ?Sized>(
             let right_vcn = vcns
                 .last()
                 .copied()
-                .ok_or("index has no allocated blocks")?
+                .ok_or(Error::io("index has no allocated blocks"))?
                 + clusters;
             let old_leaf = idx_block::read_indx_block_io(io, &ia, vcn)?;
             let (_, _, separator) =
@@ -1978,15 +2021,15 @@ fn preflight_parent_insert_io<T: BlockIo + ?Sized>(
             }
             let bitmap =
                 attr_io::find_attribute(&parent, AttrType::Bitmap, Some(crate::mkfs::stream::I30))
-                    .ok_or("$Bitmap:$I30 missing")?;
+                    .ok_or(Error::io("$Bitmap:$I30 missing"))?;
             let bit = (right_vcn / clusters) as usize;
             if !bitmap.is_resident || bit >= bitmap.resident_value_length.unwrap_or(0) as usize * 8
             {
-                return Err("index capacity: resident bitmap growth required".to_string());
+                return Err(Error::io("index capacity: resident bitmap growth required"));
             }
             let volume_bitmap = crate::bitmap::locate_bitmap_io(io)?;
             crate::bitmap::find_free_run_io(io, &volume_bitmap, clusters, ia.params.mft_lcn)?
-                .ok_or_else(|| "index capacity: no free run for a new INDX block".to_string())?;
+                .ok_or_else(|| Error::io("index capacity: no free run for a new INDX block"))?;
             Ok(())
         }
         Err(e) => Err(e),
@@ -2000,21 +2043,25 @@ fn split_index_leaf_io<T: BlockIo + ?Sized>(
     left_vcn: u64,
     entry_bytes: &[u8],
     upcase: Option<&crate::upcase::UpcaseTable>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let vcns = ia.allocated_block_vcns();
     let old_left = idx_block::read_indx_block_io(io, ia, left_vcn)?;
     let clusters = ia.block_size.div_ceil(ia.params.cluster_size);
     let right_vcn = vcns
         .last()
         .copied()
-        .ok_or("index has no allocated blocks")?
+        .ok_or(Error::io("index has no allocated blocks"))?
         + clusters;
     let volume_bitmap = crate::bitmap::locate_bitmap_io(io)?;
     let lcn = crate::bitmap::find_free_run_io(io, &volume_bitmap, clusters, ia.params.mft_lcn)?
-        .ok_or_else(|| format!("index capacity: no {clusters}-cluster run for a new INDX block"))?;
+        .ok_or_else(|| {
+            Error::io(format!(
+                "index capacity: no {clusters}-cluster run for a new INDX block"
+            ))
+        })?;
     crate::bitmap::allocate_io(io, &volume_bitmap, lcn, clusters)?;
 
-    let prepared = (|| -> Result<index_io::SplitIndxLeaves, String> {
+    let prepared = (|| -> Result<index_io::SplitIndxLeaves, Error> {
         let (mut left, right, separator) =
             index_io::split_indx_leaf(&old_left, entry_bytes, left_vcn, right_vcn, upcase)?;
         let (_, mut parent) = read_mft_record_io(io, parent_rec)?;
@@ -2049,7 +2096,7 @@ fn split_index_leaf_io<T: BlockIo + ?Sized>(
             AttrType::IndexAllocation,
             Some(crate::mkfs::stream::I30),
         )
-        .ok_or("$INDEX_ALLOCATION:$I30 disappeared")?;
+        .ok_or(Error::io("$INDEX_ALLOCATION:$I30 disappeared"))?;
         let replacement = crate::record_build::build_nonresident_attribute(
             AttrType::IndexAllocation as u32,
             Some(crate::mkfs::stream::I30),
@@ -2063,18 +2110,18 @@ fn split_index_leaf_io<T: BlockIo + ?Sized>(
         crate::attr_resize::replace_attribute(&mut parent, allocation.attr_offset, &replacement)?;
         let bitmap =
             attr_io::find_attribute(&parent, AttrType::Bitmap, Some(crate::mkfs::stream::I30))
-                .ok_or("$Bitmap:$I30 disappeared")?;
+                .ok_or(Error::io("$Bitmap:$I30 disappeared"))?;
         if !bitmap.is_resident || bitmap.resident_value_length.unwrap_or(0) < 1 {
-            return Err("index capacity: unsupported $Bitmap:$I30 layout".to_string());
+            return Err(Error::io("index capacity: unsupported $Bitmap:$I30 layout"));
         }
         let bit = (right_vcn / clusters) as usize;
         if bit >= bitmap.resident_value_length.unwrap_or(0) as usize * 8 {
-            return Err("index capacity: resident bitmap growth required".to_string());
+            return Err(Error::io("index capacity: resident bitmap growth required"));
         }
         let bitmap_value = bitmap.attr_offset
             + bitmap
                 .resident_value_offset
-                .ok_or("bitmap value offset missing")? as usize;
+                .ok_or(Error::io("bitmap value offset missing"))? as usize;
         parent[bitmap_value + bit / 8] |= 1u8 << (bit % 8);
 
         crate::mft_io::apply_fixup_on_write_magic(&mut left, ia.params.bytes_per_sector, b"INDX")?;
@@ -2092,18 +2139,18 @@ fn split_index_leaf_io<T: BlockIo + ?Sized>(
 
     let right_offset = lcn
         .checked_mul(ia.params.cluster_size)
-        .ok_or("right INDX offset overflow")?;
+        .ok_or(Error::io("right INDX offset overflow"))?;
     if let Err(e) = io
         .write_all_at(right_offset, &right)
         .and_then(|_| io.sync())
     {
         crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
-        return Err(format!("write new INDX block: {e}"));
+        return Err(Error::io(format!("write new INDX block: {e}")));
     }
     let left_offset = idx_block::vcn_to_disk_offset(ia, left_vcn, io.size())?;
     if let Err(e) = io.write_all_at(left_offset, &left).and_then(|_| io.sync()) {
         crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
-        return Err(format!("write split left INDX block: {e}"));
+        return Err(Error::io(format!("write split left INDX block: {e}")));
     }
     if let Err(e) = crate::mft_io::restore_mft_record_io(io, parent_rec, &parent) {
         let mut rollback = old_left.clone();
@@ -2112,22 +2159,21 @@ fn split_index_leaf_io<T: BlockIo + ?Sized>(
             ia.params.bytes_per_sector,
             b"INDX",
         )
-        .and_then(|_| {
-            io.write_all_at(left_offset, &rollback)
-                .map_err(|e| e.to_string())
-        })
-        .and_then(|_| io.sync());
+        .and_then(|_| Ok(io.write_all_at(left_offset, &rollback)?))
+        .and_then(|_| Ok(io.sync()?));
         if rollback_result.is_ok() {
             crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
         }
-        return Err(format!(
-            "commit split root: {e}; {}",
-            if rollback_result.is_ok() {
-                "the old leaf was restored"
-            } else {
-                "the new allocation was left allocated for safety"
-            }
-        ));
+        return Err(e.map_message(|m| {
+            format!(
+                "commit split root: {m}; {}",
+                if rollback_result.is_ok() {
+                    "the old leaf was restored"
+                } else {
+                    "the new allocation was left allocated for safety"
+                }
+            )
+        }));
     }
     Ok(())
 }
@@ -2141,16 +2187,20 @@ fn promote_parent_index_io<T: BlockIo + ?Sized>(
     entry_bytes: &[u8],
     basename: &str,
     upcase: Option<&crate::upcase::UpcaseTable>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let block_size = usize::try_from(params.index_block_size)
         .map_err(|_| "index block size does not fit usize".to_string())?;
     let clusters = u64::from(params.index_block_size).div_ceil(params.cluster_size);
     let volume_bitmap = crate::bitmap::locate_bitmap_io(io)?;
     let lcn = crate::bitmap::find_free_run_io(io, &volume_bitmap, clusters, params.mft_lcn)?
-        .ok_or_else(|| format!("no {clusters}-cluster run for the first INDX block"))?;
+        .ok_or_else(|| {
+            Error::io(format!(
+                "no {clusters}-cluster run for the first INDX block"
+            ))
+        })?;
     crate::bitmap::allocate_io(io, &volume_bitmap, lcn, clusters)?;
 
-    let prepared = (|| -> Result<(Vec<u8>, Vec<u8>), String> {
+    let prepared = (|| -> Result<(Vec<u8>, Vec<u8>), Error> {
         let (_, mut parent) = read_mft_record_io(io, parent_rec)?;
         let mut block = index_io::promote_index_root_to_first_indx(
             &mut parent,
@@ -2203,19 +2253,21 @@ fn promote_parent_index_io<T: BlockIo + ?Sized>(
     crate::mft_io::apply_fixup_on_write_magic(&mut block, params.bytes_per_sector, b"INDX")?;
     let block_offset = lcn
         .checked_mul(params.cluster_size)
-        .ok_or("INDX block offset overflow")?;
+        .ok_or(Error::io("INDX block offset overflow"))?;
     if let Err(e) = io
         .write_all_at(block_offset, &block)
         .and_then(|_| io.sync())
     {
         crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
-        return Err(format!("write first INDX block: {e}"));
+        return Err(Error::io(format!("write first INDX block: {e}")));
     }
     crate::mft_io::restore_mft_record_io(io, parent_rec, &parent).map_err(|e| {
-        format!(
-            "the first INDX block is allocated and written but parent record {parent_rec} could \
-             not be promoted ({e}); its clusters were left allocated for safety"
-        )
+        e.map_message(|m| {
+            format!(
+                "the first INDX block is allocated and written but parent record {parent_rec} \
+                 could not be promoted ({m}); its clusters were left allocated for safety"
+            )
+        })
     })
 }
 
@@ -2252,7 +2304,7 @@ fn build_named_resident_attribute(
 /// Returns the new directory's MFT record number on success.
 ///
 /// Shares the index growth limits of [`create_file`].
-pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, String> {
+pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Error> {
     let mut io = PathIo::open_rw(image)?;
     mkdir_io(&mut io, parent_path, basename)
 }
@@ -2261,7 +2313,7 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
     io: &mut T,
     parent_path: &str,
     basename: &str,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     // The directory index is ordered by COLLATION_FILE_NAME, so a
     // lookup in it has to fold case the same way the insert did;
     // see `index_io::find_index_entry`.
@@ -2273,20 +2325,26 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
     let (params, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let parent_flags = crate::mft_io::record_flags(&parent_record_bytes);
     if parent_flags & crate::mft_io::MFT_FLAG_DIRECTORY == 0 {
-        return Err(format!("parent '{parent_path}' is not a directory"));
+        return Err(Error::not_directory(format!(
+            "parent '{parent_path}' is not a directory"
+        )));
     }
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
-        .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
+        .ok_or_else(|| Error::io("parent has no $INDEX_ROOT"))?;
     let parent_has_overflow = ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0;
     if index_io::find_index_entry(&parent_record_bytes, basename, Some(&upcase))?.is_some() {
-        return Err(format!("'{basename}' already exists in '{parent_path}'"));
+        return Err(Error::exists(format!(
+            "'{basename}' already exists in '{parent_path}'"
+        )));
     }
     if parent_has_overflow {
         let ia = idx_block::load_for_directory_io(io, parent_rec)?;
         for vcn in ia.allocated_block_vcns() {
             let blk = idx_block::read_indx_block_io(io, &ia, vcn)?;
             if index_io::find_entry_in_indx_block(&blk, basename, Some(&upcase))?.is_some() {
-                return Err(format!("'{basename}' already exists in '{parent_path}'"));
+                return Err(Error::exists(format!(
+                    "'{basename}' already exists in '{parent_path}'"
+                )));
             }
         }
         preflight_parent_insert_io(
@@ -2341,7 +2399,7 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
             &mbm,
             new_rec,
             NewRecordState::BitmapOnly,
-            format!("write new dir record: {e}"),
+            Error::io(format!("write new dir record: {e}")),
         ));
     }
     if let Err(e) = io.sync() {
@@ -2350,7 +2408,7 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
             &mbm,
             new_rec,
             NewRecordState::BitmapOnly,
-            format!("fsync new dir record: {e}"),
+            Error::io(format!("fsync new dir record: {e}")),
         ));
     }
 
@@ -2370,7 +2428,7 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
             &mbm,
             new_rec,
             NewRecordState::RecordWritten,
-            format!("insert dir index entry: {e}"),
+            e.context("insert dir index entry"),
         ));
     }
 
@@ -2389,7 +2447,7 @@ pub fn write_ea(
     ea_name: &[u8],
     ea_value: &[u8],
     flags: u8,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     write_ea_io(&mut io, file_path, ea_name, ea_value, flags)
 }
@@ -2400,9 +2458,12 @@ pub fn write_ea_io<T: BlockIo + ?Sized>(
     ea_name: &[u8],
     ea_value: &[u8],
     flags: u8,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     if ea_name.is_empty() || ea_name.len() > 254 {
-        return Err(format!("invalid EA name length {}", ea_name.len()));
+        return Err(Error::invalid(format!(
+            "invalid EA name length {}",
+            ea_name.len()
+        )));
     }
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     update_mft_record_io(io, rec, |record| {
@@ -2420,7 +2481,7 @@ pub fn write_ea_io<T: BlockIo + ?Sized>(
 }
 
 /// Remove an EA by name (case-insensitive). Errors if not found.
-pub fn remove_ea(image: &Path, file_path: &str, ea_name: &[u8]) -> Result<(), String> {
+pub fn remove_ea(image: &Path, file_path: &str, ea_name: &[u8]) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     remove_ea_io(&mut io, file_path, ea_name)
 }
@@ -2429,22 +2490,22 @@ pub fn remove_ea_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     ea_name: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     update_mft_record_io(io, rec, |record| {
         let mut eas = crate::ea_io::read_from_record(record)?;
         if !crate::ea_io::remove_by_name(&mut eas, ea_name) {
-            return Err(format!(
+            return Err(Error::not_found(format!(
                 "EA '{}' not found",
                 String::from_utf8_lossy(ea_name)
-            ));
+            )));
         }
         commit_eas(record, &eas)
     })
 }
 
 /// Return all EAs on `file_path` (empty vec if none).
-pub fn list_eas(image: &Path, file_path: &str) -> Result<Vec<crate::ea_io::Ea>, String> {
+pub fn list_eas(image: &Path, file_path: &str) -> Result<Vec<crate::ea_io::Ea>, Error> {
     let mut io = PathIo::open_ro(image)?;
     list_eas_io(&mut io, file_path)
 }
@@ -2452,7 +2513,7 @@ pub fn list_eas(image: &Path, file_path: &str) -> Result<Vec<crate::ea_io::Ea>, 
 pub fn list_eas_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
-) -> Result<Vec<crate::ea_io::Ea>, String> {
+) -> Result<Vec<crate::ea_io::Ea>, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
     crate::ea_io::read_from_record(&record)
@@ -2466,7 +2527,7 @@ pub fn list_eas_io<T: BlockIo + ?Sized>(
 /// EA names are byte-strings on disk (not strictly UTF-8) — they
 /// cannot contain NUL but otherwise carry arbitrary bytes. Callers
 /// that need UTF-8 should validate at the API boundary.
-pub fn list_ea_keys(image: &Path, file_path: &str) -> Result<Vec<Vec<u8>>, String> {
+pub fn list_ea_keys(image: &Path, file_path: &str) -> Result<Vec<Vec<u8>>, Error> {
     let mut io = PathIo::open_ro(image)?;
     list_ea_keys_io(&mut io, file_path)
 }
@@ -2474,13 +2535,13 @@ pub fn list_ea_keys(image: &Path, file_path: &str) -> Result<Vec<Vec<u8>>, Strin
 pub fn list_ea_keys_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
-) -> Result<Vec<Vec<u8>>, String> {
+) -> Result<Vec<Vec<u8>>, Error> {
     let eas = list_eas_io(io, file_path)?;
     Ok(eas.into_iter().map(|ea| ea.name).collect())
 }
 
 /// Rewrite `$EA` + `$EA_INFORMATION`. Empty list ⇒ both removed.
-fn commit_eas(record: &mut [u8], eas: &[crate::ea_io::Ea]) -> Result<(), String> {
+fn commit_eas(record: &mut [u8], eas: &[crate::ea_io::Ea]) -> Result<(), Error> {
     let packed = crate::ea_io::encode(eas)?;
     let packed_length = crate::ea_io::packed_ea_length(eas)?;
     let need = u16::try_from(crate::ea_io::count_need_ea(eas))
@@ -2523,7 +2584,7 @@ pub(crate) fn remove_attribute_at(
     record: &mut [u8],
     attr_offset: usize,
     attr_length: usize,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let bytes_used =
         u32::from_le_bytes([record[0x18], record[0x19], record[0x1A], record[0x1B]]) as usize;
     if attr_length == 0
@@ -2532,10 +2593,10 @@ pub(crate) fn remove_attribute_at(
             .checked_add(attr_length)
             .is_none_or(|end| end > bytes_used)
     {
-        return Err(format!(
+        return Err(Error::invalid(format!(
             "remove_attribute: invalid range (off={attr_offset}, len={attr_length}, bytes_used={bytes_used}, record_len={})",
             record.len()
-        ));
+        )));
     }
     record.copy_within(attr_offset + attr_length..bytes_used, attr_offset);
     for byte in &mut record[bytes_used - attr_length..bytes_used] {
@@ -2546,7 +2607,7 @@ pub(crate) fn remove_attribute_at(
     Ok(())
 }
 
-fn remove_unnamed_attr(record: &mut [u8], ty: AttrType) -> Result<(), String> {
+fn remove_unnamed_attr(record: &mut [u8], ty: AttrType) -> Result<(), Error> {
     let Some(loc) = attr_io::find_attribute(record, ty, None) else {
         return Ok(());
     };
@@ -2558,9 +2619,9 @@ fn upsert_unnamed_resident_attr<F>(
     ty: AttrType,
     value: &[u8],
     build: &F,
-) -> Result<(), String>
+) -> Result<(), Error>
 where
-    F: Fn(u16, &[u8]) -> Result<Vec<u8>, String>,
+    F: Fn(u16, &[u8]) -> Result<Vec<u8>, Error>,
 {
     if let Some(loc) = attr_io::find_attribute(record, ty, None) {
         let attr_id = loc.attribute_id;
@@ -2590,7 +2651,7 @@ pub fn write_reparse_point(
     file_path: &str,
     reparse_tag: u32,
     data: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     write_reparse_point_io(&mut io, file_path, reparse_tag, data)
 }
@@ -2600,7 +2661,7 @@ pub fn write_reparse_point_io<T: BlockIo + ?Sized>(
     file_path: &str,
     reparse_tag: u32,
     data: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     update_mft_record_io(io, rec, |record| {
         let existing = attr_io::find_attribute(record, AttrType::ReparsePoint, None);
@@ -2628,7 +2689,7 @@ pub fn write_reparse_point_io<T: BlockIo + ?Sized>(
 
 /// Remove the `$REPARSE_POINT` attribute and clear the
 /// `FILE_ATTRIBUTE_REPARSE_POINT` flag.
-pub fn remove_reparse_point(image: &Path, file_path: &str) -> Result<(), String> {
+pub fn remove_reparse_point(image: &Path, file_path: &str) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     remove_reparse_point_io(&mut io, file_path)
 }
@@ -2636,11 +2697,11 @@ pub fn remove_reparse_point(image: &Path, file_path: &str) -> Result<(), String>
 pub fn remove_reparse_point_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     update_mft_record_io(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::ReparsePoint, None)
-            .ok_or_else(|| "no $REPARSE_POINT to remove".to_string())?;
+            .ok_or_else(|| Error::io("no $REPARSE_POINT to remove"))?;
         remove_attribute_at(record, loc.attr_offset, loc.attr_length)?;
 
         set_si_file_attributes_bit(record, FILE_ATTRIBUTE_REPARSE_POINT, false)?;
@@ -2665,7 +2726,7 @@ pub struct ReparsePoint {
 /// Resident-only: this crate writes reparse points resident; reading
 /// non-resident on-disk reparse data would require run-list decoding
 /// and is not yet supported.
-pub fn read_reparse_point(image: &Path, file_path: &str) -> Result<Option<ReparsePoint>, String> {
+pub fn read_reparse_point(image: &Path, file_path: &str) -> Result<Option<ReparsePoint>, Error> {
     let mut io = PathIo::open_ro(image)?;
     read_reparse_point_io(&mut io, file_path)
 }
@@ -2673,42 +2734,46 @@ pub fn read_reparse_point(image: &Path, file_path: &str) -> Result<Option<Repars
 pub fn read_reparse_point_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
-) -> Result<Option<ReparsePoint>, String> {
+) -> Result<Option<ReparsePoint>, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
     let Some(loc) = attr_io::find_attribute(&record, AttrType::ReparsePoint, None) else {
         return Ok(None);
     };
     if !loc.is_resident {
-        return Err("$REPARSE_POINT is non-resident (not yet supported)".to_string());
+        return Err(Error::io(
+            "$REPARSE_POINT is non-resident (not yet supported)",
+        ));
     }
     let val_off = loc.attr_offset
         + loc
             .resident_value_offset
-            .ok_or("$REPARSE_POINT has no value_offset")? as usize;
+            .ok_or(Error::io("$REPARSE_POINT has no value_offset"))? as usize;
     let val_len = loc.resident_value_length.unwrap_or(0) as usize;
     // REPARSE_DATA_BUFFER (MS-FSCC §2.1.2): u32 ReparseTag, u16 ReparseDataLength,
     // u16 Reserved, then `ReparseDataLength` bytes of tag-specific data.
     if val_len < 8 {
-        return Err(format!("$REPARSE_POINT value too short: {val_len} bytes"));
+        return Err(Error::io(format!(
+            "$REPARSE_POINT value too short: {val_len} bytes"
+        )));
     }
     if val_off
         .checked_add(val_len)
         .is_none_or(|end| end > record.len())
     {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$REPARSE_POINT value range out of record: val_off={val_off}, val_len={val_len}, record_len={}",
             record.len()
-        ));
+        )));
     }
     let buf = &record[val_off..val_off + val_len];
     let reparse_tag = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
     let data_len = u16::from_le_bytes([buf[4], buf[5]]) as usize;
     let data_start = 8usize;
     if data_start + data_len > val_len {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$REPARSE_POINT data_length ({data_len}) runs past attribute value ({val_len})"
-        ));
+        )));
     }
     let data = buf[data_start..data_start + data_len].to_vec();
     Ok(Some(ReparsePoint { reparse_tag, data }))
@@ -2722,7 +2787,7 @@ pub fn create_symlink(
     basename: &str,
     target: &str,
     relative: bool,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let mut io = PathIo::open_rw(image)?;
     create_symlink_io(&mut io, parent_path, basename, target, relative)
 }
@@ -2733,7 +2798,7 @@ pub fn create_symlink_io<T: BlockIo + ?Sized>(
     basename: &str,
     target: &str,
     relative: bool,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let rec = create_file_io(io, parent_path, basename)?;
     let data = crate::record_build::build_symlink_reparse_data(target, None, relative);
     let child_path = if parent_path == "/" {
@@ -2748,7 +2813,7 @@ pub fn create_symlink_io<T: BlockIo + ?Sized>(
         &data,
     ) {
         let _ = unlink_io(io, &child_path);
-        return Err(format!("write_reparse_point: {e}"));
+        return Err(e.context("write_reparse_point"));
     }
     Ok(rec)
 }
@@ -2767,7 +2832,7 @@ pub fn create_symlink_io<T: BlockIo + ?Sized>(
 pub fn read_attributes(
     image: &Path,
     file_path: &str,
-) -> Result<Vec<crate::attr_io::AttrDescription>, String> {
+) -> Result<Vec<crate::attr_io::AttrDescription>, Error> {
     let mut io = PathIo::open_ro(image)?;
     read_attributes_io(&mut io, file_path)
 }
@@ -2775,7 +2840,7 @@ pub fn read_attributes(
 pub fn read_attributes_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
-) -> Result<Vec<crate::attr_io::AttrDescription>, String> {
+) -> Result<Vec<crate::attr_io::AttrDescription>, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
     Ok(crate::attr_io::describe_attributes(&record))
@@ -2813,7 +2878,7 @@ pub struct FileNameRecord {
 /// the case-sensitive-dir investigation, and for visualising how
 /// `$FILE_NAME` entries differ between system records (where mkfs
 /// uses skeleton streams) and user records.
-pub fn read_file_names(image: &Path, file_path: &str) -> Result<Vec<FileNameRecord>, String> {
+pub fn read_file_names(image: &Path, file_path: &str) -> Result<Vec<FileNameRecord>, Error> {
     let mut io = PathIo::open_ro(image)?;
     read_file_names_io(&mut io, file_path)
 }
@@ -2821,7 +2886,7 @@ pub fn read_file_names(image: &Path, file_path: &str) -> Result<Vec<FileNameReco
 pub fn read_file_names_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
-) -> Result<Vec<FileNameRecord>, String> {
+) -> Result<Vec<FileNameRecord>, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
 
@@ -2840,7 +2905,7 @@ pub fn read_file_names_io<T: BlockIo + ?Sized>(
         let val_off = loc.attr_offset
             + loc
                 .resident_value_offset
-                .ok_or("$FILE_NAME no value_offset")? as usize;
+                .ok_or(Error::io("$FILE_NAME no value_offset"))? as usize;
         let val_len = loc.resident_value_length.unwrap_or(0) as usize;
         // $FILE_NAME value layout per MS-FSCC §2.4.4:
         //   +0x00 parent_directory_reference (u64)
@@ -2902,37 +2967,37 @@ pub const VOLUME_LABEL_MAX_UTF16: usize = 32;
 /// decoded UTF-8 string. Returns an empty `String` if the volume has
 /// no label set (the `$VOLUME_NAME` attribute is absent or
 /// zero-length).
-pub fn read_volume_label(image: &Path) -> Result<String, String> {
+pub fn read_volume_label(image: &Path) -> Result<String, Error> {
     let mut io = PathIo::open_ro(image)?;
     read_volume_label_io(&mut io)
 }
 
-pub fn read_volume_label_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<String, String> {
+pub fn read_volume_label_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<String, Error> {
     // $Volume is at MFT slot 3 per canonical NTFS layout.
     let (_, record) = read_mft_record_io(io, 3)?;
     let Some(loc) = attr_io::find_attribute(&record, AttrType::VolumeName, None) else {
         return Ok(String::new());
     };
     if !loc.is_resident {
-        return Err("$VOLUME_NAME is non-resident (unexpected)".to_string());
+        return Err(Error::io("$VOLUME_NAME is non-resident (unexpected)"));
     }
     let val_off = loc.attr_offset
         + loc
             .resident_value_offset
-            .ok_or("$VOLUME_NAME has no value_offset")? as usize;
+            .ok_or(Error::io("$VOLUME_NAME has no value_offset"))? as usize;
     let val_len = loc.resident_value_length.unwrap_or(0) as usize;
     if val_off + val_len > record.len() {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$VOLUME_NAME range out of record (val_off={val_off}, val_len={val_len})"
-        ));
+        )));
     }
     if val_len == 0 {
         return Ok(String::new());
     }
     if !val_len.is_multiple_of(2) {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$VOLUME_NAME has odd byte length: {val_len} (must be multiple of 2 for UTF-16)"
-        ));
+        )));
     }
     let utf16: Vec<u16> = record[val_off..val_off + val_len]
         .chunks_exact(2)
@@ -2949,19 +3014,19 @@ pub fn read_volume_label_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<String, S
 ///
 /// Returns `Err` if the encoded label exceeds
 /// [`VOLUME_LABEL_MAX_UTF16`] code units.
-pub fn set_volume_label(image: &Path, label: &str) -> Result<(), String> {
+pub fn set_volume_label(image: &Path, label: &str) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     set_volume_label_io(&mut io, label)
 }
 
-pub fn set_volume_label_io<T: BlockIo + ?Sized>(io: &mut T, label: &str) -> Result<(), String> {
+pub fn set_volume_label_io<T: BlockIo + ?Sized>(io: &mut T, label: &str) -> Result<(), Error> {
     let label_utf16: Vec<u16> = label.encode_utf16().collect();
     if label_utf16.len() > VOLUME_LABEL_MAX_UTF16 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "volume label too long: {} UTF-16 code units (max {})",
             label_utf16.len(),
             VOLUME_LABEL_MAX_UTF16
-        ));
+        )));
     }
     let mut label_bytes: Vec<u8> = Vec::with_capacity(label_utf16.len() * 2);
     for c in &label_utf16 {
@@ -2997,7 +3062,7 @@ pub fn set_volume_label_io<T: BlockIo + ?Sized>(io: &mut T, label: &str) -> Resu
 
 /// Read the 16-byte object ID (`$OBJECT_ID` attribute value) for a
 /// file. Returns `Ok(None)` if the file has no `$OBJECT_ID`.
-pub fn read_object_id(image: &Path, file_path: &str) -> Result<Option<[u8; 16]>, String> {
+pub fn read_object_id(image: &Path, file_path: &str) -> Result<Option<[u8; 16]>, Error> {
     let mut io = PathIo::open_ro(image)?;
     read_object_id_io(&mut io, file_path)
 }
@@ -3005,32 +3070,34 @@ pub fn read_object_id(image: &Path, file_path: &str) -> Result<Option<[u8; 16]>,
 pub fn read_object_id_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
-) -> Result<Option<[u8; 16]>, String> {
+) -> Result<Option<[u8; 16]>, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
     let Some(loc) = attr_io::find_attribute(&record, AttrType::ObjectId, None) else {
         return Ok(None);
     };
     if !loc.is_resident {
-        return Err("$OBJECT_ID is non-resident (unexpected)".to_string());
+        return Err(Error::io("$OBJECT_ID is non-resident (unexpected)"));
     }
     let val_off = loc.attr_offset
         + loc
             .resident_value_offset
-            .ok_or("$OBJECT_ID has no value_offset")? as usize;
+            .ok_or(Error::io("$OBJECT_ID has no value_offset"))? as usize;
     let val_len = loc.resident_value_length.unwrap_or(0) as usize;
     if val_len < 16 {
-        return Err(format!("$OBJECT_ID value too short: {val_len} bytes"));
+        return Err(Error::io(format!(
+            "$OBJECT_ID value too short: {val_len} bytes"
+        )));
     }
     // Guard against a corrupt on-disk value_offset that lands 16 bytes
     // can't be read from — independent of val_len, which is only the
     // declared size field and could disagree with the attribute's
     // actual placement in the record.
     if val_off.checked_add(16).is_none_or(|end| end > record.len()) {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$OBJECT_ID value range out of record: val_off={val_off}, record_len={}",
             record.len()
-        ));
+        )));
     }
     let mut out = [0u8; 16];
     out.copy_from_slice(&record[val_off..val_off + 16]);
@@ -3056,7 +3123,7 @@ pub struct ObjectIdExtended {
 pub fn read_object_id_extended(
     image: &Path,
     file_path: &str,
-) -> Result<Option<ObjectIdExtended>, String> {
+) -> Result<Option<ObjectIdExtended>, Error> {
     let mut io = PathIo::open_ro(image)?;
     read_object_id_extended_io(&mut io, file_path)
 }
@@ -3064,36 +3131,36 @@ pub fn read_object_id_extended(
 pub fn read_object_id_extended_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
-) -> Result<Option<ObjectIdExtended>, String> {
+) -> Result<Option<ObjectIdExtended>, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
     let Some(loc) = attr_io::find_attribute(&record, AttrType::ObjectId, None) else {
         return Ok(None);
     };
     if !loc.is_resident {
-        return Err("$OBJECT_ID is non-resident (unexpected)".to_string());
+        return Err(Error::io("$OBJECT_ID is non-resident (unexpected)"));
     }
     let val_off = loc.attr_offset
         + loc
             .resident_value_offset
-            .ok_or("$OBJECT_ID has no value_offset")? as usize;
+            .ok_or(Error::io("$OBJECT_ID has no value_offset"))? as usize;
     let val_len = loc.resident_value_length.unwrap_or(0) as usize;
     // MS-FSCC §2.4.6: $OBJECT_ID is either 16 bytes (object_id only) or
     // 64 bytes (object_id + 3 Birth GUIDs). Reject anything else as
     // malformed instead of silently downgrading.
     if val_len != 16 && val_len != 64 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "unexpected $OBJECT_ID length: {val_len} (expected 16 or 64)"
-        ));
+        )));
     }
     if val_off
         .checked_add(val_len)
         .is_none_or(|end| end > record.len())
     {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$OBJECT_ID value range out of record: val_off={val_off}, val_len={val_len}, record_len={}",
             record.len()
-        ));
+        )));
     }
     let mut object_id = [0u8; 16];
     object_id.copy_from_slice(&record[val_off..val_off + 16]);
@@ -3118,7 +3185,7 @@ pub fn read_object_id_extended_io<T: BlockIo + ?Sized>(
 /// replaces the existing value in place if present. To also write the
 /// 48 bytes of DLT Birth-volume / Birth-object / Birth-domain GUIDs
 /// (MS-FSCC §2.4.6), use [`write_object_id_extended`].
-pub fn write_object_id(image: &Path, file_path: &str, object_id: &[u8; 16]) -> Result<(), String> {
+pub fn write_object_id(image: &Path, file_path: &str, object_id: &[u8; 16]) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     write_object_id_io(&mut io, file_path, object_id)
 }
@@ -3127,7 +3194,7 @@ pub fn write_object_id_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     object_id: &[u8; 16],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     write_object_id_inner(io, file_path, object_id, None)
 }
 
@@ -3148,7 +3215,7 @@ pub fn write_object_id_extended(
     birth_volume_id: &[u8; 16],
     birth_object_id: &[u8; 16],
     birth_domain_id: &[u8; 16],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     write_object_id_extended_io(
         &mut io,
@@ -3167,7 +3234,7 @@ pub fn write_object_id_extended_io<T: BlockIo + ?Sized>(
     birth_volume_id: &[u8; 16],
     birth_object_id: &[u8; 16],
     birth_domain_id: &[u8; 16],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     write_object_id_inner(
         io,
         file_path,
@@ -3181,7 +3248,7 @@ fn write_object_id_inner<T: BlockIo + ?Sized>(
     file_path: &str,
     object_id: &[u8; 16],
     birth_ids: Option<(&[u8; 16], &[u8; 16], &[u8; 16])>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     update_mft_record_io(io, rec, |record| {
         if let Some(loc) = attr_io::find_attribute(record, AttrType::ObjectId, None) {
@@ -3204,7 +3271,7 @@ fn write_object_id_inner<T: BlockIo + ?Sized>(
 /// Remove the `$OBJECT_ID` attribute. Returns `Ok(false)` if the file
 /// had no `$OBJECT_ID` (idempotent — not an error). Returns `Ok(true)`
 /// if an attribute was removed.
-pub fn remove_object_id(image: &Path, file_path: &str) -> Result<bool, String> {
+pub fn remove_object_id(image: &Path, file_path: &str) -> Result<bool, Error> {
     let mut io = PathIo::open_rw(image)?;
     remove_object_id_io(&mut io, file_path)
 }
@@ -3212,7 +3279,7 @@ pub fn remove_object_id(image: &Path, file_path: &str) -> Result<bool, String> {
 pub fn remove_object_id_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
-) -> Result<bool, String> {
+) -> Result<bool, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let mut removed = false;
     update_mft_record_io(io, rec, |record| {
@@ -3238,7 +3305,7 @@ pub fn link(
     existing_path: &str,
     new_parent_path: &str,
     new_basename: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     link_io(&mut io, existing_path, new_parent_path, new_basename)
 }
@@ -3248,7 +3315,7 @@ pub fn link_io<T: BlockIo + ?Sized>(
     existing_path: &str,
     new_parent_path: &str,
     new_basename: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // The directory index is ordered by COLLATION_FILE_NAME, so a
     // lookup in it has to fold case the same way the insert did;
     // see `index_io::find_index_entry`.
@@ -3258,35 +3325,35 @@ pub fn link_io<T: BlockIo + ?Sized>(
     let (_, target_record_bytes) = read_mft_record_io(io, target_rec)?;
     let target_flags = crate::mft_io::record_flags(&target_record_bytes);
     if target_flags & crate::mft_io::MFT_FLAG_DIRECTORY != 0 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "link: refusing to hardlink directory '{existing_path}'"
-        ));
+        )));
     }
 
     let new_parent_rec = resolve_path_to_record_number_io(io, new_parent_path)?;
     let (_, parent_record_bytes) = read_mft_record_io(io, new_parent_rec)?;
     let parent_flags = crate::mft_io::record_flags(&parent_record_bytes);
     if parent_flags & crate::mft_io::MFT_FLAG_DIRECTORY == 0 {
-        return Err(format!(
+        return Err(Error::not_directory(format!(
             "link: new parent '{new_parent_path}' is not a directory"
-        ));
+        )));
     }
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
-        .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
+        .ok_or_else(|| Error::io("parent has no $INDEX_ROOT"))?;
     let parent_has_overflow = ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0;
     if index_io::find_index_entry(&parent_record_bytes, new_basename, Some(&upcase))?.is_some() {
-        return Err(format!(
+        return Err(Error::exists(format!(
             "'{new_basename}' already exists in '{new_parent_path}'"
-        ));
+        )));
     }
     if parent_has_overflow {
         let ia = idx_block::load_for_directory_io(io, new_parent_rec)?;
         for vcn in ia.allocated_block_vcns() {
             let blk = idx_block::read_indx_block_io(io, &ia, vcn)?;
             if index_io::find_entry_in_indx_block(&blk, new_basename, Some(&upcase))?.is_some() {
-                return Err(format!(
+                return Err(Error::exists(format!(
                     "'{new_basename}' already exists in '{new_parent_path}'"
-                ));
+                )));
             }
         }
     }
@@ -3354,7 +3421,7 @@ pub fn link_io<T: BlockIo + ?Sized>(
             }
             Ok(())
         });
-        return Err(format!("link: insert index entry: {e}"));
+        return Err(e.context("link: insert index entry"));
     }
     Ok(())
 }
@@ -3406,11 +3473,11 @@ fn find_file_name_attr(
     None
 }
 
-fn set_si_file_attributes_bit(record: &mut [u8], bit: u32, set: bool) -> Result<(), String> {
+fn set_si_file_attributes_bit(record: &mut [u8], bit: u32, set: bool) -> Result<(), Error> {
     let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
-        .ok_or_else(|| "$STANDARD_INFORMATION not found".to_string())?;
+        .ok_or_else(|| Error::not_found("$STANDARD_INFORMATION not found"))?;
     let data_start = attr_io::resident_value_start(&loc)
-        .ok_or_else(|| "$STANDARD_INFORMATION not resident".to_string())?;
+        .ok_or_else(|| Error::io("$STANDARD_INFORMATION not resident"))?;
     // The file-attributes word sits 0x20 into the value, so the value
     // has to be that long. `AttrIter` bounds where a value starts and
     // ends but imposes no minimum on its length, so a
@@ -3422,10 +3489,10 @@ fn set_si_file_attributes_bit(record: &mut [u8], bit: u32, set: bool) -> Result<
     // path did not.
     let value_length = loc.resident_value_length.unwrap_or(0) as usize;
     if value_length < SI_FILE_ATTRIBUTES + 4 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$STANDARD_INFORMATION value is {value_length} bytes, too short to hold its \
              file attributes"
-        ));
+        )));
     }
     let off = data_start + SI_FILE_ATTRIBUTES;
     let current = u32::from_le_bytes([
@@ -3445,31 +3512,35 @@ fn set_si_file_attributes_bit(record: &mut [u8], bit: u32, set: bool) -> Result<
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ResidentWriteError {
-    NeedsPromotion(String),
-    Other(String),
+    NeedsPromotion(Error),
+    Other(Error),
 }
 
 impl ResidentWriteError {
-    fn into_string(self) -> String {
+    fn into_error(self) -> Error {
         match self {
-            Self::NeedsPromotion(message) | Self::Other(message) => message,
+            Self::NeedsPromotion(error) | Self::Other(error) => error,
         }
+    }
+}
+
+impl From<Error> for ResidentWriteError {
+    fn from(error: Error) -> Self {
+        Self::Other(error)
     }
 }
 
 impl From<String> for ResidentWriteError {
     fn from(message: String) -> Self {
-        Self::Other(message)
+        Self::Other(Error::from(message))
     }
 }
 
 impl From<crate::attr_resize::ResidentResizeError> for ResidentWriteError {
     fn from(error: crate::attr_resize::ResidentResizeError) -> Self {
         match error {
-            crate::attr_resize::ResidentResizeError::Capacity(message) => {
-                Self::NeedsPromotion(message)
-            }
-            crate::attr_resize::ResidentResizeError::Other(message) => Self::Other(message),
+            crate::attr_resize::ResidentResizeError::Capacity(error) => Self::NeedsPromotion(error),
+            crate::attr_resize::ResidentResizeError::Other(error) => Self::Other(error),
         }
     }
 }
@@ -3490,7 +3561,7 @@ pub fn write_named_stream_resident(
     file_path: &str,
     stream_name: &str,
     data: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     write_named_stream_resident_io(&mut io, file_path, stream_name, data)
 }
@@ -3500,9 +3571,9 @@ pub fn write_named_stream_resident_io<T: BlockIo + ?Sized>(
     file_path: &str,
     stream_name: &str,
     data: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     write_named_stream_resident_attempt_io(io, file_path, stream_name, data)
-        .map_err(ResidentWriteError::into_string)
+        .map_err(ResidentWriteError::into_error)
 }
 
 fn write_named_stream_resident_attempt_io<T: BlockIo + ?Sized>(
@@ -3512,9 +3583,9 @@ fn write_named_stream_resident_attempt_io<T: BlockIo + ?Sized>(
     data: &[u8],
 ) -> Result<(), ResidentWriteError> {
     if stream_name.is_empty() {
-        return Err(ResidentWriteError::Other(
-            "stream_name must be non-empty".to_string(),
-        ));
+        return Err(ResidentWriteError::Other(Error::invalid(
+            "stream_name must be non-empty",
+        )));
     }
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     update_mft_record_io_typed(io, rec, |record| {
@@ -3522,9 +3593,9 @@ fn write_named_stream_resident_attempt_io<T: BlockIo + ?Sized>(
         let existing = attr_io::find_attribute(record, AttrType::Data, Some(stream_name));
         if let Some(loc) = existing {
             if !loc.is_resident {
-                return Err(ResidentWriteError::NeedsPromotion(format!(
+                return Err(ResidentWriteError::NeedsPromotion(Error::io(format!(
                     "named stream '{stream_name}' is non-resident; use write_at + grow instead"
-                )));
+                ))));
             }
             crate::attr_resize::set_resident_value_typed(record, loc.attr_offset, data)
                 .map_err(ResidentWriteError::from)
@@ -3550,7 +3621,7 @@ pub fn write_named_stream(
     file_path: &str,
     stream_name: &str,
     data: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     write_named_stream_io(&mut io, file_path, stream_name, data)
 }
@@ -3560,7 +3631,7 @@ pub fn write_named_stream_io<T: BlockIo + ?Sized>(
     file_path: &str,
     stream_name: &str,
     data: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     match write_named_stream_resident_attempt_io(io, file_path, stream_name, data) {
         Ok(()) => Ok(()),
         Err(ResidentWriteError::NeedsPromotion(_)) => {
@@ -3591,7 +3662,7 @@ pub fn write_named_stream_io<T: BlockIo + ?Sized>(
 ///
 /// Resident and non-resident streams are both reported (this is a
 /// header-only walk; we don't read the bodies).
-pub fn list_named_streams(image: &Path, file_path: &str) -> Result<Vec<String>, String> {
+pub fn list_named_streams(image: &Path, file_path: &str) -> Result<Vec<String>, Error> {
     let mut io = PathIo::open_ro(image)?;
     list_named_streams_io(&mut io, file_path)
 }
@@ -3599,7 +3670,7 @@ pub fn list_named_streams(image: &Path, file_path: &str) -> Result<Vec<String>, 
 pub fn list_named_streams_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
     let mut names = Vec::new();
@@ -3618,7 +3689,7 @@ pub fn list_named_streams_io<T: BlockIo + ?Sized>(
 
 /// Delete a named `$DATA` stream from a file. Fails if the stream
 /// doesn't exist.
-pub fn delete_named_stream(image: &Path, file_path: &str, stream_name: &str) -> Result<(), String> {
+pub fn delete_named_stream(image: &Path, file_path: &str, stream_name: &str) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     delete_named_stream_io(&mut io, file_path, stream_name)
 }
@@ -3627,9 +3698,9 @@ pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     stream_name: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     if stream_name.is_empty() {
-        return Err("stream_name must be non-empty".to_string());
+        return Err(Error::invalid("stream_name must be non-empty"));
     }
     let rec = resolve_path_to_record_number_io(io, file_path)?;
 
@@ -3650,16 +3721,15 @@ pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
     let runs_to_free =
         match attr_io::find_attribute(&record_bytes, AttrType::Data, Some(stream_name)) {
             Some(loc) if !loc.is_resident => {
-                let mapping_offset = loc
-                    .non_resident_mapping_pairs_offset
-                    .ok_or("non-resident named stream has no mapping-pairs offset")?
-                    as usize;
+                let mapping_offset = loc.non_resident_mapping_pairs_offset.ok_or(Error::io(
+                    "non-resident named stream has no mapping-pairs offset",
+                ))? as usize;
                 let start = loc.attr_offset + mapping_offset;
                 let end = loc.attr_offset + loc.attr_length;
                 if start >= end || end > record_bytes.len() {
-                    return Err(format!(
+                    return Err(Error::io(format!(
                         "named stream '{stream_name}' has a mapping-pair range outside its record"
-                    ));
+                    )));
                 }
                 data_runs::decode_runs(&record_bytes[start..end])?
                     .into_iter()
@@ -3675,7 +3745,7 @@ pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
 
     update_mft_record_io(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, Some(stream_name))
-            .ok_or_else(|| format!("named stream '{stream_name}' not found"))?;
+            .ok_or_else(|| Error::not_found(format!("named stream '{stream_name}' not found")))?;
         remove_attribute_at(record, loc.attr_offset, loc.attr_length)
     })?;
 
@@ -3683,12 +3753,14 @@ pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
         let bm = bitmap::locate_bitmap_io(io)?;
         for (lcn, n) in runs_to_free {
             bitmap::free_io(io, &bm, lcn, n).map_err(|e| {
-                format!(
-                    "the named stream '{stream_name}' was removed, but freeing its clusters \
-                     [{lcn}..{}] failed ({e}): those clusters are still marked allocated and \
-                     nothing owns them now",
-                    lcn + n
-                )
+                e.map_message(|m| {
+                    format!(
+                        "the named stream '{stream_name}' was removed, but freeing its clusters \
+                         [{lcn}..{}] failed ({m}): those clusters are still marked allocated \
+                         and nothing owns them now",
+                        lcn + n
+                    )
+                })
             })?;
         }
     }
@@ -3710,7 +3782,7 @@ pub fn promote_resident_data_to_nonresident(
     image: &Path,
     file_path: &str,
     new_data: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     promote_resident_data_to_nonresident_io(&mut io, file_path, new_data)
 }
@@ -3719,15 +3791,15 @@ pub fn promote_resident_data_to_nonresident_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     new_data: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (params, record) = read_mft_record_io(io, rec)?;
     let cluster_size = params.cluster_size;
 
     let loc = attr_io::find_attribute(&record, AttrType::Data, None)
-        .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+        .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
     if !loc.is_resident {
-        return Err("$DATA is already non-resident".to_string());
+        return Err(Error::io("$DATA is already non-resident"));
     }
 
     // Allocate clusters for the new data.
@@ -3735,7 +3807,7 @@ pub fn promote_resident_data_to_nonresident_io<T: BlockIo + ?Sized>(
     let n_clusters = new_size.div_ceil(cluster_size).max(1);
     let bm = crate::bitmap::locate_bitmap_io(io)?;
     let new_lcn = crate::bitmap::find_free_run_io(io, &bm, n_clusters, params.mft_lcn)?
-        .ok_or_else(|| format!("no contiguous free run of {n_clusters} clusters"))?;
+        .ok_or_else(|| Error::io(format!("no contiguous free run of {n_clusters} clusters")))?;
     crate::bitmap::allocate_io(io, &bm, new_lcn, n_clusters)?;
     let allocated_length = n_clusters * cluster_size;
 
@@ -3783,7 +3855,7 @@ fn promote_data_commit_io<T: BlockIo + ?Sized>(
     n_clusters: u64,
     allocated_length: u64,
     attr_id: u16,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let new_size = new_data.len() as u64;
     {
         // Checked and bounded by the volume and the device; see
@@ -3797,7 +3869,7 @@ fn promote_data_commit_io<T: BlockIo + ?Sized>(
         // rejected write does not leave the clusters marked in use.
         let disk_offset =
             crate::mft_io::cluster_span(params, new_lcn, 0, 0, allocated_length, io.size())
-                .map_err(|e| format!("write data: {e}"))?;
+                .map_err(|e| e.context("write data"))?;
         io.write_all_at(disk_offset, new_data)
             .map_err(|e| format!("write data: {e}"))?;
         let pad = (allocated_length - new_size) as usize;
@@ -3852,10 +3924,10 @@ fn promote_data_commit_io<T: BlockIo + ?Sized>(
     // Replace $DATA in the MFT record.
     let replace_res = update_mft_record_io(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, None)
-            .ok_or_else(|| "$DATA vanished during RMW".to_string())?;
+            .ok_or_else(|| Error::io("$DATA vanished during RMW"))?;
         crate::attr_resize::replace_attribute(record, loc.attr_offset, &new_attr_bytes)
     });
-    replace_res.map_err(|e| format!("replace $DATA: {e}"))?;
+    replace_res.map_err(|e| e.context("replace $DATA"))?;
 
     Ok(())
 }
@@ -3869,7 +3941,7 @@ fn promote_data_commit_io<T: BlockIo + ?Sized>(
 /// MVP precondition: the file's current `$DATA` must be resident (same as
 /// [`promote_resident_data_to_nonresident`]). On any failure, every cluster
 /// allocation made here is rolled back.
-pub fn write_sparse_file(image: &Path, file_path: &str, data: &[u8]) -> Result<(), String> {
+pub fn write_sparse_file(image: &Path, file_path: &str, data: &[u8]) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     write_sparse_file_io(&mut io, file_path, data)
 }
@@ -3878,15 +3950,17 @@ pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     data: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (params, record) = read_mft_record_io(io, rec)?;
     let cluster_size = params.cluster_size;
 
     let loc = attr_io::find_attribute(&record, AttrType::Data, None)
-        .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+        .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
     if !loc.is_resident {
-        return Err("write_sparse_file: $DATA is already non-resident (MVP)".to_string());
+        return Err(Error::io(
+            "write_sparse_file: $DATA is already non-resident (MVP)",
+        ));
     }
     let attr_id = loc.attribute_id;
 
@@ -3944,7 +4018,7 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
     segments: &[crate::sparse::SparseSegment],
     attr_id: u16,
     allocated: &mut Vec<(u64, u64)>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let cluster_size = params.cluster_size;
     // Allocate one contiguous run per Data segment, write its bytes, and
     // record (lcn, n) for rollback. Holes allocate nothing.
@@ -3962,9 +4036,9 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
         };
         let n = *clusters;
         let lcn = crate::bitmap::find_free_run_io(io, bm, n, hint)?
-            .ok_or_else(|| format!("no contiguous free run of {n} clusters"))?;
+            .ok_or_else(|| Error::io(format!("no contiguous free run of {n} clusters")))?;
         crate::bitmap::allocate_io(io, bm, lcn, n)
-            .map_err(|e| format!("allocate {n}@{lcn}: {e}"))?;
+            .map_err(|e| e.context(format!("allocate {n}@{lcn}")))?;
         allocated.push((lcn, n));
         data_lcns.push(lcn);
         hint = lcn + n;
@@ -4042,14 +4116,16 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
     // non-resident sparse attribute.
     update_mft_record_io(io, rec, |record| {
         let si = attr_io::find_attribute(record, AttrType::StandardInformation, None)
-            .ok_or("$STANDARD_INFORMATION not found")?;
-        let si_val =
-            attr_io::resident_value_start(&si).ok_or("$STANDARD_INFORMATION not resident")?;
+            .ok_or(Error::not_found("$STANDARD_INFORMATION not found"))?;
+        let si_val = attr_io::resident_value_start(&si)
+            .ok_or(Error::io("$STANDARD_INFORMATION not resident"))?;
         // The value has to reach its own file-attributes word; see
         // `set_si_file_attributes_bit`. Without this the write landed
         // in the next attribute.
         if (si.resident_value_length.unwrap_or(0) as usize) < SI_FILE_ATTRIBUTES + 4 {
-            return Err("$STANDARD_INFORMATION is too short to hold its file attributes".into());
+            return Err(Error::io(
+                "$STANDARD_INFORMATION is too short to hold its file attributes",
+            ));
         }
         let fa_off = si_val + SI_FILE_ATTRIBUTES;
         let fa = u32::from_le_bytes([
@@ -4062,10 +4138,10 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
             .copy_from_slice(&(fa | crate::sparse::FILE_ATTRIBUTE_SPARSE_FILE).to_le_bytes());
 
         let loc = attr_io::find_attribute(record, AttrType::Data, None)
-            .ok_or("$DATA vanished during RMW")?;
+            .ok_or(Error::io("$DATA vanished during RMW"))?;
         crate::attr_resize::replace_attribute(record, loc.attr_offset, &new_attr_bytes)
     })
-    .map_err(|e| format!("replace $DATA: {e}"))
+    .map_err(|e| e.context("replace $DATA"))
 }
 
 /// Replace a file's unnamed `$DATA` with `new_data`, whatever it holds now:
@@ -4087,17 +4163,17 @@ pub fn replace_file_contents_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     new_data: &[u8],
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = crate::mft_io::read_mft_record_io(io, rec)?;
     let loc = attr_io::find_attribute(&record, AttrType::Data, None)
-        .ok_or_else(|| format!("{file_path} has no unnamed $DATA"))?;
+        .ok_or_else(|| Error::io(format!("{file_path} has no unnamed $DATA")))?;
     if loc.is_resident {
         return write_file_contents_io(io, file_path, new_data);
     }
     let old = loc
         .non_resident_value_length
-        .ok_or("missing non-resident value_length")?;
+        .ok_or(Error::io("missing non-resident value_length"))?;
     let new = new_data.len() as u64;
     if new < old {
         truncate_io(io, file_path, new)?;
@@ -4111,14 +4187,16 @@ pub fn replace_file_contents_io<T: BlockIo + ?Sized>(
         // retry that fails the same way.
         if let Err(in_place) = grow_nonresident_io(io, file_path, new) {
             if !in_place.contains(MAPPING_CAPACITY_EXCEEDED) {
-                return Err(format!("grow to {new} bytes: {in_place}"));
+                return Err(in_place.context(format!("grow to {new} bytes")));
             }
             truncate_io(io, file_path, 0)?;
             grow_nonresident_io(io, file_path, new).map_err(|e| {
-                format!(
-                    "grow to {new} bytes: {in_place}; and emptied to grow as one run: {e} \
-                     (the file is now empty)"
-                )
+                e.map_message(|m| {
+                    format!(
+                        "grow to {new} bytes: {in_place}; and emptied to grow as one run: {m} \
+                         (the file is now empty)"
+                    )
+                })
             })?;
         }
     }
@@ -4132,7 +4210,7 @@ pub fn replace_file_contents_io<T: BlockIo + ?Sized>(
 ///
 /// The dispatcher attempts a resident write first and retries with promotion
 /// only when the resident writer returns its typed capacity outcome.
-pub fn write_file_contents(image: &Path, file_path: &str, new_data: &[u8]) -> Result<u64, String> {
+pub fn write_file_contents(image: &Path, file_path: &str, new_data: &[u8]) -> Result<u64, Error> {
     let mut io = PathIo::open_rw(image)?;
     write_file_contents_io(&mut io, file_path, new_data)
 }
@@ -4141,7 +4219,7 @@ pub fn write_file_contents_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     new_data: &[u8],
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     match write_resident_contents_attempt_io(io, file_path, new_data) {
         Ok(n) => Ok(n),
         Err(ResidentWriteError::NeedsPromotion(_)) => {
@@ -4166,7 +4244,7 @@ pub fn promote_attribute_to_nonresident(
     attr_type: AttrType,
     attr_name: Option<&str>,
     new_data: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     promote_attribute_to_nonresident_io(&mut io, file_path, attr_type, attr_name, new_data)
 }
@@ -4177,7 +4255,7 @@ pub fn promote_attribute_to_nonresident_io<T: BlockIo + ?Sized>(
     attr_type: AttrType,
     attr_name: Option<&str>,
     new_data: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (params, _) = read_mft_record_io(io, rec)?;
     let cluster_size = params.cluster_size;
@@ -4186,7 +4264,7 @@ pub fn promote_attribute_to_nonresident_io<T: BlockIo + ?Sized>(
     let n_clusters = new_size.div_ceil(cluster_size).max(1);
     let bm = crate::bitmap::locate_bitmap_io(io)?;
     let new_lcn = crate::bitmap::find_free_run_io(io, &bm, n_clusters, params.mft_lcn)?
-        .ok_or_else(|| format!("no contiguous free run of {n_clusters} clusters"))?;
+        .ok_or_else(|| Error::io(format!("no contiguous free run of {n_clusters} clusters")))?;
     crate::bitmap::allocate_io(io, &bm, new_lcn, n_clusters)?;
     let allocated_length = n_clusters * cluster_size;
 
@@ -4236,7 +4314,7 @@ fn promote_attribute_commit_io<T: BlockIo + ?Sized>(
     allocated_length: u64,
     attr_type: AttrType,
     attr_name: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let new_size = new_data.len() as u64;
     {
         // Checked and bounded by the volume and the device; see
@@ -4250,7 +4328,7 @@ fn promote_attribute_commit_io<T: BlockIo + ?Sized>(
         // rejected write does not leave the clusters marked in use.
         let disk_offset =
             crate::mft_io::cluster_span(params, new_lcn, 0, 0, allocated_length, io.size())
-                .map_err(|e| format!("write data: {e}"))?;
+                .map_err(|e| e.context("write data"))?;
         io.write_all_at(disk_offset, new_data)
             .map_err(|e| format!("write data: {e}"))?;
         let pad = (allocated_length - new_size) as usize;
@@ -4296,7 +4374,7 @@ fn promote_attribute_commit_io<T: BlockIo + ?Sized>(
         }
         Ok(())
     });
-    replace_res.map_err(|e| format!("replace attribute: {e}"))?;
+    replace_res.map_err(|e| e.context("replace attribute"))?;
 
     Ok(())
 }
@@ -4308,17 +4386,19 @@ fn promote_attribute_commit_io<T: BlockIo + ?Sized>(
 /// Delete an empty directory. Fails if the directory has any entries
 /// (other than the implicit LAST sentinel) or if it's overflowed to
 /// `$INDEX_ALLOCATION`. Returns `Ok(())` on success.
-pub fn rmdir(image: &Path, dir_path: &str) -> Result<(), String> {
+pub fn rmdir(image: &Path, dir_path: &str) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     rmdir_io(&mut io, dir_path)
 }
 
-pub fn rmdir_io<T: BlockIo + ?Sized>(io: &mut T, dir_path: &str) -> Result<(), String> {
+pub fn rmdir_io<T: BlockIo + ?Sized>(io: &mut T, dir_path: &str) -> Result<(), Error> {
     let (parent_rec, dir_rec, basename) = resolve_parent_and_child_io(io, dir_path)?;
     let (_, dir_record_bytes) = read_mft_record_io(io, dir_rec)?;
     let flags = crate::mft_io::record_flags(&dir_record_bytes);
     if flags & MFT_FLAG_DIRECTORY == 0 {
-        return Err(format!("rmdir: '{dir_path}' is not a directory"));
+        return Err(Error::not_directory(format!(
+            "rmdir: '{dir_path}' is not a directory"
+        )));
     }
     remove_dir_record_io(io, parent_rec, dir_rec, &basename, dir_path)
 }
@@ -4332,25 +4412,25 @@ fn remove_parent_index_entry_io<T: BlockIo + ?Sized>(
     parent_rec: u64,
     child_rec: u64,
     basename: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // The directory index is ordered by COLLATION_FILE_NAME, so a
     // lookup in it has to fold case the same way the insert did;
     // see `index_io::find_index_entry`.
     let upcase = crate::upcase::UpcaseTable::load_io(io)?;
     let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
-        .ok_or_else(|| "no $INDEX_ROOT on parent".to_string())?;
+        .ok_or_else(|| Error::io("no $INDEX_ROOT on parent"))?;
     let in_root = index_io::find_index_entry(&parent_record_bytes, basename, Some(&upcase))?;
     if let Some(entry) = in_root {
         if entry.file_record_number != child_rec {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "parent's $INDEX_ROOT entry for '{basename}' points at {} but resolved {child_rec}",
                 entry.file_record_number
-            ));
+            )));
         }
         update_mft_record_io(io, parent_rec, |record| {
             let e = index_io::find_index_entry(record, basename, Some(&upcase))?
-                .ok_or_else(|| "race: $INDEX_ROOT entry vanished".to_string())?;
+                .ok_or_else(|| Error::io("race: $INDEX_ROOT entry vanished"))?;
             index_io::remove_index_entry(record, &e, index_io::BlockKind::IndexRoot)
         })?;
     } else if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
@@ -4362,14 +4442,14 @@ fn remove_parent_index_entry_io<T: BlockIo + ?Sized>(
                 index_io::find_entry_in_indx_block(&block, basename, Some(&upcase))?
             {
                 if entry.file_record_number != child_rec {
-                    return Err(format!(
+                    return Err(Error::io(format!(
                         "INDX entry at VCN {vcn} points at {} but resolved {child_rec}",
                         entry.file_record_number
-                    ));
+                    )));
                 }
                 idx_block::update_indx_block_io(io, &ia, vcn, |block| {
                     let e = index_io::find_entry_in_indx_block(block, basename, Some(&upcase))?
-                        .ok_or_else(|| "race: INDX entry vanished".to_string())?;
+                        .ok_or_else(|| Error::io("race: INDX entry vanished"))?;
                     index_io::remove_index_entry(block, &e, index_io::BlockKind::IndexAllocation)
                 })?;
                 removed = true;
@@ -4377,12 +4457,14 @@ fn remove_parent_index_entry_io<T: BlockIo + ?Sized>(
             }
         }
         if !removed {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "no index entry for '{basename}' in parent record {parent_rec}"
-            ));
+            )));
         }
     } else {
-        return Err(format!("no entry for '{basename}' in parent's $INDEX_ROOT"));
+        return Err(Error::io(format!(
+            "no entry for '{basename}' in parent's $INDEX_ROOT"
+        )));
     }
     Ok(())
 }
@@ -4399,21 +4481,22 @@ fn remove_dir_record_io<T: BlockIo + ?Sized>(
     dir_rec: u64,
     basename: &str,
     display: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let (_, dir_record_bytes) = read_mft_record_io(io, dir_rec)?;
 
     // Emptiness check: walk $INDEX_ROOT entries, require only the LAST
     // sentinel is present. Also reject $INDEX_ALLOCATION spillover — a
     // non-empty overflowed dir is definitely non-empty; a claimed-empty
     // but overflowed dir is suspicious anyway, refuse for MVP.
-    let ir_flags = index_io::index_root_flags(&dir_record_bytes).ok_or("dir has no $INDEX_ROOT")?;
+    let ir_flags =
+        index_io::index_root_flags(&dir_record_bytes).ok_or(Error::io("dir has no $INDEX_ROOT"))?;
     if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
-        return Err(format!(
+        return Err(Error::not_empty(format!(
             "rmdir: '{display}' has $INDEX_ALLOCATION overflow (probably not empty)"
-        ));
+        )));
     }
     if index_io::index_root_has_real_entries(&dir_record_bytes)? {
-        return Err(format!("rmdir: '{display}' is not empty"));
+        return Err(Error::not_empty(format!("rmdir: '{display}' is not empty")));
     }
 
     // Remove from parent's index. Parent's index may or may not be
@@ -4447,7 +4530,7 @@ pub fn write_resident_contents(
     image: &Path,
     file_path: &str,
     new_data: &[u8],
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let mut io = PathIo::open_rw(image)?;
     write_resident_contents_io(&mut io, file_path, new_data)
 }
@@ -4456,9 +4539,9 @@ pub fn write_resident_contents_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     new_data: &[u8],
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     write_resident_contents_attempt_io(io, file_path, new_data)
-        .map_err(ResidentWriteError::into_string)
+        .map_err(ResidentWriteError::into_error)
 }
 
 fn write_resident_contents_attempt_io<T: BlockIo + ?Sized>(
@@ -4469,11 +4552,11 @@ fn write_resident_contents_attempt_io<T: BlockIo + ?Sized>(
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     update_mft_record_io_typed(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, None)
-            .ok_or_else(|| "unnamed $DATA attribute not found".to_string())?;
+            .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
         if !loc.is_resident {
-            return Err(ResidentWriteError::NeedsPromotion(
-                "$DATA is already non-resident; use write_at + grow instead".to_string(),
-            ));
+            return Err(ResidentWriteError::NeedsPromotion(Error::io(
+                "$DATA is already non-resident; use write_at + grow instead",
+            )));
         }
         crate::attr_resize::set_resident_value_typed(record, loc.attr_offset, new_data)
             .map_err(ResidentWriteError::from)
@@ -4494,7 +4577,7 @@ fn write_resident_contents_attempt_io<T: BlockIo + ?Sized>(
 /// resident-only `$INDEX_ROOT` (same MVP limitation as `create_file`).
 /// Timestamps are refreshed to "now" in the updated index entry and
 /// `$FILE_NAME` attribute(s), matching Windows' observable behavior.
-pub fn rename(image: &Path, old_path: &str, new_basename: &str) -> Result<(), String> {
+pub fn rename(image: &Path, old_path: &str, new_basename: &str) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     rename_io(&mut io, old_path, new_basename)
 }
@@ -4503,7 +4586,7 @@ pub fn rename_io<T: BlockIo + ?Sized>(
     io: &mut T,
     old_path: &str,
     new_basename: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     rename_replace_io(io, old_path, new_basename, false)
 }
 
@@ -4526,7 +4609,7 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     old_path: &str,
     new_basename: &str,
     replace: bool,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // The directory index is ordered by COLLATION_FILE_NAME, so a
     // lookup in it has to fold case the same way the insert did;
     // see `index_io::find_index_entry`.
@@ -4561,12 +4644,11 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
 
     let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
-        .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
+        .ok_or_else(|| Error::io("parent has no $INDEX_ROOT"))?;
     if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
-        return Err(
-            "variable-length rename MVP: parent has $INDEX_ALLOCATION overflow — not yet supported"
-                .to_string(),
-        );
+        return Err(Error::io(
+            "variable-length rename MVP: parent has $INDEX_ALLOCATION overflow — not yet supported",
+        ));
     }
     // As in rename_same_length_io: the file's own ENTRY is not a clash.
     // Identify it by its offset, not by the record number it references:
@@ -4576,12 +4658,12 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     // onto the file's other hard link and inserted a duplicate collation
     // key into $I30.
     let own_entry = index_io::find_index_entry(&parent_record_bytes, &old_basename, Some(&upcase))?
-        .ok_or_else(|| format!("old entry '{old_basename}' not found"))?;
+        .ok_or_else(|| Error::not_found(format!("old entry '{old_basename}' not found")))?;
     if let Some(clash) =
         index_io::find_index_entry(&parent_record_bytes, new_basename, Some(&upcase))?
     {
         if clash.record_offset != own_entry.record_offset {
-            return Err(format!("'{new_basename}' already exists"));
+            return Err(Error::exists(format!("'{new_basename}' already exists")));
         }
     }
 
@@ -4618,7 +4700,7 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     // been loading it a second time.
     update_mft_record_io(io, parent_rec, |record| {
         let old_entry = index_io::find_index_entry(record, &old_basename, Some(&upcase))?
-            .ok_or_else(|| format!("old entry '{old_basename}' not found"))?;
+            .ok_or_else(|| Error::not_found(format!("old entry '{old_basename}' not found")))?;
         index_io::remove_index_entry(record, &old_entry, index_io::BlockKind::IndexRoot)?;
         index_io::insert_entry_into_index_root_with_collation(
             record,
@@ -4648,11 +4730,13 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
                 // torn now, and no further write here can be trusted to
                 // fix it, so the error says exactly what is on disk
                 // rather than reporting only the first failure.
-                Err(rollback) => format!(
-                    "{step_two}; and rolling the index entry back failed too ({rollback}): \
-                     directory '{new_basename}' entry stands while the file's $FILE_NAME \
-                     still reads '{old_basename}' — run chkdsk"
-                ),
+                Err(rollback) => step_two.map_message(|m| {
+                    format!(
+                        "{m}; and rolling the index entry back failed too ({rollback}): \
+                         directory '{new_basename}' entry stands while the file's $FILE_NAME \
+                         still reads '{old_basename}' — run chkdsk"
+                    )
+                }),
             },
         );
     }
@@ -4667,7 +4751,7 @@ fn find_existing_entry_record_io<T: BlockIo + ?Sized>(
     io: &mut T,
     parent_rec: u64,
     name: &str,
-) -> Result<Option<u64>, String> {
+) -> Result<Option<u64>, Error> {
     // The directory index is ordered by COLLATION_FILE_NAME, so a
     // lookup in it has to fold case the same way the insert did;
     // see `index_io::find_index_entry`.
@@ -4677,7 +4761,7 @@ fn find_existing_entry_record_io<T: BlockIo + ?Sized>(
         return Ok(Some(e.file_record_number));
     }
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
-        .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
+        .ok_or_else(|| Error::io("parent has no $INDEX_ROOT"))?;
     if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
         let ia = idx_block::load_for_directory_io(io, parent_rec)?;
         for vcn in ia.allocated_block_vcns() {
@@ -4723,7 +4807,7 @@ fn replace_existing_dest_io<T: BlockIo + ?Sized>(
     src_rec: u64,
     new_basename: &str,
     same_length: bool,
-) -> Result<ReplaceDisposition, String> {
+) -> Result<ReplaceDisposition, Error> {
     let Some(dest_rec) = find_existing_entry_record_io(io, parent_rec, new_basename)? else {
         return Ok(ReplaceDisposition::NoDestination);
     };
@@ -4740,19 +4824,18 @@ fn replace_existing_dest_io<T: BlockIo + ?Sized>(
     let (_, dest_bytes) = read_mft_record_io(io, dest_rec)?;
     let dest_is_dir = crate::mft_io::record_flags(&dest_bytes) & MFT_FLAG_DIRECTORY != 0;
 
-    // POSIX rename(2) forbids crossing the file/directory boundary. The
-    // wording below is chosen so `infer_errno_from_message` maps these to
+    // POSIX rename(2) forbids crossing the file/directory boundary:
     // EISDIR / ENOTDIR respectively.
     if !src_is_dir && dest_is_dir {
-        return Err(format!(
+        return Err(Error::is_directory(format!(
             "rename: cannot replace '{new_basename}': destination is a directory"
-        ));
+        )));
     }
     if src_is_dir && !dest_is_dir {
-        return Err(format!(
+        return Err(Error::not_directory(format!(
             "rename: cannot replace '{new_basename}' with a directory: \
              destination is not a directory"
-        ));
+        )));
     }
 
     // The variable-length rename that follows requires a resident-only
@@ -4761,12 +4844,9 @@ fn replace_existing_dest_io<T: BlockIo + ?Sized>(
     if !same_length {
         let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
         let pir = index_io::index_root_flags(&parent_record_bytes)
-            .ok_or_else(|| "parent has no $INDEX_ROOT".to_string())?;
+            .ok_or_else(|| Error::io("parent has no $INDEX_ROOT"))?;
         if pir & index_io::IH_FLAG_HAS_SUBNODES != 0 {
-            return Err(
-                "variable-length rename MVP: parent has $INDEX_ALLOCATION overflow — not yet supported"
-                    .to_string(),
-            );
+            return Err(Error::io("variable-length rename MVP: parent has $INDEX_ALLOCATION overflow — not yet supported"));
         }
     }
 
@@ -4785,11 +4865,11 @@ fn replace_file_name_with_new_name(
     parent_reference: u64,
     nt_time: u64,
     is_dir: bool,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let old_utf16: Vec<u16> = old_name.encode_utf16().collect();
     let new_utf16: Vec<u16> = new_name.encode_utf16().collect();
     if new_utf16.is_empty() || new_utf16.len() > 255 {
-        return Err("invalid new name length".to_string());
+        return Err(Error::invalid("invalid new name length"));
     }
 
     loop {
@@ -4867,21 +4947,21 @@ fn build_file_name_value(
 /// steps 2-4 free the backing storage. A crash between 1 and 4 leaks
 /// an MFT record + clusters (recoverable by scan); a reversed order
 /// could leave the file name pointing at a freed+reallocated record.
-pub fn unlink(image: &Path, file_path: &str) -> Result<(), String> {
+pub fn unlink(image: &Path, file_path: &str) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     unlink_io(&mut io, file_path)
 }
 
-pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(), String> {
+pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(), Error> {
     let (parent_rec, file_rec, basename) = resolve_parent_and_child_io(io, file_path)?;
 
     // Refuse directory targets.
     let (_, file_record_bytes) = read_mft_record_io(io, file_rec)?;
     let flags = crate::mft_io::record_flags(&file_record_bytes);
     if flags & MFT_FLAG_DIRECTORY != 0 {
-        return Err(format!(
+        return Err(Error::is_directory(format!(
             "unlink: '{file_path}' is a directory — use rmdir (not implemented)"
-        ));
+        )));
     }
 
     remove_file_record_io(io, parent_rec, file_rec, &basename)
@@ -4904,7 +4984,7 @@ pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(),
 fn free_all_nonresident_runs_io<T: BlockIo + ?Sized>(
     io: &mut T,
     record: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // Decode every non-resident attribute's runs first, so the cluster
     // bitmap is only touched after the whole record parses cleanly (no
     // half-freed state if a later attribute's mapping is malformed).
@@ -4935,7 +5015,7 @@ fn free_all_nonresident_runs_io<T: BlockIo + ?Sized>(
     let bm = bitmap::locate_bitmap_io(io)?;
     for (lcn, n) in to_free {
         bitmap::free_io(io, &bm, lcn, n)
-            .map_err(|e| format!("free clusters [{lcn}..{}]: {e}", lcn + n))?;
+            .map_err(|e| e.context(format!("free clusters [{lcn}..{}]", lcn + n)))?;
     }
     Ok(())
 }
@@ -4951,7 +5031,7 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
     parent_rec: u64,
     file_rec: u64,
     basename: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let (_, file_record_bytes) = read_mft_record_io(io, file_rec)?;
 
     // 1) Remove the parent's index entry. Dispatch on IR flags.
@@ -4970,9 +5050,9 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
     if hard_link_count > 1
         && find_file_name_attr(&file_record_bytes, parent_reference, basename).is_none()
     {
-        return Err(format!(
+        return Err(Error::io(format!(
             "unlink: no $FILE_NAME for '{basename}' under parent {parent_rec}"
-        ));
+        )));
     }
 
     remove_parent_index_entry_io(io, parent_rec, file_rec, basename)?;
@@ -5053,12 +5133,12 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
 /// [`rmdir_io`] (which enforces emptiness), regular files through
 /// [`unlink_io`]. Both `unlink` and `rmdir` deliberately refuse the
 /// other's type; this is the single entrypoint that routes correctly.
-pub fn remove(image: &Path, path: &str) -> Result<(), String> {
+pub fn remove(image: &Path, path: &str) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     remove_io(&mut io, path)
 }
 
-pub fn remove_io<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<(), String> {
+pub fn remove_io<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<(), Error> {
     let (_, rec, _) = resolve_parent_and_child_io(io, path)?;
     let (_, record_bytes) = read_mft_record_io(io, rec)?;
     if crate::mft_io::record_flags(&record_bytes) & MFT_FLAG_DIRECTORY != 0 {
@@ -5070,7 +5150,7 @@ pub fn remove_io<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<(), Stri
 
 /// Resolve `old_path` to `(parent_record_number, file_record_number, basename)`.
 #[allow(dead_code)]
-fn resolve_parent_and_child(image: &Path, old_path: &str) -> Result<(u64, u64, String), String> {
+fn resolve_parent_and_child(image: &Path, old_path: &str) -> Result<(u64, u64, String), Error> {
     let mut io = PathIo::open_ro(image)?;
     resolve_parent_and_child_io(&mut io, old_path)
 }
@@ -5078,10 +5158,10 @@ fn resolve_parent_and_child(image: &Path, old_path: &str) -> Result<(u64, u64, S
 fn resolve_parent_and_child_io<T: BlockIo + ?Sized>(
     io: &mut T,
     old_path: &str,
-) -> Result<(u64, u64, String), String> {
+) -> Result<(u64, u64, String), Error> {
     let p = old_path.trim_start_matches('/');
     if p.is_empty() {
-        return Err("cannot rename root".to_string());
+        return Err(Error::io("cannot rename root"));
     }
     let (parent_path, basename) = match p.rsplit_once('/') {
         Some((par, base)) => (par, base),
@@ -5094,7 +5174,7 @@ fn resolve_parent_and_child_io<T: BlockIo + ?Sized>(
 }
 
 /// Walk `file_path` natively and return the target's MFT record number.
-pub fn resolve_path_to_record_number(path: &Path, file_path: &str) -> Result<u64, String> {
+pub fn resolve_path_to_record_number(path: &Path, file_path: &str) -> Result<u64, Error> {
     let mut io = PathIo::open_ro(path)?;
     resolve_path_to_record_number_io(&mut io, file_path)
 }
@@ -5105,7 +5185,7 @@ pub fn resolve_path_to_record_number(path: &Path, file_path: &str) -> Result<u64
 pub fn resolve_path_to_record_number_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     // Native read layer: resolves `.`/`..` and matches names case-insensitively
     // via the on-disk `$UpCase` table (COLLATION_FILE_NAME), same as the
     // upstream finder did — no dependency on the `ntfs` crate.

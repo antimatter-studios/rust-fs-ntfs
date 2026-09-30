@@ -27,6 +27,7 @@
 //! are Microsoft's own output, captured via `fsutil file queryextents`
 //! + raw volume read on a clean format.com-formatted VHDX.
 
+use crate::error::Error;
 use std::path::Path;
 
 use crate::attr_io::AttrType;
@@ -59,7 +60,7 @@ pub struct UpcaseTable {
 impl UpcaseTable {
     /// Load `$UpCase` from the volume (record 10's unnamed `$DATA`) using the
     /// native read layer — no upstream `ntfs` crate.
-    pub fn load(image: &Path) -> Result<Self, String> {
+    pub fn load(image: &Path) -> Result<Self, Error> {
         let mut io = PathIo::open_ro(image)?;
         Self::load_io(&mut io)
     }
@@ -70,15 +71,15 @@ impl UpcaseTable {
     /// Reads `$UpCase`'s unnamed `$DATA` by its fixed record number, so this
     /// needs no name collation (and thus no upcase table) — safe even though
     /// collation itself depends on this table.
-    pub fn load_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<Self, String> {
+    pub fn load_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<Self, Error> {
         let bytes =
             crate::read::read_attribute_value(io, UPCASE_RECORD_NUMBER, AttrType::Data, None)
-                .map_err(|e| format!("read $UpCase: {e}"))?;
+                .map_err(|e| e.context("read $UpCase"))?;
         if bytes.len() < UPCASE_BYTES {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "$UpCase value length {} < expected {UPCASE_BYTES}",
                 bytes.len()
-            ));
+            )));
         }
         let table = bytes[..UPCASE_BYTES]
             .chunks_exact(2)

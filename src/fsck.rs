@@ -41,6 +41,7 @@
 //! memory-mapped image) can drive the same logic via callbacks. See the
 //! C ABI `fs_ntfs_fsck_with_callbacks` for the external entry point.
 
+use crate::error::Error;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -105,7 +106,7 @@ pub struct PathIo {
 }
 
 impl PathIo {
-    pub fn open(path: &Path) -> Result<Self, String> {
+    pub fn open(path: &Path) -> Result<Self, Error> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -209,7 +210,7 @@ impl<T: FsckIo> Seek for IoReader<'_, T> {
 /// Return `true` if the volume's `VOLUME_IS_DIRTY` flag (0x0001) is
 /// set. Lightweight probe — parses the boot sector + `$Volume` but
 /// doesn't mount the volume or load the upcase table.
-pub fn is_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
+pub fn is_dirty(path: impl AsRef<Path>) -> Result<bool, Error> {
     let mut io = PathIo::open(path.as_ref())?;
     is_dirty_io(&mut io)
 }
@@ -221,7 +222,7 @@ pub fn is_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
 ///
 /// Returns `Ok(true)` if the flag was set and has been cleared,
 /// `Ok(false)` if the volume was already clean, `Err` otherwise.
-pub fn clear_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
+pub fn clear_dirty(path: impl AsRef<Path>) -> Result<bool, Error> {
     let p = path.as_ref();
     log::info!(target: "fs_ntfs::fsck", "clear_dirty path={}", p.display());
     let mut io = PathIo::open(p)?;
@@ -235,7 +236,7 @@ pub fn clear_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
 ///
 /// Returns `Ok(true)` if the flag was clear and has been set,
 /// `Ok(false)` if the volume was already dirty, `Err` otherwise.
-pub fn set_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
+pub fn set_dirty(path: impl AsRef<Path>) -> Result<bool, Error> {
     let p = path.as_ref();
     log::info!(target: "fs_ntfs::fsck", "set_dirty path={}", p.display());
     let mut io = PathIo::open(p)?;
@@ -257,7 +258,7 @@ pub fn set_dirty(path: impl AsRef<Path>) -> Result<bool, String> {
 /// volume formatted + edited on Mac/Linux looks "already upgraded"
 /// to Windows, parallel to what `ntfs.sys` would have done on first
 /// RW mount.
-pub fn upgrade_volume_version(path: impl AsRef<Path>) -> Result<bool, String> {
+pub fn upgrade_volume_version(path: impl AsRef<Path>) -> Result<bool, Error> {
     let p = path.as_ref();
     log::info!(target: "fs_ntfs::fsck", "upgrade_volume_version path={}", p.display());
     let mut io = PathIo::open(p)?;
@@ -267,7 +268,7 @@ pub fn upgrade_volume_version(path: impl AsRef<Path>) -> Result<bool, String> {
 /// Explicitly overwrite `$LogFile` with `0xFF` bytes. Only use after an
 /// independent repair has made the volume consistent: this discards records
 /// and does not replay them. Returns the number of bytes overwritten.
-pub fn reset_logfile(path: impl AsRef<Path>) -> Result<u64, String> {
+pub fn reset_logfile(path: impl AsRef<Path>) -> Result<u64, Error> {
     let mut io = PathIo::open(path.as_ref())?;
     reset_logfile_io(&mut io, None)
 }
@@ -276,7 +277,7 @@ pub fn reset_logfile(path: impl AsRef<Path>) -> Result<u64, String> {
 /// log, or a restart area recording nothing to redo or undo. Any other log
 /// is refused before anything is written, whether or not the volume is
 /// marked dirty (#376). The log itself is never written.
-pub fn fsck(path: impl AsRef<Path>) -> Result<FsckReport, String> {
+pub fn fsck(path: impl AsRef<Path>) -> Result<FsckReport, Error> {
     let p = path.as_ref();
     log::info!(target: "fs_ntfs::fsck", "fsck path={}", p.display());
     let mut io = PathIo::open(p)?;
@@ -316,13 +317,13 @@ pub struct FsckReport {
 /// Passed as `Option<&mut dyn FnMut(&str, u64, u64)>` to the IO fns.
 ///
 /// `is_dirty` over an arbitrary `FsckIo`.
-pub fn is_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
+pub fn is_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, Error> {
     let (_, current) = locate_volume_flags_io(io)?;
     Ok(current & VOLUME_IS_DIRTY != 0)
 }
 
 /// `clear_dirty` over an arbitrary `FsckIo`.
-pub fn clear_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
+pub fn clear_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, Error> {
     let (flag_disk_offset, current_flags) = locate_volume_flags_io(io)?;
     if current_flags & VOLUME_IS_DIRTY == 0 {
         return Ok(false);
@@ -337,7 +338,7 @@ pub fn clear_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
 }
 
 /// `set_dirty` over an arbitrary `FsckIo`.
-pub fn set_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
+pub fn set_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, Error> {
     let (flag_disk_offset, current_flags) = locate_volume_flags_io(io)?;
     if current_flags & VOLUME_IS_DIRTY != 0 {
         return Ok(false);
@@ -367,7 +368,7 @@ pub fn set_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
 /// `$VOLUME_INFORMATION` layout in practice, but the `debug_assert!`
 /// below makes the requirement explicit rather than hoping a future
 /// layout change doesn't silently break the guarantee.
-pub fn upgrade_volume_version_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
+pub fn upgrade_volume_version_io<T: FsckIo>(io: &mut T) -> Result<bool, Error> {
     // Discard `locate`'s flag read; we'll re-fetch in a single 4-byte
     // read so version + flags share a snapshot (Greptile review on #36).
     let (flag_disk_offset, _stale_flags) = locate_volume_flags_io(io)?;
@@ -410,7 +411,7 @@ pub fn upgrade_volume_version_io<T: FsckIo>(io: &mut T) -> Result<bool, String> 
 pub fn reset_logfile_io<'cb, T: FsckIo>(
     io: &mut T,
     mut progress: Option<&mut (dyn FnMut(&str, u64, u64) + 'cb)>,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let (logfile_disk_offset, logfile_size) = locate_logfile_data_io(io)?;
 
     if let Some(cb) = progress.as_deref_mut() {
@@ -439,7 +440,7 @@ pub fn reset_logfile_io<'cb, T: FsckIo>(
 pub fn fsck_io<'cb, T: FsckIo>(
     io: &mut T,
     mut progress: Option<&mut (dyn FnMut(&str, u64, u64) + 'cb)>,
-) -> Result<FsckReport, String> {
+) -> Result<FsckReport, Error> {
     // THE LOG DECIDES, WHATEVER THE DIRTY FLAG SAYS (#375, #376). The flag
     // and the log are separate facts: a volume hibernated or shut down with
     // Fast Startup can have a clear flag over a log that still records
@@ -462,9 +463,9 @@ pub fn fsck_io<'cb, T: FsckIo>(
     emit("check_logfile", 0, 1);
     let logfile = logfile_state_io(io)?;
     if let LogfileState::Pending(why) = &logfile {
-        return Err(format!(
+        return Err(Error::io(format!(
             "{why}; fsck will not clear the dirty flag or rewrite the log over them"
-        ));
+        )));
     }
     emit("check_logfile", 1, 1);
 
@@ -523,7 +524,7 @@ pub struct CheckReport {
 }
 
 /// Is `$LogFile` all `0xFF` bytes? Reads the whole log; writes nothing.
-pub fn logfile_is_empty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
+pub fn logfile_is_empty_io<T: FsckIo>(io: &mut T) -> Result<bool, Error> {
     let (logfile_disk_offset, logfile_size) = locate_logfile_data_io(io)?;
     let mut buf = [0u8; LOGFILE_CHUNK];
     let mut checked = 0;
@@ -543,7 +544,7 @@ pub fn logfile_is_empty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
 /// log only to see whether it is all `0xFF`; otherwise the two restart
 /// pages and at most the one page holding the last checkpoint. Writes
 /// nothing. See [`crate::logfile`].
-pub fn logfile_state_io<T: FsckIo>(io: &mut T) -> Result<LogfileState, String> {
+pub fn logfile_state_io<T: FsckIo>(io: &mut T) -> Result<LogfileState, Error> {
     if logfile_is_empty_io(io)? {
         return Ok(LogfileState::Empty);
     }
@@ -568,7 +569,7 @@ pub fn logfile_state_io<T: FsckIo>(io: &mut T) -> Result<LogfileState, String> {
 /// THESE is wrong, and Windows' chkdsk remains the authority. An error is a
 /// volume too damaged to answer the questions at all (no boot sector, no
 /// `$MFT`, no `$Volume`).
-pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, String> {
+pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
     let dirty = is_dirty_io(io)?;
     let logfile = logfile_state_io(io)?;
     let logfile_empty = logfile == LogfileState::Empty;
@@ -597,7 +598,9 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, String> {
     // $MFTMirr agrees with $MFT, byte for byte, on disk (fixups included:
     // the mirror is a copy of the stored record, not a re-encoding).
     match read_mirror(io, record_size) {
-        Err(reason) => findings.push(CheckFinding::MirrorUnreadable { reason }),
+        Err(reason) => findings.push(CheckFinding::MirrorUnreadable {
+            reason: reason.into(),
+        }),
         Ok(mirror) => {
             let mirrored = mirror.len() as u64 / record_size;
             for record in 0..mirrored {
@@ -622,7 +625,7 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, String> {
 }
 
 /// The records `$MFTMirr` holds, as stored.
-fn read_mirror<T: FsckIo>(io: &mut T, record_size: u64) -> Result<Vec<u8>, String> {
+fn read_mirror<T: FsckIo>(io: &mut T, record_size: u64) -> Result<Vec<u8>, Error> {
     let mirror_bytes = crate::read::read_stat(io, 1)?.size;
     let mirrored = MIRRORED_RECORDS.min(mirror_bytes / record_size);
     crate::read::read_attribute_range(
@@ -644,7 +647,7 @@ fn bad_record_reason<T: FsckIo>(
 ) -> Option<String> {
     let at = match crate::mft_io::mft_record_offset_io(io, params, record) {
         Ok(at) => at,
-        Err(e) => return Some(e),
+        Err(e) => return Some(e.into()),
     };
     if let Err(e) = io.read_exact_at(at, raw) {
         return Some(format!("unreadable: {e}"));
@@ -664,7 +667,7 @@ fn bad_record_reason<T: FsckIo>(
     }
     // The header's own lengths, as every reader of the record checks them.
     if let Err(e) = crate::mft_io::read_mft_record_io(io, record) {
-        return Some(e);
+        return Some(e.into());
     }
     None
 }
@@ -677,7 +680,7 @@ fn bad_record_reason<T: FsckIo>(
 /// nothing is written.
 ///
 /// `Ok(true)` when the flag was cleared, `Ok(false)` when it was not set.
-pub fn repair_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
+pub fn repair_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, Error> {
     if !is_dirty_io(io)? {
         return Ok(false);
     }
@@ -691,7 +694,7 @@ pub fn repair_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, String> {
 /// Parse the volume, locate `$Volume`'s `$VOLUME_INFORMATION` attribute,
 /// and return (on-disk byte offset of the 2-byte flags field, current
 /// flags value).
-fn locate_volume_flags_io<T: FsckIo>(io: &mut T) -> Result<(u64, u16), String> {
+fn locate_volume_flags_io<T: FsckIo>(io: &mut T) -> Result<(u64, u16), Error> {
     // Native: on-disk offset of `$VOLUME_INFORMATION`'s resident value on
     // `$Volume`, plus the fixed flags-field offset within it.
     // Require the value to be long enough to hold the full version+flags
@@ -706,7 +709,7 @@ fn locate_volume_flags_io<T: FsckIo>(io: &mut T) -> Result<(u64, u16), String> {
         VOLUME_FLAGS_OFFSET as usize + 2,
     )?;
     let flag_offset = value_start + VOLUME_FLAGS_OFFSET;
-    let current = read_u16_le_io(io, flag_offset).map_err(|e| format!("read volume flags: {e}"))?;
+    let current = read_u16_le_io(io, flag_offset).map_err(|e| e.context("read volume flags"))?;
     Ok((flag_offset, current))
 }
 
@@ -784,7 +787,7 @@ fn ranges_overlap(a: (u64, u64), b: (u64, u64)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
-fn locate_logfile_data_io<T: FsckIo>(io: &mut T) -> Result<(u64, u64), String> {
+fn locate_logfile_data_io<T: FsckIo>(io: &mut T) -> Result<(u64, u64), Error> {
     // Native: `$LogFile`'s unnamed `$DATA` is non-resident and laid out as a
     // single contiguous extent; the helper returns its on-disk offset + the
     // logical length to overwrite, and fails closed if it's ever fragmented.
@@ -795,7 +798,7 @@ fn locate_logfile_data_io<T: FsckIo>(io: &mut T) -> Result<(u64, u64), String> {
         None,
     )?;
     if length == 0 {
-        return Err("$LogFile $DATA has zero length".to_string());
+        return Err(Error::io("$LogFile $DATA has zero length"));
     }
     // Not over the boot sector, and not over $MFT. See
     // `forbidden_fill_ranges`.
@@ -813,17 +816,17 @@ fn locate_logfile_data_io<T: FsckIo>(io: &mut T) -> Result<(u64, u64), String> {
     let fill = (offset, offset.saturating_add(length));
     for forbidden in forbidden_fill_ranges(&params, &other) {
         if ranges_overlap(fill, forbidden) {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "$LogFile says its data is at [{}, {}), which overlaps [{}, {}) -- the \
                  volume's own structures",
                 fill.0, fill.1, forbidden.0, forbidden.1
-            ));
+            )));
         }
     }
     Ok((offset, length))
 }
 
-fn read_u16_le_io<T: FsckIo>(io: &mut T, offset: u64) -> Result<u16, String> {
+fn read_u16_le_io<T: FsckIo>(io: &mut T, offset: u64) -> Result<u16, Error> {
     let mut buf = [0u8; 2];
     io.read_exact_at(offset, &mut buf)?;
     Ok(u16::from_le_bytes(buf))

@@ -16,6 +16,7 @@
 
 use crate::block_io::BlockIo;
 use crate::data_runs::{encode_runs, DataRun};
+use crate::error::Error;
 use crate::mft_io::apply_fixup_on_write;
 use crate::record_build::{
     align8, build_nonresident_attribute, build_nonresident_data_attribute,
@@ -377,27 +378,33 @@ pub fn format_filesystem(
     mft_record_size: u32,
     label: Option<&str>,
     serial: Option<u64>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     if !cluster_size.is_power_of_two() || !(512..=65536).contains(&cluster_size) {
-        return Err(format!("invalid cluster_size {cluster_size}"));
+        return Err(Error::invalid(format!(
+            "invalid cluster_size {cluster_size}"
+        )));
     }
     if !mft_record_size.is_power_of_two() || !(512..=16384).contains(&mft_record_size) {
-        return Err(format!("invalid mft_record_size {mft_record_size}"));
+        return Err(Error::invalid(format!(
+            "invalid mft_record_size {mft_record_size}"
+        )));
     }
     let bytes_per_sector: u16 = 512;
     if (cluster_size as u64) < bytes_per_sector as u64 {
-        return Err("cluster_size < bytes_per_sector".to_string());
+        return Err(Error::io("cluster_size < bytes_per_sector"));
     }
     let sectors_per_cluster = cluster_size / bytes_per_sector as u32;
     let cluster_count = size_bytes / cluster_size as u64;
     if cluster_count < 1024 {
-        return Err(format!("volume too small: {cluster_count} clusters"));
+        return Err(Error::io(format!(
+            "volume too small: {cluster_count} clusters"
+        )));
     }
     if dev.size() < size_bytes {
-        return Err(format!(
+        return Err(Error::io(format!(
             "device size {} < requested format size {size_bytes}",
             dev.size()
-        ));
+        )));
     }
 
     // Layout planning ------------------------------------------------------
@@ -420,7 +427,7 @@ pub fn format_filesystem(
         .max(1);
     let mft_records_capacity: u64 = mft_clusters * cluster_size as u64 / mft_record_size as u64;
     if mft_records_capacity < 24 {
-        return Err("MFT initial allocation too small".to_string());
+        return Err(Error::io("MFT initial allocation too small"));
     }
 
     let logfile_lcn = mft_lcn + mft_clusters;
@@ -497,7 +504,7 @@ pub fn format_filesystem(
 
     let last_used_lcn = sds_mirror_lcn + 1;
     if last_used_lcn >= mftmirr_lcn || mftmirr_lcn + mftmirr_clusters >= backup_boot_lcn {
-        return Err("volume too small for chosen layout".to_string());
+        return Err(Error::io("volume too small for chosen layout"));
     }
 
     let serial = serial.unwrap_or_else(generate_serial);
@@ -557,9 +564,9 @@ pub fn format_filesystem(
     // The checkpoint page at its home, which LFS 1.1 reads it from.
     let (home, page) = logfile_checkpoint_home();
     if home + page.len() as u64 > log_size_bytes {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$LogFile of {log_size_bytes} bytes cannot hold its checkpoint page at {home:#x}"
-        ));
+        )));
     }
     dev.write_all_at(logfile_off + home, page)?;
 
@@ -581,12 +588,12 @@ pub fn format_filesystem(
     // 4. $Bitmap data -----------------------------------------------------
     let mut bitmap = vec![0u8; (bitmap_clusters * cluster_size as u64) as usize];
     // Mark every cluster we've placed on disk.
-    let mut allocate = |start: u64, count: u64| -> Result<(), String> {
+    let mut allocate = |start: u64, count: u64| -> Result<(), Error> {
         for c in start..start + count {
             if c >= cluster_count {
-                return Err(format!(
+                return Err(Error::io(format!(
                     "tried to allocate cluster {c} past volume end {cluster_count}"
-                ));
+                )));
             }
             let byte = (c / 8) as usize;
             let bit = (c % 8) as u8;
@@ -1568,7 +1575,7 @@ fn build_boot_sector(
     cluster_size: u32,
     mft_record_size: u32,
     serial: u64,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let mut b = vec![0u8; 512];
     // Jump instruction (3 bytes), per spec: EB 52 90.
     b[0] = 0xEB;
@@ -1612,7 +1619,9 @@ fn build_boot_sector(
     let cpmr: i8 = if (mft_record_size as u64) >= cluster_size as u64 {
         let n = mft_record_size as u64 / cluster_size as u64;
         if n > i8::MAX as u64 {
-            return Err(format!("clusters_per_mft_record {n} exceeds i8 range"));
+            return Err(Error::io(format!(
+                "clusters_per_mft_record {n} exceeds i8 range"
+            )));
         }
         n as i8
     } else {
@@ -1677,7 +1686,7 @@ fn build_system_record(
     fn_data_alloc: u64,
     fn_data_real: u64,
     extra_attrs: &[Vec<u8>],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     // Default parent for slots 0..11 is the root directory (rec 5,
     // seq 5). Records nested under another system directory use the
     // `_with_parent` variant. None ship at format time today; future
@@ -1703,11 +1712,11 @@ fn build_system_record_with_parent(
     fn_data_alloc: u64,
     fn_data_real: u64,
     extra_attrs: &[Vec<u8>],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let rs = layout.record_size;
     let bps = layout.bytes_per_sector;
     if rs < 512 || !rs.is_multiple_of(bps as usize) {
-        return Err(format!("invalid record_size {rs}"));
+        return Err(Error::invalid(format!("invalid record_size {rs}")));
     }
 
     let mut rec = vec![0u8; rs];
@@ -1833,10 +1842,10 @@ fn build_system_record_with_parent(
 
     for attr in extra_attrs {
         if cursor + attr.len() + 8 > rs {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "system record {record_number} too small: need {} more bytes for attr",
                 attr.len()
-            ));
+            )));
         }
         rec[cursor..cursor + attr.len()].copy_from_slice(attr);
         cursor += attr.len();
@@ -1861,11 +1870,11 @@ fn build_system_record_with_parent(
 /// Build a FILE-magic placeholder for one of the reserved MFT slots
 /// (11..15). `$STD_INFO + empty $DATA`, no `$FILE_NAME`. ntfs.sys
 /// validates this layout at mount; raw-zero slots cause Event ID 55.
-fn build_reserved_placeholder(layout: &MftLayout, record_number: u32) -> Result<Vec<u8>, String> {
+fn build_reserved_placeholder(layout: &MftLayout, record_number: u32) -> Result<Vec<u8>, Error> {
     let rs = layout.record_size;
     let bps = layout.bytes_per_sector;
     if rs < 512 || !rs.is_multiple_of(bps as usize) {
-        return Err(format!("invalid record_size {rs}"));
+        return Err(Error::invalid(format!("invalid record_size {rs}")));
     }
 
     let mut rec = vec![0u8; rs];
@@ -1927,10 +1936,10 @@ fn place_record(
     record_size: usize,
     record_number: u32,
     rec: Vec<u8>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let off = (record_number as usize) * record_size;
     if off + record_size > mft_buf.len() {
-        return Err(format!("record {record_number} past MFT buffer"));
+        return Err(Error::io(format!("record {record_number} past MFT buffer")));
     }
     mft_buf[off..off + record_size].copy_from_slice(&rec);
     Ok(())
@@ -2023,17 +2032,20 @@ fn write_file_name(
     data_alloc: u64,
     data_real: u64,
     namespace: u8,
-) -> Result<usize, String> {
+) -> Result<usize, Error> {
     let utf16: Vec<u16> = name.encode_utf16().collect();
     if utf16.is_empty() || utf16.len() > 255 {
-        return Err(format!("invalid name length {}", utf16.len()));
+        return Err(Error::invalid(format!(
+            "invalid name length {}",
+            utf16.len()
+        )));
     }
     let header_size = 24usize;
     let key_fixed = 0x42usize;
     let value_size = key_fixed + utf16.len() * 2;
     let attr_length = align8(header_size + value_size);
     if at + attr_length > rec.len() {
-        return Err("$FILE_NAME doesn't fit".to_string());
+        return Err(Error::io("$FILE_NAME doesn't fit"));
     }
     rec[at..at + 4].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
     rec[at + 4..at + 8].copy_from_slice(&(attr_length as u32).to_le_bytes());
@@ -2351,10 +2363,13 @@ fn build_file_name_stream(
     data_alloc: u64,
     data_real: u64,
     namespace: u8,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let utf16: Vec<u16> = name.encode_utf16().collect();
     if utf16.is_empty() || utf16.len() > 255 {
-        return Err(format!("invalid name length {}", utf16.len()));
+        return Err(Error::invalid(format!(
+            "invalid name length {}",
+            utf16.len()
+        )));
     }
     let key_fixed = 0x42usize;
     let mut buf = vec![0u8; key_fixed + utf16.len() * 2];
@@ -2398,10 +2413,13 @@ fn build_skeleton_fn_stream(
     parent_reference: u64,
     name: &str,
     namespace: u8,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let utf16: Vec<u16> = name.encode_utf16().collect();
     if utf16.is_empty() || utf16.len() > 255 {
-        return Err(format!("invalid name length {}", utf16.len()));
+        return Err(Error::invalid(format!(
+            "invalid name length {}",
+            utf16.len()
+        )));
     }
     let key_fixed = 0x42usize;
     let mut buf = vec![0u8; key_fixed + utf16.len() * 2];
@@ -2730,7 +2748,7 @@ fn build_attrdef_table() -> Vec<u8> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn write_filled(dev: &mut dyn BlockIo, offset: u64, len: u64, fill: u8) -> Result<(), String> {
+fn write_filled(dev: &mut dyn BlockIo, offset: u64, len: u64, fill: u8) -> Result<(), Error> {
     const CHUNK: usize = 64 * 1024;
     let buf = vec![fill; CHUNK];
     let mut off = offset;

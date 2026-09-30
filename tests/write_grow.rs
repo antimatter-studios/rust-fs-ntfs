@@ -216,7 +216,8 @@ fn grow_with_failure_at(
     } else {
         common::FailingIo::failing_from(inner, n)
     };
-    let got = write::grow_nonresident_by_record_number_io(&mut io, rec, target);
+    let got =
+        write::grow_nonresident_by_record_number_io(&mut io, rec, target).map_err(String::from);
     let _ = BlockIo::sync(&mut io);
     drop(io);
     (got, free_clusters(img))

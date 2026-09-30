@@ -41,6 +41,13 @@ impl From<String> for Error {
     }
 }
 
+/// The kind is dropped: the facade reports a message only.
+impl From<crate::error::Error> for Error {
+    fn from(e: crate::error::Error) -> Self {
+        Error(e.into())
+    }
+}
+
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error(e.to_string())
@@ -122,8 +129,8 @@ impl Filesystem {
         let image = path.as_ref().to_path_buf();
         // Validate it's a parseable NTFS volume via the native reader (boot
         // sector + MFT + `$Volume` record) — no upstream `ntfs` crate.
-        let mut io = PathIo::open_ro(&image).map_err(Error)?;
-        read::read_volume_info(&mut io).map_err(Error)?;
+        let mut io = PathIo::open_ro(&image).map_err(Error::from)?;
+        read::read_volume_info(&mut io).map_err(Error::from)?;
         Ok(Self { image })
     }
 
@@ -138,8 +145,8 @@ impl Filesystem {
     /// mount; the volume is still usable in its pre-upgrade form.
     pub fn mount_rw(path: impl AsRef<Path>) -> Result<Self, Error> {
         let fs = Self::mount(path)?;
-        let mut io = PathIo::open_ro(&fs.image).map_err(Error)?;
-        let info = read::read_volume_info(&mut io).map_err(Error)?;
+        let mut io = PathIo::open_ro(&fs.image).map_err(Error::from)?;
+        let info = read::read_volume_info(&mut io).map_err(Error::from)?;
         crate::require_clean_rw_mount(info.flags).map_err(|e| Error(e.to_string()))?;
         match fs.upgrade_volume_version() {
             Ok(true) => log::info!(
@@ -168,11 +175,11 @@ impl Filesystem {
 
     /// Is the volume's DIRTY flag set in `$Volume`?
     pub fn is_dirty(&self) -> Result<bool, Error> {
-        fsck::is_dirty(&self.image).map_err(Error)
+        fsck::is_dirty(&self.image).map_err(Error::from)
     }
 
     pub fn clear_dirty(&self) -> Result<bool, Error> {
-        fsck::clear_dirty(&self.image).map_err(Error)
+        fsck::clear_dirty(&self.image).map_err(Error::from)
     }
 
     /// Mimic `ntfs.sys`'s "upgrade on mount" transition: rewrite
@@ -184,22 +191,22 @@ impl Filesystem {
     /// volume didn't need upgrading (already 3.1, different version,
     /// or flag clear). Idempotent; safe to call before every RW open.
     pub fn upgrade_volume_version(&self) -> Result<bool, Error> {
-        fsck::upgrade_volume_version(&self.image).map_err(Error)
+        fsck::upgrade_volume_version(&self.image).map_err(Error::from)
     }
 
     /// Rich stats: free clusters, MFT free records, dirty flag.
     /// Two full bitmap scans — not cheap.
     pub fn volume_stats(&self) -> Result<VolumeStats, Error> {
-        let bm = crate::bitmap::locate_bitmap(&self.image).map_err(Error)?;
-        let free_clusters = crate::bitmap::count_free(&self.image, &bm).map_err(Error)?;
-        let mft_bm = crate::mft_bitmap::locate(&self.image).map_err(Error)?;
+        let bm = crate::bitmap::locate_bitmap(&self.image).map_err(Error::from)?;
+        let free_clusters = crate::bitmap::count_free(&self.image, &bm).map_err(Error::from)?;
+        let mft_bm = crate::mft_bitmap::locate(&self.image).map_err(Error::from)?;
         let mft_total_records = match &mft_bm.layout {
             crate::mft_bitmap::MftBitmapLayout::Resident { total_bits, .. } => *total_bits,
             crate::mft_bitmap::MftBitmapLayout::NonResident { total_bits, .. } => *total_bits,
         };
         let mft_free_records =
-            crate::mft_bitmap::count_free(&self.image, &mft_bm).map_err(Error)?;
-        let dirty = fsck::is_dirty(&self.image).map_err(Error)?;
+            crate::mft_bitmap::count_free(&self.image, &mft_bm).map_err(Error::from)?;
+        let dirty = fsck::is_dirty(&self.image).map_err(Error::from)?;
         Ok(VolumeStats {
             total_clusters: bm.total_bits,
             free_clusters,
@@ -215,8 +222,8 @@ impl Filesystem {
         // (A fresh-format volume reads back as 1.2 with UPGRADE_ON_MOUNT set;
         // ntfs.sys rewrites it to 3.1 on first RW mount — we report the real
         // on-disk version rather than hardcoding 3.1.)
-        let mut io = PathIo::open_ro(&self.image).map_err(Error)?;
-        let vi = read::read_volume_info(&mut io).map_err(Error)?;
+        let mut io = PathIo::open_ro(&self.image).map_err(Error::from)?;
+        let vi = read::read_volume_info(&mut io).map_err(Error::from)?;
         Ok(VolumeInfo {
             volume_name: vi.label,
             cluster_size: vi.cluster_size,
@@ -229,9 +236,9 @@ impl Filesystem {
     }
 
     pub fn stat(&self, path: &str) -> Result<Attr, Error> {
-        let mut io = PathIo::open_ro(&self.image).map_err(Error)?;
-        let rec = read::resolve_path(&mut io, path).map_err(Error)?;
-        let st = read::read_stat(&mut io, rec).map_err(Error)?;
+        let mut io = PathIo::open_ro(&self.image).map_err(Error::from)?;
+        let rec = read::resolve_path(&mut io, path).map_err(Error::from)?;
+        let st = read::read_stat(&mut io, rec).map_err(Error::from)?;
         let (crtime_sec, crtime_nsec) = nt_parts(st.created_nt);
         let (mtime_sec, mtime_nsec) = nt_parts(st.modified_nt);
         let (atime_sec, atime_nsec) = nt_parts(st.accessed_nt);
@@ -281,8 +288,8 @@ impl Filesystem {
     /// Callers must handle that race/consistency boundary just as they would a
     /// file disappearing after an ordinary directory enumeration.
     pub fn read_dir(&self, path: &str) -> Result<Vec<DirEntry>, Error> {
-        let mut io = PathIo::open_ro(&self.image).map_err(Error)?;
-        let current_rn = read::resolve_path(&mut io, path).map_err(Error)?;
+        let mut io = PathIo::open_ro(&self.image).map_err(Error::from)?;
+        let current_rn = read::resolve_path(&mut io, path).map_err(Error::from)?;
         let parent_rn = if current_rn == read::ROOT_RECORD_NUMBER {
             current_rn
         } else {
@@ -302,7 +309,7 @@ impl Filesystem {
         ];
         // read_dir_entries already merges $INDEX_ROOT + INDX blocks, skips the
         // DOS 8.3 shadow names, and sets is_dir from each entry's $FILE_NAME bit.
-        for e in read::read_dir_entries(&mut io, current_rn).map_err(Error)? {
+        for e in read::read_dir_entries(&mut io, current_rn).map_err(Error::from)? {
             out.push(DirEntry {
                 file_record_number: e.record_number,
                 file_type: if e.is_dir {
@@ -320,14 +327,14 @@ impl Filesystem {
     /// `offset`. Returns the number of bytes actually read (may be less
     /// than `buf.len()` if EOF is hit).
     pub fn read_file(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
-        let mut io = PathIo::open_ro(&self.image).map_err(Error)?;
-        let rec = read::resolve_path(&mut io, path).map_err(Error)?;
+        let mut io = PathIo::open_ro(&self.image).map_err(Error::from)?;
+        let rec = read::resolve_path(&mut io, path).map_err(Error::from)?;
         // Ranged native read of the unnamed $DATA (resident / non-resident /
         // sparse / LZNT1) — reads only the clusters overlapping the window, so
         // a small read of a huge file doesn't materialise the whole file.
         let data =
             read::read_attribute_range(&mut io, rec, AttrType::Data, None, offset, buf.len())
-                .map_err(Error)?;
+                .map_err(Error::from)?;
         let n = data.len().min(buf.len());
         buf[..n].copy_from_slice(&data[..n]);
         Ok(n)
@@ -336,49 +343,49 @@ impl Filesystem {
     // ---------- mutations ----------
 
     pub fn create_file(&self, parent: &str, basename: &str) -> Result<u64, Error> {
-        write::create_file(&self.image, parent, basename).map_err(Error)
+        write::create_file(&self.image, parent, basename).map_err(Error::from)
     }
 
     pub fn mkdir(&self, parent: &str, basename: &str) -> Result<u64, Error> {
-        write::mkdir(&self.image, parent, basename).map_err(Error)
+        write::mkdir(&self.image, parent, basename).map_err(Error::from)
     }
 
     pub fn unlink(&self, path: &str) -> Result<(), Error> {
-        write::unlink(&self.image, path).map_err(Error)
+        write::unlink(&self.image, path).map_err(Error::from)
     }
 
     pub fn rmdir(&self, path: &str) -> Result<(), Error> {
-        write::rmdir(&self.image, path).map_err(Error)
+        write::rmdir(&self.image, path).map_err(Error::from)
     }
 
     /// POSIX-style remove: dispatches to `rmdir` for directories and
     /// `unlink` for regular files.
     pub fn remove(&self, path: &str) -> Result<(), Error> {
-        write::remove(&self.image, path).map_err(Error)
+        write::remove(&self.image, path).map_err(Error::from)
     }
 
     pub fn rename(&self, old_path: &str, new_basename: &str) -> Result<(), Error> {
-        write::rename(&self.image, old_path, new_basename).map_err(Error)
+        write::rename(&self.image, old_path, new_basename).map_err(Error::from)
     }
 
     pub fn rename_same_length(&self, old_path: &str, new_name: &str) -> Result<(), Error> {
-        write::rename_same_length(&self.image, old_path, new_name).map_err(Error)
+        write::rename_same_length(&self.image, old_path, new_name).map_err(Error::from)
     }
 
     pub fn truncate(&self, path: &str, new_size: u64) -> Result<u64, Error> {
-        write::truncate(&self.image, path, new_size).map_err(Error)
+        write::truncate(&self.image, path, new_size).map_err(Error::from)
     }
 
     pub fn grow(&self, path: &str, new_size: u64) -> Result<u64, Error> {
-        write::grow_nonresident(&self.image, path, new_size).map_err(Error)
+        write::grow_nonresident(&self.image, path, new_size).map_err(Error::from)
     }
 
     pub fn write_file_contents(&self, path: &str, data: &[u8]) -> Result<u64, Error> {
-        write::write_file_contents(&self.image, path, data).map_err(Error)
+        write::write_file_contents(&self.image, path, data).map_err(Error::from)
     }
 
     pub fn write_resident_contents(&self, path: &str, data: &[u8]) -> Result<u64, Error> {
-        write::write_resident_contents(&self.image, path, data).map_err(Error)
+        write::write_resident_contents(&self.image, path, data).map_err(Error::from)
     }
 
     pub fn write_named_stream(
@@ -387,33 +394,33 @@ impl Filesystem {
         stream_name: &str,
         data: &[u8],
     ) -> Result<(), Error> {
-        write::write_named_stream(&self.image, path, stream_name, data).map_err(Error)
+        write::write_named_stream(&self.image, path, stream_name, data).map_err(Error::from)
     }
 
     pub fn delete_named_stream(&self, path: &str, stream_name: &str) -> Result<(), Error> {
-        write::delete_named_stream(&self.image, path, stream_name).map_err(Error)
+        write::delete_named_stream(&self.image, path, stream_name).map_err(Error::from)
     }
 
     pub fn write_ea(&self, path: &str, name: &[u8], value: &[u8], flags: u8) -> Result<(), Error> {
-        write::write_ea(&self.image, path, name, value, flags).map_err(Error)
+        write::write_ea(&self.image, path, name, value, flags).map_err(Error::from)
     }
 
     pub fn remove_ea(&self, path: &str, name: &[u8]) -> Result<(), Error> {
-        write::remove_ea(&self.image, path, name).map_err(Error)
+        write::remove_ea(&self.image, path, name).map_err(Error::from)
     }
 
     pub fn write_reparse_point(&self, path: &str, tag: u32, data: &[u8]) -> Result<(), Error> {
-        write::write_reparse_point(&self.image, path, tag, data).map_err(Error)
+        write::write_reparse_point(&self.image, path, tag, data).map_err(Error::from)
     }
 
     pub fn remove_reparse_point(&self, path: &str) -> Result<(), Error> {
-        write::remove_reparse_point(&self.image, path).map_err(Error)
+        write::remove_reparse_point(&self.image, path).map_err(Error::from)
     }
 
     /// Read the file's 16-byte `$OBJECT_ID` (GUID). Returns `Ok(None)`
     /// if the file has no object ID.
     pub fn object_id(&self, path: &str) -> Result<Option<[u8; 16]>, Error> {
-        write::read_object_id(&self.image, path).map_err(Error)
+        write::read_object_id(&self.image, path).map_err(Error::from)
     }
 
     pub fn link(
@@ -422,7 +429,7 @@ impl Filesystem {
         new_parent: &str,
         new_basename: &str,
     ) -> Result<(), Error> {
-        write::link(&self.image, existing_path, new_parent, new_basename).map_err(Error)
+        write::link(&self.image, existing_path, new_parent, new_basename).map_err(Error::from)
     }
 
     pub fn create_symlink(
@@ -432,7 +439,7 @@ impl Filesystem {
         target: &str,
         relative: bool,
     ) -> Result<u64, Error> {
-        write::create_symlink(&self.image, parent, basename, target, relative).map_err(Error)
+        write::create_symlink(&self.image, parent, basename, target, relative).map_err(Error::from)
     }
 }
 

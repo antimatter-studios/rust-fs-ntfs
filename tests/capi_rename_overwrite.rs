@@ -41,12 +41,12 @@ use fs_ntfs::{
 
 const VOL_SIZE: u64 = 32 * 1024 * 1024;
 
-// POSIX errno values (matched by `infer_errno_from_message`).
-const EEXIST: c_int = 17;
-const ENOTDIR: c_int = 20;
-const EISDIR: c_int = 21;
-const EINVAL: c_int = 22;
-const ENOTEMPTY: c_int = 66;
+// The platform's <errno.h> values, which is what the C ABI reports.
+const EEXIST: c_int = libc::EEXIST;
+const ENOTDIR: c_int = libc::ENOTDIR;
+const EISDIR: c_int = libc::EISDIR;
+const EINVAL: c_int = libc::EINVAL;
+const ENOTEMPTY: c_int = libc::ENOTEMPTY;
 
 // --- image generation -----------------------------------------------------
 

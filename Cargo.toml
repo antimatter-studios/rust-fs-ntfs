@@ -60,6 +60,11 @@ cli = ["dep:clap", "am-fs-core/cli"]
 # they want — `log` itself is a no-op until one is set, so the crate
 # stays quiet by default.
 log = "0.4"
+# The <errno.h> values the C ABI reports, taken from the platform the crate
+# is built for rather than written down: ENOTEMPTY is 66 on macOS and 39 on
+# Linux, and a hard-coded 66 was never ENOTEMPTY to a Linux caller (#382).
+# MIT/Apache-2.0, already in the tree through the dependencies.
+libc = "0.2"
 # Block-device trait surface shared with sister crates (qcow2 reader,
 # partition probe, the other fs-* drivers). Normal builds use the published
 # crate, so a standalone clone does not require a sibling checkout.

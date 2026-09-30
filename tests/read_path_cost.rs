@@ -277,6 +277,7 @@ fn measure_shared(img: &Path) -> Pass {
             Ok(_) => ok += 1,
             Err(e) => {
                 failed += 1;
+                let e = String::from(e);
                 if !reasons.iter().any(|r| r == &e) {
                     reasons.push(e);
                 }
@@ -313,6 +314,7 @@ fn measure_shared(img: &Path) -> Pass {
             Ok(_) => ok += 1,
             Err(e) => {
                 failed += 1;
+                let e = String::from(e);
                 if !reasons.iter().any(|r| r == &e) {
                     reasons.push(e);
                 }
@@ -375,6 +377,7 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
             Ok(_) => ok += 1,
             Err(e) => {
                 failed += 1;
+                let e = String::from(e);
                 if !reasons.iter().any(|r| r == &e) {
                     reasons.push(e);
                 }
@@ -407,6 +410,7 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
             Ok(_) => ok += 1,
             Err(e) => {
                 failed += 1;
+                let e = String::from(e);
                 if !reasons.iter().any(|r| r == &e) {
                     reasons.push(e);
                 }
@@ -449,6 +453,7 @@ fn measure_per_call(img: &Path, paths: &[PathEntry]) -> Pass {
             Ok(_) => ok += 1,
             Err(e) => {
                 failed += 1;
+                let e = String::from(e);
                 if !reasons.iter().any(|r| r == &e) {
                     reasons.push(e);
                 }
