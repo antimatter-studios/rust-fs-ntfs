@@ -20,8 +20,18 @@
   `$LogFile` restart pages said LFS 2.0 with a client open and the clean
   flag clear -- a volume still mounted, captured from format.com mid-run
   -- which ntfs-3g refuses as an unclean shutdown and as metadata kept in
-  Windows' cache. They now say LFS 1.1 and `RESTART_VOLUME_IS_CLEAN`, what
-  Windows writes when it dismounts a volume cleanly.
+  Windows' cache. The log head is now laid out as Windows lays out a log it
+  dismounted cleanly: both restart pages LFS 1.1 with
+  `RESTART_VOLUME_IS_CLEAN`, one update sequence number apart; the
+  checkpoint page at its home, where its LSN resolves; and pages 2 and 3
+  as tail copies naming that home. LFS 1.1 without the home copy made
+  Windows log event 55 on mount and `chkdsk /scan` exit 13.
+- **`$LogFile`'s state is read from every record page, tail copies
+  included** (#375). A log Windows was still writing when it was captured
+  had three pages ending past its last checkpoint while its restart area
+  agreed with itself -- LFS 2.0 rewrites the restart area only at a
+  checkpoint -- and was read as clean. Checked against two such logs
+  captured on `windows-latest` (`test-disks/windows-interrupted-logfile-*`).
 
 ## [0.6.0] — 2026-09-30
 

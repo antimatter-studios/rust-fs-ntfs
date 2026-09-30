@@ -177,7 +177,7 @@ fn restart_page(read: &mut ReadLog<'_>, off: u64, page_size: usize) -> Result<Re
 }
 
 /// Byte offset in the log of `lsn`, or `None` if the geometry is nonsense.
-fn lsn_to_offset(lsn: u64, seq_number_bits: u32) -> Option<u64> {
+pub(crate) fn lsn_to_offset(lsn: u64, seq_number_bits: u32) -> Option<u64> {
     if !(3..64).contains(&seq_number_bits) {
         return None;
     }
@@ -266,22 +266,75 @@ fn analyse(read: &mut ReadLog<'_>) -> Result<LogfileState, String> {
     if !(512..=65536).contains(&lps) || !lps.is_power_of_two() {
         return Err(unreadable(format!("log page size {lps}")));
     }
+    // EVERY RECORD PAGE IS READ, not only the checkpoint's. An LFS 2.0
+    // restart area -- what Windows 8 and later run a mounted log at -- is
+    // rewritten only at a checkpoint, so `current_lsn` equal to the
+    // client's restart LSN says nothing about what was logged since. The
+    // record pages do: each names the last LSN ending on it. On a log
+    // Windows was writing when it was captured, three pages ended past the
+    // checkpoint while the restart area agreed with itself
+    // (test-disks/windows-interrupted-logfile-1.bin.gz). A page whose
+    // update sequence does not check out may be the page being written
+    // when the log stopped, and is not taken on trust either.
+    //
+    // The two pages after the restart pages are the LFS TAIL COPIES: the
+    // newest tail page is written there before its home, so a checkpoint
+    // can be there and nowhere else yet (windows-interrupted-logfile-5).
+    let lps_u64 = u64::from(lps);
+    let first_record_page = 2 * sps as u64;
+    let tail_copies_end = first_record_page + 2 * lps_u64;
+    let mut tail_copies = Vec::new();
+    let mut newest = 0u64;
+    let mut at = first_record_page;
+    while let Some(mut page) = read(at, lps as usize) {
+        if page.get(..4) == Some(b"RCRD".as_slice()) {
+            apply_fixup_on_read_magic(&mut page, LFS_STRIDE, b"RCRD").map_err(|e| {
+                format!(
+                    "$LogFile's record page at {at:#x} is torn ({e}), so it may hold \
+                     transactions this library cannot replay (rust-fs-ntfs#137)"
+                )
+            })?;
+            // `last_end_lsn` (0x20), not the field at 0x08: on an LFS 1.x
+            // tail copy that one is the file offset of the page's home
+            // (0x22000 on Windows' clean log), not an LSN.
+            let last_end = u64_at(&page, 0x20).unwrap_or(u64::MAX);
+            newest = newest.max(last_end);
+            if at < tail_copies_end {
+                tail_copies.push(page);
+            }
+        }
+        at += lps_u64;
+    }
+    if newest > restart_lsn {
+        return Err(format!(
+            "$LogFile holds records after its last checkpoint (checkpoint LSN \
+             {restart_lsn:#x}, newest record LSN {newest:#x}), which may be transactions \
+             this library cannot replay (rust-fs-ntfs#137)"
+        ));
+    }
+
     let offset = lsn_to_offset(restart_lsn, ra.seq_number_bits)
         .ok_or_else(|| unreadable(format!("sequence-number bits {}", ra.seq_number_bits)))?;
-    let page_start = offset - offset % u64::from(lps);
+    let page_start = offset - offset % lps_u64;
     let in_page = (offset - page_start) as usize;
-    let mut page = read(page_start, lps as usize)
+    let carries = |page: &[u8]| u64_at(page, in_page) == Some(restart_lsn);
+    let mut home = read(page_start, lps as usize)
         .ok_or_else(|| unreadable(format!("offset {offset:#x} is past the log's end")))?;
-    apply_fixup_on_read_magic(&mut page, LFS_STRIDE, b"RCRD")
-        .map_err(|e| unreadable(format!("record page at {page_start:#x}: {e}")))?;
+    let home_ok =
+        apply_fixup_on_read_magic(&mut home, LFS_STRIDE, b"RCRD").is_ok() && carries(&home);
+    let page = if home_ok {
+        home
+    } else {
+        tail_copies
+            .into_iter()
+            .find(|p| carries(p))
+            .ok_or_else(|| {
+                unreadable(format!(
+                    "neither the record at {offset:#x} nor either tail copy carries it"
+                ))
+            })?
+    };
 
-    let this_lsn =
-        u64_at(&page, in_page).ok_or_else(|| unreadable("header past the page".into()))?;
-    if this_lsn != restart_lsn {
-        return Err(unreadable(format!(
-            "the record at {offset:#x} carries LSN {this_lsn:#x}"
-        )));
-    }
     let data_len = u32_at(&page, in_page + 0x18)
         .ok_or_else(|| unreadable("header past the page".into()))? as usize;
     let record_type =

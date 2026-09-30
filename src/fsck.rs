@@ -1659,24 +1659,28 @@ mod check_tests {
     #[test]
     fn a_checkpoint_with_nothing_after_it_is_clean_without_the_flag() {
         let mut dev = fresh();
-        let (log, len) = locate_logfile_data_io(&mut dev).unwrap();
+        let (log, _) = locate_logfile_data_io(&mut dev).unwrap();
         let page = log as usize;
         let ra = page + u16::from_le_bytes([dev.0[page + 0x18], dev.0[page + 0x19]]) as usize;
         dev.0[ra + crate::logfile::RESTART_AREA_FLAGS_OFFSET] &=
             !(crate::logfile::RESTART_VOLUME_IS_CLEAN as u8);
-        // mkfs's checkpoint record is at 0x2000, not where its LSN resolves
-        // (0x22040, #377), so without the flag the log cannot be shown to
-        // be clean and is treated as holding work.
-        assert!(logfile_state_io(&mut dev).unwrap().needs_replay());
-        // Put the record where its LSN says it is, and the checkpoint alone
-        // proves there is nothing to redo or undo.
-        let rcrd = dev.0[page + 0x2000..page + 0x3000].to_vec();
-        dev.0[page + 0x22000..page + 0x23000].copy_from_slice(&rcrd);
-        assert!(len as usize > 0x23000);
+        // The checkpoint record is at its home (0x22040) and in both LFS
+        // tail copies (0x2000, 0x3000), as on Windows' clean log. It lists
+        // nothing, and nothing follows it.
         assert_eq!(
             logfile_state_io(&mut dev).unwrap(),
             LogfileState::Clean(crate::logfile::CleanBecause::CheckpointOnly)
         );
+        // Either copy is enough to find it...
+        dev.0[page + 0x22000..page + 0x23000].fill(0xFF);
+        assert_eq!(
+            logfile_state_io(&mut dev).unwrap(),
+            LogfileState::Clean(crate::logfile::CleanBecause::CheckpointOnly)
+        );
+        // ...and with none of them the checkpoint is nowhere, and a log
+        // whose checkpoint cannot be read may hold work.
+        dev.0[page + 0x2000..page + 0x4000].fill(0xFF);
+        assert!(logfile_state_io(&mut dev).unwrap().needs_replay());
     }
 
     #[test]

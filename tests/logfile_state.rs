@@ -235,3 +235,51 @@ fn a_torn_restart_page_is_not_trusted() {
     log[4096 + 510] ^= 0xff;
     assert!(logfile::state(&log).needs_replay());
 }
+
+// ---------------------------------------------------------------------------
+// Logs Windows was still writing when they were captured (#366).
+//
+// `test-disks/windows-interrupted-logfile-{1,5}.bin.gz` are the `$LogFile`s
+// of two VSS snapshots of a VHD on `windows-latest` taken while a workload
+// created, renamed and deleted files on it (logfile-oracle.yml, run
+// 36664699296, test-disks/capture-interrupted-logfile.ps1; candidates 1 and
+// 5). Cut out with ntfs-3g's `ntfscat -f -i 2`; 2,097,152 bytes each,
+// SHA-256 e6a36b92...d638eb and fa15e834...67ad1ec before gzip. ntfs-3g
+// calls both volumes unclean. They are LFS 2.0 logs with a client open.
+//
+// * Candidate 1's restart area names checkpoint LSN 0x33e791, and three
+//   RCRD pages end past it (the highest at 0x33ea1e): records Windows
+//   logged after its last checkpoint, which a replay would redo.
+// * Candidate 5's newest checkpoint record is only in the LFS tail copy at
+//   log offset 0x2000 -- its home page was not yet written -- and no page
+//   ends past it.
+// ---------------------------------------------------------------------------
+
+fn windows_interrupted_log(k: u32) -> Vec<u8> {
+    let path = format!("test-disks/windows-interrupted-logfile-{k}.bin.gz");
+    let out = Command::new("gzip")
+        .args(["-dc", &path])
+        .output()
+        .expect("spawn gzip");
+    assert!(out.status.success(), "gzip -dc {path}");
+    assert_eq!(out.stdout.len(), 2_097_152, "{path} is a 2 MiB $LogFile");
+    out.stdout
+}
+
+#[test]
+fn records_windows_logged_after_its_last_checkpoint_may_be_transactions() {
+    let state = logfile::state(&windows_interrupted_log(1));
+    assert!(
+        matches!(&state, LogfileState::Pending(why) if why.contains("after its last checkpoint")),
+        "{state:?}"
+    );
+}
+
+#[test]
+fn a_checkpoint_windows_left_in_the_tail_copy_is_found() {
+    let state = logfile::state(&windows_interrupted_log(5));
+    assert!(
+        !matches!(&state, LogfileState::Pending(why) if why.contains("cannot be read")),
+        "{state:?}"
+    );
+}
