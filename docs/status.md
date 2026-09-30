@@ -114,7 +114,7 @@ MFT — are tracked in [`future-features.md`](future-features.md).
 | `fs_ntfs_is_dirty(image)` / `fs_ntfs_is_dirty_with_callbacks(cfg)` | Probe `VOLUME_IS_DIRTY` without modifying. |
 | `fs_ntfs_clear_dirty(image)` | Clear `VOLUME_IS_DIRTY` in `$Volume/$VOLUME_INFORMATION`. Returns 1 (cleared), 0 (already clean), -1 (error). |
 | `fs_ntfs_reset_logfile(image)` | Overwrite `$LogFile` with `0xFF` — the format-level "no pending transactions" signal. |
-| `fs_ntfs_fsck(image, *logfile_bytes, *dirty_cleared)` | Both above; `NULL` out-params accepted. |
+| `fs_ntfs_fsck(image, *dirty_cleared)` | Clears the dirty flag when `$LogFile` records nothing to replay; refuses any other log, dirty or not, and never writes the log (#376). `NULL` out-param accepted. |
 | `fs_ntfs_fsck_with_callbacks(cfg, …)` | Same as `fsck` but goes through the block-device callback adapter (sandbox-safe). |
 | `fs_ntfs_mkfs(cfg)` | Format a volume from scratch via the callback adapter. |
 
@@ -392,7 +392,7 @@ Three C-ABI functions in `src/fsck.rs`:
 |---|---|
 | `fs_ntfs_clear_dirty(path) -> c_int` | Clears `VOLUME_IS_DIRTY` in `$Volume/$VOLUME_INFORMATION`. Returns 1 (cleared), 0 (already clean), -1 (error). |
 | `fs_ntfs_reset_logfile(path) -> i64` | Overwrites `$LogFile` with `0xFF` — the NTFS format-level "no pending transactions" signal. Returns bytes written. |
-| `fs_ntfs_fsck(path, *logfile_bytes, *dirty_cleared) -> c_int` | Runs both; `NULL` out-params are accepted. |
+| `fs_ntfs_fsck(path, *dirty_cleared) -> c_int` | Clears the dirty flag when `$LogFile` records nothing to replay; refuses any other log, dirty or not, and never writes the log (#376). `NULL` out-param accepted. |
 
 Tests: `tests/fsck.rs` (7) + `tests/capi_fsck.rs` (8).
 
@@ -645,8 +645,11 @@ volumes that lost their mount handle without a clean unmount.
 - `fs_ntfs_reset_logfile(path)` — overwrite `$LogFile` with `0xFF`, the
   format-level "no pending transactions" pattern documented in Windows Internals 7th ed.
   Returns bytes written or `-1`.
-- `fs_ntfs_fsck(path, *logfile_bytes, *dirty_cleared)` — both above,
-  with optional out-params. `NULL` out-params accepted.
+- `fs_ntfs_fsck(path, *dirty_cleared)` — clear the dirty flag when
+  `$LogFile` records nothing to replay (empty, or a restart area with
+  nothing to redo or undo). Any other log is refused before a write,
+  dirty or not, and the log is never written (#376). `NULL` out-param
+  accepted.
 
 Scope is the weakest possible recovery: no `$LogFile` replay, no
 MFT/MFTMirror reconciliation. Uncommitted metadata changes are

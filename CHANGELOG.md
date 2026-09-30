@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### Breaking
+
+- **`fsck` decides from `$LogFile` on every volume and never writes it**
+  (#376). It used to overwrite the log with `0xFF` on any volume whose
+  dirty flag was clear, whatever the log held -- discarding the record of
+  an unclean shutdown on a volume hibernated or shut down with Fast
+  Startup, which leaves the flag clear. Now a log that may hold
+  transactions is refused before anything is written, dirty or not; an
+  empty or clean log is left as it is; and the dirty flag is cleared if
+  set. `fsck::reset_logfile` stays, for a volume made consistent by other
+  means. What that changes for callers:
+  - **C ABI:** `fs_ntfs_fsck`, `fs_ntfs_fsck_with_callbacks` and
+    `fs_ntfs_fsck_with_fs_core_device` lose their `uint64_t
+    *out_logfile_bytes` parameter -- the count would always be 0.
+    `fs_ntfs_fsck(path, out_dirty_cleared)`; the other two end
+    `(..., progress_ctx, out_dirty_cleared)`. A caller built against the
+    old header fails to compile rather than passing its pointers one slot
+    off.
+  - **Progress phases:** `reset_logfile` is no longer emitted by fsck.
+    The phases are `check_logfile` (0/1, 1/1) then `clear_dirty` (0/1,
+    1/1).
+  - **Return value:** fsck on a volume whose flag is clear but whose log
+    records work now fails (`-1`, `Err`) instead of succeeding.
+  - **Rust:** `FsckReport.logfile_bytes: u64` is replaced by
+    `FsckReport.logfile: LogfileState` (`Empty` or `Clean`), and
+    `FsckReport` is no longer `Copy`.
+
 ### Fixed
 
 - **`fsck` clears the dirty flag on a volume whose `$LogFile` records

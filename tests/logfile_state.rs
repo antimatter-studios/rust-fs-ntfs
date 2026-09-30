@@ -116,9 +116,9 @@ fn a_dirty_volume_this_crate_formatted_is_repaired_and_its_log_kept() {
     let report =
         fsck::fsck(&img).expect("fsck must clear the dirty flag over a log with nothing to replay");
     assert!(report.dirty_cleared, "{report:?}");
-    assert_eq!(
-        report.logfile_bytes, 0,
-        "a log that records nothing to replay is kept, not overwritten"
+    assert!(
+        matches!(report.logfile, LogfileState::Clean(_)),
+        "{report:?}"
     );
     assert!(!fsck::is_dirty(&img).unwrap());
     assert!(

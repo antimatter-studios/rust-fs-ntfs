@@ -507,7 +507,8 @@ description neutralised (no longer Swift/FSKit-specific).
 
 Callback-based fsck. New: `fs_ntfs_blockdev_cfg_t.write` field;
 `fs_ntfs_is_dirty_with_callbacks`; `fs_ntfs_fsck_with_callbacks`
-with progress callbacks (`reset_logfile` / `clear_dirty` phases).
+with progress callbacks (`reset_logfile` / `clear_dirty` phases; since
+#376 fsck emits `check_logfile` / `clear_dirty` and never resets the log).
 
 ### 2026-04-18 — 0.1.0 (unreleased) initial commit
 
