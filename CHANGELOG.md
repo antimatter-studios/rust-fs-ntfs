@@ -40,6 +40,16 @@
 
 ### Fixed
 
+- **A read-write mount refuses a volume whose `$LogFile` may hold
+  transactions, dirty flag or not** (#137). `Filesystem::mount_rw`,
+  `fs_ntfs_mount`, `fs_ntfs_mount_with_callbacks` with a `write` callback
+  and `fs_ntfs_mount_rw_with_fs_core_device` checked only the dirty flag,
+  which Windows 8 and later leave clear after an unclean shutdown, recording
+  it in the log alone. Both volumes Windows left mid-write
+  (`test-disks/windows-interrupted-{1,6}`) were opened for writing, and the
+  mount's version upgrade wrote over metadata whose committed changes were
+  still only in the log. They are now refused before anything is written;
+  a read-only mount is still allowed.
 - **The errno is decided where the error is raised, not read out of its
   message** (#382). `fs_ntfs_last_errno` used to be inferred by searching
   the message for "not found", "already exists", "full", "invalid" and the
