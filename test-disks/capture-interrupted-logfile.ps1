@@ -93,8 +93,13 @@ while ((Get-Date) -lt $end) {
     $dir = Join-Path $Vol ('d{0:D3}' -f ($i % 64))
     [System.IO.Directory]::CreateDirectory($dir) | Out-Null
     $file = Join-Path $dir ('f{0:D7}.bin' -f $i)
-    $buf = New-Object byte[] ($rng.Next(1, 32768))
-    $rng.NextBytes($buf)
+    # Each file's bytes are its own index, repeated: distinct per file, so
+    # the manifest's hashes tell every file apart, and compressible, so a
+    # captured image is small enough to commit.
+    $unit = [System.Text.Encoding]::ASCII.GetBytes(('<{0:D7}>' -f $i))
+    $len = $rng.Next(1, 32768)
+    $buf = New-Object byte[] $len
+    for ($j = 0; $j -lt $len; $j++) { $buf[$j] = $unit[$j % $unit.Length] }
     [System.IO.File]::WriteAllBytes($file, $buf)
     if ($i % 3 -eq 0) { [System.IO.File]::Move($file, "$file.renamed") }
     if ($i -ge 400 -and $i % 2 -eq 0) {
