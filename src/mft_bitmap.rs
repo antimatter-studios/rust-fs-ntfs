@@ -205,7 +205,7 @@ fn grow_io<T: BlockIo + ?Sized>(io: &mut T, old: &MftBitmap) -> Result<(), Error
     let volume_bitmap = crate::bitmap::locate_bitmap_io(io)?;
     let lcn = crate::bitmap::find_free_run_io(io, &volume_bitmap, clusters, params.mft_lcn)?
         .ok_or_else(|| {
-            Error::io(format!(
+            Error::no_space(format!(
                 "no contiguous free run of {clusters} clusters for $MFT growth"
             ))
         })?;
@@ -483,7 +483,7 @@ fn disk_offset_for_byte(
         .find(|r| vcn >= r.starting_vcn && vcn < r.starting_vcn + r.length)
         .copied()
         .ok_or_else(|| {
-            Error::not_found(format!(
+            Error::io(format!(
                 "byte_idx {byte_idx} (VCN {vcn}) not mapped in $MFT:$Bitmap"
             ))
         })?;

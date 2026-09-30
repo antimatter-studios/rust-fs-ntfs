@@ -80,7 +80,7 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
 
     // Get block_size from $INDEX_ROOT:$I30.
     let ir = attr_io::find_attribute(&record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or_else(|| Error::not_found("$INDEX_ROOT:$I30 not found on parent"))?;
+        .ok_or_else(|| Error::io("$INDEX_ROOT:$I30 not found on parent"))?;
     let ir_val_off = ir
         .resident_value_offset
         .ok_or(Error::io("no value_offset"))? as usize;
@@ -117,7 +117,7 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
 
     // Get $INDEX_ALLOCATION:$I30 data runs.
     let ia = attr_io::find_attribute(&record, AttrType::IndexAllocation, Some(stream::I30))
-        .ok_or_else(|| Error::not_found("$INDEX_ALLOCATION:$I30 not found"))?;
+        .ok_or_else(|| Error::io("$INDEX_ALLOCATION:$I30 not found"))?;
     if ia.is_resident {
         return Err(Error::io("$INDEX_ALLOCATION unexpectedly resident"));
     }
@@ -132,7 +132,7 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
 
     // Get $Bitmap:$I30.
     let bm_attr = attr_io::find_attribute(&record, AttrType::Bitmap, Some(stream::I30))
-        .ok_or_else(|| Error::not_found("$Bitmap:$I30 not found"))?;
+        .ok_or_else(|| Error::io("$Bitmap:$I30 not found"))?;
     // A DIRECTORY BIG ENOUGH PUSHES ITS OWN BITMAP OUT OF THE RECORD, and
     // this used to refuse it: "non-resident $Bitmap:$I30 unsupported in
     // this MVP". `load_for_directory_io` is the single door to
@@ -212,7 +212,7 @@ pub fn vcn_to_disk_offset(ia: &IndexAllocation, vcn: u64, device_bytes: u64) -> 
                 .checked_add(r.length)
                 .is_some_and(|end| vcn >= r.starting_vcn && vcn < end)
         })
-        .ok_or_else(|| Error::not_found(format!("VCN {vcn} not mapped in $INDEX_ALLOCATION")))?;
+        .ok_or_else(|| Error::io(format!("VCN {vcn} not mapped in $INDEX_ALLOCATION")))?;
     let lcn = run
         .lcn
         .ok_or_else(|| Error::io(format!("VCN {vcn} in sparse run")))?;
@@ -304,7 +304,7 @@ fn map_indx_block(
                     .is_some_and(|end| logical_cluster >= r.starting_vcn && logical_cluster < end)
             })
             .ok_or_else(|| {
-                Error::not_found(format!(
+                Error::io(format!(
                     "VCN {logical_cluster} not mapped in $INDEX_ALLOCATION"
                 ))
             })?;

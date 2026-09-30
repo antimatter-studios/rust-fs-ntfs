@@ -832,9 +832,8 @@ pub fn read_stat<T: BlockIo + ?Sized>(io: &mut T, record_number: u64) -> Result<
     let is_dir = record_flags(&record) & MFT_FLAG_DIRECTORY != 0;
     let link_count = u16::from_le_bytes([record[0x12], record[0x13]]);
 
-    let si = attr_io::find_attribute(&record, AttrType::StandardInformation, None).ok_or(
-        Error::not_found("read_stat: $STANDARD_INFORMATION not found"),
-    )?;
+    let si = attr_io::find_attribute(&record, AttrType::StandardInformation, None)
+        .ok_or(Error::io("read_stat: $STANDARD_INFORMATION not found"))?;
     if !si.is_resident {
         return Err(Error::io(
             "read_stat: $STANDARD_INFORMATION is non-resident (impossible per spec)",
@@ -2366,5 +2365,23 @@ mod tests {
         dev.buf[3..11].copy_from_slice(b"MSDOS5.0");
         let err = read_volume_info(&mut dev).expect_err("should reject non-NTFS OEM");
         assert!(err.contains("not an NTFS volume"), "err={err}");
+    }
+
+    /// A file record without `$STANDARD_INFORMATION` is a corrupt volume,
+    /// and stat reports it as EIO -- not the ENOENT "not found" used to
+    /// earn it, which says the name does not exist (#394).
+    #[test]
+    fn a_record_missing_standard_information_is_an_io_error() {
+        let mut dev = fresh_vol();
+        let rec = write::create_file_io(&mut dev, "/", "f").expect("create");
+        crate::mft_io::update_mft_record_io(&mut dev, rec, |record| {
+            let si = crate::attr_io::find_attribute(record, AttrType::StandardInformation, None)
+                .expect("a new file has $STANDARD_INFORMATION");
+            write::remove_attribute_at(record, si.attr_offset, si.attr_length)
+        })
+        .expect("remove $STANDARD_INFORMATION");
+        let e = read_stat(&mut dev, rec).unwrap_err();
+        assert!(e.contains("$STANDARD_INFORMATION"), "{e}");
+        assert_eq!(e.kind(), crate::error::Kind::Io);
     }
 }

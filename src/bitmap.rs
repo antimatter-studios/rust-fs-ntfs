@@ -479,7 +479,7 @@ fn map_bitmap_range(
             .runs
             .iter()
             .find(|r| vcn >= r.starting_vcn && vcn < r.starting_vcn + r.length)
-            .ok_or_else(|| Error::not_found(format!("VCN {vcn} not mapped in $Bitmap")))?;
+            .ok_or_else(|| Error::io(format!("VCN {vcn} not mapped in $Bitmap")))?;
         let lcn = run
             .lcn
             .ok_or_else(|| Error::io(format!("VCN {vcn} is in a sparse $Bitmap run")))?;
