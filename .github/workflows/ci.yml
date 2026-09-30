@@ -303,6 +303,9 @@ jobs:
   windows-native-read-fixtures:
     name: Windows-authored native read fixtures
     runs-on: windows-latest
+    # Measured at 2.1 to 2.4 minutes. Without a bound, a step that hangs holds
+    # the runner for GitHub's six hours and prints nothing (#388).
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -705,6 +708,9 @@ jobs:
   validate-mkfs-windows-run:
     name: Windows chkdsk execution
     runs-on: windows-latest
+    # Measured at 9.3 to 12.4 minutes. Without a bound, a step that hangs holds
+    # the runner for GitHub's six hours and prints nothing (#388).
+    timeout-minutes: 40
     needs: [changes]
     if: needs.changes.outputs.mkfs == 'true'
     steps:
