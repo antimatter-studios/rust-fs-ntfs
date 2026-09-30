@@ -64,34 +64,6 @@
   argument to `fs_ntfs_get_volume_info{,_v2}`, a NULL iterator to
   `fs_ntfs_dir_next` and `fs_ntfs_dir_skipped` -- now record EINVAL, as does
   a `fs_ntfs_read_file` length past `isize::MAX`, which read as EIO.
-- **`fsck` clears the dirty flag on a volume whose `$LogFile` records
-  nothing to replay, and keeps the log** (#375). It used to refuse any
-  log that was not all `0xFF`, including the one `mkfs` writes. The new
-  `logfile` module reads the restart area: a log marked clean
-  (`RESTART_VOLUME_IS_CLEAN`), one with no client open, or one whose last
-  record is a checkpoint with no open transaction and no dirty page holds
-  nothing to redo or undo. Any other log is still refused before anything
-  is written (#137). Checked against the `$LogFile` Windows left on a
-  cleanly detached volume (`test-disks/windows-clean-logfile.bin.gz`) and
-  against ntfs-3g. `CheckReport` gains `logfile: LogfileState`, and
-  `fsck.ntfs` reports `"logfile": "clean"` and a dirty volume over a clean
-  log as repairable.
-- **A volume `mkfs` makes is one ntfs-3g mounts read-write** (#377). Its
-  `$LogFile` restart pages said LFS 2.0 with a client open and the clean
-  flag clear -- a volume still mounted, captured from format.com mid-run
-  -- which ntfs-3g refuses as an unclean shutdown and as metadata kept in
-  Windows' cache. The log head is now laid out as Windows lays out a log it
-  dismounted cleanly: both restart pages LFS 1.1 with
-  `RESTART_VOLUME_IS_CLEAN`, one update sequence number apart; the
-  checkpoint page at its home, where its LSN resolves; and pages 2 and 3
-  as tail copies naming that home. LFS 1.1 without the home copy made
-  Windows log event 55 on mount and `chkdsk /scan` exit 13.
-- **`$LogFile`'s state is read from every record page, tail copies
-  included** (#375). A log Windows was still writing when it was captured
-  had three pages ending past its last checkpoint while its restart area
-  agreed with itself -- LFS 2.0 rewrites the restart area only at a
-  checkpoint -- and was read as clean. Checked against two such logs
-  captured on `windows-latest` (`test-disks/windows-interrupted-logfile-*`).
 
 ## [0.6.0] — 2026-09-30
 
@@ -196,6 +168,37 @@
 - **`mkfs.ntfs --version` (and `-V`) prints the tool name and crate
   version**, e.g. `mkfs.ntfs (am-fs-ntfs) 0.5.0`. It was rejected as an
   unknown flag. `rust-ntfs format --version` answers the same way.
+
+### Fixed
+
+- **`fsck` clears the dirty flag on a volume whose `$LogFile` records
+  nothing to replay, and keeps the log** (#375). It used to refuse any
+  log that was not all `0xFF`, including the one `mkfs` writes. The new
+  `logfile` module reads the restart area: a log marked clean
+  (`RESTART_VOLUME_IS_CLEAN`), one with no client open, or one whose last
+  record is a checkpoint with no open transaction and no dirty page holds
+  nothing to redo or undo. Any other log is still refused before anything
+  is written (#137). Checked against the `$LogFile` Windows left on a
+  cleanly detached volume (`test-disks/windows-clean-logfile.bin.gz`) and
+  against ntfs-3g. `CheckReport` gains `logfile: LogfileState`, and
+  `fsck.ntfs` reports `"logfile": "clean"` and a dirty volume over a clean
+  log as repairable.
+- **A volume `mkfs` makes is one ntfs-3g mounts read-write** (#377). Its
+  `$LogFile` restart pages said LFS 2.0 with a client open and the clean
+  flag clear -- a volume still mounted, captured from format.com mid-run
+  -- which ntfs-3g refuses as an unclean shutdown and as metadata kept in
+  Windows' cache. The log head is now laid out as Windows lays out a log it
+  dismounted cleanly: both restart pages LFS 1.1 with
+  `RESTART_VOLUME_IS_CLEAN`, one update sequence number apart; the
+  checkpoint page at its home, where its LSN resolves; and pages 2 and 3
+  as tail copies naming that home. LFS 1.1 without the home copy made
+  Windows log event 55 on mount and `chkdsk /scan` exit 13.
+- **`$LogFile`'s state is read from every record page, tail copies
+  included** (#375). A log Windows was still writing when it was captured
+  had three pages ending past its last checkpoint while its restart area
+  agreed with itself -- LFS 2.0 rewrites the restart area only at a
+  checkpoint -- and was read as clean. Checked against two such logs
+  captured on `windows-latest` (`test-disks/windows-interrupted-logfile-*`).
 
 ### Removed
 
