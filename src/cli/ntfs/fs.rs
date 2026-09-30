@@ -176,7 +176,7 @@ fn command() -> Cmd {
                      A label is at most 32 UTF-16 code units. \
                      `set dirty false` clears the flag without looking at $LogFile: use it \
                      only on a volume known to be consistent. fsck.ntfs -y clears it only \
-                     when the log is empty.",
+                     when the log is empty or records nothing to replay.",
                 ),
         )
         .subcommand(
