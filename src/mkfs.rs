@@ -104,21 +104,120 @@ const SD_SYSFILE_RW: &[u8] = &[
 // (RCRD, lsn=0x104408), so no recovery is needed and the first online scan
 // exits 0.
 //
-// Layout of the 12 KiB:
+// Layout of the capture's 12 KiB:
 //   * page 0 (offset 0x0000)  — authoritative RSTR (cur_lsn=0x104408,
-//                               oldest_lsn=0x100000, flags=0x0000 clean)
-//   * page 1 (offset 0x1000)  — stale backup RSTR (cur_lsn=0x100000;
-//                               ntfs.sys ignores it as older)
-//   * page 2 (offset 0x2000)  — single RCRD record page (lsn=0x104408;
-//                               covers page 0's active range)
+//                               oldest_lsn=0x100000), LFS 2.0, flags 0x0000
+//   * page 1 (offset 0x1000)  — stale backup RSTR (cur_lsn=0x100000)
+//   * page 2 (offset 0x2000)  — single RCRD record page (lsn=0x104408)
 //
-// Bytes 0x3000..end are all-0xFF; written by the 0xFF sweep below.
+// WHAT IS WRITTEN is not that: `logfile_head` rewrites it into the layout of
+// a log Windows cleanly dismounted (#377, #378), read off Windows' own
+// (`test-disks/windows-clean-logfile.bin.gz`):
+//   * pages 0 and 1           — the same LFS 1.1 restart area, flags 0x0002
+//                               (clean), one update sequence number apart
+//   * pages 2 and 3           — tail copies of the checkpoint page, header
+//                               field 0x08 naming its home offset
+//   * page 0x22 (0x22000)     — the checkpoint page at its home, where
+//                               lsn 0x104408 resolves
+//   * everything else         — 0xFF
 //
 // References: MS-FSCC (system files / log structure), Windows Internals
 // 7th ed. ch. "NTFS Logging" (RSTR / RCRD page taxonomy). No GPL'd
 // NTFS reimplementations consulted.
 //
 const LOGFILE_CANONICAL: &[u8] = include_bytes!("logfile-canonical-12k.bin");
+
+/// The first 12 KiB of `$LogFile` as written: [`LOGFILE_CANONICAL`] with
+/// both restart pages made to say what Windows writes when it dismounts a
+/// volume cleanly (#377).
+///
+/// The capture was taken while the volume was in use, and says so twice:
+///
+/// * its restart areas have a client in use and `RESTART_VOLUME_IS_CLEAN`
+///   clear -- an unclean shutdown. ntfs-3g refuses such a volume
+///   read-write ("The disk contains an unclean file system"), and this
+///   crate's own `fsck` cannot tell it from a log holding transactions
+///   (#375);
+/// * its restart pages are LFS 2.0, the version Windows 8 and later run a
+///   mounted log at, and keep on a Fast Startup shutdown with metadata
+///   still cached. ntfs-3g refuses any 2.0 log read-write for exactly that
+///   reason ("Metadata kept in Windows cache, refused to mount").
+///
+/// A volume Windows formatted, wrote to and cleanly detached carries LFS
+/// 1.1 restart pages with flags `0x0002` and a client still in use -- read
+/// off four of them, `test-disks/windows-clean-logfile.bin.gz` among them
+/// -- so that is what is written here.
+///
+/// LFS 1.1 also fixes WHERE the checkpoint record lives, and Windows'
+/// chkdsk holds a volume to it: a 1.1 log is read at the checkpoint's home,
+/// the page its LSN resolves to, and pages 2 and 3 are tail copies of that
+/// page whose header field 0x08 is the home's file offset. format.com's
+/// 2.0 capture has the record only at page 2. Written that way under 1.1,
+/// Windows logged event 55 ("the exact nature of the corruption is
+/// unknown") on mount and `chkdsk /scan` exited 13 (rust-fs-ntfs#378, CI
+/// run 36665078584). So [`logfile_checkpoint_home`] also writes the page at
+/// its home, and pages 2 and 3 name it -- the layout of Windows' own clean
+/// log.
+///
+/// The version (page offsets 0x1A / 0x1C), the flags (restart-area offset
+/// 0x0E) and the tail copies' home offset (page offset 0x08) all sit inside
+/// their page's first sector and clear of its last two bytes, so the update
+/// sequence array does not cover them and needs no recompute.
+fn logfile_head() -> Vec<u8> {
+    use crate::logfile::{RESTART_AREA_FLAGS_OFFSET, RESTART_VOLUME_IS_CLEAN};
+    let mut head = LOGFILE_CANONICAL.to_vec();
+    for page in [0usize, 4096] {
+        // LFS 1.1: minor version, then major version.
+        head[page + 0x1A..page + 0x1C].copy_from_slice(&1u16.to_le_bytes());
+        head[page + 0x1C..page + 0x1E].copy_from_slice(&1u16.to_le_bytes());
+        let ra = u16::from_le_bytes([head[page + 0x18], head[page + 0x19]]) as usize;
+        let at = page + ra + RESTART_AREA_FLAGS_OFFSET;
+        debug_assert!(at % 512 < 510, "restart flags must not sit under the USA");
+        let flags = u16::from_le_bytes([head[at], head[at + 1]]) | RESTART_VOLUME_IS_CLEAN;
+        head[at..at + 2].copy_from_slice(&flags.to_le_bytes());
+    }
+    // Page 1: the same restart area as page 0, one update sequence number
+    // behind, as Windows writes the pair. format.com's page 1 was an older
+    // restart area (current LSN 0x100000), which under LFS 1.1 resolves to
+    // offset 0 -- a restart page, not a record. The update sequence number
+    // is the only thing that differs, at the USA and each sector's end.
+    let (page0, rest) = head.split_at_mut(0x1000);
+    let page1 = &mut rest[..0x1000];
+    page1.copy_from_slice(page0);
+    let usa = u16::from_le_bytes([page0[4], page0[5]]) as usize;
+    let usn = u16::from_le_bytes([page0[usa], page0[usa + 1]]);
+    let behind = if usn > 1 { usn - 1 } else { 0xFFFF };
+    page1[usa..usa + 2].copy_from_slice(&behind.to_le_bytes());
+    for sector_end in (512..=0x1000).step_by(512) {
+        page1[sector_end - 2..sector_end].copy_from_slice(&behind.to_le_bytes());
+    }
+    // Pages 2 and 3: both tail copies of the checkpoint page, naming its
+    // home. format.com's capture ends after page 2, so page 3 is added.
+    let (home, page) = logfile_checkpoint_home();
+    head.truncate(0x2000);
+    for _ in 0..2 {
+        let at = head.len();
+        head.extend_from_slice(page);
+        head[at + 0x08..at + 0x10].copy_from_slice(&home.to_le_bytes());
+    }
+    head
+}
+
+/// The checkpoint record page of [`LOGFILE_CANONICAL`] and the log offset
+/// of its home: the page its LSN resolves to (#378). Pages 2 and 3 of
+/// [`logfile_head`] are tail copies naming this offset.
+fn logfile_checkpoint_home() -> (u64, &'static [u8]) {
+    let page = &LOGFILE_CANONICAL[0x2000..0x3000];
+    let lsn = u64::from_le_bytes(page[0x08..0x10].try_into().expect("8 bytes"));
+    let ra = u16::from_le_bytes([LOGFILE_CANONICAL[0x18], LOGFILE_CANONICAL[0x19]]) as usize;
+    let bits = u32::from_le_bytes(
+        LOGFILE_CANONICAL[ra + 0x10..ra + 0x14]
+            .try_into()
+            .expect("4 bytes"),
+    );
+    let offset = crate::logfile::lsn_to_offset(lsn, bits).expect("format.com's LSN resolves");
+    (offset - offset % 0x1000, page)
+}
 
 /// `$FILE_NAME` namespace values (MS-FSCC §2.4.4).
 ///
@@ -450,10 +549,19 @@ pub fn format_filesystem(
     // on every subsequent write.
     let log_size_bytes = logfile_clusters * cluster_size as u64;
     let logfile_off = logfile_lcn * cluster_size as u64;
-    dev.write_all_at(logfile_off, LOGFILE_CANONICAL)?;
-    let pad_off = logfile_off + LOGFILE_CANONICAL.len() as u64;
-    let pad_len = log_size_bytes - LOGFILE_CANONICAL.len() as u64;
+    let head = logfile_head();
+    dev.write_all_at(logfile_off, &head)?;
+    let pad_off = logfile_off + head.len() as u64;
+    let pad_len = log_size_bytes - head.len() as u64;
     write_filled(dev, pad_off, pad_len, 0xFF)?;
+    // The checkpoint page at its home, which LFS 1.1 reads it from.
+    let (home, page) = logfile_checkpoint_home();
+    if home + page.len() as u64 > log_size_bytes {
+        return Err(format!(
+            "$LogFile of {log_size_bytes} bytes cannot hold its checkpoint page at {home:#x}"
+        ));
+    }
+    dev.write_all_at(logfile_off + home, page)?;
 
     // 3. $UpCase data -----------------------------------------------------
     let upcase_data = upcase::generate_upcase_table();

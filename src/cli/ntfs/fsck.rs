@@ -2,16 +2,18 @@
 //! knows how to repair safely.
 //!
 //! WHAT IT CHECKS is `fs_ntfs::fsck::check_io`: the dirty flag, whether
-//! `$LogFile` is empty, `$MFTMirr` against `$MFT`, and the header of every
-//! MFT record the bitmap marks in use. It does not follow attributes,
-//! indexes or runs. The report says so in `checks` and `scope`, so nobody
-//! reads exit 0 as "chkdsk would agree": Windows' chkdsk is the authority.
+//! `$LogFile` records anything to replay (empty, clean, or records),
+//! `$MFTMirr` against `$MFT`, and the header of every MFT record the bitmap
+//! marks in use. It does not follow attributes, indexes or runs. The report
+//! says so in `checks` and `scope`, so nobody reads exit 0 as "chkdsk would
+//! agree": Windows' chkdsk is the authority.
 //!
 //! WHAT IT REPAIRS, with `-y` (or `-p`): the dirty flag, and only when
-//! `$LogFile` is empty. A log holding anything may hold transactions this
-//! library cannot replay (#137), and clearing the flag over them would
-//! discard them, so that is refused and reported, and nothing is written.
-//! Nothing else is repaired.
+//! `$LogFile` is empty or its restart area records nothing to redo or undo
+//! (#375); a clean log is kept as it is. Any other log may hold
+//! transactions this library cannot replay (#137), and clearing the flag
+//! over them would discard them, so that is refused and reported, and
+//! nothing is written. Nothing else is repaired.
 //!
 //! EXIT STATUS IS fsck(8)'s, because scripts and the `fsck` front-end read
 //! it: 0 clean, 1 errors corrected, 4 errors left uncorrected, 8 an
@@ -25,7 +27,7 @@ use std::ffi::OsString;
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command as Cmd};
 
 use crate::common::{CliError, Json, Outcome, Tool};
-use fs_ntfs::fsck::{check_io, repair_dirty_io, CheckFinding, CheckReport};
+use fs_ntfs::fsck::{check_io, repair_dirty_io, CheckFinding, CheckReport, LogfileState};
 
 /// fsck(8): no errors.
 pub const CLEAN: u8 = 0;
@@ -176,16 +178,16 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
 
     let mut findings = Vec::new();
     if before.dirty {
-        let why = dirty_refused.clone().or_else(|| {
-            (!before.logfile_empty).then(|| {
-                "$LogFile holds records, which may be transactions this library cannot replay \
-                 (rust-fs-ntfs#137)"
-                    .to_string()
-            })
+        // Repairable unless the log may hold transactions: an empty log, or
+        // one whose restart area records nothing to redo or undo, is safe
+        // to clear the flag over (#375).
+        let why = dirty_refused.clone().or_else(|| match &before.logfile {
+            LogfileState::Pending(why) => Some(why.clone()),
+            _ => None,
         });
         findings.push(Json::object([
             ("kind", Json::from("dirty")),
-            ("repairable", Json::from(before.logfile_empty)),
+            ("repairable", Json::from(!before.logfile.needs_replay())),
             ("repaired", Json::from(before.dirty && !after.dirty)),
             ("why", Json::from(why)),
         ]));
@@ -205,10 +207,10 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         ("dirty", Json::from(after.dirty)),
         (
             "logfile",
-            Json::from(if after.logfile_empty {
-                "empty"
-            } else {
-                "records"
+            Json::from(match after.logfile {
+                LogfileState::Empty => "empty",
+                LogfileState::Clean(_) => "clean",
+                LogfileState::Pending(_) => "records",
             }),
         ),
         ("exit", Json::from(u64::from(code))),
