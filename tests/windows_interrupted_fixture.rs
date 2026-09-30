@@ -33,8 +33,8 @@
 //!
 //! Until this crate replays (#137), what can be checked is that it knows
 //! the pre-images' logs hold work, and that it reads what Windows recovered
-//! exactly as Windows does. Neither pre-image has its dirty flag set, so
-//! `fsck` refusing them is #376's to prove.
+//! exactly as Windows does, and that `fsck` refuses the pre-images and
+//! writes nothing, though neither has its dirty flag set (#376).
 
 mod common;
 
@@ -178,6 +178,23 @@ fn the_logs_windows_left_mid_write_are_read_as_holding_work() {
         assert!(
             !ok && err.contains(why),
             "snapshot {k}: ntfs-3g.probe succeeded={ok}, said {err}"
+        );
+    }
+}
+
+#[test]
+fn fsck_refuses_a_volume_windows_left_mid_write_and_writes_nothing() {
+    // Neither volume's dirty flag is set: Windows 8 and later record an
+    // unclean shutdown in the log alone. fsck used to take a clear flag as
+    // leave to overwrite the log, discarding all 2 MiB of it (#376).
+    for k in [1, 6] {
+        let img = unpack(&format!("windows-interrupted-{k}"));
+        let before = std::fs::read(&img).unwrap();
+        let err = fsck::fsck(&img).expect_err("fsck must not act over a log holding work");
+        assert!(err.contains("$LogFile"), "snapshot {k}: {err}");
+        assert!(
+            std::fs::read(&img).unwrap() == before,
+            "snapshot {k}: a refused fsck wrote to the volume"
         );
     }
 }
