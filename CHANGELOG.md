@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-30
+
 ### Added
 
 - **The command-line tools are one multi-call binary, `rust-fs-ntfs`,
