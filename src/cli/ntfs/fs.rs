@@ -563,7 +563,21 @@ fn write(target: &OsString, offset: u64, path: &str) -> Result<Outcome, CliError
             }
             Err(e) => return Err(e),
         };
-        let size = fs_ntfs::write::replace_file_contents_io(dev, path, &data)?;
+        let size = match fs_ntfs::write::replace_file_contents_io(dev, path, &data) {
+            Ok(size) => size,
+            // A file this call created is removed again, so a failed write
+            // does not leave an empty file behind. One that existed keeps
+            // whatever the failed replacement left of it.
+            Err(e) if created => {
+                let undone = fs_ntfs::write::unlink_io(dev, path)
+                    .and_then(|()| fs_ntfs::block_io::BlockIo::sync(dev));
+                return Err(match undone {
+                    Ok(()) => format!("{e} (the new file was removed again)"),
+                    Err(u) => format!("{e}; and removing the new file failed: {u}"),
+                });
+            }
+            Err(e) => return Err(e),
+        };
         Ok((created, size))
     })?;
     let report = Json::object([

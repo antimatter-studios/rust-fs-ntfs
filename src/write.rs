@@ -1039,6 +1039,12 @@ pub fn grow_nonresident_by_record_number_io<T: BlockIo + ?Sized>(
     }
 }
 
+/// What a grow's error says when the new run fits on the volume but its
+/// mapping pairs do not fit in the attribute. [`replace_file_contents_io`]
+/// recognises that failure, and only that one, as worth emptying the file
+/// to retry as one run.
+const MAPPING_CAPACITY_EXCEEDED: &str = "exceed attr capacity";
+
 /// The part of [`grow_nonresident_by_record_number_io`] that runs after
 /// the allocation, with every failure as a `?`.
 ///
@@ -1098,7 +1104,7 @@ fn grow_commit_io<T: BlockIo + ?Sized>(
     let new_mapping = data_runs::encode_runs(&new_runs)?;
     if new_mapping.len() > mapping_capacity {
         return Err(format!(
-            "new mapping_pairs ({} bytes) exceed attr capacity ({}). Attribute resize (W2.1) required.",
+            "new mapping_pairs ({} bytes) {MAPPING_CAPACITY_EXCEEDED} ({}). Attribute resize (W2.1) required.",
             new_mapping.len(),
             mapping_capacity
         ));
@@ -4072,9 +4078,11 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
 /// length first, and the bytes are then written over it from offset 0
 /// ([`write_at_io`], which moves `initialized_length` up to what it
 /// wrote). The resize comes first so that a failed grow leaves the old
-/// content in place rather than half of the new -- except where growing in
-/// place cannot fit the new run and the file is emptied to grow as one run;
-/// if THAT fails too, the file is left empty and the error says so.
+/// content in place rather than half of the new -- except where the new run
+/// fits on the volume but its mapping pairs do not fit in the attribute,
+/// and the file is emptied to grow as one run; if THAT fails too, the file
+/// is left empty and the error says so. Any other failed grow (no room on
+/// the volume, above all) keeps the old content.
 pub fn replace_file_contents_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
@@ -4097,8 +4105,14 @@ pub fn replace_file_contents_io<T: BlockIo + ?Sized>(
         // In place first, which keeps the old content if it fails. A grow
         // that has to append a second run can outgrow the room the
         // attribute has for its mapping pairs; emptied first, the file
-        // grows as ONE run, which needs no more room than it had.
+        // grows as ONE run, which needs no more room than it had. Only
+        // that failure is retried: emptying the file for any other one
+        // (a volume with no room, above all) would lose its content for a
+        // retry that fails the same way.
         if let Err(in_place) = grow_nonresident_io(io, file_path, new) {
+            if !in_place.contains(MAPPING_CAPACITY_EXCEEDED) {
+                return Err(format!("grow to {new} bytes: {in_place}"));
+            }
             truncate_io(io, file_path, 0)?;
             grow_nonresident_io(io, file_path, new).map_err(|e| {
                 format!(

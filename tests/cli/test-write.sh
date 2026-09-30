@@ -84,6 +84,14 @@ echo x | fs.ntfs "$img" write /d >/dev/null 2>"$SANDBOX/z.err"
 jq_check "write over a directory is refused" '.code == 1 and (.error | test("is a directory"))' "$SANDBOX/z.err"
 check "the refusals left the image as it was" cmp -s "$img" "$SANDBOX/before.img"
 
+# A new file the volume cannot hold is refused, and is not left behind
+# empty: the created path is removed again.
+head -c 100000000 /dev/zero | fs.ntfs "$img" write /toobig >/dev/null 2>"$SANDBOX/big.err"
+check "a write larger than the volume exits 1" test $? -eq 1
+jq_check "a write larger than the volume is a structured error" '.code == 1 and (.error | type) == "string"' "$SANDBOX/big.err"
+fs.ntfs "$img" ls /toobig >/dev/null 2>&1
+check "the refused new file is not left on the volume" test $? -eq 1
+
 # A dirty volume is not written to.
 cp "$img" "$SANDBOX/dirty.img"
 fs.ntfs "$SANDBOX/dirty.img" set dirty true >/dev/null 2>&1

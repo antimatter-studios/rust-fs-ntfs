@@ -56,3 +56,34 @@ fn every_replacement_reads_back_as_the_new_content() {
         assert!(got == pattern(*second, 2), "{first} -> {second}: content");
     }
 }
+
+/// A grow the volume has no room for fails, and the file keeps what it
+/// held: running out of space is not a reason to lose the old content.
+#[test]
+fn a_replacement_the_volume_cannot_hold_keeps_the_old_content() {
+    let img = common::temp_image_path("replace_contents_no_room");
+    {
+        let f = std::fs::File::create(&img).unwrap();
+        f.set_len(64 << 20).unwrap();
+    }
+    {
+        let mut dev = PathIo::open_rw(Path::new(&img)).unwrap();
+        fs_ntfs::mkfs::format_filesystem(&mut dev, 64 << 20, 4096, 4096, None, Some(3)).unwrap();
+    }
+    let old = pattern(8192, 1);
+    let mut dev = PathIo::open_rw(Path::new(&img)).unwrap();
+    fs_ntfs::write::create_file_io(&mut dev, "/", "f").unwrap();
+    fs_ntfs::write::replace_file_contents_io(&mut dev, "/f", &old).unwrap();
+    let err = fs_ntfs::write::replace_file_contents_io(&mut dev, "/f", &pattern(96 << 20, 2))
+        .expect_err("96 MiB cannot fit on a 64 MiB volume");
+    assert!(!err.contains("now empty"), "the file was emptied: {err}");
+    drop(dev);
+
+    let (ntfs, mut reader) = common::open(&img);
+    let got = common::read_file_all(&ntfs, &mut reader, "/f");
+    assert!(
+        got == old,
+        "the old content did not survive ({} bytes back)",
+        got.len()
+    );
+}
