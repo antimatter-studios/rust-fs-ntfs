@@ -1,0 +1,48 @@
+name: logfile oracle
+
+# Makes the Windows-authored interrupted-write images #137's replay needs an
+# oracle from (#366): test-disks/capture-interrupted-logfile.ps1 snapshots a
+# VHD Windows is writing to, lets Windows recover a copy of each snapshot, and
+# this uploads both. Which snapshots hold pending $LogFile records is decided
+# from the bytes afterwards, not here.
+#
+# On demand only. It builds no code and gates nothing: a fixture is chosen
+# from its artifact by a person and committed, and from then on the tests
+# read the committed bytes.
+on:
+  workflow_dispatch:
+    inputs:
+      candidates:
+        description: "Snapshots to take"
+        required: false
+        default: "6"
+      seconds:
+        description: "Seconds the workload runs"
+        required: false
+        default: "40"
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    name: interrupted-write NTFS images, and what Windows recovers from them
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Capture
+        shell: pwsh
+        run: >-
+          ./test-disks/capture-interrupted-logfile.ps1
+          -Candidates ${{ inputs.candidates || '6' }}
+          -WorkloadSeconds ${{ inputs.seconds || '40' }}
+          -Out logfile-oracle
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logfile-oracle
+          path: logfile-oracle/
+          if-no-files-found: error
+          retention-days: 30
