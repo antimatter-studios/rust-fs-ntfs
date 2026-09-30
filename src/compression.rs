@@ -31,6 +31,7 @@
 //! wide enough to address the bytes produced so far.
 
 /// Maximum bytes a single chunk decompresses to.
+use crate::error::Error;
 const CHUNK_SIZE: usize = 4096;
 
 /// Decompress one LZNT1 compression unit.
@@ -40,7 +41,7 @@ const CHUNK_SIZE: usize = 4096;
 /// valid bytes this unit contributes to the file (e.g. the unit size, or
 /// the remaining `data_size` for the final unit). Decoding stops at the
 /// end-of-stream marker or once `max_len` bytes are produced.
-pub fn decompress_unit(input: &[u8], max_len: usize) -> Result<Vec<u8>, String> {
+pub fn decompress_unit(input: &[u8], max_len: usize) -> Result<Vec<u8>, Error> {
     let mut out = Vec::with_capacity(max_len.min(64 * 1024));
     let mut pos = 0usize;
 
@@ -57,14 +58,14 @@ pub fn decompress_unit(input: &[u8], max_len: usize) -> Result<Vec<u8>, String> 
         // so a corrupt header isn't silently decoded as a valid chunk.
         let signature = (header >> 12) & 0x7;
         if signature != 3 {
-            return Err(format!(
+            return Err(Error::invalid(format!(
                 "LZNT1: invalid chunk header signature {signature:#x} (expected 0b011)"
-            ));
+            )));
         }
         let chunk_end = pos
             .checked_add(chunk_len)
             .filter(|&e| e <= input.len())
-            .ok_or_else(|| format!("LZNT1: chunk body ({chunk_len}) overruns input"))?;
+            .ok_or_else(|| Error::io(format!("LZNT1: chunk body ({chunk_len}) overruns input")))?;
 
         if compressed {
             decompress_chunk(&input[pos..chunk_end], &mut out)?;
@@ -82,7 +83,7 @@ pub fn decompress_unit(input: &[u8], max_len: usize) -> Result<Vec<u8>, String> 
 /// the end of `out`. Back-references address only bytes within this
 /// chunk, so `chunk_start` anchors the per-chunk position used to size
 /// the displacement field.
-fn decompress_chunk(body: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
+fn decompress_chunk(body: &[u8], out: &mut Vec<u8>) -> Result<(), Error> {
     let chunk_start = out.len();
     let mut i = 0usize;
 
@@ -103,7 +104,7 @@ fn decompress_chunk(body: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
             } else {
                 // Back-reference: 16-bit LE, split by current position.
                 if i + 2 > body.len() {
-                    return Err("LZNT1: truncated back-reference token".to_string());
+                    return Err(Error::io("LZNT1: truncated back-reference token"));
                 }
                 let token = u16::from_le_bytes([body[i], body[i + 1]]);
                 i += 2;
@@ -111,10 +112,10 @@ fn decompress_chunk(body: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
                 let cur = out.len() - chunk_start; // bytes already in this chunk
                 let (length, displacement) = split_token(token, cur)?;
                 if displacement > cur {
-                    return Err(format!(
+                    return Err(Error::io(format!(
                         "LZNT1: back-reference displacement {displacement} exceeds \
                          {cur} bytes decoded in chunk"
-                    ));
+                    )));
                 }
                 // A chunk decompresses to at most CHUNK_SIZE bytes; a copy
                 // that would cross that boundary is corrupt input. Guard the
@@ -123,10 +124,10 @@ fn decompress_chunk(body: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
                 // overrun the chunk and push `cur` past 4096, corrupting the
                 // split of every later back-reference in this chunk.
                 if cur + length > CHUNK_SIZE {
-                    return Err(format!(
+                    return Err(Error::io(format!(
                         "LZNT1: back-reference (length {length} at offset {cur}) overruns \
                          the {CHUNK_SIZE}-byte chunk"
-                    ));
+                    )));
                 }
                 // Copy byte-by-byte: displacement may be < length (RLE-style
                 // overlapping copy), so we can't use copy_within.
@@ -149,9 +150,9 @@ fn decompress_chunk(body: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
 /// so far: `displacement_bits = ceil(log2(cur))`, and the remaining bits
 /// hold `length - 3`. So early in the chunk displacements are small and
 /// lengths large; as the chunk fills the split shifts the other way.
-fn split_token(token: u16, cur: usize) -> Result<(usize, usize), String> {
+fn split_token(token: u16, cur: usize) -> Result<(usize, usize), Error> {
     if cur == 0 {
-        return Err("LZNT1: back-reference at start of chunk".to_string());
+        return Err(Error::io("LZNT1: back-reference at start of chunk"));
     }
     let mut span = cur - 1;
     let mut length_bits: u32 = 12;

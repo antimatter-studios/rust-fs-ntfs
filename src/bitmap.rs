@@ -20,6 +20,7 @@
 use crate::attr_io::{self, AttrType};
 use crate::block_io::{BlockIo, PathIo};
 use crate::data_runs::{self, DataRun};
+use crate::error::Error;
 use crate::mft_io::{read_mft_record_io, BootParams};
 
 use std::path::Path;
@@ -68,7 +69,7 @@ pub struct BitmapLocation {
     pub other_protected: Vec<(u64, u64)>,
 }
 
-pub fn locate_bitmap(image: &Path) -> Result<BitmapLocation, String> {
+pub fn locate_bitmap(image: &Path) -> Result<BitmapLocation, Error> {
     let mut io = PathIo::open_ro(image)?;
     locate_bitmap_io(&mut io)
 }
@@ -121,23 +122,27 @@ impl BitmapLocation {
     }
 }
 
-pub fn locate_bitmap_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BitmapLocation, String> {
+pub fn locate_bitmap_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BitmapLocation, Error> {
     let (params, record) = read_mft_record_io(io, BITMAP_RECORD_NUMBER)?;
     let loc = attr_io::find_attribute(&record, AttrType::Data, None)
-        .ok_or_else(|| "$Bitmap has no unnamed $DATA".to_string())?;
+        .ok_or_else(|| Error::io("$Bitmap has no unnamed $DATA"))?;
     if loc.is_resident {
-        return Err("resident $Bitmap unsupported (volume too small?)".to_string());
+        return Err(Error::io(
+            "resident $Bitmap unsupported (volume too small?)",
+        ));
     }
     let mapping_offset = loc
         .non_resident_mapping_pairs_offset
-        .ok_or("missing mapping_pairs_offset")? as usize;
+        .ok_or(Error::io("missing mapping_pairs_offset"))? as usize;
     let mapping_start = loc.attr_offset + mapping_offset;
     let mapping_end = loc.attr_offset + loc.attr_length;
     if mapping_end > record.len() || mapping_start >= mapping_end {
-        return Err("$Bitmap mapping_pairs out of record".to_string());
+        return Err(Error::io("$Bitmap mapping_pairs out of record"));
     }
     let runs = data_runs::decode_runs(&record[mapping_start..mapping_end])?;
-    let value_length = loc.non_resident_value_length.ok_or("no value_length")?;
+    let value_length = loc
+        .non_resident_value_length
+        .ok_or(Error::io("no value_length"))?;
     // A bit covers a cluster, and the volume has only so many.
     //
     // The declared count is $Bitmap's own data_length times eight, off
@@ -216,7 +221,7 @@ pub fn read_range(
     bm: &BitmapLocation,
     start: u64,
     nbits: u64,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let mut io = PathIo::open_ro(image)?;
     read_range_io(&mut io, bm, start, nbits)
 }
@@ -226,13 +231,13 @@ pub fn read_range_io<T: BlockIo + ?Sized>(
     bm: &BitmapLocation,
     start: u64,
     nbits: u64,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     if start + nbits > bm.total_bits {
-        return Err(format!(
+        return Err(Error::io(format!(
             "range [{start}..{}] exceeds total_bits {}",
             start + nbits,
             bm.total_bits
-        ));
+        )));
     }
     let start_byte = start / 8;
     let end_byte = (start + nbits).div_ceil(8);
@@ -248,7 +253,7 @@ pub fn find_free_run(
     bm: &BitmapLocation,
     n_clusters: u64,
     hint_lcn: u64,
-) -> Result<Option<u64>, String> {
+) -> Result<Option<u64>, Error> {
     let mut io = PathIo::open_ro(image)?;
     find_free_run_io(&mut io, bm, n_clusters, hint_lcn)
 }
@@ -258,9 +263,9 @@ pub fn find_free_run_io<T: BlockIo + ?Sized>(
     bm: &BitmapLocation,
     n_clusters: u64,
     hint_lcn: u64,
-) -> Result<Option<u64>, String> {
+) -> Result<Option<u64>, Error> {
     if n_clusters == 0 {
-        return Err("n_clusters = 0".to_string());
+        return Err(Error::io("n_clusters = 0"));
     }
     // Simple linear scan starting at hint, wrapping around. Read bytes
     // in chunks so we don't ever hold the whole bitmap in memory.
@@ -317,7 +322,7 @@ pub fn find_free_run_io<T: BlockIo + ?Sized>(
 
 /// Flip the bits for `[lcn..lcn+n)` to 1 (allocated). Fails if any bit
 /// in the range is already 1.
-pub fn allocate(image: &Path, bm: &BitmapLocation, lcn: u64, n: u64) -> Result<(), String> {
+pub fn allocate(image: &Path, bm: &BitmapLocation, lcn: u64, n: u64) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     allocate_io(&mut io, bm, lcn, n)
 }
@@ -327,13 +332,13 @@ pub fn allocate_io<T: BlockIo + ?Sized>(
     bm: &BitmapLocation,
     lcn: u64,
     n: u64,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     mutate_bits_io(io, bm, lcn, n, true)
 }
 
 /// Flip the bits for `[lcn..lcn+n)` to 0 (free). Fails if any bit in
 /// the range is already 0.
-pub fn free(image: &Path, bm: &BitmapLocation, lcn: u64, n: u64) -> Result<(), String> {
+pub fn free(image: &Path, bm: &BitmapLocation, lcn: u64, n: u64) -> Result<(), Error> {
     let mut io = PathIo::open_rw(image)?;
     free_io(&mut io, bm, lcn, n)
 }
@@ -343,14 +348,14 @@ pub fn free_io<T: BlockIo + ?Sized>(
     bm: &BitmapLocation,
     lcn: u64,
     n: u64,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // Not the volume's own clusters, however a file record describes
     // its runs. See `BitmapLocation::covers_the_volumes_own`.
     if bm.covers_the_volumes_own(lcn, n) {
-        return Err(format!(
+        return Err(Error::io(format!(
             "clusters [{lcn}, +{n}) hold the volume's own structures and are not a \
              file's to free"
-        ));
+        )));
     }
     mutate_bits_io(io, bm, lcn, n, false)
 }
@@ -361,7 +366,7 @@ fn mutate_bits_io<T: BlockIo + ?Sized>(
     lcn: u64,
     n: u64,
     set: bool,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     if n == 0 {
         return Ok(());
     }
@@ -394,10 +399,10 @@ fn mutate_bits_io<T: BlockIo + ?Sized>(
         let bit_in_byte = (bit % 8) as u8;
         let cur = bit_is_set(bytes[byte_idx], bit_in_byte);
         if set && cur {
-            return Err(format!("cluster {} already allocated", lcn + i));
+            return Err(Error::io(format!("cluster {} already allocated", lcn + i)));
         }
         if !set && !cur {
-            return Err(format!("cluster {} already free", lcn + i));
+            return Err(Error::io(format!("cluster {} already free", lcn + i)));
         }
         if set {
             set_bit(&mut bytes, byte_idx, bit_in_byte);
@@ -460,7 +465,7 @@ fn map_bitmap_range(
     start_byte: u64,
     len: u64,
     device_bytes: u64,
-) -> Result<Vec<MappedChunk>, String> {
+) -> Result<Vec<MappedChunk>, Error> {
     let cluster_size = bm.params.cluster_size;
     let end = start_byte + len;
     let mut out = Vec::new();
@@ -474,10 +479,10 @@ fn map_bitmap_range(
             .runs
             .iter()
             .find(|r| vcn >= r.starting_vcn && vcn < r.starting_vcn + r.length)
-            .ok_or_else(|| format!("VCN {vcn} not mapped in $Bitmap"))?;
+            .ok_or_else(|| Error::not_found(format!("VCN {vcn} not mapped in $Bitmap")))?;
         let lcn = run
             .lcn
-            .ok_or_else(|| format!("VCN {vcn} is in a sparse $Bitmap run"))?;
+            .ok_or_else(|| Error::io(format!("VCN {vcn} is in a sparse $Bitmap run")))?;
         // Checked, and required to make progress. Both halves of the
         // sum are run-list fields off the disk, and in release -- where
         // this crate ships with `overflow-checks` off -- the product
@@ -534,7 +539,7 @@ fn read_bitmap_bytes_io<T: BlockIo + ?Sized>(
     bm: &BitmapLocation,
     start_byte: u64,
     len: u64,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let mut out = vec![0u8; len as usize];
     for c in map_bitmap_range(bm, start_byte, len, io.size())? {
         io.read_exact_at(c.disk_offset, &mut out[c.cursor..c.cursor + c.len])
@@ -570,7 +575,7 @@ fn write_bitmap_bytes_io<T: BlockIo + ?Sized>(
     start_byte: u64,
     data: &[u8],
     previous: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     debug_assert_eq!(
         data.len(),
         previous.len(),
@@ -580,7 +585,7 @@ fn write_bitmap_bytes_io<T: BlockIo + ?Sized>(
 
     for (i, c) in chunks.iter().enumerate() {
         if let Err(e) = io.write_all_at(c.disk_offset, &data[c.cursor..c.cursor + c.len]) {
-            let failure = format!("write bitmap: {e}");
+            let failure = Error::io(format!("write bitmap: {e}"));
             // PUT BACK THE CHUNK THAT FAILED TOO, not only the ones
             // before it. `write_all_at` is not atomic: a failure can
             // leave part of chunk `i` written, and `chunks[..i]` left
@@ -605,16 +610,20 @@ fn write_bitmap_bytes_io<T: BlockIo + ?Sized>(
             let sync_failed = io.sync().err();
             return Err(match (rollback_failed, sync_failed) {
                 (None, None) => failure,
-                (Some(re), _) => format!(
-                    "{failure}; and rolling back failed too ({re}): \
-                     $Bitmap now records an allocation state that does not match the \
-                     records it describes — run chkdsk"
-                ),
-                (None, Some(se)) => format!(
-                    "{failure}; the rollback was written but syncing it failed ({se}): \
-                     whether $Bitmap on disk matches the records it describes depends on \
-                     what the device did with the buffered writes — run chkdsk"
-                ),
+                (Some(re), _) => failure.map_message(|m| {
+                    format!(
+                        "{m}; and rolling back failed too ({re}): \
+                         $Bitmap now records an allocation state that does not match the \
+                         records it describes — run chkdsk"
+                    )
+                }),
+                (None, Some(se)) => failure.map_message(|m| {
+                    format!(
+                        "{m}; the rollback was written but syncing it failed ({se}): \
+                         whether $Bitmap on disk matches the records it describes depends on \
+                         what the device did with the buffered writes — run chkdsk"
+                    )
+                }),
             });
         }
     }
@@ -623,12 +632,12 @@ fn write_bitmap_bytes_io<T: BlockIo + ?Sized>(
 }
 
 /// Count free clusters in `$Bitmap`. Scans the whole bitmap once.
-pub fn count_free(image: &Path, bm: &BitmapLocation) -> Result<u64, String> {
+pub fn count_free(image: &Path, bm: &BitmapLocation) -> Result<u64, Error> {
     let mut io = PathIo::open_ro(image)?;
     count_free_io(&mut io, bm)
 }
 
-pub fn count_free_io<T: BlockIo + ?Sized>(io: &mut T, bm: &BitmapLocation) -> Result<u64, String> {
+pub fn count_free_io<T: BlockIo + ?Sized>(io: &mut T, bm: &BitmapLocation) -> Result<u64, Error> {
     // IN CHUNKS. `value_length` is $Bitmap's declared, unvalidated
     // `data_length`, and this read it whole into one buffer: 2^40 asks
     // for a terabyte, which `handle_alloc_error` answers by aborting --
@@ -651,7 +660,7 @@ pub fn count_free_io<T: BlockIo + ?Sized>(io: &mut T, bm: &BitmapLocation) -> Re
 }
 
 /// Is cluster `lcn` marked allocated?
-pub fn is_allocated(image: &Path, bm: &BitmapLocation, lcn: u64) -> Result<bool, String> {
+pub fn is_allocated(image: &Path, bm: &BitmapLocation, lcn: u64) -> Result<bool, Error> {
     let mut io = PathIo::open_ro(image)?;
     is_allocated_io(&mut io, bm, lcn)
 }
@@ -660,12 +669,12 @@ pub fn is_allocated_io<T: BlockIo + ?Sized>(
     io: &mut T,
     bm: &BitmapLocation,
     lcn: u64,
-) -> Result<bool, String> {
+) -> Result<bool, Error> {
     if lcn >= bm.total_bits {
-        return Err(format!(
+        return Err(Error::io(format!(
             "LCN {lcn} out of range (total_bits {})",
             bm.total_bits
-        ));
+        )));
     }
     let byte_idx = lcn / 8;
     let bit = (lcn % 8) as u8;

@@ -15,6 +15,7 @@ use clap::{value_parser, Arg, ArgAction, ArgMatches, Command as Cmd};
 use super::device::{self, Device};
 use fs_core::cli::{CliError, Json, Outcome, Tool};
 use fs_ntfs::attr_io::AttrType;
+use fs_ntfs::error::{Error, Kind};
 use fs_ntfs::read::{self, VolumeInfo};
 
 pub const TOOL: Tool = Tool {
@@ -268,7 +269,7 @@ fn path_arg(sub: &ArgMatches) -> Result<&str, CliError> {
     })
 }
 
-fn ntfs_error(path: &str, e: String) -> CliError {
+fn ntfs_error(path: &str, e: Error) -> CliError {
     CliError::failed(format!("{path}: {e}"))
 }
 
@@ -304,7 +305,7 @@ fn mode(kind: &str) -> &'static str {
 /// everywhere -- name (string), type (string), size (number), mode (octal
 /// string), mtime (seconds since the epoch, number), and target (string)
 /// for a link -- plus NTFS's own record number and attribute bits.
-fn entry(dev: &mut Device, name: &str, record: u64) -> Result<Json, String> {
+fn entry(dev: &mut Device, name: &str, record: u64) -> Result<Json, Error> {
     let st = read::read_stat(dev, record)?;
     let reparse = read::read_attribute_value_if_present(dev, record, AttrType::ReparsePoint, None)?;
     let tag = reparse
@@ -518,7 +519,7 @@ fn edit<T>(
     target: &OsString,
     offset: u64,
     what: &str,
-    edit: impl FnOnce(&mut Device) -> Result<T, String>,
+    edit: impl FnOnce(&mut Device) -> Result<T, Error>,
 ) -> Result<T, CliError> {
     let (mut dev, info) = device::mount(target, offset, true)?;
     if is_dirty(&info) {
@@ -549,14 +550,14 @@ fn write(target: &OsString, offset: u64, path: &str) -> Result<Outcome, CliError
         let created = match read::resolve_path(dev, path) {
             Ok(record) => {
                 if read::read_stat(dev, record)?.is_dir {
-                    return Err("is a directory".to_string());
+                    return Err(Error::is_directory("is a directory"));
                 }
                 false
             }
-            Err(e) if e.contains("not found") => {
+            Err(e) if e.kind() == Kind::NotFound => {
                 let parent_record = read::resolve_path(dev, &parent)?;
                 if !read::read_stat(dev, parent_record)?.is_dir {
-                    return Err(format!("{parent} is not a directory"));
+                    return Err(Error::not_directory(format!("{parent} is not a directory")));
                 }
                 fs_ntfs::write::create_file_io(dev, &parent, name)?;
                 true
@@ -570,10 +571,12 @@ fn write(target: &OsString, offset: u64, path: &str) -> Result<Outcome, CliError
             // whatever the failed replacement left of it.
             Err(e) if created => {
                 let undone = fs_ntfs::write::unlink_io(dev, path)
-                    .and_then(|()| fs_ntfs::block_io::BlockIo::sync(dev));
+                    .and_then(|()| Ok(fs_ntfs::block_io::BlockIo::sync(dev)?));
                 return Err(match undone {
-                    Ok(()) => format!("{e} (the new file was removed again)"),
-                    Err(u) => format!("{e}; and removing the new file failed: {u}"),
+                    Ok(()) => e.map_message(|m| format!("{m} (the new file was removed again)")),
+                    Err(u) => {
+                        e.map_message(|m| format!("{m}; and removing the new file failed: {u}"))
+                    }
                 });
             }
             Err(e) => return Err(e),
@@ -598,7 +601,7 @@ fn mkdir(target: &OsString, offset: u64, path: &str) -> Result<Outcome, CliError
     let (parent, name) = split_path(path)?;
     let record = edit(target, offset, path, |dev| {
         if read::resolve_path(dev, path).is_ok() {
-            return Err("already exists".to_string());
+            return Err(Error::exists("already exists"));
         }
         fs_ntfs::write::mkdir_io(dev, &parent, name)
     })?;

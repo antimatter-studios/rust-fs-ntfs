@@ -29,6 +29,7 @@ dependencies = [
  "am-fs-core",
  "clap",
  "criterion",
+ "libc",
  "libtest-mimic",
  "log",
  "ntfs",

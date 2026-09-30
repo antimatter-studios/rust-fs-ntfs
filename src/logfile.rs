@@ -35,6 +35,7 @@
 //! `RSTR` / `RCRD` taxonomy and the restart area). No GPL implementation
 //! was consulted; ntfs-3g is used only as a program, in the tests.
 
+use crate::error::Error;
 use crate::mft_io::apply_fixup_on_read_magic;
 
 /// Log pages are protected by an update sequence array with a 512-byte
@@ -129,12 +130,15 @@ struct RestartArea {
 pub type ReadLog<'a> = dyn FnMut(u64, usize) -> Option<Vec<u8>> + 'a;
 
 /// Parse the restart page at `off`, or say why it is not one.
-fn restart_page(read: &mut ReadLog<'_>, off: u64, page_size: usize) -> Result<RestartArea, String> {
-    let mut page = read(off, page_size)
-        .ok_or_else(|| format!("no restart page at {off:#x}: the log ends before it"))?;
+fn restart_page(read: &mut ReadLog<'_>, off: u64, page_size: usize) -> Result<RestartArea, Error> {
+    let mut page = read(off, page_size).ok_or_else(|| {
+        Error::io(format!(
+            "no restart page at {off:#x}: the log ends before it"
+        ))
+    })?;
     apply_fixup_on_read_magic(&mut page, LFS_STRIDE, b"RSTR")
-        .map_err(|e| format!("restart page at {off:#x}: {e}"))?;
-    let bad = |what: &str| format!("restart page at {off:#x}: {what}");
+        .map_err(|e| e.context(format!("restart page at {off:#x}")))?;
+    let bad = |what: &str| Error::io(format!("restart page at {off:#x}: {what}"));
     let log_page_size = u32_at(&page, 0x14).ok_or_else(|| bad("truncated header"))?;
     let ra =
         u16_at(&page, RESTART_AREA_OFFSET_FIELD).ok_or_else(|| bad("truncated header"))? as usize;
@@ -203,7 +207,7 @@ pub fn state_of_nonempty(read: &mut ReadLog<'_>) -> LogfileState {
         Ok(state) => state,
         // Every reason names the log and the replay it would take, so a
         // refusal says what it is protecting whichever check tripped.
-        Err(why) if why.contains("$LogFile") => LogfileState::Pending(why),
+        Err(why) if why.contains("$LogFile") => LogfileState::Pending(why.into()),
         Err(why) => LogfileState::Pending(format!(
             "$LogFile cannot be shown to hold nothing to replay ({why}), so it may hold \
              transactions this library cannot replay (rust-fs-ntfs#137)"
@@ -211,16 +215,16 @@ pub fn state_of_nonempty(read: &mut ReadLog<'_>) -> LogfileState {
     }
 }
 
-fn analyse(read: &mut ReadLog<'_>) -> Result<LogfileState, String> {
+fn analyse(read: &mut ReadLog<'_>) -> Result<LogfileState, Error> {
     // The first restart page names the system page size, which is where
     // the second one starts.
-    let header = read(0, 0x18).ok_or("the log is shorter than a restart page header")?;
+    let header = read(0, 0x18).ok_or(Error::io("the log is shorter than a restart page header"))?;
     let system_page_size =
-        u32_at(&header, 0x10).ok_or("the log is shorter than a restart page header")?;
+        u32_at(&header, 0x10).ok_or(Error::io("the log is shorter than a restart page header"))?;
     if !(512..=65536).contains(&system_page_size) || !system_page_size.is_power_of_two() {
-        return Err(format!(
+        return Err(Error::io(format!(
             "restart page names a system page size of {system_page_size}"
-        ));
+        )));
     }
     let sps = system_page_size as usize;
     let first = restart_page(read, 0, sps);
@@ -235,7 +239,9 @@ fn analyse(read: &mut ReadLog<'_>) -> Result<LogfileState, String> {
         }
         (Ok(a), Err(_)) | (Err(_), Ok(a)) => a,
         (Err(a), Err(b)) => {
-            return Err(format!("$LogFile has no readable restart page ({a}; {b})"));
+            return Err(Error::io(format!(
+                "$LogFile has no readable restart page ({a}; {b})"
+            )));
         }
     };
 
@@ -246,21 +252,23 @@ fn analyse(read: &mut ReadLog<'_>) -> Result<LogfileState, String> {
         return Ok(LogfileState::Clean(CleanBecause::MarkedClean));
     }
 
-    let restart_lsn = ra.client_restart_lsn.ok_or("no in-use client record")?;
+    let restart_lsn = ra
+        .client_restart_lsn
+        .ok_or(Error::io("no in-use client record"))?;
     if restart_lsn != ra.current_lsn {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$LogFile holds records after its last checkpoint (checkpoint LSN {restart_lsn:#x}, \
              last LSN {:#x}), which may be transactions this library cannot replay \
              (rust-fs-ntfs#137)",
             ra.current_lsn
-        ));
+        )));
     }
 
     let unreadable = |what: String| {
-        format!(
+        Error::io(format!(
             "the checkpoint at LSN {restart_lsn:#x} cannot be read ({what}), so whether \
              $LogFile holds transactions cannot be established (rust-fs-ntfs#137)"
-        )
+        ))
     };
     let lps = ra.log_page_size;
     if !(512..=65536).contains(&lps) || !lps.is_power_of_two() {
@@ -306,11 +314,11 @@ fn analyse(read: &mut ReadLog<'_>) -> Result<LogfileState, String> {
         at += lps_u64;
     }
     if newest > restart_lsn {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$LogFile holds records after its last checkpoint (checkpoint LSN \
              {restart_lsn:#x}, newest record LSN {newest:#x}), which may be transactions \
              this library cannot replay (rust-fs-ntfs#137)"
-        ));
+        )));
     }
 
     let offset = lsn_to_offset(restart_lsn, ra.seq_number_bits)
@@ -356,11 +364,11 @@ fn analyse(read: &mut ReadLog<'_>) -> Result<LogfileState, String> {
     let dirty_pages = u32_at(&page, body + 0x38).unwrap_or(u32::MAX);
     let transactions = u32_at(&page, body + 0x3C).unwrap_or(u32::MAX);
     if dirty_pages != 0 || transactions != 0 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$LogFile's last checkpoint lists {transactions} bytes of open transactions and \
              {dirty_pages} bytes of dirty pages, which this library cannot replay \
              (rust-fs-ntfs#137)"
-        ));
+        )));
     }
     Ok(LogfileState::Clean(CleanBecause::CheckpointOnly))
 }

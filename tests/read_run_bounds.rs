@@ -188,8 +188,10 @@ fn read_both_ways(
     record_number: u64,
 ) -> (Result<Vec<u8>, String>, Result<Vec<u8>, String>) {
     let mut io = PathIo::open_ro(Path::new(img)).expect("open_ro");
-    let whole = read::read_attribute_value(&mut io, record_number, AttrType::Data, None);
-    let ranged = read::read_attribute_range(&mut io, record_number, AttrType::Data, None, 0, 512);
+    let whole = read::read_attribute_value(&mut io, record_number, AttrType::Data, None)
+        .map_err(String::from);
+    let ranged = read::read_attribute_range(&mut io, record_number, AttrType::Data, None, 0, 512)
+        .map_err(String::from);
     (whole, ranged)
 }
 

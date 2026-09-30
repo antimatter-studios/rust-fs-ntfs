@@ -12,6 +12,7 @@
 //! ch. "NTFS On-Disk Structure" and MS-FSCC.
 
 use crate::attr_io::attr_off;
+use crate::error::Error;
 use std::fmt;
 
 /// Stable control-flow result for operations that need space in one MFT
@@ -20,27 +21,41 @@ use std::fmt;
 /// remain ordinary errors regardless of their wording.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResidentResizeError {
-    Capacity(String),
-    Other(String),
+    Capacity(Error),
+    Other(Error),
 }
 
 impl fmt::Display for ResidentResizeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Capacity(message) | Self::Other(message) => f.write_str(message),
+            Self::Capacity(error) | Self::Other(error) => fmt::Display::fmt(error, f),
         }
+    }
+}
+
+impl From<Error> for ResidentResizeError {
+    fn from(error: Error) -> Self {
+        Self::Other(error)
     }
 }
 
 impl From<String> for ResidentResizeError {
     fn from(message: String) -> Self {
-        Self::Other(message)
+        Self::Other(Error::from(message))
     }
 }
 
 impl From<&str> for ResidentResizeError {
     fn from(message: &str) -> Self {
-        Self::Other(message.to_string())
+        Self::Other(Error::from(message))
+    }
+}
+
+impl From<ResidentResizeError> for Error {
+    fn from(error: ResidentResizeError) -> Self {
+        match error {
+            ResidentResizeError::Capacity(error) | ResidentResizeError::Other(error) => error,
+        }
     }
 }
 
@@ -66,9 +81,8 @@ pub fn resize_resident_value(
     record: &mut [u8],
     attr_offset: usize,
     new_value_length: u32,
-) -> Result<(), String> {
-    resize_resident_value_typed(record, attr_offset, new_value_length)
-        .map_err(|error| error.to_string())
+) -> Result<(), Error> {
+    resize_resident_value_typed(record, attr_offset, new_value_length).map_err(Error::from)
 }
 
 pub(crate) fn resize_resident_value_typed(
@@ -77,9 +91,9 @@ pub(crate) fn resize_resident_value_typed(
     new_value_length: u32,
 ) -> Result<(), ResidentResizeError> {
     if record[attr_offset + attr_off::NON_RESIDENT] != 0 {
-        return Err(ResidentResizeError::Other(
-            "attribute is non-resident".to_string(),
-        ));
+        return Err(ResidentResizeError::Other(Error::io(
+            "attribute is non-resident",
+        )));
     }
     let old_attr_length = u32::from_le_bytes([
         record[attr_offset + attr_off::LENGTH],
@@ -117,10 +131,10 @@ pub(crate) fn resize_resident_value_typed(
     if new_attr_length > old_attr_length {
         let diff = new_attr_length - old_attr_length;
         if bytes_used + diff > bytes_allocated {
-            return Err(ResidentResizeError::Capacity(format!(
+            return Err(ResidentResizeError::Capacity(Error::no_space(format!(
                 "growing attribute by {diff} bytes exceeds record capacity \
                  (bytes_used={bytes_used} + diff > bytes_allocated={bytes_allocated})"
-            )));
+            ))));
         }
         // Shift [attr_offset + old_attr_length .. bytes_used) forward by `diff`.
         record.copy_within(
@@ -173,20 +187,20 @@ pub fn replace_attribute(
     record: &mut [u8],
     attr_offset: usize,
     new_attr: &[u8],
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let new_attr_length = new_attr.len();
     if new_attr_length == 0 || !new_attr_length.is_multiple_of(8) {
-        return Err(format!(
+        return Err(Error::io(format!(
             "replace_attribute: new_attr length {new_attr_length} not 8-aligned non-zero"
-        ));
+        )));
     }
     // Sanity: the header's own `length` field must match new_attr.len().
     let header_len =
         u32::from_le_bytes([new_attr[4], new_attr[5], new_attr[6], new_attr[7]]) as usize;
     if header_len != new_attr_length {
-        return Err(format!(
+        return Err(Error::io(format!(
             "replace_attribute: header length {header_len} != buffer length {new_attr_length}"
-        ));
+        )));
     }
 
     let old_attr_length = u32::from_le_bytes([
@@ -211,10 +225,10 @@ pub fn replace_attribute(
     if new_attr_length > old_attr_length {
         let diff = new_attr_length - old_attr_length;
         if bytes_used + diff > bytes_allocated {
-            return Err(format!(
+            return Err(Error::no_space(format!(
                 "replace_attribute: growing by {diff} exceeds record capacity \
                  (bytes_used={bytes_used} bytes_allocated={bytes_allocated})"
-            ));
+            )));
         }
         record.copy_within(
             attr_offset + old_attr_length..bytes_used,
@@ -244,8 +258,8 @@ pub fn replace_attribute(
 /// end-of-attributes sentinel (`0xFFFFFFFF`). The caller supplies a
 /// fully-formed, 8-byte-aligned attribute blob — including its
 /// attribute-header `length` field set to the buffer's length.
-pub fn insert_attribute_sorted(record: &mut [u8], new_attr: &[u8]) -> Result<(), String> {
-    insert_attribute_sorted_typed(record, new_attr).map_err(|error| error.to_string())
+pub fn insert_attribute_sorted(record: &mut [u8], new_attr: &[u8]) -> Result<(), Error> {
+    insert_attribute_sorted_typed(record, new_attr).map_err(Error::from)
 }
 
 pub(crate) fn insert_attribute_sorted_typed(
@@ -254,16 +268,16 @@ pub(crate) fn insert_attribute_sorted_typed(
 ) -> Result<(), ResidentResizeError> {
     let new_len = new_attr.len();
     if new_len == 0 || !new_len.is_multiple_of(8) {
-        return Err(ResidentResizeError::Other(format!(
+        return Err(ResidentResizeError::Other(Error::io(format!(
             "insert_attribute: length {new_len} not 8-aligned non-zero"
-        )));
+        ))));
     }
     let header_len =
         u32::from_le_bytes([new_attr[4], new_attr[5], new_attr[6], new_attr[7]]) as usize;
     if header_len != new_len {
-        return Err(ResidentResizeError::Other(format!(
+        return Err(ResidentResizeError::Other(Error::io(format!(
             "insert_attribute: header length {header_len} != buffer length {new_len}"
-        )));
+        ))));
     }
 
     let bytes_used = u32::from_le_bytes([
@@ -279,10 +293,10 @@ pub(crate) fn insert_attribute_sorted_typed(
         record[REC_OFF_BYTES_ALLOCATED + 3],
     ]) as usize;
     if bytes_used + new_len > bytes_allocated {
-        return Err(ResidentResizeError::Capacity(format!(
+        return Err(ResidentResizeError::Capacity(Error::no_space(format!(
             "no room for new attribute: need {new_len} more, have {}",
             bytes_allocated - bytes_used
-        )));
+        ))));
     }
 
     // Find the sorted insertion offset. NTFS requires the attributes in a
@@ -330,8 +344,11 @@ pub(crate) fn insert_attribute_sorted_typed(
         }
         cursor += attr_len;
     }
-    let end_marker_pos = end_marker_pos
-        .ok_or_else(|| format!("no 0xFFFFFFFF end marker found before bytes_used {bytes_used}"))?;
+    let end_marker_pos = end_marker_pos.ok_or_else(|| {
+        Error::io(format!(
+            "no 0xFFFFFFFF end marker found before bytes_used {bytes_used}"
+        ))
+    })?;
     let insert_pos = insert_pos.unwrap_or(end_marker_pos);
 
     // Open a gap at insert_pos by shifting everything from there up to and
@@ -367,8 +384,8 @@ pub fn set_resident_value(
     record: &mut [u8],
     attr_offset: usize,
     new_value: &[u8],
-) -> Result<(), String> {
-    set_resident_value_typed(record, attr_offset, new_value).map_err(|error| error.to_string())
+) -> Result<(), Error> {
+    set_resident_value_typed(record, attr_offset, new_value).map_err(Error::from)
 }
 
 pub(crate) fn set_resident_value_typed(

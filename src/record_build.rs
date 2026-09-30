@@ -14,6 +14,7 @@
 
 /// Encode an NTFS file-reference from (record_number, sequence_number).
 /// The low 48 bits are the record number; the high 16 are the sequence.
+use crate::error::Error;
 pub fn encode_file_reference(record_number: u64, sequence: u16) -> u64 {
     (record_number & 0x0000_FFFF_FFFF_FFFF) | ((sequence as u64) << 48)
 }
@@ -182,7 +183,7 @@ pub fn build_regular_file_record(
     name: &str,
     nt_time: u64,
     bytes_per_sector: u16,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     build_record_inner(
         record_size,
         record_number,
@@ -248,13 +249,16 @@ pub fn build_directory_record(
     // `clusters_per_index_block` byte inside `$INDEX_ROOT` -- see
     // `build_empty_ir_value` (#144).
     cluster_size: u32,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     if record_size < 512 || !record_size.is_multiple_of(bytes_per_sector as usize) {
-        return Err(format!("invalid record_size {record_size}"));
+        return Err(Error::invalid(format!("invalid record_size {record_size}")));
     }
     let utf16: Vec<u16> = name.encode_utf16().collect();
     if utf16.is_empty() || utf16.len() > 255 {
-        return Err(format!("invalid name length {}", utf16.len()));
+        return Err(Error::invalid(format!(
+            "invalid name length {}",
+            utf16.len()
+        )));
     }
 
     let mut rec = vec![0u8; record_size];
@@ -296,10 +300,10 @@ pub fn build_directory_record(
 
     // W2.5 — bounds guard, same rationale as `build_record_inner`.
     if cursor + 8 > record_size {
-        return Err(format!(
+        return Err(Error::no_space(format!(
             "record overflow: attributes consumed {} bytes, no room for 8-byte END marker in {}-byte record",
             cursor, record_size
-        ));
+        )));
     }
 
     // END marker is 4 bytes magic + 4 bytes attribute_length=0 — see
@@ -368,7 +372,7 @@ fn write_empty_index_root(
     index_block_size: u32,
     cluster_size: u32,
     bytes_per_sector: u16,
-) -> Result<usize, String> {
+) -> Result<usize, Error> {
     let name_u16: [u16; 4] = ['$' as u16, 'I' as u16, '3' as u16, '0' as u16];
     let name_bytes = name_u16.len() * 2; // 8 bytes
     let header_size = 24usize;
@@ -378,7 +382,7 @@ fn write_empty_index_root(
     let attr_length = align8(value_offset + ir_value.len());
 
     if at + attr_length > rec.len() {
-        return Err("$INDEX_ROOT doesn't fit in MFT record".to_string());
+        return Err(Error::io("$INDEX_ROOT doesn't fit in MFT record"));
     }
 
     // Resident attribute header.
@@ -416,13 +420,16 @@ fn build_record_inner(
     nt_time: u64,
     bytes_per_sector: u16,
     is_dir: bool,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     if record_size < 512 || !record_size.is_multiple_of(bytes_per_sector as usize) {
-        return Err(format!("invalid record_size {record_size}"));
+        return Err(Error::invalid(format!("invalid record_size {record_size}")));
     }
     let utf16: Vec<u16> = name.encode_utf16().collect();
     if utf16.is_empty() || utf16.len() > 255 {
-        return Err(format!("invalid name length {}", utf16.len()));
+        return Err(Error::invalid(format!(
+            "invalid name length {}",
+            utf16.len()
+        )));
     }
 
     let mut rec = vec![0u8; record_size];
@@ -464,10 +471,10 @@ fn build_record_inner(
     // + hard links could exhaust. Fail loudly before writing the
     // END marker would overflow.
     if cursor + 8 > record_size {
-        return Err(format!(
+        return Err(Error::no_space(format!(
             "record overflow: attributes consumed {} bytes, no room for 8-byte END marker in {}-byte record",
             cursor, record_size
-        ));
+        )));
     }
 
     // End marker. NTFS spec records the END marker as 4 bytes of
@@ -490,19 +497,19 @@ fn build_record_inner(
 pub fn build_resident_ea_information_attribute(
     attr_id: u16,
     value: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     if value.len() != 8 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$EA_INFORMATION value must be 8 bytes, got {}",
             value.len()
-        ));
+        )));
     }
     build_resident_unnamed_attribute(ATTR_EA_INFORMATION, attr_id, value)
 }
 
 /// Build a resident `$EA` (type 0xE0) attribute blob wrapping a packed
 /// EA byte stream.
-pub fn build_resident_ea_attribute(attr_id: u16, packed: &[u8]) -> Result<Vec<u8>, String> {
+pub fn build_resident_ea_attribute(attr_id: u16, packed: &[u8]) -> Result<Vec<u8>, Error> {
     build_resident_unnamed_attribute(ATTR_EA, attr_id, packed)
 }
 
@@ -539,7 +546,7 @@ pub(crate) fn build_resident_unnamed_attribute(
     attr_type: u32,
     attr_id: u16,
     value: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let header_size = 24usize;
     let attr_length = align8(header_size + value.len());
     let mut buf = vec![0u8; attr_length];
@@ -571,12 +578,12 @@ pub fn build_resident_reparse_point_attribute(
     attr_id: u16,
     reparse_tag: u32,
     data: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     if data.len() > u16::MAX as usize {
-        return Err(format!(
+        return Err(Error::io(format!(
             "reparse data {} bytes exceeds u16 ceiling",
             data.len()
-        ));
+        )));
     }
     let common_header = 16usize;
     let resident_fields = 8usize;
@@ -738,10 +745,13 @@ pub fn build_named_resident_data_attribute(
     attr_id: u16,
     stream_name: &str,
     data: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let name_u16: Vec<u16> = stream_name.encode_utf16().collect();
     if name_u16.is_empty() || name_u16.len() > 255 {
-        return Err(format!("invalid stream name length {}", name_u16.len()));
+        return Err(Error::invalid(format!(
+            "invalid stream name length {}",
+            name_u16.len()
+        )));
     }
     let common_header = 16usize;
     let resident_fields = 8usize;
@@ -798,7 +808,7 @@ pub fn build_nonresident_data_attribute(
     initialized_length: u64,
     last_vcn: i64,
     mapping_pairs: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let common_header = 16usize;
     // Non-resident specific fields span +0x10..+0x40 (first_vcn/last_vcn
     // (16) + mapping_pairs_offset/compression_unit (4) + reserved (4) +
@@ -862,12 +872,15 @@ pub fn build_sparse_nonresident_data_attribute(
     initialized_length: u64,
     last_vcn: i64,
     mapping_pairs: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let name_u16: Vec<u16> = attr_name
         .map(|s| s.encode_utf16().collect())
         .unwrap_or_default();
     if name_u16.len() > 255 {
-        return Err(format!("attribute name too long: {}", name_u16.len()));
+        return Err(Error::io(format!(
+            "attribute name too long: {}",
+            name_u16.len()
+        )));
     }
 
     // Extended header: 0x40 standard fields + 8-byte total_allocated_size.
@@ -919,12 +932,15 @@ pub fn build_nonresident_attribute(
     initialized_length: u64,
     last_vcn: i64,
     mapping_pairs: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let name_u16: Vec<u16> = attr_name
         .map(|s| s.encode_utf16().collect())
         .unwrap_or_default();
     if name_u16.len() > 255 {
-        return Err(format!("attribute name too long: {}", name_u16.len()));
+        return Err(Error::io(format!(
+            "attribute name too long: {}",
+            name_u16.len()
+        )));
     }
     let common_header = 16usize;
     let nonres_fields = 48usize;
@@ -1009,10 +1025,13 @@ pub fn build_file_name_attribute(
     name: &str,
     nt_time: u64,
     is_dir: bool,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let utf16: Vec<u16> = name.encode_utf16().collect();
     if utf16.is_empty() || utf16.len() > 255 {
-        return Err(format!("invalid name length {}", utf16.len()));
+        return Err(Error::invalid(format!(
+            "invalid name length {}",
+            utf16.len()
+        )));
     }
     let header_size = 24usize;
     let key_fixed = FILE_NAME_FIXED_SIZE;

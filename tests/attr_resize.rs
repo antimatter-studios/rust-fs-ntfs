@@ -44,6 +44,7 @@ fn rename_volume(img: &str, new_name: &str) -> Result<(), String> {
             Ok(())
         },
     )
+    .map_err(String::from)
 }
 
 #[test]

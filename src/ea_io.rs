@@ -9,6 +9,7 @@
 //! `layout.h` and Linux ntfs3's `ntfs.h`.
 
 use crate::attr_io::{self, AttrType};
+use crate::error::Error;
 
 pub const FLAG_NEED_EA: u8 = 0x80;
 
@@ -36,31 +37,31 @@ pub fn entry_encoded_size(name_len: usize, value_len: usize) -> usize {
 /// This is the size of each entry without its four-byte `NextEntryOffset`
 /// field or alignment padding: flags, name length, value length, name NUL,
 /// and value.
-pub fn packed_ea_length(eas: &[Ea]) -> Result<u16, String> {
+pub fn packed_ea_length(eas: &[Ea]) -> Result<u16, Error> {
     let mut total = 0usize;
     for ea in eas {
         if ea.name.len() > 254 {
-            return Err(format!("ea name too long: {}", ea.name.len()));
+            return Err(Error::io(format!("ea name too long: {}", ea.name.len())));
         }
         if ea.value.len() > u16::MAX as usize {
-            return Err(format!("ea value too large: {}", ea.value.len()));
+            return Err(Error::io(format!("ea value too large: {}", ea.value.len())));
         }
         total = total
             .checked_add(4 + ea.name.len() + 1 + ea.value.len())
-            .ok_or_else(|| "packed EA length overflow".to_string())?;
+            .ok_or_else(|| Error::io("packed EA length overflow"))?;
     }
-    u16::try_from(total).map_err(|_| format!("packed EA length too large: {total}"))
+    u16::try_from(total).map_err(|_| Error::io(format!("packed EA length too large: {total}")))
 }
 
 /// Pack a list of EAs into a `$EA` blob.
-pub fn encode(eas: &[Ea]) -> Result<Vec<u8>, String> {
+pub fn encode(eas: &[Ea]) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
     for (i, ea) in eas.iter().enumerate() {
         if ea.name.len() > 254 {
-            return Err(format!("ea name too long: {}", ea.name.len()));
+            return Err(Error::io(format!("ea name too long: {}", ea.name.len())));
         }
         if ea.value.len() > u16::MAX as usize {
-            return Err(format!("ea value too large: {}", ea.value.len()));
+            return Err(Error::io(format!("ea value too large: {}", ea.value.len())));
         }
         let entry_len = entry_encoded_size(ea.name.len(), ea.value.len());
         let next_off = if i == eas.len() - 1 { 0 } else { entry_len };
@@ -83,7 +84,7 @@ pub fn encode(eas: &[Ea]) -> Result<Vec<u8>, String> {
 }
 
 /// Decode a `$EA` blob into a list.
-pub fn decode(bytes: &[u8]) -> Result<Vec<Ea>, String> {
+pub fn decode(bytes: &[u8]) -> Result<Vec<Ea>, Error> {
     let mut out = Vec::new();
     let mut cursor = 0usize;
     while cursor + 8 <= bytes.len() {
@@ -100,10 +101,10 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Ea>, String> {
         let value_start = name_start + name_len + 1; // skip NUL
         let value_end = value_start + value_len;
         if value_end > bytes.len() {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "EA entry at {cursor} extends past buffer ({value_end} > {})",
                 bytes.len()
-            ));
+            )));
         }
         out.push(Ea {
             flags,
@@ -114,9 +115,9 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Ea>, String> {
             break;
         }
         if next_off < 8 || cursor + next_off > bytes.len() {
-            return Err(format!(
+            return Err(Error::invalid(format!(
                 "EA entry at {cursor} has invalid next_offset {next_off}"
-            ));
+            )));
         }
         cursor += next_off;
     }
@@ -146,15 +147,21 @@ pub fn build_ea_information_value(
 /// Read the current EAs + $EA_INFORMATION state from a record. Returns
 /// `Ok(vec)` if `$EA` is absent (empty list) or present + resident; an
 /// error if present but non-resident (MVP).
-pub fn read_from_record(record: &[u8]) -> Result<Vec<Ea>, String> {
+pub fn read_from_record(record: &[u8]) -> Result<Vec<Ea>, Error> {
     let Some(ea) = attr_io::find_attribute(record, AttrType::ExtendedAttribute, None) else {
         return Ok(Vec::new());
     };
     if !ea.is_resident {
-        return Err("$EA is non-resident (MVP only supports resident EAs)".to_string());
+        return Err(Error::io(
+            "$EA is non-resident (MVP only supports resident EAs)",
+        ));
     }
-    let val_off = ea.resident_value_offset.ok_or("no value_offset")? as usize;
-    let val_len = ea.resident_value_length.ok_or("no value_length")? as usize;
+    let val_off = ea
+        .resident_value_offset
+        .ok_or(Error::io("no value_offset"))? as usize;
+    let val_len = ea
+        .resident_value_length
+        .ok_or(Error::io("no value_length"))? as usize;
     let start = ea.attr_offset + val_off;
     decode(&record[start..start + val_len])
 }

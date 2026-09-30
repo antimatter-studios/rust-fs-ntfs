@@ -408,6 +408,11 @@ int fs_ntfs_readlink(fs_ntfs_fs_t *fs, const char *path,
  * thread, and every call resets the errno to 0 on entry -- so after a
  * successful call it is 0, however an earlier call on the thread ended.
  * The message is kept until the next failure.
+ *
+ * The errno is decided where the failure is raised, not read back out of
+ * the message, so a name the caller chose -- which messages quote -- never
+ * decides it. The values are the <errno.h> of the platform the library was
+ * built for (ENOTEMPTY is 66 on macOS, 39 on Linux).
  */
 
 /*

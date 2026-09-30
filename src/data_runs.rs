@@ -17,6 +17,7 @@
 //!   0x00       terminator
 
 /// One decoded run.
+use crate::error::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DataRun {
     /// First VCN covered by this run.
@@ -61,7 +62,7 @@ fn sign_extend_i64(raw: i64, nbytes: usize) -> i64 {
 /// the first 0x00 header byte or the end of `bytes`, whichever comes
 /// first. Validates that LCN deltas don't produce negative absolute
 /// LCNs.
-pub fn decode_runs(bytes: &[u8]) -> Result<Vec<DataRun>, String> {
+pub fn decode_runs(bytes: &[u8]) -> Result<Vec<DataRun>, Error> {
     let mut runs = Vec::new();
     let mut prev_lcn: i64 = 0;
     let mut starting_vcn: u64 = 0;
@@ -75,17 +76,21 @@ pub fn decode_runs(bytes: &[u8]) -> Result<Vec<DataRun>, String> {
         let length_bytes = (header & 0x0F) as usize;
         let lcn_bytes = ((header >> 4) & 0x0F) as usize;
         if length_bytes == 0 {
-            return Err(format!("run at offset {p}: length-byte-count is zero"));
+            return Err(Error::io(format!(
+                "run at offset {p}: length-byte-count is zero"
+            )));
         }
         if length_bytes > 8 || lcn_bytes > 8 {
-            return Err(format!("run at offset {p}: invalid header {header:#04x}"));
+            return Err(Error::invalid(format!(
+                "run at offset {p}: invalid header {header:#04x}"
+            )));
         }
         p += 1;
         if p + length_bytes + lcn_bytes > bytes.len() {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "run at offset {p}: extends past data ({length_bytes}+{lcn_bytes} needed, {} left)",
                 bytes.len() - p
-            ));
+            )));
         }
 
         // length: unsigned little-endian, variable width 1..=8.
@@ -95,7 +100,7 @@ pub fn decode_runs(bytes: &[u8]) -> Result<Vec<DataRun>, String> {
         }
         p += length_bytes;
         if length == 0 {
-            return Err(format!("run at offset {p}: zero-cluster length"));
+            return Err(Error::io(format!("run at offset {p}: zero-cluster length")));
         }
 
         let lcn = if lcn_bytes == 0 {
@@ -111,9 +116,9 @@ pub fn decode_runs(bytes: &[u8]) -> Result<Vec<DataRun>, String> {
             p += lcn_bytes;
             let new_lcn = prev_lcn
                 .checked_add(delta)
-                .ok_or_else(|| format!("LCN delta overflow at offset {p}"))?;
+                .ok_or_else(|| Error::io(format!("LCN delta overflow at offset {p}")))?;
             if new_lcn < 0 {
-                return Err(format!("negative absolute LCN {new_lcn}"));
+                return Err(Error::io(format!("negative absolute LCN {new_lcn}")));
             }
             prev_lcn = new_lcn;
             Some(new_lcn as u64)
@@ -124,7 +129,9 @@ pub fn decode_runs(bytes: &[u8]) -> Result<Vec<DataRun>, String> {
             length,
             lcn,
         });
-        starting_vcn = starting_vcn.checked_add(length).ok_or("VCN overflow")?;
+        starting_vcn = starting_vcn
+            .checked_add(length)
+            .ok_or(Error::io("VCN overflow"))?;
     }
     // Ran off the end without a 0x00 terminator — tolerate since the
     // attribute's `attr_length` can itself bound the list.
@@ -152,19 +159,19 @@ pub fn vcn_to_lcn(runs: &[DataRun], vcn: u64) -> Option<u64> {
 /// Requires `runs` be VCN-contiguous starting at 0 (the usual shape for
 /// a complete attribute value). A gap between runs is rejected — sparse
 /// regions must be expressed as an explicit `DataRun` with `lcn = None`.
-pub fn encode_runs(runs: &[DataRun]) -> Result<Vec<u8>, String> {
+pub fn encode_runs(runs: &[DataRun]) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
     let mut prev_lcn: i64 = 0;
     let mut expected_vcn: u64 = 0;
     for (i, r) in runs.iter().enumerate() {
         if r.starting_vcn != expected_vcn {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "run {i} starts at VCN {} but previous runs cover up to {}",
                 r.starting_vcn, expected_vcn
-            ));
+            )));
         }
         if r.length == 0 {
-            return Err(format!("run {i} has zero length"));
+            return Err(Error::io(format!("run {i} has zero length")));
         }
 
         // NTFS encodes mapping-pair length as a *signed* value (so the
@@ -183,7 +190,9 @@ pub fn encode_runs(runs: &[DataRun]) -> Result<Vec<u8>, String> {
             Some(abs) => {
                 let abs_i =
                     i64::try_from(abs).map_err(|_| format!("LCN {abs} exceeds i64 range"))?;
-                let delta = abs_i.checked_sub(prev_lcn).ok_or("LCN delta overflow")?;
+                let delta = abs_i
+                    .checked_sub(prev_lcn)
+                    .ok_or(Error::io("LCN delta overflow"))?;
                 let nb = signed_bytes_needed(delta);
                 (nb, delta)
             }
@@ -200,7 +209,9 @@ pub fn encode_runs(runs: &[DataRun]) -> Result<Vec<u8>, String> {
             prev_lcn += lcn_field; // lcn_field is delta; accumulate absolute
         }
 
-        expected_vcn = expected_vcn.checked_add(r.length).ok_or("VCN overflow")?;
+        expected_vcn = expected_vcn
+            .checked_add(r.length)
+            .ok_or(Error::io("VCN overflow"))?;
     }
     out.push(0x00);
     Ok(out)

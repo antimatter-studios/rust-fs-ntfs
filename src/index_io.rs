@@ -7,6 +7,7 @@
 //! 7th ed. ch. "NTFS On-Disk Structure" and MS-FSCC.
 
 use crate::attr_io::{self, read_u32_le, AttrType};
+use crate::error::Error;
 use crate::mkfs::stream;
 
 /// Offsets inside `$INDEX_ROOT`'s resident value.
@@ -60,33 +61,34 @@ fn child_vcn_in_node(
     value_end: usize,
     wanted: &str,
     upcase: Option<&crate::upcase::UpcaseTable>,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let header_end = ih
         .checked_add(INDEX_HEADER_SIZE)
-        .ok_or("index header overflow")?;
+        .ok_or(Error::io("index header overflow"))?;
     if header_end > value_end || value_end > buf.len() {
-        return Err("interior index header exceeds its value".to_string());
+        return Err(Error::io("interior index header exceeds its value"));
     }
     if buf[ih + IH_FLAGS_OFFSET] & IH_FLAG_HAS_SUBNODES == 0 {
-        return Err("index node has no child pointers".to_string());
+        return Err(Error::io("index node has no child pointers"));
     }
-    let first = read_u32_le(buf, ih + IH_FIRST_ENTRY_OFFSET).ok_or("missing first entry")? as usize;
-    let total =
-        read_u32_le(buf, ih + IH_TOTAL_SIZE_OF_ENTRIES).ok_or("missing index size")? as usize;
+    let first = read_u32_le(buf, ih + IH_FIRST_ENTRY_OFFSET)
+        .ok_or(Error::io("missing first entry"))? as usize;
+    let total = read_u32_le(buf, ih + IH_TOTAL_SIZE_OF_ENTRIES)
+        .ok_or(Error::io("missing index size"))? as usize;
     if first < INDEX_HEADER_SIZE || !first.is_multiple_of(8) || first > total {
-        return Err("invalid interior index first-entry offset".to_string());
+        return Err(Error::invalid("invalid interior index first-entry offset"));
     }
     let end = ih
         .checked_add(total)
-        .ok_or("interior index size overflow")?;
+        .ok_or(Error::io("interior index size overflow"))?;
     if end > value_end {
-        return Err("interior index entries exceed their value".to_string());
+        return Err(Error::io("interior index entries exceed their value"));
     }
     let mut cursor = ih + first;
     let wanted_utf16: Vec<u16> = wanted.encode_utf16().collect();
     while cursor < end {
         if cursor + IE_KEY_START > end {
-            return Err("truncated interior index entry".to_string());
+            return Err(Error::io("truncated interior index entry"));
         }
         let len =
             u16::from_le_bytes([buf[cursor + IE_LENGTH], buf[cursor + IE_LENGTH + 1]]) as usize;
@@ -95,25 +97,27 @@ fn child_vcn_in_node(
                 as usize;
         let flags = u16::from_le_bytes([buf[cursor + IE_FLAGS], buf[cursor + IE_FLAGS + 1]]);
         if len < IE_KEY_START + 8 || !len.is_multiple_of(8) || cursor + len > end {
-            return Err("invalid interior index entry length".to_string());
+            return Err(Error::invalid("invalid interior index entry length"));
         }
         if flags & IE_FLAG_HAS_SUBNODE == 0 {
-            return Err("interior index entry has no child VCN".to_string());
+            return Err(Error::io("interior index entry has no child VCN"));
         }
         let descend = if flags & IE_FLAG_LAST != 0 {
             if cursor + len != end {
-                return Err("interior index LAST entry is not last".to_string());
+                return Err(Error::io("interior index LAST entry is not last"));
             }
             true
         } else {
             if IE_KEY_START + key_len + 8 > len {
-                return Err("interior index key overlaps child VCN".to_string());
+                return Err(Error::io("interior index key overlaps child VCN"));
             }
             let key = entry_name(buf, cursor, len - 8)?;
             match compare_names(&wanted_utf16, &key, upcase) {
                 std::cmp::Ordering::Less => true,
                 std::cmp::Ordering::Equal => {
-                    return Err("index key already exists in an interior node".to_string());
+                    return Err(Error::exists(
+                        "index key already exists in an interior node",
+                    ));
                 }
                 std::cmp::Ordering::Greater => false,
             }
@@ -125,17 +129,19 @@ fn child_vcn_in_node(
         }
         cursor += len;
     }
-    Err("interior index has no LAST child".to_string())
+    Err(Error::io("interior index has no LAST child"))
 }
 
 pub(crate) fn index_root_child_vcn(
     record: &[u8],
     wanted: &str,
     upcase: Option<&crate::upcase::UpcaseTable>,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or("$INDEX_ROOT:$I30 not found")?;
-    let start = ir.attr_offset + ir.resident_value_offset.ok_or("no value_offset")? as usize;
+        .ok_or(Error::not_found("$INDEX_ROOT:$I30 not found"))?;
+    let start = ir.attr_offset
+        + ir.resident_value_offset
+            .ok_or(Error::io("no value_offset"))? as usize;
     let end = index_root_value_end(record, &ir)?;
     child_vcn_in_node(record, start + IR_INDEX_HEADER_OFFSET, end, wanted, upcase)
 }
@@ -144,7 +150,7 @@ pub(crate) fn indx_child_vcn(
     block: &[u8],
     wanted: &str,
     upcase: Option<&crate::upcase::UpcaseTable>,
-) -> Result<u64, String> {
+) -> Result<u64, Error> {
     child_vcn_in_node(
         block,
         crate::idx_block::INDX_INDEX_HEADER_OFFSET,
@@ -162,20 +168,20 @@ pub(crate) fn indx_child_vcn(
 /// with no bound at all, having proved only that the entry's own
 /// `length` fits in the buffer. `collect_entries` is the walk that does
 /// bound every read; this is that bound, written once.
-fn entry_name(buf: &[u8], cursor: usize, length: usize) -> Result<Vec<u16>, String> {
+fn entry_name(buf: &[u8], cursor: usize, length: usize) -> Result<Vec<u16>, Error> {
     let name_length = usize::from(
         *buf.get(cursor + IE_KEY_START + FN_NAME_LENGTH_OFFSET)
-            .ok_or("index entry ends before its name length")?,
+            .ok_or(Error::io("index entry ends before its name length"))?,
     );
     let name_start = cursor + IE_KEY_START + FN_NAME_OFFSET;
     let name_end = name_start
         .checked_add(name_length * 2)
-        .ok_or("index entry name length overflows")?;
+        .ok_or(Error::io("index entry name length overflows"))?;
     if name_end > cursor + length || name_end > buf.len() {
-        return Err(format!(
+        return Err(Error::io(format!(
             "index entry at {cursor} says its name is {name_length} characters, which \
              runs past the {length}-byte entry"
-        ));
+        )));
     }
     Ok(buf[name_start..name_end]
         .chunks_exact(2)
@@ -199,33 +205,36 @@ fn lookup_node(
     limit: usize,
     wanted: &[u16],
     upcase: &crate::upcase::UpcaseTable,
-) -> Result<IndexNodeLookup, String> {
+) -> Result<IndexNodeLookup, Error> {
     if ih_start.saturating_add(INDEX_HEADER_SIZE) > limit || limit > buf.len() {
-        return Err("index node is too short for an index header".to_string());
+        return Err(Error::io("index node is too short for an index header"));
     }
-    let first_entry_rel = read_u32_le(buf, ih_start + IH_FIRST_ENTRY_OFFSET)
-        .ok_or("index node is too short to read first_entry_offset")?
-        as usize;
+    let first_entry_rel = read_u32_le(buf, ih_start + IH_FIRST_ENTRY_OFFSET).ok_or(Error::io(
+        "index node is too short to read first_entry_offset",
+    ))? as usize;
     let total_size = read_u32_le(buf, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
-        .ok_or("index node is too short to read total_size")? as usize;
+        .ok_or(Error::io("index node is too short to read total_size"))?
+        as usize;
     if first_entry_rel < INDEX_HEADER_SIZE || !first_entry_rel.is_multiple_of(8) {
-        return Err(format!(
+        return Err(Error::io(format!(
             "index node says its first entry is {first_entry_rel} bytes into the index header, \
              which is not an entry boundary"
-        ));
+        )));
     }
     let end = ih_start
         .checked_add(total_size)
         .filter(|&end| end <= limit)
-        .ok_or_else(|| "index node entries run past their container".to_string())?;
+        .ok_or_else(|| Error::io("index node entries run past their container"))?;
     let mut cursor = ih_start
         .checked_add(first_entry_rel)
         .filter(|&cursor| cursor <= end)
-        .ok_or_else(|| "index node first entry runs past its entries".to_string())?;
+        .ok_or_else(|| Error::io("index node first entry runs past its entries"))?;
 
     while cursor < end {
         if cursor.saturating_add(IE_KEY_START) > end {
-            return Err(format!("index entry header at {cursor} runs past the node"));
+            return Err(Error::io(format!(
+                "index entry header at {cursor} runs past the node"
+            )));
         }
         let length =
             u16::from_le_bytes([buf[cursor + IE_LENGTH], buf[cursor + IE_LENGTH + 1]]) as usize;
@@ -236,12 +245,12 @@ fn lookup_node(
         let entry_end = cursor
             .checked_add(length)
             .filter(|&entry_end| length >= IE_KEY_START && entry_end <= end)
-            .ok_or_else(|| format!("malformed index entry at {cursor}"))?;
+            .ok_or_else(|| Error::io(format!("malformed index entry at {cursor}")))?;
         let child_vcn = if flags & IE_FLAG_HAS_SUBNODE != 0 {
             if length < IE_KEY_START + 8 {
-                return Err(format!(
+                return Err(Error::io(format!(
                     "index entry at {cursor} is too short for its child VCN"
-                ));
+                )));
             }
             Some(u64::from_le_bytes(
                 buf[entry_end - 8..entry_end].try_into().unwrap(),
@@ -254,9 +263,9 @@ fn lookup_node(
             return Ok(child_vcn.map_or(IndexNodeLookup::NotFound, IndexNodeLookup::Descend));
         }
         if key_length < FN_NAME_OFFSET || cursor + IE_KEY_START + key_length > entry_end {
-            return Err(format!(
+            return Err(Error::io(format!(
                 "malformed $FILE_NAME key in index entry at {cursor}"
-            ));
+            )));
         }
         let indexed_name = entry_name(buf, cursor, length)?;
         match upcase.cmp_names(wanted, &indexed_name) {
@@ -277,20 +286,24 @@ fn lookup_node(
             std::cmp::Ordering::Greater => cursor = entry_end,
         }
     }
-    Err("index node has no LAST entry".to_string())
+    Err(Error::io("index node has no LAST entry"))
 }
 
 pub(crate) fn lookup_index_root_node(
     record: &[u8],
     wanted: &[u16],
     upcase: &crate::upcase::UpcaseTable,
-) -> Result<IndexNodeLookup, String> {
+) -> Result<IndexNodeLookup, Error> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or_else(|| "$INDEX_ROOT:$I30 not found".to_string())?;
+        .ok_or_else(|| Error::not_found("$INDEX_ROOT:$I30 not found"))?;
     if !ir.is_resident {
-        return Err("$INDEX_ROOT is non-resident (impossible per spec)".to_string());
+        return Err(Error::io(
+            "$INDEX_ROOT is non-resident (impossible per spec)",
+        ));
     }
-    let value_offset = ir.resident_value_offset.ok_or("no value_offset")? as usize;
+    let value_offset = ir
+        .resident_value_offset
+        .ok_or(Error::io("no value_offset"))? as usize;
     let ih_start = ir.attr_offset + value_offset + IR_INDEX_HEADER_OFFSET;
     lookup_node(
         record,
@@ -305,9 +318,9 @@ pub(crate) fn lookup_indx_node(
     block: &[u8],
     wanted: &[u16],
     upcase: &crate::upcase::UpcaseTable,
-) -> Result<IndexNodeLookup, String> {
+) -> Result<IndexNodeLookup, Error> {
     if block.len() < 4 || &block[..4] != b"INDX" {
-        return Err("not an INDX block (fixup missing?)".to_string());
+        return Err(Error::io("not an INDX block (fixup missing?)"));
     }
     lookup_node(
         block,
@@ -362,23 +375,23 @@ pub struct IndexEntryLocation {
 /// value then has `readdir` decoding whatever follows the attribute in
 /// the same record as index entries, each carrying a 48-bit record
 /// number taken from those bytes, which the caller opens.
-fn index_root_value_end(record: &[u8], ir: &attr_io::AttrLocation) -> Result<usize, String> {
+fn index_root_value_end(record: &[u8], ir: &attr_io::AttrLocation) -> Result<usize, Error> {
     let off = ir
         .resident_value_offset
-        .ok_or("$INDEX_ROOT has no value_offset")? as usize;
+        .ok_or(Error::io("$INDEX_ROOT has no value_offset"))? as usize;
     let len = ir
         .resident_value_length
-        .ok_or("$INDEX_ROOT has no value_length")? as usize;
+        .ok_or(Error::io("$INDEX_ROOT has no value_length"))? as usize;
     ir.attr_offset
         .checked_add(off)
         .and_then(|start| start.checked_add(len))
         .filter(|&end| end <= record.len())
         .ok_or_else(|| {
-            format!(
+            Error::io(format!(
                 "$INDEX_ROOT value [{}+{off}, +{len}) runs past the {}-byte record",
                 ir.attr_offset,
                 record.len()
-            )
+            ))
         })
 }
 
@@ -405,13 +418,17 @@ pub fn find_index_entry(
     record: &[u8],
     wanted: &str,
     upcase: Option<&crate::upcase::UpcaseTable>,
-) -> Result<Option<IndexEntryLocation>, String> {
+) -> Result<Option<IndexEntryLocation>, Error> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or_else(|| "$INDEX_ROOT:$I30 not found".to_string())?;
+        .ok_or_else(|| Error::not_found("$INDEX_ROOT:$I30 not found"))?;
     if !ir.is_resident {
-        return Err("$INDEX_ROOT is non-resident (impossible per spec)".to_string());
+        return Err(Error::io(
+            "$INDEX_ROOT is non-resident (impossible per spec)",
+        ));
     }
-    let ir_value_offset = ir.resident_value_offset.ok_or("no value_offset")? as usize;
+    let ir_value_offset = ir
+        .resident_value_offset
+        .ok_or(Error::io("no value_offset"))? as usize;
     let ir_data_start = ir.attr_offset + ir_value_offset;
     let value_end = index_root_value_end(record, &ir)?;
 
@@ -427,16 +444,16 @@ pub fn find_index_entry(
     // as "that name is free". `index_root_has_real_entries` was given
     // this check by #172; these two walks were not.
     if ih_start.saturating_add(INDEX_HEADER_SIZE) > value_end {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$INDEX_ROOT value is too short for an index header: header at {ih_start}, \
              value ends at {value_end}"
-        ));
+        )));
     }
     let first_entry_rel = read_u32_le(record, ih_start + IH_FIRST_ENTRY_OFFSET)
-        .ok_or_else(|| "index header too short to read first_entry_offset".to_string())?
+        .ok_or_else(|| Error::io("index header too short to read first_entry_offset"))?
         as usize;
     let total_size = read_u32_le(record, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
-        .ok_or_else(|| "index header too short to read total_size".to_string())?
+        .ok_or_else(|| Error::io("index header too short to read total_size"))?
         as usize;
     // THE LOOKUP MUST NOT WALK FROM A FALSE ENTRY EITHER.
     //
@@ -447,10 +464,10 @@ pub fn find_index_entry(
     // and entries are 8-byte aligned, so neither can begin an entry.
     // See #271.
     if first_entry_rel < INDEX_HEADER_SIZE || !first_entry_rel.is_multiple_of(8) {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$INDEX_ROOT says its first entry is {first_entry_rel} bytes into the index \
              header, which is not an entry boundary"
-        ));
+        )));
     }
 
     let mut cursor = ih_start + first_entry_rel;
@@ -475,7 +492,7 @@ pub fn find_index_entry(
             break;
         }
         if length == 0 || cursor + length > value_end {
-            return Err(format!("malformed index entry at {cursor}"));
+            return Err(Error::io(format!("malformed index entry at {cursor}")));
         }
         if key_length >= FN_NAME_OFFSET {
             // Bounded by the entry rather than by the buffer: the
@@ -524,21 +541,23 @@ pub fn find_index_entry(
 
 /// True if the resident `$INDEX_ROOT:$I30` has any non-LAST entries.
 /// Used by `rmdir` to verify a directory is empty.
-pub fn index_root_has_real_entries(record: &[u8]) -> Result<bool, String> {
+pub fn index_root_has_real_entries(record: &[u8]) -> Result<bool, Error> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or_else(|| "$INDEX_ROOT:$I30 not found".to_string())?;
+        .ok_or_else(|| Error::not_found("$INDEX_ROOT:$I30 not found"))?;
     if !ir.is_resident {
-        return Err("$INDEX_ROOT unexpectedly non-resident".to_string());
+        return Err(Error::io("$INDEX_ROOT unexpectedly non-resident"));
     }
-    let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
+    let val_off = ir
+        .resident_value_offset
+        .ok_or(Error::io("no value_offset"))? as usize;
     let ir_data_start = ir.attr_offset + val_off;
     let value_end = index_root_value_end(record, &ir)?;
     let ih_start = ir_data_start + IR_INDEX_HEADER_OFFSET;
     let first_entry_rel = read_u32_le(record, ih_start + IH_FIRST_ENTRY_OFFSET)
-        .ok_or_else(|| "index header too short to read first_entry_offset".to_string())?
+        .ok_or_else(|| Error::io("index header too short to read first_entry_offset"))?
         as usize;
     let total_size = read_u32_le(record, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
-        .ok_or_else(|| "index header too short to read total_size".to_string())?
+        .ok_or_else(|| Error::io("index header too short to read total_size"))?
         as usize;
     let first_entry = ih_start + first_entry_rel;
     let end = (ih_start + total_size).min(value_end);
@@ -551,10 +570,10 @@ pub fn index_root_has_real_entries(record: &[u8]) -> Result<bool, String> {
     // the one input where reporting emptiness is destructive: the
     // caller's response to emptiness is to delete.
     if first_entry + IE_KEY_START > value_end || first_entry + 0x10 > end {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$INDEX_ROOT header is unreadable: first entry at {first_entry}, entries end \
              at {end}, value ends at {value_end}"
-        ));
+        )));
     }
     // If the very first entry has the LAST flag, the dir is empty.
     let flags = u16::from_le_bytes([
@@ -611,19 +630,19 @@ pub fn find_entry_in_indx_block(
     block: &[u8],
     wanted: &str,
     upcase: Option<&crate::upcase::UpcaseTable>,
-) -> Result<Option<IndexEntryLocation>, String> {
+) -> Result<Option<IndexEntryLocation>, Error> {
     use crate::idx_block::{
         IH_FIRST_ENTRY_OFFSET, IH_TOTAL_SIZE_OF_ENTRIES, INDX_INDEX_HEADER_OFFSET,
     };
     if &block[0..4] != b"INDX" {
-        return Err("not an INDX block (fixup missing?)".to_string());
+        return Err(Error::io("not an INDX block (fixup missing?)"));
     }
     let ih_start = INDX_INDEX_HEADER_OFFSET;
     let first_entry_rel = read_u32_le(block, ih_start + IH_FIRST_ENTRY_OFFSET)
-        .ok_or_else(|| "INDX block too short to read first_entry_offset".to_string())?
+        .ok_or_else(|| Error::io("INDX block too short to read first_entry_offset"))?
         as usize;
     let total_size = read_u32_le(block, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
-        .ok_or_else(|| "INDX block too short to read total_size".to_string())?
+        .ok_or_else(|| Error::io("INDX block too short to read total_size"))?
         as usize;
     let mut cursor = ih_start + first_entry_rel;
     let end = ih_start + total_size;
@@ -638,7 +657,7 @@ fn scan_entries_for_name(
     end: usize,
     wanted: &str,
     upcase: Option<&crate::upcase::UpcaseTable>,
-) -> Result<Option<IndexEntryLocation>, String> {
+) -> Result<Option<IndexEntryLocation>, Error> {
     let wanted_utf16: Vec<u16> = wanted.encode_utf16().collect();
     while *cursor < end && *cursor + IE_KEY_START <= buf.len() {
         let length =
@@ -653,7 +672,7 @@ fn scan_entries_for_name(
             break;
         }
         if length == 0 || *cursor + length > buf.len() {
-            return Err(format!("malformed index entry at {cursor}"));
+            return Err(Error::io(format!("malformed index entry at {cursor}")));
         }
         if key_length >= FN_NAME_OFFSET {
             // Bounded by the entry rather than by the buffer: the
@@ -732,7 +751,7 @@ fn collect_entries(
     // comes off the disk and does not get to exceed it.
     limit: usize,
     out: &mut Vec<DirEntryRaw>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // Same rule as `find_index_entry`: `read_u32_le` is bounded by
     // `buf.len()` -- the whole MFT record for an `$INDEX_ROOT` -- while
     // the node ends at `limit`. A value too short for the header read
@@ -740,16 +759,16 @@ fn collect_entries(
     // `cursor`, and the walk appended nothing: `readdir` reported an
     // empty directory for a directory that has entries.
     if ih_start.saturating_add(INDEX_HEADER_SIZE) > limit {
-        return Err(format!(
+        return Err(Error::io(format!(
             "index node is too short for an index header: header at {ih_start}, \
              node ends at {limit}"
-        ));
+        )));
     }
     let first_entry_rel = read_u32_le(buf, ih_start + IH_FIRST_ENTRY_OFFSET)
-        .ok_or("index node too short to read first_entry_offset")?
+        .ok_or(Error::io("index node too short to read first_entry_offset"))?
         as usize;
     let total_size = read_u32_le(buf, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
-        .ok_or("index node too short to read total_size")? as usize;
+        .ok_or(Error::io("index node too short to read total_size"))? as usize;
     let mut cursor = ih_start + first_entry_rel;
     let end = (ih_start + total_size).min(limit);
     while cursor < end && cursor + IE_KEY_START <= limit {
@@ -763,7 +782,7 @@ fn collect_entries(
             break;
         }
         if length == 0 || cursor + length > limit {
-            return Err(format!("malformed index entry at {cursor}"));
+            return Err(Error::io(format!("malformed index entry at {cursor}")));
         }
         // Bound every read to THIS entry [cursor, entry_end), not the whole
         // buffer: a corrupt key_length/name_length must not let us decode
@@ -806,9 +825,9 @@ fn collect_entries(
 }
 
 /// Enumerate the `$FILE_NAME` entries in a directory's resident `$INDEX_ROOT`.
-pub fn collect_index_root_entries(record: &[u8], out: &mut Vec<DirEntryRaw>) -> Result<(), String> {
+pub fn collect_index_root_entries(record: &[u8], out: &mut Vec<DirEntryRaw>) -> Result<(), Error> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or_else(|| "$INDEX_ROOT:$I30 not found".to_string())?;
+        .ok_or_else(|| Error::not_found("$INDEX_ROOT:$I30 not found"))?;
     // BY CHECK, NOT BY CONSEQUENCE.
     //
     // `find_index_entry` and `index_root_has_real_entries` both refuse
@@ -818,7 +837,7 @@ pub fn collect_index_root_entries(record: &[u8], out: &mut Vec<DirEntryRaw>) -> 
     // non-residence:
     //
     //   * a non-resident attribute the iterator YIELDS fell through to
-    //     `resident_value_offset.ok_or("no value_offset")` below, which
+    //     `resident_value_offset.ok_or(Error::io("no value_offset"))` below, which
     //     holds solely because `AttrIter` fills that field inside
     //     `if !non_resident` and nowhere else;
     //   * a record whose header byte says non-resident while the rest
@@ -837,9 +856,13 @@ pub fn collect_index_root_entries(record: &[u8], out: &mut Vec<DirEntryRaw>) -> 
     // it. `no_flags_means_no_listing` builds an input the iterator
     // yields and asserts the REASON; see the note there.
     if !ir.is_resident {
-        return Err("$INDEX_ROOT is non-resident (impossible per spec)".to_string());
+        return Err(Error::io(
+            "$INDEX_ROOT is non-resident (impossible per spec)",
+        ));
     }
-    let ir_value_offset = ir.resident_value_offset.ok_or("no value_offset")? as usize;
+    let ir_value_offset = ir
+        .resident_value_offset
+        .ok_or(Error::io("no value_offset"))? as usize;
     let value_end = index_root_value_end(record, &ir)?;
     let ih_start = ir.attr_offset + ir_value_offset + IR_INDEX_HEADER_OFFSET;
     collect_entries(record, ih_start, value_end, out)
@@ -847,9 +870,9 @@ pub fn collect_index_root_entries(record: &[u8], out: &mut Vec<DirEntryRaw>) -> 
 
 /// Enumerate the `$FILE_NAME` entries in one `$INDEX_ALLOCATION` (INDX) block
 /// (already read + USA-fixed).
-pub fn collect_indx_block_entries(block: &[u8], out: &mut Vec<DirEntryRaw>) -> Result<(), String> {
+pub fn collect_indx_block_entries(block: &[u8], out: &mut Vec<DirEntryRaw>) -> Result<(), Error> {
     if block.len() < 4 || &block[0..4] != b"INDX" {
-        return Err("not an INDX block (fixup missing?)".to_string());
+        return Err(Error::io("not an INDX block (fixup missing?)"));
     }
     // An INDX block is its own buffer; the block is what holds the node.
     collect_entries(
@@ -868,14 +891,14 @@ pub fn rename_index_entry_same_length(
     record: &mut [u8],
     entry: &IndexEntryLocation,
     new_name: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let utf16: Vec<u16> = new_name.encode_utf16().collect();
     if utf16.len() != entry.name_length as usize {
-        return Err(format!(
+        return Err(Error::io(format!(
             "same-length rename required (got {} u16 code units, expected {})",
             utf16.len(),
             entry.name_length
-        ));
+        )));
     }
     let name_start = entry.record_offset + IE_KEY_START + FN_NAME_OFFSET;
     for (i, c) in utf16.iter().enumerate() {
@@ -902,7 +925,7 @@ pub fn remove_index_entry(
     buf: &mut [u8],
     entry: &IndexEntryLocation,
     block_kind: BlockKind,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     // THE INDEX ENDS WHERE THE THING HOLDING IT ENDS.
     //
     // For an $INDEX_ROOT, `buf` is the whole MFT record and the index
@@ -915,18 +938,22 @@ pub fn remove_index_entry(
     let (ih_start, index_limit) = match block_kind {
         BlockKind::IndexRoot => {
             let ir = attr_io::find_attribute(buf, AttrType::IndexRoot, Some(stream::I30))
-                .ok_or_else(|| "$INDEX_ROOT:$I30 missing".to_string())?;
-            let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
-            let val_len = ir.resident_value_length.ok_or("no value_length")? as usize;
+                .ok_or_else(|| Error::io("$INDEX_ROOT:$I30 missing"))?;
+            let val_off = ir
+                .resident_value_offset
+                .ok_or(Error::io("no value_offset"))? as usize;
+            let val_len = ir
+                .resident_value_length
+                .ok_or(Error::io("no value_length"))? as usize;
             // Both headers, for the reason written out on the insert's
             // copy of this check: `total_size` is read from `ih_start`
             // with raw indexing a few lines down, and a 16..31 byte value
             // put that read past the value's own end. See #271.
             if val_len < IR_INDEX_HEADER_OFFSET + INDEX_HEADER_SIZE {
-                return Err(format!(
+                return Err(Error::io(format!(
                     "$INDEX_ROOT:$I30 value is {val_len} bytes, too short to hold an index \
                      header at {IR_INDEX_HEADER_OFFSET} plus its {INDEX_HEADER_SIZE} bytes"
-                ));
+                )));
             }
             (
                 ir.attr_offset + val_off + IR_INDEX_HEADER_OFFSET,
@@ -954,10 +981,10 @@ pub fn remove_index_entry(
         || entry.record_offset < ih_start
         || entry.record_offset > entry_end
     {
-        return Err(format!(
+        return Err(Error::io(format!(
             "index says its entries end at {tail_end}, past the {index_limit} where the \
              index itself does"
-        ));
+        )));
     }
 
     // AN ENTRY WITH A CHILD IS NOT ONE TO SHIFT AWAY.
@@ -979,11 +1006,10 @@ pub fn remove_index_entry(
         buf[entry.record_offset + IE_FLAGS + 1],
     ]);
     if entry_flags & IE_FLAG_HAS_SUBNODE != 0 {
-        return Err(
+        return Err(Error::io(
             "the entry to remove points at a sub-node; removing it would orphan that \
-             subtree (index B-tree maintenance is not implemented)"
-                .to_string(),
-        );
+             subtree (index B-tree maintenance is not implemented)",
+        ));
     }
 
     // Shift following entries back.
@@ -1013,8 +1039,10 @@ pub fn remove_index_entry(
         buf[alloc_pos..alloc_pos + 4].copy_from_slice(&new_total_size.to_le_bytes());
 
         let ir = attr_io::find_attribute(buf, AttrType::IndexRoot, Some(stream::I30))
-            .ok_or("$INDEX_ROOT re-find failed")?;
-        let old_val_len = ir.resident_value_length.ok_or("no value_length")?;
+            .ok_or(Error::io("$INDEX_ROOT re-find failed"))?;
+        let old_val_len = ir
+            .resident_value_length
+            .ok_or(Error::io("no value_length"))?;
         let new_val_len = old_val_len.saturating_sub(entry.length as u32);
         crate::attr_resize::resize_resident_value(buf, ir.attr_offset, new_val_len)?;
     }
@@ -1041,10 +1069,13 @@ pub fn build_file_name_index_entry(
     name: &str,
     nt_time: u64,
     is_dir: bool,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let utf16: Vec<u16> = name.encode_utf16().collect();
     if utf16.is_empty() || utf16.len() > 255 {
-        return Err(format!("invalid name length {}", utf16.len()));
+        return Err(Error::invalid(format!(
+            "invalid name length {}",
+            utf16.len()
+        )));
     }
     let key_fixed = 0x42usize;
     let key_len = key_fixed + utf16.len() * 2;
@@ -1100,7 +1131,7 @@ pub fn insert_entry_into_index_root(
     record: &mut [u8],
     entry_bytes: &[u8],
     new_name: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     insert_entry_into_index_root_with_collation(record, entry_bytes, new_name, None)
 }
 
@@ -1113,11 +1144,15 @@ pub fn insert_entry_into_index_root_with_collation(
     entry_bytes: &[u8],
     new_name: &str,
     upcase: Option<&crate::upcase::UpcaseTable>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or_else(|| "$INDEX_ROOT:$I30 missing".to_string())?;
-    let val_off = ir.resident_value_offset.ok_or("no value_offset")? as usize;
-    let old_val_len = ir.resident_value_length.ok_or("no value_length")? as usize;
+        .ok_or_else(|| Error::io("$INDEX_ROOT:$I30 missing"))?;
+    let val_off = ir
+        .resident_value_offset
+        .ok_or(Error::io("no value_offset"))? as usize;
+    let old_val_len = ir
+        .resident_value_length
+        .ok_or(Error::io("no value_length"))? as usize;
     // THE VALUE HAS TO HOLD BOTH HEADERS, NOT JUST THE FIRST.
     //
     // This refused only `old_val_len < IR_INDEX_HEADER_OFFSET` (16), and
@@ -1128,10 +1163,10 @@ pub fn insert_entry_into_index_root_with_collation(
     // `find_index_entry` grew this check in #222 and both readers have
     // it; the two root mutators were left at 16. See #271.
     if old_val_len < IR_INDEX_HEADER_OFFSET + INDEX_HEADER_SIZE {
-        return Err(format!(
+        return Err(Error::io(format!(
             "$INDEX_ROOT:$I30 value is {old_val_len} bytes, too short to hold an index \
              header at {IR_INDEX_HEADER_OFFSET} plus its {INDEX_HEADER_SIZE} bytes"
-        ));
+        )));
     }
     let ih_start = ir.attr_offset + val_off + IR_INDEX_HEADER_OFFSET;
     let index_limit = ir.attr_offset + val_off + old_val_len;
@@ -1162,10 +1197,10 @@ pub fn insert_entry_into_index_root_with_collation(
             format!("the index says its entries end past its own {old_val_len}-byte value")
         })?;
     if first_entry_rel > total_size {
-        return Err(format!(
+        return Err(Error::io(format!(
             "the index says its first entry is {first_entry_rel} bytes in, past the \
              {total_size} bytes of entries it has"
-        ));
+        )));
     }
     // AND IT HAS TO BE AN ENTRY BOUNDARY, NOT MERELY INSIDE THE VALUE.
     //
@@ -1182,10 +1217,10 @@ pub fn insert_entry_into_index_root_with_collation(
     // `INDEX_HEADER_SIZE` points into the header itself and an unaligned
     // one cannot be the start of any entry. See #271.
     if first_entry_rel < INDEX_HEADER_SIZE || !first_entry_rel.is_multiple_of(8) {
-        return Err(format!(
+        return Err(Error::io(format!(
             "the index says its first entry is {first_entry_rel} bytes in, which is not \
              an entry boundary"
-        ));
+        )));
     }
 
     refuse_if_interior(record[ih_start + IH_FLAGS_OFFSET], "$INDEX_ROOT:$I30")?;
@@ -1205,7 +1240,7 @@ pub fn insert_entry_into_index_root_with_collation(
             break; // insertion point is immediately before LAST
         }
         if length == 0 || cursor + length > record.len() {
-            return Err("malformed index during insert".to_string());
+            return Err(Error::io("malformed index during insert"));
         }
         let existing_utf16 = entry_name(record, cursor, length)?;
         if compare_names(&new_utf16, &existing_utf16, upcase) != std::cmp::Ordering::Greater {
@@ -1230,8 +1265,10 @@ pub fn insert_entry_into_index_root_with_collation(
     // because we grew by an amount that preserves existing attr offset —
     // but compute defensively anyway).
     let ir2 = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or("$INDEX_ROOT vanished")?;
-    let val_off2 = ir2.resident_value_offset.ok_or("no value_offset")? as usize;
+        .ok_or(Error::io("$INDEX_ROOT vanished"))?;
+    let val_off2 = ir2
+        .resident_value_offset
+        .ok_or(Error::io("no value_offset"))? as usize;
     let attr_val_start = ir2.attr_offset + val_off2;
     let insertion_point = attr_val_start + insertion_in_value;
 
@@ -1270,38 +1307,48 @@ pub(crate) fn promote_index_root_to_first_indx(
     record: &mut [u8],
     block_size: usize,
     bytes_per_sector: u16,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or_else(|| "$INDEX_ROOT:$I30 missing".to_string())?;
-    let value_offset = ir.resident_value_offset.ok_or("no value_offset")? as usize;
-    let value_length = ir.resident_value_length.ok_or("no value_length")? as usize;
+        .ok_or_else(|| Error::io("$INDEX_ROOT:$I30 missing"))?;
+    let value_offset = ir
+        .resident_value_offset
+        .ok_or(Error::io("no value_offset"))? as usize;
+    let value_length = ir
+        .resident_value_length
+        .ok_or(Error::io("no value_length"))? as usize;
     let value_start = ir.attr_offset + value_offset;
     let value_end = index_root_value_end(record, &ir)?;
     let ih = value_start + IR_INDEX_HEADER_OFFSET;
     if value_length < IR_INDEX_HEADER_OFFSET + INDEX_HEADER_SIZE {
-        return Err("$INDEX_ROOT is too short to promote".to_string());
+        return Err(Error::io("$INDEX_ROOT is too short to promote"));
     }
     refuse_if_interior(record[ih + IH_FLAGS_OFFSET], "$INDEX_ROOT")?;
 
     let first = read_u32_le(record, ih + IH_FIRST_ENTRY_OFFSET)
-        .ok_or("$INDEX_ROOT has no first-entry offset")? as usize;
+        .ok_or(Error::io("$INDEX_ROOT has no first-entry offset"))? as usize;
     let total = read_u32_le(record, ih + IH_TOTAL_SIZE_OF_ENTRIES)
-        .ok_or("$INDEX_ROOT has no total size")? as usize;
+        .ok_or(Error::io("$INDEX_ROOT has no total size"))? as usize;
     if first < INDEX_HEADER_SIZE || !first.is_multiple_of(8) || first > total {
-        return Err("$INDEX_ROOT has an invalid first-entry offset".to_string());
+        return Err(Error::invalid(
+            "$INDEX_ROOT has an invalid first-entry offset",
+        ));
     }
     let entries_start = ih
         .checked_add(first)
-        .ok_or("$INDEX_ROOT entry offset overflow")?;
-    let entries_end = ih.checked_add(total).ok_or("$INDEX_ROOT size overflow")?;
+        .ok_or(Error::io("$INDEX_ROOT entry offset overflow"))?;
+    let entries_end = ih
+        .checked_add(total)
+        .ok_or(Error::io("$INDEX_ROOT size overflow"))?;
     if entries_end > value_end || entries_start > entries_end {
-        return Err("$INDEX_ROOT entries run past the resident value".to_string());
+        return Err(Error::io("$INDEX_ROOT entries run past the resident value"));
     }
     let entries = record[entries_start..entries_end].to_vec();
 
     let sector_size = usize::from(bytes_per_sector);
     if sector_size == 0 || block_size < sector_size || !block_size.is_multiple_of(sector_size) {
-        return Err("index block size is incompatible with the sector size".to_string());
+        return Err(Error::io(
+            "index block size is incompatible with the sector size",
+        ));
     }
     let usa_count = block_size / sector_size + 1;
     let usa_offset = 0x28usize;
@@ -1311,12 +1358,14 @@ pub(crate) fn promote_index_root_to_first_indx(
     let first_abs = (usa_offset + usa_count * 2 + 7) & !7;
     let first_rel = first_abs
         .checked_sub(block_ih)
-        .ok_or("INDX USA overlaps the index header")?;
+        .ok_or(Error::io("INDX USA overlaps the index header"))?;
     let block_total = first_rel
         .checked_add(entries.len())
-        .ok_or("INDX entry size overflow")?;
+        .ok_or(Error::io("INDX entry size overflow"))?;
     if block_ih + block_total > block_size {
-        return Err("resident index entries do not fit in one INDX block".to_string());
+        return Err(Error::io(
+            "resident index entries do not fit in one INDX block",
+        ));
     }
     let mut block = vec![0u8; block_size];
     block[0..4].copy_from_slice(b"INDX");
@@ -1359,34 +1408,39 @@ pub(crate) fn split_indx_leaf(
     left_vcn: u64,
     right_vcn: u64,
     upcase: Option<&crate::upcase::UpcaseTable>,
-) -> Result<SplitIndxLeaves, String> {
+) -> Result<SplitIndxLeaves, Error> {
     let ih = crate::idx_block::INDX_INDEX_HEADER_OFFSET;
     if block.get(0..4) != Some(b"INDX") {
-        return Err("not an INDX block".to_string());
+        return Err(Error::io("not an INDX block"));
     }
     refuse_if_interior(
-        *block.get(ih + IH_FLAGS_OFFSET).ok_or("short INDX header")?,
+        *block
+            .get(ih + IH_FLAGS_OFFSET)
+            .ok_or(Error::io("short INDX header"))?,
         "this INDX block",
     )?;
-    let first = read_u32_le(block, ih + IH_FIRST_ENTRY_OFFSET).ok_or("short INDX header")? as usize;
-    let total =
-        read_u32_le(block, ih + IH_TOTAL_SIZE_OF_ENTRIES).ok_or("short INDX header")? as usize;
-    let end = ih.checked_add(total).ok_or("INDX size overflow")?;
+    let first = read_u32_le(block, ih + IH_FIRST_ENTRY_OFFSET)
+        .ok_or(Error::io("short INDX header"))? as usize;
+    let total = read_u32_le(block, ih + IH_TOTAL_SIZE_OF_ENTRIES)
+        .ok_or(Error::io("short INDX header"))? as usize;
+    let end = ih
+        .checked_add(total)
+        .ok_or(Error::io("INDX size overflow"))?;
     if first < INDEX_HEADER_SIZE || !first.is_multiple_of(8) || end > block.len() {
-        return Err("invalid INDX entry bounds".to_string());
+        return Err(Error::invalid("invalid INDX entry bounds"));
     }
 
     let mut entries: Vec<Vec<u8>> = Vec::new();
     let mut cursor = ih + first;
     while cursor < end {
         if cursor + IE_KEY_START > end {
-            return Err("truncated INDX entry".to_string());
+            return Err(Error::io("truncated INDX entry"));
         }
         let len =
             u16::from_le_bytes([block[cursor + IE_LENGTH], block[cursor + IE_LENGTH + 1]]) as usize;
         let flags = u16::from_le_bytes([block[cursor + IE_FLAGS], block[cursor + IE_FLAGS + 1]]);
         if len == 0 || cursor.checked_add(len).is_none_or(|e| e > end) {
-            return Err("malformed INDX entry during split".to_string());
+            return Err(Error::io("malformed INDX entry during split"));
         }
         if flags & IE_FLAG_LAST != 0 {
             break;
@@ -1409,18 +1463,18 @@ pub(crate) fn split_indx_leaf(
     let left_entries = &entries[..mid];
     let right_entries = &entries[mid + 1..];
 
-    fn rewrite_leaf(template: &[u8], entries: &[Vec<u8>], vcn: u64) -> Result<Vec<u8>, String> {
+    fn rewrite_leaf(template: &[u8], entries: &[Vec<u8>], vcn: u64) -> Result<Vec<u8>, Error> {
         let ih = crate::idx_block::INDX_INDEX_HEADER_OFFSET;
-        let first =
-            read_u32_le(template, ih + IH_FIRST_ENTRY_OFFSET).ok_or("short INDX header")? as usize;
+        let first = read_u32_le(template, ih + IH_FIRST_ENTRY_OFFSET)
+            .ok_or(Error::io("short INDX header"))? as usize;
         let allocated = read_u32_le(template, ih + IH_ALLOCATED_SIZE_OF_ENTRIES)
-            .ok_or("short INDX header")? as usize;
+            .ok_or(Error::io("short INDX header"))? as usize;
         let mut out = template.to_vec();
         let start = ih + first;
         let sentinel_len = 16usize;
         let used = first + entries.iter().map(Vec::len).sum::<usize>() + sentinel_len;
         if used > allocated || ih + allocated > out.len() {
-            return Err("split leaf does not fit in its INDX block".to_string());
+            return Err(Error::io("split leaf does not fit in its INDX block"));
         }
         out[start..ih + allocated].fill(0);
         let mut at = start;
@@ -1454,36 +1508,39 @@ pub(crate) fn route_add_split_in_index_root(
     left_vcn: u64,
     right_vcn: u64,
     upcase: Option<&crate::upcase::UpcaseTable>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or("$INDEX_ROOT:$I30 missing")?;
-    let value = ir.attr_offset + ir.resident_value_offset.ok_or("no value offset")? as usize;
+        .ok_or(Error::io("$INDEX_ROOT:$I30 missing"))?;
+    let value = ir.attr_offset
+        + ir.resident_value_offset
+            .ok_or(Error::io("no value offset"))? as usize;
     let value_end = index_root_value_end(record, &ir)?;
     let ih = value + IR_INDEX_HEADER_OFFSET;
     if record.get(ih + IH_FLAGS_OFFSET).copied().unwrap_or(0) & IH_FLAG_HAS_SUBNODES == 0 {
-        return Err("split parent is not an interior $INDEX_ROOT".to_string());
+        return Err(Error::io("split parent is not an interior $INDEX_ROOT"));
     }
-    let first = read_u32_le(record, ih + IH_FIRST_ENTRY_OFFSET).ok_or("short index root")? as usize;
-    let total =
-        read_u32_le(record, ih + IH_TOTAL_SIZE_OF_ENTRIES).ok_or("short index root")? as usize;
+    let first = read_u32_le(record, ih + IH_FIRST_ENTRY_OFFSET)
+        .ok_or(Error::io("short index root"))? as usize;
+    let total = read_u32_le(record, ih + IH_TOTAL_SIZE_OF_ENTRIES)
+        .ok_or(Error::io("short index root"))? as usize;
     if first != INDEX_HEADER_SIZE || total < first || ih + total > value_end {
-        return Err("invalid root routing bounds".to_string());
+        return Err(Error::invalid("invalid root routing bounds"));
     }
     let name = String::from_utf16(&entry_name(separator, 0, separator.len())?)
-        .map_err(|_| "separator name is invalid UTF-16")?;
+        .map_err(|_| Error::invalid("separator name is invalid UTF-16"))?;
     if index_root_child_vcn(record, &name, upcase)? != left_vcn {
-        return Err("split separator does not route to the old leaf".to_string());
+        return Err(Error::io("split separator does not route to the old leaf"));
     }
     let mut entries = record[ih + first..ih + total].to_vec();
     let mut at = 0usize;
     while at < entries.len() {
         if at + IE_KEY_START > entries.len() {
-            return Err("truncated root routing entry".to_string());
+            return Err(Error::io("truncated root routing entry"));
         }
         let len =
             u16::from_le_bytes([entries[at + IE_LENGTH], entries[at + IE_LENGTH + 1]]) as usize;
         if len < 24 || !len.is_multiple_of(8) || at + len > entries.len() {
-            return Err("invalid root routing entry length".to_string());
+            return Err(Error::invalid("invalid root routing entry length"));
         }
         let child_at = at + len - 8;
         if u64::from_le_bytes(entries[child_at..child_at + 8].try_into().unwrap()) == left_vcn {
@@ -1491,7 +1548,7 @@ pub(crate) fn route_add_split_in_index_root(
             let sep_len = separator
                 .len()
                 .checked_add(8)
-                .ok_or("separator size overflow")?;
+                .ok_or(Error::io("separator size overflow"))?;
             let mut promoted = vec![0u8; sep_len];
             promoted[..separator.len()].copy_from_slice(separator);
             promoted[IE_LENGTH..IE_LENGTH + 2].copy_from_slice(
@@ -1510,9 +1567,10 @@ pub(crate) fn route_add_split_in_index_root(
                 new_value_len as u32,
             )?;
             let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-                .ok_or("$INDEX_ROOT vanished")?;
-            let value =
-                ir.attr_offset + ir.resident_value_offset.ok_or("no value offset")? as usize;
+                .ok_or(Error::io("$INDEX_ROOT vanished"))?;
+            let value = ir.attr_offset
+                + ir.resident_value_offset
+                    .ok_or(Error::io("no value offset"))? as usize;
             let ih = value + IR_INDEX_HEADER_OFFSET;
             record[ih + INDEX_HEADER_SIZE..ih + new_total].copy_from_slice(&entries);
             record[ih + IH_TOTAL_SIZE_OF_ENTRIES..ih + IH_TOTAL_SIZE_OF_ENTRIES + 4]
@@ -1523,7 +1581,7 @@ pub(crate) fn route_add_split_in_index_root(
         }
         at += len;
     }
-    Err("split leaf has no direct $INDEX_ROOT parent".to_string())
+    Err(Error::io("split leaf has no direct $INDEX_ROOT parent"))
 }
 
 /// Replace the one-child promoted root with a separator routing to `left_vcn`
@@ -1533,19 +1591,23 @@ pub(crate) fn route_split_in_index_root(
     separator: &[u8],
     left_vcn: u64,
     right_vcn: u64,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or("$INDEX_ROOT:$I30 missing")?;
+        .ok_or(Error::io("$INDEX_ROOT:$I30 missing"))?;
     let old_offset = ir.attr_offset;
     let sep_len = separator
         .len()
         .checked_add(8)
-        .ok_or("separator size overflow")?;
-    let new_value_len = 56usize.checked_add(sep_len).ok_or("root size overflow")?;
+        .ok_or(Error::io("separator size overflow"))?;
+    let new_value_len = 56usize
+        .checked_add(sep_len)
+        .ok_or(Error::io("root size overflow"))?;
     crate::attr_resize::resize_resident_value(record, old_offset, new_value_len as u32)?;
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or("$INDEX_ROOT vanished")?;
-    let value = ir.attr_offset + ir.resident_value_offset.ok_or("no value offset")? as usize;
+        .ok_or(Error::io("$INDEX_ROOT vanished"))?;
+    let value = ir.attr_offset
+        + ir.resident_value_offset
+            .ok_or(Error::io("no value offset"))? as usize;
     let ih = value + IR_INDEX_HEADER_OFFSET;
     let at = ih + INDEX_HEADER_SIZE;
     let mut routed = vec![0u8; sep_len];
@@ -1578,7 +1640,7 @@ pub fn insert_entry_into_indx_block(
     block: &mut [u8],
     entry_bytes: &[u8],
     new_name: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     insert_entry_into_indx_block_with_collation(block, entry_bytes, new_name, None)
 }
 
@@ -1589,19 +1651,19 @@ pub fn insert_entry_into_indx_block_with_collation(
     entry_bytes: &[u8],
     new_name: &str,
     upcase: Option<&crate::upcase::UpcaseTable>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     use crate::idx_block::{
         IH_FIRST_ENTRY_OFFSET, IH_TOTAL_SIZE_OF_ENTRIES, INDX_INDEX_HEADER_OFFSET,
     };
     if &block[0..4] != b"INDX" {
-        return Err("not an INDX block".to_string());
+        return Err(Error::io("not an INDX block"));
     }
     let ih_start = INDX_INDEX_HEADER_OFFSET;
     let first_entry_rel = read_u32_le(block, ih_start + IH_FIRST_ENTRY_OFFSET)
-        .ok_or_else(|| "INDX block too short to read first_entry_offset".to_string())?
+        .ok_or_else(|| Error::io("INDX block too short to read first_entry_offset"))?
         as usize;
     let total_size = read_u32_le(block, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
-        .ok_or_else(|| "INDX block too short to read total_size".to_string())?
+        .ok_or_else(|| Error::io("INDX block too short to read total_size"))?
         as usize;
     let allocated_size = u32::from_le_bytes([
         block[ih_start + 8],
@@ -1640,11 +1702,11 @@ pub fn insert_entry_into_indx_block_with_collation(
         .checked_add(allocated_size)
         .is_none_or(|end| end > block.len())
     {
-        return Err(format!(
+        return Err(Error::io(format!(
             "the index says its entries are allocated {allocated_size} bytes, past the \
              {} the block has",
             block.len() - ih_start
-        ));
+        )));
     }
     // THIS ONE CANNOT CURRENTLY CHANGE THE OUTCOME, and is kept
     // deliberately. The room check below already refuses whenever
@@ -1655,22 +1717,22 @@ pub fn insert_entry_into_indx_block_with_collation(
     // bounds test, and a capacity test is the kind of thing a later edit
     // reorders or relaxes without noticing what else depended on it.
     if total_size > allocated_size {
-        return Err(format!(
+        return Err(Error::io(format!(
             "the index says it holds {total_size} bytes of entries in {allocated_size} \
              bytes of space"
-        ));
+        )));
     }
     if first_entry_rel > total_size {
-        return Err(format!(
+        return Err(Error::io(format!(
             "the index says its first entry is {first_entry_rel} bytes in, past the \
              {total_size} bytes of entries it has"
-        ));
+        )));
     }
     if first_entry_rel < INDEX_HEADER_SIZE || !first_entry_rel.is_multiple_of(8) {
-        return Err(format!(
+        return Err(Error::io(format!(
             "the index says its first entry is {first_entry_rel} bytes in, which is not \
              an entry boundary"
-        ));
+        )));
     }
 
     // THE CHECK THIS FUNCTION WAS THE ONLY ONE WITHOUT. The $I30 bitmap
@@ -1678,14 +1740,14 @@ pub fn insert_entry_into_indx_block_with_collation(
     // here was chosen for having room, not for being a leaf.
     let flags = *block
         .get(ih_start + IH_FLAGS_OFFSET)
-        .ok_or_else(|| "INDX block too short to read the index header flags".to_string())?;
+        .ok_or_else(|| Error::io("INDX block too short to read the index header flags"))?;
     refuse_if_interior(flags, "this INDX block")?;
 
     let new_len = entry_bytes.len();
     if total_size + new_len > allocated_size {
-        return Err(format!(
+        return Err(Error::no_space(format!(
             "INDX block has no room: total_size={total_size} + new={new_len} > allocated={allocated_size}"
-        ));
+        )));
     }
 
     // Find sorted insertion position.
@@ -1701,7 +1763,7 @@ pub fn insert_entry_into_indx_block_with_collation(
             break;
         }
         if length == 0 || cursor + length > block.len() {
-            return Err("malformed INDX entry during insert".to_string());
+            return Err(Error::io("malformed INDX entry during insert"));
         }
         let existing_utf16 = entry_name(block, cursor, length)?;
         if compare_names(&new_utf16, &existing_utf16, upcase) != std::cmp::Ordering::Greater {
@@ -1748,12 +1810,12 @@ pub fn insert_entry_into_indx_block_with_collation(
 ///
 /// `flags` is the INDEX_HEADER flags byte at [`IH_FLAGS_OFFSET`];
 /// `what` names the structure for the error message.
-pub(crate) fn refuse_if_interior(flags: u8, what: &str) -> Result<(), String> {
+pub(crate) fn refuse_if_interior(flags: u8, what: &str) -> Result<(), Error> {
     if flags & IH_FLAG_HAS_SUBNODES != 0 {
-        return Err(format!(
+        return Err(Error::io(format!(
             "{what} has sub-nodes; inserting into an interior node needs \
              index B-tree maintenance, which is not implemented"
-        ));
+        )));
     }
     Ok(())
 }
@@ -1826,11 +1888,11 @@ pub fn rename_filename_attribute_same_length(
     record: &mut [u8],
     old_name: &str,
     new_name: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let old_utf16: Vec<u16> = old_name.encode_utf16().collect();
     let new_utf16: Vec<u16> = new_name.encode_utf16().collect();
     if new_utf16.len() != old_utf16.len() {
-        return Err("same-length rename required on $FILE_NAME".to_string());
+        return Err(Error::io("same-length rename required on $FILE_NAME"));
     }
     let mut patched = false;
     for loc in attr_io::iter_attributes(record).collect::<Vec<_>>() {
@@ -1871,10 +1933,10 @@ pub fn rename_filename_attribute_same_length(
         patched = true;
     }
     if !patched {
-        return Err(format!(
+        return Err(Error::io(format!(
             "no matching $FILE_NAME attribute with old name '{old_name}' of length {}",
             old_utf16.len()
-        ));
+        )));
     }
     Ok(())
 }
