@@ -534,6 +534,17 @@ tasks:
             echo "test:ignored: every ignored test still fails, which is what 'known defect' means"
         fi
 
+  check:semver:
+    desc: Refuse a public-API break the version in Cargo.toml does not declare
+    # Against the newest version on crates.io, with cargo-semver-checks: a
+    # break needs the 0.x minor to move, an addition the patch. Why, and what
+    # it cannot see, is at the top of the script (#399). No `sources:` on
+    # purpose -- the baseline is the registry, which moves without this tree
+    # changing, so a fingerprint would call a stale answer up to date.
+    deps: [siblings:gate]
+    cmds:
+      - scripts/tier.sh semver -- scripts/semver-check.sh
+
   test:scripts:
     desc: The shell tests (tests/scripts/*.sh), every one by glob
     # By glob, so a test added later needs no edit here -- a test that has to

@@ -84,6 +84,11 @@ shift
 # regression tests, measured 101 lines and 2,669 bytes after rebase on
 # 2026-09-26. The cap is 135 lines / 3,500 bytes, about one third of headroom.
 
+# THE SEMVER ROW is rust-fs-ext4's measurement of the same script: 11 lines /
+# 489 bytes passing with the baseline's rustdoc cached, one line more when it
+# is built. Its lines are fixed, not per item, so 40 / 4,000 leaves room for a
+# warning block without hiding a flood; a failing run prints its tail (#399).
+
 # THE MATRIX ROW is measured on a GREEN 46-scenario run (2026-09-18, 46 min,
 # max_parallel=4): 633 lines / 35,311 bytes, budgeted at that plus a third.
 # Only a passing run is budgeted, so the 1,521 lines the same matrix printed
@@ -108,6 +113,7 @@ case "$TIER" in
     suite)      MAX_LINES=2900; MAX_BYTES=150000 ;;
     asan)       MAX_LINES=1100; MAX_BYTES=72000 ;;
     scripts)    MAX_LINES=135;  MAX_BYTES=3500 ;;
+    semver)     MAX_LINES=40;   MAX_BYTES=4000 ;;
     matrix)     MAX_LINES=900;  MAX_BYTES=50000 ;;
     cli)        MAX_LINES=36;   MAX_BYTES=1380 ;;
     cli-oracle) MAX_LINES=20;   MAX_BYTES=990 ;;
