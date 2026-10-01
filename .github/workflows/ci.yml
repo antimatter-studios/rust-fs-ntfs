@@ -11,6 +11,13 @@ on:
   # output back in ~5 minutes. The test job runs on every push too.
   workflow_dispatch:
 
+# Read-only unless a job asks for more. A workflow that declares nothing
+# inherits the repository's default token, which a settings change can make
+# read-write without this file changing, so the grant is stated here, where
+# a review sees it.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test-${{ matrix.os }}

@@ -30,6 +30,13 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
+# Read-only unless a job asks for more. A workflow that declares nothing
+# inherits the repository's default token, which a settings change can make
+# read-write without this file changing, so the grant is stated here, where
+# a review sees it.
+permissions:
+  contents: read
+
 jobs:
   fuzz:
     name: fuzz the boot sector, records, index and codec
