@@ -120,7 +120,11 @@ esac
 [ -f "$tarball" ] && ok || bad "the packaged tarball exists at '$tarball'"
 if [ -f "$tarball" ]; then
     listing="$(tar -tzf "$tarball" | sort | tr '\n' ' ')"
-    files="$(tar -tzf "$tarball" | sed 's|^\./||' | grep -v '/$' | sort | tr '\n' ' ')"
+    # LC_ALL=C because want_files below is written in byte order, the
+    # LICENSE files before bin/. A bare `sort` collates by the caller's
+    # locale, so the check failed on a correct tarball everywhere but a
+    # C-locale CI runner (#406).
+    files="$(tar -tzf "$tarball" | sed 's|^\./||' | grep -v '/$' | LC_ALL=C sort | tr '\n' ' ')"
     want_files="LICENSE-APACHE LICENSE-MIT bin/mkfs.ntfs bin/rust-fs-ntfs"
     want_files="$want_files share/bash-completion/completions/mkfs.ntfs share/bash-completion/completions/rust-fs-ntfs"
     want_files="$want_files share/fish/vendor_completions.d/mkfs.ntfs.fish share/fish/vendor_completions.d/rust-fs-ntfs.fish"
