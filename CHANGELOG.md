@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`$LogFile` is replayed** (#137). `fsck` (and `fsck.ntfs -y`) no longer
+  refuses every log that holds work: it runs NTFS's restart -- analysis
+  from the last checkpoint, then redo from the oldest dirty page to the
+  log's last record -- writes the result, mirrors any of the first four
+  MFT records it changed, and only then empties the log, which the volume
+  no longer needs. `fsck::replay_logfile` / `replay_logfile_io` do the
+  same alone. The whole replay is planned in memory first; a log it
+  cannot replay in full is refused with nothing written. Checked against
+  Windows itself: on both volumes Windows left mid-write
+  (`test-disks/windows-interrupted-{1,6}`), every MFT record, every index
+  block and `$MFT`'s bitmap match what Windows' own restart produced from
+  the same image, every file Windows listed afterwards reads back at its
+  size and hash, and the Windows job's `cli` matrix runs chkdsk on the
+  replayed images. Not yet: undo of unfinished transactions, operations
+  those logs did not hold, and logs that wrap during replay -- each
+  refused.
+- `fsck.ntfs` reports a log holding work as a problem (`"kind":
+  "logfile"`, exit 4), and `-y` replays it. It used to exit 0 over such a
+  log whenever the dirty flag was clear.
+
 ## [0.7.0] — 2026-10-02
 
 ### Breaking

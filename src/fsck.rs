@@ -15,15 +15,18 @@
 //!    reinitialize on mount" signal documented in Windows Internals
 //!    7th ed. ch. "NTFS Logging".
 //!
-//! Neither operation replays in-progress transactions. `fsck` uses only the
-//! first: it reads `$LogFile`'s restart area ([`crate::logfile`]) on every
-//! volume, and clears the dirty flag when the log is empty or records
-//! nothing to redo or undo. Any other log is refused before anything is
-//! written, whether or not the flag is set, and `fsck` never writes the log
-//! (#375, #376, #137). The explicit
-//! `reset_logfile` and `clear_dirty` operations require the caller to know
-//! independently that metadata is consistent; using them on a crashed
-//! volume can destroy recoverable changes.
+//! Neither operation replays transactions; [`replay_logfile`] does. `fsck`
+//! reads `$LogFile`'s restart area ([`crate::logfile`]) on every volume.
+//! When the log is empty or records nothing to redo or undo, it clears the
+//! dirty flag and keeps the log. When the log holds work, it replays it
+//! ([`crate::logfile_replay`]): every committed change is redone from the
+//! log, the now-consistent volume's log is emptied, and the flag cleared. A
+//! log that cannot be replayed in full -- unread, torn, holding an
+//! operation replay does not perform, or a transaction that would need
+//! undoing -- is refused before anything is written (#375, #376, #137).
+//! The explicit `reset_logfile` and `clear_dirty` operations require the
+//! caller to know independently that metadata is consistent; using them on
+//! a crashed volume can destroy recoverable changes.
 //!
 //! All writes are bounded, well-located, and immediately `fsync`'d. No
 //! MFT-record USA fixup recompute is required here because:
@@ -273,10 +276,11 @@ pub fn reset_logfile(path: impl AsRef<Path>) -> Result<u64, Error> {
     reset_logfile_io(&mut io, None)
 }
 
-/// Clear the dirty flag when `$LogFile` records nothing to replay: an empty
-/// log, or a restart area recording nothing to redo or undo. Any other log
-/// is refused before anything is written, whether or not the volume is
-/// marked dirty (#376). The log itself is never written.
+/// Bring a volume to a clean state: replay `$LogFile` when it holds work
+/// ([`replay_logfile_io`]), then clear the dirty flag. A log that is empty
+/// or records nothing to redo or undo is kept as it is. A log that cannot
+/// be replayed in full is refused before anything is written, whether or
+/// not the volume is marked dirty (#376, #137).
 pub fn fsck(path: impl AsRef<Path>) -> Result<FsckReport, Error> {
     let p = path.as_ref();
     log::info!(target: "fs_ntfs::fsck", "fsck path={}", p.display());
@@ -295,9 +299,8 @@ pub fn fsck(path: impl AsRef<Path>) -> Result<FsckReport, Error> {
 /// Summary of what [`fsck`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsckReport {
-    /// What `$LogFile` held: [`LogfileState::Empty`] or
-    /// [`LogfileState::Clean`], since fsck refuses anything else. fsck
-    /// never writes the log (#376).
+    /// What `$LogFile` holds now: [`LogfileState::Empty`] after a replay,
+    /// or the empty or clean log fsck found and kept (#376).
     pub logfile: LogfileState,
     pub dirty_cleared: bool,
 }
@@ -308,7 +311,7 @@ pub struct FsckReport {
 
 /// Progress callback type used by the long-running phases of [`fsck_io`]
 /// / [`reset_logfile_io`]. Signature: `(phase, done, total)`:
-/// * `phase` — short identifier string: `"check_logfile"` and
+/// * `phase` — short identifier string: `"check_logfile"`, `"replay_logfile"` and
 ///   `"clear_dirty"` from [`fsck_io`], `"reset_logfile"` from
 ///   [`reset_logfile_io`].
 /// * `done` / `total` — bytes (or 0/1 for trivial single-write phases)
@@ -444,30 +447,33 @@ pub fn fsck_io<'cb, T: FsckIo>(
     // THE LOG DECIDES, WHATEVER THE DIRTY FLAG SAYS (#375, #376). The flag
     // and the log are separate facts: a volume hibernated or shut down with
     // Fast Startup can have a clear flag over a log that still records
-    // work. So the log is read first, on every volume, and fsck NEVER
-    // WRITES IT:
+    // work. So the log is read first, on every volume:
     //
     // * empty (all 0xFF): nothing to replay, and nothing to rewrite;
     // * clean (a restart area recording nothing to redo or undo): kept as
     //   it is, the log Windows expects to find;
-    // * anything else may be transactions this crate cannot replay (#137),
-    //   and is refused before a byte is written.
+    // * anything else is replayed in full (#137) -- or, when that cannot be
+    //   done completely, refused before a byte is written.
     //
-    // Then the dirty flag, if set, is cleared. `reset_logfile_io` remains,
-    // for a caller that has made the volume consistent by other means.
+    // Then the dirty flag, if set, is cleared.
     let mut emit = |phase: &str, done: u64, total: u64| {
         if let Some(cb) = progress.as_deref_mut() {
             cb(phase, done, total);
         }
     };
     emit("check_logfile", 0, 1);
-    let logfile = logfile_state_io(io)?;
-    if let LogfileState::Pending(why) = &logfile {
-        return Err(Error::io(format!(
-            "{why}; fsck will not clear the dirty flag or rewrite the log over them"
-        )));
-    }
+    let mut logfile = logfile_state_io(io)?;
     emit("check_logfile", 1, 1);
+    if let LogfileState::Pending(why) = &logfile {
+        emit("replay_logfile", 0, 1);
+        replay_logfile_io(io).map_err(|e| {
+            Error::io(format!(
+                "{why}; {e}; fsck will not clear the dirty flag or rewrite the log over them"
+            ))
+        })?;
+        emit("replay_logfile", 1, 1);
+        logfile = logfile_state_io(io)?;
+    }
 
     emit("clear_dirty", 0, 1);
     let dirty_cleared = clear_dirty_io(io)?;
@@ -476,6 +482,97 @@ pub fn fsck_io<'cb, T: FsckIo>(
     Ok(FsckReport {
         logfile,
         dirty_cleared,
+    })
+}
+
+/// What [`replay_logfile_io`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayReport {
+    /// Log records read, from the oldest dirty page to the last record.
+    pub records: u64,
+    /// Redo operations applied (a record whose block already held it is
+    /// not counted).
+    pub applied: u64,
+    /// Blocks written: MFT records, index blocks and bitmap clusters.
+    pub blocks_written: u64,
+    /// LSN of the checkpoint the analysis started from.
+    pub checkpoint_lsn: u64,
+    /// LSN of the last record replayed.
+    pub last_lsn: u64,
+}
+
+/// Replay `$LogFile` on the volume at `path`. See [`replay_logfile_io`].
+pub fn replay_logfile(path: impl AsRef<Path>) -> Result<ReplayReport, Error> {
+    let mut io = PathIo::open(path.as_ref())?;
+    replay_logfile_io(&mut io)
+}
+
+/// Redo every change `$LogFile` holds that may not have reached the
+/// volume, then empty the log, which the volume no longer needs (#137).
+///
+/// The whole replay is planned in memory first ([`crate::logfile_replay`]);
+/// a log that cannot be replayed in full is refused with nothing written.
+/// The metadata is written before the log is emptied, so a replay that
+/// stops part-way leaves the log as it was, and running it again redoes
+/// the same changes: every MFT record and index block carries the LSN of
+/// the last change it holds, and is skipped once it holds it.
+pub fn replay_logfile_io<T: FsckIo>(io: &mut T) -> Result<ReplayReport, Error> {
+    let (log_offset, log_size) = locate_logfile_data_io(io)?;
+    let size = usize::try_from(log_size).map_err(|_| Error::io("$LogFile is too large"))?;
+    let mut log = vec![0u8; size];
+    io.read_exact_at(log_offset, &mut log)
+        .map_err(|e| format!("read $LogFile: {e}"))?;
+    let params = crate::mft_io::read_boot_params_io(io)?;
+    let plan = crate::logfile_replay::plan(&log, &params, &mut |at, buf| {
+        io.read_exact_at(at, buf)
+            .map_err(|e| Error::io(format!("read byte {at:#x}: {e}")))
+    })?;
+    // A log that is not this volume's must not be replayed onto it: every
+    // MFT record the log names has to be where this volume's $MFT has it.
+    for &(record, at) in &plan.mft_records {
+        let here = crate::mft_io::mft_record_offset_io(io, &params, record)?;
+        if here != at {
+            return Err(Error::io(format!(
+                "$LogFile puts MFT record {record} at byte {at:#x}, where this volume's $MFT \
+                 has it at {here:#x}: the log is not this volume's, and nothing was written \
+                 (rust-fs-ntfs#137)"
+            )));
+        }
+    }
+    let log_end = log_offset + log_size;
+    for (&at, bytes) in &plan.writes {
+        if at < log_end && log_offset < at + bytes.len() as u64 {
+            return Err(Error::io(format!(
+                "$LogFile replay would write into the log itself at byte {at:#x}; nothing \
+                 was written (rust-fs-ntfs#137)"
+            )));
+        }
+    }
+    for (&at, bytes) in &plan.writes {
+        io.write_all_at(at, bytes)
+            .map_err(|e| format!("replay $LogFile: write byte {at:#x}: {e}"))?;
+    }
+    for &(record, _) in &plan.mft_records {
+        crate::mft_io::sync_mftmirr_record_io(io, record)?;
+    }
+    io.sync()
+        .map_err(|e| format!("replay $LogFile: sync: {e}"))?;
+    reset_logfile_io(io, None)?;
+    io.sync()
+        .map_err(|e| format!("replay $LogFile: sync: {e}"))?;
+    log::info!(
+        target: "fs_ntfs::fsck",
+        "$LogFile replayed: {} records, {} redo operations, {} blocks written",
+        plan.records,
+        plan.applied,
+        plan.writes.len()
+    );
+    Ok(ReplayReport {
+        records: plan.records,
+        applied: plan.applied,
+        blocks_written: plan.writes.len() as u64,
+        checkpoint_lsn: plan.checkpoint,
+        last_lsn: plan.last_lsn,
     })
 }
 

@@ -1,4 +1,4 @@
-//! `fsck.ntfs`: check an NTFS volume, and repair the one thing the library
+//! `fsck.ntfs`: check an NTFS volume, and repair the two things the library
 //! knows how to repair safely.
 //!
 //! WHAT IT CHECKS is `fs_ntfs::fsck::check_io`: the dirty flag, whether
@@ -8,12 +8,12 @@
 //! says so in `checks` and `scope`, so nobody reads exit 0 as "chkdsk would
 //! agree": Windows' chkdsk is the authority.
 //!
-//! WHAT IT REPAIRS, with `-y` (or `-p`): the dirty flag, and only when
-//! `$LogFile` is empty or its restart area records nothing to redo or undo
-//! (#375); a clean log is kept as it is. Any other log may hold
-//! transactions this library cannot replay (#137), and clearing the flag
-//! over them would discard them, so that is refused and reported, and
-//! nothing is written. Nothing else is repaired.
+//! WHAT IT REPAIRS, with `-y` (or `-p`): a `$LogFile` that holds work, by
+//! replaying it (#137), and the dirty flag, once the log records nothing to
+//! redo or undo (#375); a clean log is kept as it is. A log that cannot be
+//! replayed in full is refused and reported, nothing is written, and the
+//! flag is left set: clearing it over the log would discard what the log
+//! holds. Nothing else is repaired.
 //!
 //! EXIT STATUS IS fsck(8)'s, because scripts and the `fsck` front-end read
 //! it: 0 clean, 1 errors corrected, 4 errors left uncorrected, 8 an
@@ -27,7 +27,9 @@ use std::ffi::OsString;
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command as Cmd};
 
 use fs_core::cli::{CliError, Json, Outcome, Tool};
-use fs_ntfs::fsck::{check_io, repair_dirty_io, CheckFinding, CheckReport, LogfileState};
+use fs_ntfs::fsck::{
+    check_io, repair_dirty_io, replay_logfile_io, CheckFinding, CheckReport, LogfileState,
+};
 
 /// fsck(8): no errors.
 pub const CLEAN: u8 = 0;
@@ -67,9 +69,10 @@ fn command() -> Cmd {
              $MFTMirr against $MFT, and the header of every in-use MFT record. This is not \
              a full structural check, and the report says so: Windows' chkdsk is the \
              authority.\n\n\
-             Nothing is written unless -y (or -p) is given, and then only the dirty flag is \
-             cleared, and only when $LogFile is empty: a log that holds records may hold \
-             transactions this library cannot replay.\n\n\
+             Nothing is written unless -y (or -p) is given. Then a $LogFile that holds \
+             work is replayed, and the dirty flag is cleared once the log holds nothing to \
+             redo or undo. A log that cannot be replayed in full is left as it is, with \
+             nothing written.\n\n\
              The report is JSON on stdout (--text for people).\n\n\
              Exit status, as fsck(8): 0 clean, 1 errors corrected, 4 errors left \
              uncorrected, 8 operational error, 16 usage error.",
@@ -92,7 +95,7 @@ fn command() -> Cmd {
             Arg::new("yes")
                 .short('y')
                 .long("yes")
-                .help("Repair what can be repaired: the dirty flag, when $LogFile is empty")
+                .help("Repair what can be repaired: replay $LogFile, then clear the dirty flag")
                 .action(ArgAction::SetTrue)
                 .conflicts_with("no"),
         )
@@ -101,7 +104,7 @@ fn command() -> Cmd {
                 .short('p')
                 .visible_short_alias('a')
                 .long("preen")
-                .help("Repair automatically, as -y (the one repair made here is a safe one)")
+                .help("Repair automatically, as -y (the repairs made here are safe ones)")
                 .action(ArgAction::SetTrue)
                 .conflicts_with("no"),
         )
@@ -131,7 +134,7 @@ fn command() -> Cmd {
         .after_help(
             "Examples:\n  fsck.ntfs disk.img                 check, change nothing\n  \
              fsck.ntfs -fn disk.img             the same, as fsck(8) front-ends spell it\n  \
-             fsck.ntfs -y disk.img              clear the dirty flag if that is safe\n  \
+             fsck.ntfs -y disk.img              replay $LogFile, clear the dirty flag\n  \
              fsck.ntfs --text disk.img; echo $?",
         )
 }
@@ -149,15 +152,29 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
     let before = check_io(&mut dev)
         .map_err(|e| CliError::failed(format!("{name}: {e}")).with_code(OPERATIONAL))?;
 
-    // The one repair: the dirty flag, when the log holds nothing to lose.
-    let mut dirty_refused = None;
+    // The log first: replayed in full, or not touched (#137).
+    let mut replay_refused = None;
+    let mut replayed = None;
     let mut repaired = 0u64;
-    if repair && before.dirty {
+    if repair && before.logfile.needs_replay() {
+        match replay_logfile_io(&mut dev) {
+            Ok(report) => {
+                repaired += 1;
+                replayed = Some(report);
+            }
+            Err(why) => replay_refused = Some(String::from(why)),
+        }
+    }
+    // Then the dirty flag, when the log holds nothing to lose.
+    let mut dirty_refused = None;
+    if repair && before.dirty && replay_refused.is_none() {
         match repair_dirty_io(&mut dev) {
             Ok(true) => repaired += 1,
             Ok(false) => {}
             Err(why) => dirty_refused = Some(String::from(why)),
         }
+    } else if repair && before.dirty {
+        dirty_refused = replay_refused.clone();
     }
     let after = if repaired > 0 {
         check_io(&mut dev)
@@ -177,6 +194,18 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
     };
 
     let mut findings = Vec::new();
+    if before.logfile.needs_replay() {
+        let why = match &before.logfile {
+            LogfileState::Pending(why) => why.clone(),
+            _ => unreachable!("needs_replay is Pending"),
+        };
+        findings.push(Json::object([
+            ("kind", Json::from("logfile")),
+            ("repaired", Json::from(replayed.is_some())),
+            ("replayed", Json::from(replayed.as_ref().map(|r| r.applied))),
+            ("why", Json::from(replay_refused.clone().unwrap_or(why))),
+        ]));
+    }
     if before.dirty {
         // Repairable unless the log may hold transactions: an empty log, or
         // one whose restart area records nothing to redo or undo, is safe
@@ -187,7 +216,16 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         });
         findings.push(Json::object([
             ("kind", Json::from("dirty")),
-            ("repairable", Json::from(!before.logfile.needs_replay())),
+            // Checking alone cannot know whether a log holding work will
+            // replay; repairing says whether it did.
+            (
+                "repairable",
+                Json::from(if repair {
+                    before.dirty && !after.dirty
+                } else {
+                    !before.logfile.needs_replay()
+                }),
+            ),
             ("repaired", Json::from(before.dirty && !after.dirty)),
             ("why", Json::from(why)),
         ]));
@@ -243,9 +281,12 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         .with_code(code))
 }
 
-/// How many problems a check left: the dirty flag counts as one.
+/// How many problems a check left: the dirty flag counts as one, and so
+/// does a log holding work.
 fn count(report: &CheckReport) -> u64 {
-    u64::from(report.dirty) + report.findings.len() as u64
+    u64::from(report.dirty)
+        + u64::from(report.logfile.needs_replay())
+        + report.findings.len() as u64
 }
 
 /// One finding as JSON: its `kind`, and what locates it.

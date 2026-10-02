@@ -2236,6 +2236,88 @@
       ],
       "image": "nfs-cli-populate-win-verify-chkdsk.img",
       "_notes": "fs.ntfs mkdir, write and set label, graded by Windows: every file reads back with the SHA-256 fs.ntfs wrote (Get-FileHash), the directories exist, the label is the one set, and chkdsk finds the volume clean."
+    },
+    "cli-windows-interrupted-1-fsck-replay-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 127,
+        "label": "ORACLE366",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-replay",
+          "snapshot": "1"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        {
+          "op": "win-dirty-query",
+          "expect": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-cli-verify",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-windows-interrupted-1-replay.img",
+      "_notes": "A volume Windows was writing to when it was captured (test-disks/windows-interrupted-1, after 244 workload operations), its log holding work Windows had not checkpointed. fsck.ntfs -y replays $LogFile; then Windows grades the result: fsutil dirty query says Clean, every file Windows itself listed after its own recovery of the same image reads back at Windows' size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean."
+    },
+    "cli-windows-interrupted-6-fsck-replay-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 127,
+        "label": "ORACLE366",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-replay",
+          "snapshot": "6"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        {
+          "op": "win-dirty-query",
+          "expect": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-cli-verify",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-windows-interrupted-6-replay.img",
+      "_notes": "A volume Windows was writing to when it was captured (test-disks/windows-interrupted-6, after 1982 workload operations), its log holding work Windows had not checkpointed. fsck.ntfs -y replays $LogFile; then Windows grades the result: fsutil dirty query says Clean, every file Windows itself listed after its own recovery of the same image reads back at Windows' size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean."
     }
   },
   "_consolidated_by": "chore matrix (fs-windows-test-harness runner)",

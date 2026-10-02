@@ -24,8 +24,10 @@ What's solid today:
   promotion, grow / truncate, create / unlink / mkdir / rmdir,
   rename (same- and variable-length), hard links, ADS write/delete,
   reparse points, EAs, timestamps, file-attribute flag toggling.
-- **Recovery controls** — dirty-flag detection, explicit clear and
-  `$LogFile` reset. `fsck` refuses a dirty volume with nonempty log data.
+- **Recovery controls** — dirty-flag detection, `$LogFile` redo replay
+  for the operations Windows' own logs were checked to need, explicit
+  clear and log reset. `fsck` replays a log holding work, or refuses it
+  whole with nothing written.
   Both path-based and callback-transport APIs.
 - **mkfs** — pure-Rust formatter that produces volumes Microsoft's
   `chkdsk /scan` accepts and Windows `ntfs.sys` mounts and writes
@@ -130,8 +132,9 @@ Concrete user-observable list, end-to-end:
   `$STANDARD_INFORMATION`; toggle `FILE_ATTRIBUTE_*` flags.
 - Refuse a writable mount of a volume that is dirty or whose `$LogFile`
   may hold transactions (Windows 8+ leaves the flag clear). `fs_ntfs_fsck`
-  can clear dirty when `$LogFile` is empty; callback transport reports
-  progress during a permitted reset.
+  replays such a log -- redoing what it recorded, as Windows' own restart
+  does, then emptying it -- and clears the dirty flag; callback transport
+  reports progress.
 - Drive everything from C, Go (cgo), or Swift via the stable
   `fs_ntfs_*` C ABI in `include/fs_ntfs.h`.
 
@@ -139,12 +142,14 @@ Concrete user-observable list, end-to-end:
 
 Specific limits, current as of HEAD:
 
-- **`$LogFile` replay.** Not implemented. A dirty volume, or one whose
-  log may hold transactions, remains readable, but writable mounts are
-  refused. `fsck` refuses a dirty
-  volume with nonempty log data and does not validate metadata
-  consistency. Explicit log reset is only for volumes independently
-  known consistent.
+- **`$LogFile` replay is redo only** (#137). `fsck` replays the redo
+  operations two Windows-written logs hold, checked against what Windows
+  recovered from the same images; it refuses, writing nothing, a log
+  with a transaction left unfinished (that needs undo), an operation
+  those logs did not hold, a page spanning clusters, a log that wraps
+  during replay, or an LFS version other than 2.x. A writable mount of a
+  volume whose log holds work is refused: run `fsck` first. Explicit log
+  reset is only for volumes independently known consistent.
 - **Overflowed directories.** Once a directory has more entries
   than fit in `$INDEX_ROOT`, writes that would touch its index
   (`create_file`, `mkdir`, `rmdir`, `unlink`, `rename`) refuse with

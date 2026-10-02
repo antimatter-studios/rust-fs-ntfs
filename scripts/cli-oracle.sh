@@ -21,6 +21,11 @@
 #                                    and longer) and set label; IMAGE.manifest then
 #                                    lists every file's SHA-256, every directory and
 #                                    the label, for win-cli-verify.ps1
+#   replay IMAGE SNAPSHOT            IMAGE is test-disks/windows-interrupted-SNAPSHOT,
+#                                    whose log holds work; fsck.ntfs reports it,
+#                                    fsck.ntfs -y replays it, and IMAGE.manifest is
+#                                    what Windows listed after recovering the same
+#                                    image itself, for win-cli-verify.ps1
 #
 # The binary is target/release/rust-fs-ntfs (built with `--features cli`),
 # or RUST_FS_NTFS. JSON is read with grep, not jq: the Windows runner's Git
@@ -145,6 +150,25 @@ case "$step" in
         printf 'label\t%s\n' "$1" >>"$manifest"
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the writes exited $status: $out"
+        ;;
+    replay)
+        [ $# -eq 1 ] || die "replay IMAGE SNAPSHOT"
+        mkdir -p "$(dirname "$image")"
+        gzip -dc "$REPO/test-disks/windows-interrupted-$1.img.gz" >"$image" ||
+            die "no test-disks/windows-interrupted-$1.img.gz"
+        run fsck "$image"
+        [ "$status" -eq 4 ] || die "fsck.ntfs on the volume Windows left mid-write exited $status, not 4: $out"
+        has '"kind": "logfile"' || die "fsck.ntfs did not report the log holding work: $out"
+        run fsck -y "$image"
+        [ "$status" -eq 1 ] || die "fsck.ntfs -y exited $status, not 1 (corrected): $out"
+        has '"logfile": "empty"' || die "fsck.ntfs -y did not leave the log empty: $out"
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the replay exited $status: $out"
+        # Windows' listing of its own recovery of the same image: path,
+        # size and Get-FileHash SHA-256, as win-cli-verify reads them.
+        awk -F '\t' 'NF == 3 { printf "file\t/%s\t%s\t%s\n", $1, $2, $3 }' \
+            "$REPO/test-disks/windows-interrupted-$1.recovered.manifest" >"$image.manifest"
+        [ -s "$image.manifest" ] || die "no manifest for snapshot $1"
         ;;
     *)
         die "unknown step '$step'"
