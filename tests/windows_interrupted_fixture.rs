@@ -187,20 +187,81 @@ fn the_logs_windows_left_mid_write_are_read_as_holding_work() {
     }
 }
 
+/// The last LSN each pre-image's `$LogFile` holds, read by an
+/// independent reader written for #137 (not this crate's): the newest
+/// `last_end_lsn` of any record page whose update sequence checks out,
+/// tail copies included.
+const LOG_END: [(u32, u64); 2] = [(1, 0x11_d767), (6, 0x2b_48b3)];
+
+/// Where, in each pre-image, a `$LogFile` record page the replay needs
+/// sits: inside the walk from the oldest dirty page to the log's end, and
+/// in no tail copy.
+const NEEDED_LOG_PAGE: [(u32, u64); 2] = [(1, 0x8_0000), (6, 0x10_0000)];
+
 #[test]
-fn fsck_refuses_a_volume_windows_left_mid_write_and_writes_nothing() {
-    // Neither volume's dirty flag is set: Windows 8 and later record an
-    // unclean shutdown in the log alone. fsck used to take a clear flag as
-    // leave to overwrite the log, discarding all 2 MiB of it (#376).
-    for k in [1, 6] {
+fn fsck_refuses_a_log_it_cannot_read_to_the_end_and_writes_nothing() {
+    // A torn record page in the middle of the work: the log cannot be
+    // replayed in full, so nothing may be replayed at all. A partial redo
+    // would leave metadata that matches no state the volume was ever in.
+    for (k, page) in NEEDED_LOG_PAGE {
         let img = unpack(&format!("windows-interrupted-{k}"));
-        let before = std::fs::read(&img).unwrap();
-        let err = fsck::fsck(&img).expect_err("fsck must not act over a log holding work");
+        let logfile_lcn = 10_318u64; // $LogFile's one run, in both images
+        let at = logfile_lcn * 4096 + page + 510; // the first sector's USN copy
+        let mut bytes = std::fs::read(&img).unwrap();
+        bytes[at as usize] ^= 0xFF;
+        std::fs::write(&img, &bytes).unwrap();
+
+        let err = fsck::fsck(&img).expect_err("fsck must not act on a log it cannot read");
         assert!(err.contains("$LogFile"), "snapshot {k}: {err}");
         assert!(
-            std::fs::read(&img).unwrap() == before,
+            std::fs::read(&img).unwrap() == bytes,
             "snapshot {k}: a refused fsck wrote to the volume"
         );
+    }
+}
+
+#[test]
+fn fsck_replays_a_volume_windows_left_mid_write_to_what_windows_recovered() {
+    // Neither volume's dirty flag is set: Windows 8 and later record an
+    // unclean shutdown in the log alone. Windows' own restart pass turned
+    // each pre-image into the `.recovered` image; fsck must reach the same
+    // metadata from the same log (#137).
+    for (k, log_end) in LOG_END {
+        let img = unpack(&format!("windows-interrupted-{k}"));
+        fsck::fsck(&img).unwrap_or_else(|e| panic!("snapshot {k}: fsck: {e}"));
+
+        // What Windows lists after recovery, file for file.
+        let want = manifest(k);
+        let got = walk(&img);
+        assert!(
+            got == want,
+            "snapshot {k}: {} files after replay, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+
+        // The log no longer holds work, and the volume opens for writing.
+        let mut io = fs_ntfs::block_io::PathIo::open_ro(std::path::Path::new(&img)).unwrap();
+        let state = fsck::logfile_state_io(&mut io).expect("read $LogFile");
+        assert!(
+            !state.needs_replay(),
+            "snapshot {k} after replay: {state:?}"
+        );
+        drop(io);
+        Filesystem::mount_rw(&img).unwrap_or_else(|e| panic!("snapshot {k}: mount_rw: {e}"));
+
+        // A third reader: ntfs-3g refused both pre-images read-write (one
+        // could not even open $Secure); it opens the replayed volumes.
+        let (ok, err) = ntfs3g(&["ntfs-3g.probe", "--readwrite", &img]);
+        assert!(
+            ok,
+            "snapshot {k}: ntfs-3g.probe --readwrite after replay: {err}"
+        );
+
+        let pre = Image::read(&unpack(&format!("windows-interrupted-{k}")));
+        let win = Image::read(&unpack(&format!("windows-interrupted-{k}.recovered")));
+        let ours = Image::read(&img);
+        oracle::same_metadata_as_windows(k, &pre, &ours, &win, log_end);
     }
 }
 
@@ -332,4 +393,317 @@ fn windows_replay_changed_what_the_volumes_hold() {
         "Windows' replay should both remove and add names on snapshot 6 \
          (removed {gone}, added {appeared})"
     );
+}
+
+/// A raw reading of an NTFS image, written for this comparison from
+/// MS-FSCC and nothing in this crate: the boot sector, `$MFT`'s runs, and
+/// update-sequence fixups.
+struct Image {
+    bytes: Vec<u8>,
+    cluster: u64,
+    record: u64,
+    mft_runs: Vec<(u64, u64)>,
+}
+
+fn le(b: &[u8], at: usize, n: usize) -> u64 {
+    let mut v = 0u64;
+    for i in (0..n).rev() {
+        v = (v << 8) | u64::from(b[at + i]);
+    }
+    v
+}
+
+/// Mapping pairs of the attribute at `a` in `rec`: (lcn, clusters) runs.
+fn runs_of(rec: &[u8], a: usize) -> Vec<(u64, u64)> {
+    let mut at = a + le(rec, a + 0x20, 2) as usize;
+    let end = a + le(rec, a + 4, 4) as usize;
+    let mut lcn = 0i64;
+    let mut out = Vec::new();
+    while at < end && rec[at] != 0 {
+        let (ln, on) = ((rec[at] & 15) as usize, (rec[at] >> 4) as usize);
+        let len = le(rec, at + 1, ln);
+        if on > 0 {
+            let raw = le(rec, at + 1 + ln, on);
+            let shift = 64 - 8 * on as u32;
+            lcn += ((raw << shift) as i64) >> shift;
+            out.push((lcn as u64, len));
+        }
+        at += 1 + ln + on;
+    }
+    out
+}
+
+/// Attributes of a record (fixups undone): (offset, type, non-resident).
+fn attrs(rec: &[u8]) -> Vec<(usize, u32, bool)> {
+    let mut at = le(rec, 0x14, 2) as usize;
+    let mut out = Vec::new();
+    while at + 8 <= rec.len() {
+        let t = le(rec, at, 4) as u32;
+        let len = le(rec, at + 4, 4) as usize;
+        if t == 0xFFFF_FFFF || len == 0 || at + len > rec.len() {
+            break;
+        }
+        out.push((at, t, rec[at + 8] != 0));
+        at += len;
+    }
+    out
+}
+
+impl Image {
+    fn read(path: &str) -> Image {
+        let bytes = std::fs::read(path).unwrap();
+        let cluster = le(&bytes, 0x0B, 2) * le(&bytes, 0x0D, 1);
+        let c = bytes[0x40] as i8;
+        let record = if c > 0 { c as u64 * cluster } else { 1 << -c };
+        let mut img = Image {
+            bytes,
+            cluster,
+            record,
+            mft_runs: Vec::new(),
+        };
+        let mft_lcn = le(&img.bytes, 0x30, 8);
+        let at = (mft_lcn * cluster) as usize;
+        let rec0 = fixed(&img.bytes[at..at + record as usize], b"FILE").unwrap();
+        let data = attrs(&rec0)
+            .into_iter()
+            .find(|&(_, t, nr)| t == 0x80 && nr)
+            .unwrap();
+        img.mft_runs = runs_of(&rec0, data.0);
+        img
+    }
+
+    fn cluster_bytes(&self, lcn: u64, n: u64) -> &[u8] {
+        &self.bytes[(lcn * self.cluster) as usize..((lcn + n) * self.cluster) as usize]
+    }
+
+    fn records(&self) -> u64 {
+        self.mft_runs.iter().map(|r| r.1).sum::<u64>() * self.cluster / self.record
+    }
+
+    /// Record `n` as stored, before fixups.
+    fn raw_record(&self, n: u64) -> &[u8] {
+        let mut off = n * self.record;
+        for &(lcn, len) in &self.mft_runs {
+            if off < len * self.cluster {
+                let at = (lcn * self.cluster + off) as usize;
+                return &self.bytes[at..at + self.record as usize];
+            }
+            off -= len * self.cluster;
+        }
+        panic!("record {n} is past $MFT");
+    }
+
+    fn record(&self, n: u64) -> Option<Vec<u8>> {
+        fixed(self.raw_record(n), b"FILE")
+    }
+
+    /// The unnamed stream of type `t` of record `n`, non-resident.
+    fn stream(&self, n: u64, t: u32) -> Vec<u8> {
+        let rec = self.record(n).unwrap();
+        let (a, _, _) = attrs(&rec)
+            .into_iter()
+            .find(|&(_, ty, nr)| ty == t && nr)
+            .unwrap();
+        let size = le(&rec, a + 0x30, 8) as usize;
+        let mut out = Vec::new();
+        for (lcn, len) in runs_of(&rec, a) {
+            out.extend_from_slice(self.cluster_bytes(lcn, len));
+        }
+        out.truncate(size);
+        out
+    }
+}
+
+/// Fixups undone, or `None` for a block that is not `magic` or is torn.
+fn fixed(raw: &[u8], magic: &[u8; 4]) -> Option<Vec<u8>> {
+    if &raw[..4] != magic {
+        return None;
+    }
+    let mut b = raw.to_vec();
+    let (uo, uc) = (le(&b, 4, 2) as usize, le(&b, 6, 2) as usize);
+    for i in 1..uc {
+        let end = i * 512 - 2;
+        if b[end..end + 2] != b[uo..uo + 2] {
+            return None;
+        }
+        b[end] = b[uo + 2 * i];
+        b[end + 1] = b[uo + 2 * i + 1];
+    }
+    Some(b)
+}
+
+/// A FILE record or INDX block as content: fixups undone, the LSN and
+/// the update sequence number (which every write moves) blanked, and only
+/// the bytes in use.
+fn content(raw: &[u8], magic: &[u8; 4]) -> Option<Vec<u8>> {
+    let mut b = fixed(raw, magic)?;
+    b[8..16].fill(0);
+    let uo = le(&b, 4, 2) as usize;
+    b[uo..uo + 2].fill(0);
+    let used = if magic == b"FILE" {
+        le(&b, 0x18, 4) as usize
+    } else {
+        0x18 + le(&b, 0x1C, 4) as usize
+    };
+    b.truncate(used.min(raw.len()));
+    Some(b)
+}
+
+mod oracle {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// What Windows wrote AFTER its restart pass, which no replay of this
+    /// log can produce: every record whose LSN is past the log's last
+    /// record (new log records, written once the volume was mounted), and
+    /// the transactional-NTFS metadata under `$Extend\$RmMetadata`, which
+    /// Windows' resource manager rewrites at mount whether or not there
+    /// was anything to replay.
+    fn windows_after_recovery(win: &Image, log_end: u64) -> BTreeSet<u64> {
+        let mut out = BTreeSet::new();
+        let mut parent = std::collections::BTreeMap::new();
+        for n in 0..win.records() {
+            let Some(rec) = win.record(n) else { continue };
+            if le(&rec, 8, 8) > log_end {
+                out.insert(n);
+            }
+            for (a, t, nr) in attrs(&rec) {
+                if t == 0x30 && !nr {
+                    let v = a + le(&rec, a + 0x14, 2) as usize;
+                    let name_len = rec[v + 0x40] as usize;
+                    let name: Vec<u16> = (0..name_len)
+                        .map(|i| le(&rec, v + 0x42 + 2 * i, 2) as u16)
+                        .collect();
+                    parent.insert(n, (le(&rec, v, 6), String::from_utf16_lossy(&name)));
+                }
+            }
+        }
+        let mut rm: BTreeSet<u64> = parent
+            .iter()
+            .filter(|(_, (_, name))| name == "$RmMetadata")
+            .map(|(n, _)| *n)
+            .collect();
+        assert!(!rm.is_empty(), "no $RmMetadata in Windows' image");
+        loop {
+            let more: Vec<u64> = parent
+                .iter()
+                .filter(|(n, (p, _))| rm.contains(p) && !rm.contains(n))
+                .map(|(n, _)| *n)
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            rm.extend(more);
+        }
+        out.extend(rm);
+        out
+    }
+
+    pub fn same_metadata_as_windows(k: u32, pre: &Image, ours: &Image, win: &Image, log_end: u64) {
+        let after = windows_after_recovery(win, log_end);
+
+        // Every MFT record, as content.
+        let mut replayed = 0;
+        let mut differ = Vec::new();
+        for n in 0..win.records() {
+            if after.contains(&n) {
+                continue;
+            }
+            let w = content(win.raw_record(n), b"FILE");
+            if content(pre.raw_record(n), b"FILE") != w {
+                replayed += 1;
+            }
+            if content(ours.raw_record(n), b"FILE") != w {
+                differ.push(n);
+            }
+        }
+        assert!(
+            differ.is_empty(),
+            "snapshot {k}: {} MFT records differ from what Windows recovered: {:?}",
+            differ.len(),
+            &differ[..differ.len().min(20)]
+        );
+        assert!(
+            replayed > 150,
+            "snapshot {k}: Windows' replay changed only {replayed} records; the comparison \
+             has lost its subject"
+        );
+
+        // Every index block of every directory Windows did not touch after.
+        let mut blocks = 0;
+        for n in 0..win.records() {
+            if after.contains(&n) {
+                continue;
+            }
+            let Some(rec) = win.record(n) else { continue };
+            for (a, t, nr) in attrs(&rec) {
+                if t != 0xA0 || !nr {
+                    continue;
+                }
+                for (lcn, len) in runs_of(&rec, a) {
+                    for c in lcn..lcn + len {
+                        let w = content(win.cluster_bytes(c, 1), b"INDX");
+                        if w.is_none() {
+                            continue;
+                        }
+                        blocks += 1;
+                        assert!(
+                            content(ours.cluster_bytes(c, 1), b"INDX") == w,
+                            "snapshot {k}: record {n}'s index block at LCN {c} differs from \
+                             what Windows recovered"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            blocks >= 3,
+            "snapshot {k}: only {blocks} index blocks compared"
+        );
+
+        // $MFT's own bitmap, exactly.
+        assert!(
+            ours.stream(0, 0xB0) == win.stream(0, 0xB0),
+            "snapshot {k}: $MFT's bitmap differs from what Windows recovered"
+        );
+
+        // $Bitmap: any cluster that differs is one Windows allocated, after
+        // recovery, to a record it wrote after recovery.
+        let (o, w, p) = (
+            ours.stream(6, 0x80),
+            win.stream(6, 0x80),
+            pre.stream(6, 0x80),
+        );
+        let mut owned_after = BTreeSet::new();
+        for &n in &after {
+            let Some(rec) = win.record(n) else { continue };
+            for (a, _, nr) in attrs(&rec) {
+                if nr {
+                    for (lcn, len) in runs_of(&rec, a) {
+                        owned_after.extend(lcn..lcn + len);
+                    }
+                }
+            }
+        }
+        let mut changed = 0;
+        for c in 0..(w.len() as u64 * 8) {
+            let bit = |b: &[u8]| (b[(c / 8) as usize] >> (c % 8)) & 1;
+            if bit(&p) != bit(&w) && bit(&o) == bit(&w) {
+                changed += 1;
+            }
+            if bit(&o) != bit(&w) {
+                assert!(
+                    owned_after.contains(&c),
+                    "snapshot {k}: cluster {c} is {} in $Bitmap after replay, {} after Windows' \
+                     recovery, and Windows did not allocate it afterwards",
+                    bit(&o),
+                    bit(&w)
+                );
+            }
+        }
+        assert!(
+            changed > 1000,
+            "snapshot {k}: replay matched only {changed} $Bitmap bits Windows changed"
+        );
+    }
 }

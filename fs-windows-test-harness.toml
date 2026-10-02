@@ -53,6 +53,8 @@ cli = [
   "cli-corrupt-mirror-fsck-win-chkdsk",
   "cli-corrupt-signature-fsck-win-chkdsk",
   "cli-populate-win-verify-chkdsk",
+  "cli-windows-interrupted-1-fsck-replay-win-verify-chkdsk",
+  "cli-windows-interrupted-6-fsck-replay-win-verify-chkdsk",
 ]
 
 [project]
@@ -276,6 +278,15 @@ expect_exit = 0
 # fsck.ntfs. Writes <image>.manifest, which win-cli-verify checks.
 host = "host"
 command = "bash scripts/cli-oracle.sh populate {image_dir}/{run_id}/{scenario.image} '{scenario.volume_params.label}'"
+expect_exit = 0
+
+[ops.cli-replay]
+# A volume Windows left mid-write (test-disks/windows-interrupted-{snapshot}):
+# fsck.ntfs must report its log, and fsck.ntfs -y replay it and exit 1.
+# Writes <image>.manifest from what Windows listed after recovering the same
+# image itself, which win-cli-verify then checks against this replay.
+host = "host"
+command = "bash scripts/cli-oracle.sh replay {image_dir}/{run_id}/{scenario.image} {step.snapshot}"
 expect_exit = 0
 
 [ops.cli-fsck-finds]
