@@ -44,7 +44,8 @@
 #      `u8` on aarch64 Linux and `i8` on x86_64 and macOS, so a lint about a
 #      C-ABI pointer cast fails on one architecture and passes on the other
 #      (#268, ci.yml:22-24). That is precisely a failure the other two legs
-#      cannot see, and until now it could be merged past. It is required here.
+#      cannot see, and until now it could be merged past. It gates through
+#      ci-ok, which needs the whole `test` matrix.
 #
 #   3. Nothing was checked against the workflow at all. Discovery requires
 #      checks BY JOB NAME, which is only ever a guess at the PR gate, and it
@@ -53,23 +54,24 @@
 #      anyone deciding to. Pinning it costs nothing and makes the intent
 #      reviewable in a diff.
 #
-# `ci-ok` now needs every gating job and fails on a failed, cancelled, missing
-# or unexpectedly skipped dependency. ASan remains advisory. Keep the five
-# direct checks during rollout: a new required context must first report
-# success on main before protection can safely converge to `ci-ok` alone.
-# The Windows context is an always-run verdict job; only its expensive
-# execution job is skipped for non-format pull requests.
+# `ci-ok` IS NOW THE ONLY REQUIRED CHECK (#409). It needs every gating job --
+# the test matrix, the Windows-authored fixtures, the full suite, the change
+# filter, the Windows chkdsk verdict, the CLI and semver -- and fails on a
+# failed, cancelled, missing or unexpectedly skipped dependency
+# (scripts/ci-verdict.sh). ASan remains advisory. The five direct checks that
+# sat beside it during the rollout are gone: ci-ok has reported on main since,
+# and naming jobs here is what strands every merge when one is renamed --
+# GitHub reads a required check that never reports as pending forever.
+#
+# WHAT KEEPS THIS TRUE: `chore check:ci-gate` (run in CI's ubuntu test leg and
+# by `chore lint`) runs rust-fs-core's ci-gate. It fails if a job in ci.yml is
+# neither in ci-ok's needs nor declared non-gating, and if this file names
+# anything but `ci-ok`.
 #
 # A workflow-level path filter would suppress every required context and leave
 # protection pending forever; keep the workflow itself running on all PRs.
 #
-# Names must match the check-run names GitHub reports, which are the jobs'
-# `name:` values, not their ids — `test-${{ matrix.os }}` renders one name per
-# leg, and `integration` reports as `full test suite (fixtures + integration)`.
+# The name must match the check-run name GitHub reports, which is the job's
+# `name:` -- `ci-ok`.
 [checks]
-	required = test-ubuntu-latest
-	required = test-ubuntu-24.04-arm
-	required = test-macos-latest
-	required = full test suite (fixtures + integration)
-	required = validate rust-ntfs format (Windows chkdsk)
 	required = ci-ok

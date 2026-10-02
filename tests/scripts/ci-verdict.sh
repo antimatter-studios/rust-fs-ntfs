@@ -22,7 +22,7 @@ check() {
 
 windows_true='{"changes":{"result":"success","outputs":{"mkfs":"true"}},"validate-mkfs-windows-run":{"result":"success"}}'
 windows_false='{"changes":{"result":"success","outputs":{"mkfs":"false"}},"validate-mkfs-windows-run":{"result":"skipped"}}'
-aggregate='{"test":{"result":"success"},"integration":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"},"cli":{"result":"success"}}'
+aggregate='{"test":{"result":"success"},"windows-native-read-fixtures":{"result":"success"},"integration":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"},"cli":{"result":"success"},"semver":{"result":"success"}}'
 
 check windows-required-ran windows pass "$windows_true"
 check windows-unneeded-skipped windows pass "$windows_false"
@@ -33,7 +33,10 @@ check windows-missing-run windows fail '{"changes":{"result":"success","outputs"
 check windows-missing-decision windows fail '{"changes":{"result":"success"},"validate-mkfs-windows-run":{"result":"skipped"}}'
 
 check aggregate-green aggregate pass "$aggregate"
-for job in test integration changes validate-mkfs-windows cli; do
+# semver and windows-native-read-fixtures are in ci-ok's `needs:` and were
+# once absent from the verdict's list, so a failing semver job left ci-ok
+# green (#409).
+for job in test windows-native-read-fixtures integration changes validate-mkfs-windows cli semver; do
     for result in failure cancelled skipped; do
         check "aggregate-$job-$result" aggregate fail \
             "$(jq -c --arg job "$job" --arg result "$result" '.[$job].result=$result' <<< "$aggregate")"
@@ -41,6 +44,9 @@ for job in test integration changes validate-mkfs-windows cli; do
 done
 check aggregate-missing-integration aggregate fail '{"test":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"},"cli":{"result":"success"}}'
 check aggregate-missing-cli aggregate fail '{"test":{"result":"success"},"integration":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"}}'
+check aggregate-missing-semver aggregate fail "$(jq -c 'del(.semver)' <<< "$aggregate")"
+# A job added to ci-ok's `needs:` is judged even before this list learns it.
+check aggregate-extra-need-failed aggregate fail "$(jq -c '.["new-job"].result="failure"' <<< "$aggregate")"
 check aggregate-invalid-json aggregate fail '{'
 
 printf 'ci verdict: %d passed, %d failed\n' "$pass" "$fail"

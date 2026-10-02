@@ -118,6 +118,17 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo deny --all-features check
 
+      # THE ONE REQUIRED CHECK STANDS FOR EVERY JOB (#409). rust-fs-core's
+      # family-check (no copy of a family script, scripts/core.sh is core's)
+      # and ci-gate (ci-ok needs every job, .github-guard requires ci-ok
+      # alone), run through scripts/core.sh. The non-gating declaration
+      # lives in the chore task, once. Once, on ubuntu: neither varies by OS.
+      - name: family scripts and the one required check
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          bash scripts/core.sh family-check
+          chore check:ci-gate
+
       # clippy gate. Pre-commit hook runs the same invocation locally
       # so this should never fail on a clean push; it's the second line
       # of defence against drift via merges or rebases that bypass the
@@ -541,6 +552,16 @@ jobs:
   asan:
     name: unit tests under ASan (nightly toolchain, advisory)
     runs-on: ubuntu-latest
+    # ADVISORY, DECLARED (#409). ci-ok does not need this job, by decision: a
+    # pinned nightly can break independently of stable. Job-level
+    # continue-on-error is how that decision is written down where a check
+    # can read it -- rust-fs-core's ci-gate refuses a job that is neither in
+    # ci-ok's needs nor declared, and accepts a declaration only on a job
+    # carrying `if:` or `continue-on-error:`. It does not hide a finding: the
+    # job still concludes `failure` on its own check-run (measured: run
+    # 35221492916, which had this key, reported the asan job as failure).
+    # Only the toolchain install step tolerates failure inside the job.
+    continue-on-error: true
     env:
       # PINNED, like every other toolchain in both workflows. It floated on
       # `@nightly` while the rest pin 1.95.0, and combined with the old
@@ -1206,12 +1227,16 @@ jobs:
           GATE_NEEDS_JSON: ${{ toJSON(needs) }}
         run: bash scripts/ci-verdict.sh windows
 
-  # ASan stays advisory: it is deliberately not a dependency here.
+  # ASan stays advisory: it is deliberately not a dependency here, and it
+  # carries `continue-on-error: true` to say so where ci-gate can read it.
+  # `windows-native-read-fixtures` is needed directly rather than only
+  # through `integration`, so dropping it from `integration`'s needs cannot
+  # take it out of the gate (#409).
   ci-ok:
     name: ci-ok
     runs-on: ubuntu-latest
     if: always()
-    needs: [test, integration, changes, validate-mkfs-windows, cli, semver]
+    needs: [test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, semver]
     steps:
       - uses: actions/checkout@v4
       - name: Check every gating job
