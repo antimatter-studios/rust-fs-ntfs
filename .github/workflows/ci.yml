@@ -695,14 +695,12 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          # THE CODE THAT DECIDES BYTES ON DISK, plus the workflow that
-          # validates them. Deliberately not "any .rs": a change to the
-          # read path cannot make chkdsk unhappy about a volume, and
-          # paying three minutes of Windows for it teaches people to
-          # merge without reading the gate.
-          changed=$(git diff --name-only "$BASE_SHA"...HEAD)
-          echo "$changed" | sed 's/^/  /'
-          if echo "$changed" | grep -qE '^(src/(mkfs|sds|record_build|idx_block|index_io|write|fsck)\.rs|src/bin/rust_ntfs/format\.rs|src/cli/|scripts/cli-oracle\.sh|test-matrix\.json|fs-windows-test-harness\.toml|scripts/fs-windows-test-harness/|\.github/workflows/ci\.yml)'; then
+          # The code that decides bytes on disk, the workflow that validates
+          # them, and the pins of the tools the Windows job runs: the rule
+          # and its reasons are scripts/needs-windows-gate.sh, tested by
+          # tests/scripts/needs-windows-gate.sh.
+          git diff --name-only "$BASE_SHA"...HEAD | sed 's/^/  /'
+          if [ "$(bash scripts/needs-windows-gate.sh "$BASE_SHA")" = true ]; then
               echo "mkfs=true" >> "$GITHUB_OUTPUT"
               echo "::notice::this pull request changes format-relevant code, so the Windows chkdsk gate will run"
           else
