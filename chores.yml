@@ -48,7 +48,7 @@ vars:
   # family, and the bump lands here and in their pins together. That is
   # the cost of one shared copy, and it is the same property that makes
   # drift impossible rather than merely detectable.
-  FS_CORE_REF: v0.2.14
+  FS_CORE_REF: v0.2.16
 
   # The Windows-VM test harness. Not a cargo dependency — a tool this
   # repo's scripts invoke — so nothing but this pin governs which
@@ -399,6 +399,9 @@ tasks:
     cmds:
       - cargo fmt --check
       - scripts/agents-core-check.sh
+      # The family scripts are rust-fs-core's alone: fails on a committed copy,
+      # a scripts/core.sh that differs from core's, or a call to a local copy.
+      - bash scripts/core.sh family-check
       - scripts/tier.sh clippy -- cargo clippy --locked --all-targets --features cli -- -D warnings
 
   build:
@@ -543,7 +546,7 @@ tasks:
     # changing, so a fingerprint would call a stale answer up to date.
     deps: [siblings:gate]
     cmds:
-      - scripts/tier.sh semver -- scripts/semver-check.sh
+      - scripts/tier.sh semver -- bash scripts/core.sh semver-check
 
   test:scripts:
     desc: The shell tests (tests/scripts/*.sh), every one by glob
