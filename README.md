@@ -249,6 +249,22 @@ are documented there.
 Reverse chronological highlights from `git log`. Full per-commit
 history available via `git log` in the repo.
 
+### 2026-10-02 — 0.7.0
+
+- **Breaking:** `fsck` decides from `$LogFile` on every volume and never
+  writes it. A log that may hold transactions is refused, dirty flag or
+  not, instead of being overwritten; the C `fs_ntfs_fsck*` functions lose
+  their `out_logfile_bytes` parameter, and `FsckReport.logfile` says
+  whether the log was empty or clean.
+- **Breaking:** the Rust API's errors are `fs_ntfs::error::Error`, with a
+  `Kind`, instead of `String`. The message is unchanged, and the errno is
+  decided where the error is raised rather than guessed from its words.
+- A read-write mount refuses a volume whose `$LogFile` may hold
+  transactions, which Windows 8 and later leave behind an unclean
+  shutdown with the dirty flag clear. A read-only mount is still allowed.
+- Pull requests are refused when they break the public API without the
+  version saying so.
+
 ### 2026-09-30 — 0.6.0
 
 - The command-line tools are one multi-call binary, `rust-fs-ntfs`,
