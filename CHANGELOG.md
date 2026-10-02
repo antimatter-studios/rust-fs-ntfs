@@ -2,11 +2,13 @@
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-02
+
 ### Breaking
 
-The next release is **0.7.0**, not 0.6.1: each change below breaks code
-written against 0.6.0, and `chore check:semver` now refuses a pull request
-whose public-API break the version does not declare (#399).
+This is **0.7.0**, not 0.6.1: each change below breaks code written
+against 0.6.0, and `chore check:semver` now refuses a pull request whose
+public-API break the version does not declare (#399).
 
 - **`fsck` decides from `$LogFile` on every volume and never writes it**
   (#376). It used to overwrite the log with `0xFF` on any volume whose
