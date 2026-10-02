@@ -98,9 +98,8 @@ mod tests {
 
     #[test]
     fn an_offset_past_the_end_is_refused_and_io_stays_inside_the_window() {
-        let dir = std::env::temp_dir().join(format!("fs-ntfs-cli-device-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("window.img");
+        let file =
+            std::path::PathBuf::from(crate::test_scratch::temp_image_path("cli_device_window"));
         let bytes: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
         std::fs::write(&file, &bytes).unwrap();
 
@@ -114,6 +113,5 @@ mod tests {
             dev.read_exact_at(3070, &mut buf).is_err(),
             "reads past the window"
         );
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

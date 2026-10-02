@@ -5,6 +5,9 @@
 //! (am-fs-core's `cli` feature); `ntfs` is the tools themselves.
 
 mod ntfs;
+#[cfg(test)]
+#[path = "../test_scratch.rs"]
+mod test_scratch;
 
 use fs_core::cli;
 use std::process::ExitCode;

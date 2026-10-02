@@ -44,18 +44,25 @@ fn bypasses_temp_image_primitive(source: &str) -> bool {
     })
 }
 
+/// The one implementation of the primitive. Unit tests in `src/` and the
+/// integration tests here both compile this file, so it is the only source
+/// allowed to spell a generated image path.
+const PRIMITIVE: &str = "src/test_scratch.rs";
+
 #[test]
 fn generated_images_use_the_shared_temp_image_primitive() {
-    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut violations = Vec::new();
 
+    // `src/` too: unit tests there write images as readily as tests/ does.
     let mut sources = Vec::new();
-    rust_sources_below(&tests, &mut sources);
+    rust_sources_below(&root.join("tests"), &mut sources);
+    rust_sources_below(&root.join("src"), &mut sources);
     for path in sources {
-        if path == tests.join("temp_image_policy.rs") || path == tests.join("common/mod.rs") {
+        if path == root.join("tests/temp_image_policy.rs") || path == root.join(PRIMITIVE) {
             continue;
         }
-        let source = fs::read_to_string(&path).expect("read integration test source");
+        let source = fs::read_to_string(&path).expect("read test source");
         if bypasses_temp_image_primitive(&source) {
             violations.push(path.display().to_string());
         }

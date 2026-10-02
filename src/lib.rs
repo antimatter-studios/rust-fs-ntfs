@@ -72,6 +72,9 @@ pub mod sparse;
 pub mod upcase;
 pub mod write;
 
+#[cfg(test)]
+mod test_scratch;
+
 const DIRTY_RW_MOUNT_ERROR: &str =
     "dirty NTFS volume: read-write mount refused because $LogFile replay is unavailable";
 
@@ -4118,7 +4121,7 @@ mod capi_read_tests {
     /// to cause a rare cross-process flake (one process re-formatting the file
     /// while the other was populating or listing it).
     fn fresh_image(tag: &str) -> ImageGuard {
-        let path = format!("test-disks/_capi_read_{tag}_{}.img", std::process::id());
+        let path = crate::test_scratch::temp_image_path(format!("capi_read_{tag}"));
         let f = std::fs::File::create(&path).expect("create");
         f.set_len(32 * 1024 * 1024).expect("set_len");
         drop(f);

@@ -6963,12 +6963,7 @@ mod tests {
     impl TmpImage {
         fn new() -> Self {
             use std::io::Write as _;
-            use std::sync::atomic::{AtomicU64, Ordering};
-            // Unique name from pid + a monotonic counter (no rng/clock needed).
-            static COUNTER: AtomicU64 = AtomicU64::new(0);
-            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let pid = std::process::id();
-            let path = std::env::temp_dir().join(format!("fs_ntfs_wrap_{pid}_{n}.img"));
+            let path = std::path::PathBuf::from(crate::test_scratch::temp_image_path("ntfs_wrap"));
 
             const SIZE: u64 = 16 * 1024 * 1024;
             // Create the backing file at the right size.
