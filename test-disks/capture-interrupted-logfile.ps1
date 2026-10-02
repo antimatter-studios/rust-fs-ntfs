@@ -21,13 +21,24 @@
 #                      SHA-256 (Windows' own Get-FileHash)
 #   post-k.chkdsk.txt  read-only chkdsk of the recovered copy
 # and once:
-#   markers.log        one line per workload operation: index, UTC time
+#   markers-w.log      one line per operation of writer w: index, UTC time
 #   snapshots.tsv      k, UTC time, the marker count when the shadow was taken
 #   layout.json        the partition's byte offset in the VHD
 #   ntfs-events.txt    the System log's Ntfs events from the whole run
 #
 # Deciding which pre-images hold pending log records is done off the runner,
-# from the bytes, by tools that are not this script.
+# from the bytes, by tools that are not this script
+# (scripts/classify-interrupted-captures.sh).
+#
+# THE KNOBS, for the shapes #137's replay still refuses:
+#   -ClusterSize 512|1024|2048  a log page spans more than one cluster
+#   -Writers N                  N workload processes at once: one writer's
+#                               commit forces the log page holding another
+#                               writer's unfinished transaction, which is
+#                               what leaves undo work at the log's end
+#   -WorkloadSeconds, -LogKB    a run long enough, or a log small enough,
+#                               that the log wraps between a checkpoint and
+#                               the snapshot (LogKB 0 keeps format's size)
 #
 # Run elevated on Windows (GitHub's windows-latest is). Windows PowerShell 5.1
 # or PowerShell 7.
@@ -35,6 +46,9 @@ param(
     [int]$Candidates = 6,
     [int]$SizeMB = 128,
     [int]$WorkloadSeconds = 40,
+    [int]$ClusterSize = 4096,
+    [int]$Writers = 1,
+    [int]$LogKB = 0,
     [string]$Out = 'logfile-oracle'
 )
 
@@ -44,7 +58,6 @@ Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory $root -Force | Out-Null
 $Out = (New-Item -ItemType Directory $Out -Force).FullName
 $vhd = Join-Path $root 'disk.vhd'
-$markers = Join-Path $Out 'markers.log'
 $started = Get-Date
 
 function Invoke-Diskpart([string]$Script) {
@@ -72,24 +85,36 @@ Mount-DiskImage -ImagePath $vhd | Out-Null
 $disk = Get-DiskImage -ImagePath $vhd | Get-Disk
 Initialize-Disk -Number $disk.Number -PartitionStyle MBR
 $part = New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter
-Format-Volume -Partition $part -FileSystem NTFS -AllocationUnitSize 4096 `
+Format-Volume -Partition $part -FileSystem NTFS -AllocationUnitSize $ClusterSize `
     -NewFileSystemLabel 'ORACLE366' -Force -Confirm:$false | Out-Null
 $part = Get-Partition -DiskNumber $disk.Number -PartitionNumber $part.PartitionNumber
 $vol = "$($part.DriveLetter):\"
-@{ partition_offset = $part.Offset; partition_size = $part.Size; vhd_bytes = (Get-Item $vhd).Length } |
-    ConvertTo-Json | Set-Content (Join-Path $Out 'layout.json')
+if ($LogKB -gt 0) {
+    # chkdsk resizes $LogFile only with the volume locked; nothing has it
+    # open yet, and /X dismounts it first.
+    $log = & chkdsk.exe "$($part.DriveLetter):" /X /L:$LogKB 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "chkdsk /L:$LogKB failed ($LASTEXITCODE): $log" }
+    $log | Set-Content (Join-Path $Out 'logsize.txt')
+}
+@{
+    partition_offset = $part.Offset; partition_size = $part.Size; vhd_bytes = (Get-Item $vhd).Length
+    cluster_size = $ClusterSize; writers = $Writers; log_kb = $LogKB; workload_seconds = $WorkloadSeconds
+} | ConvertTo-Json | Set-Content (Join-Path $Out 'layout.json')
 Write-Host "volume $vol at byte $($part.Offset) of $vhd"
 
-# ---- the workload, in its own process -----------------------------------
+# ---- the workload, in its own processes ---------------------------------
 # Metadata-heavy on purpose: every create, rename and delete is a logged
-# NTFS transaction, and small files keep the lazy writer busy.
+# NTFS transaction, and small files keep the lazy writer busy. Writer w of
+# W numbers its files w, w+W, w+2W, ..., so writers never share a file, and
+# keeps its own markers file.
 $workload = Join-Path $root 'workload.ps1'
 @'
-param($Vol, $Markers, $Seconds)
-$rng = New-Object System.Random 366
+param($Vol, $Markers, $Seconds, $Writer, $Writers)
+$rng = New-Object System.Random (366 + $Writer)
 $end = (Get-Date).AddSeconds($Seconds)
-$i = 0
+$n = 0
 while ((Get-Date) -lt $end) {
+    $i = $n * $Writers + $Writer
     $dir = Join-Path $Vol ('d{0:D3}' -f ($i % 64))
     [System.IO.Directory]::CreateDirectory($dir) | Out-Null
     $file = Join-Path $dir ('f{0:D7}.bin' -f $i)
@@ -102,22 +127,35 @@ while ((Get-Date) -lt $end) {
     for ($j = 0; $j -lt $len; $j++) { $buf[$j] = $unit[$j % $unit.Length] }
     [System.IO.File]::WriteAllBytes($file, $buf)
     if ($i % 3 -eq 0) { [System.IO.File]::Move($file, "$file.renamed") }
-    if ($i -ge 400 -and $i % 2 -eq 0) {
-        $old = $i - 400
+    if ($n -ge 400 -and $n % 2 -eq 0) {
+        $old = $i - 400 * $Writers
         $victim = Join-Path $Vol ('d{0:D3}\f{1:D7}.bin' -f ($old % 64), $old)
         foreach ($p in @($victim, "$victim.renamed")) {
             if ([System.IO.File]::Exists($p)) { [System.IO.File]::Delete($p) }
         }
     }
     [System.IO.File]::AppendAllText($Markers, "$i $([DateTime]::UtcNow.ToString('o'))`r`n")
-    $i++
+    $n++
 }
 '@ | Set-Content -Path $workload -Encoding utf8
 
 $shell = (Get-Process -Id $PID).Path
-$proc = Start-Process -FilePath $shell -PassThru -NoNewWindow -ArgumentList @(
-    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $workload,
-    '-Vol', $vol, '-Markers', $markers, '-Seconds', $WorkloadSeconds)
+$procs = @(for ($w = 0; $w -lt $Writers; $w++) {
+    Start-Process -FilePath $shell -PassThru -NoNewWindow -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $workload,
+        '-Vol', $vol, '-Markers', (Join-Path $Out "markers-$w.log"), '-Seconds', $WorkloadSeconds,
+        '-Writer', $w, '-Writers', $Writers)
+})
+# Without its handle cached now, a Start-Process object reports no ExitCode
+# once the process has gone.
+$procs | ForEach-Object { $null = $_.Handle }
+function Get-MarkerCount {
+    $sum = 0
+    foreach ($f in Get-ChildItem $Out -Filter 'markers-*.log' -ErrorAction SilentlyContinue) {
+        $sum += (Get-Content $f.FullName).Count
+    }
+    return $sum
+}
 
 # ---- the snapshots, while it runs ---------------------------------------
 Start-Sleep -Seconds 4
@@ -128,7 +166,7 @@ for ($k = 1; $k -le $Candidates; $k++) {
         -Arguments @{ Volume = 'C:\'; Context = 'ClientAccessible' }
     if ($created.ReturnValue -ne 0) { throw "shadow copy $k failed: $($created.ReturnValue)" }
     $at = [DateTime]::UtcNow.ToString('o')
-    $count = if (Test-Path $markers) { (Get-Content $markers).Count } else { 0 }
+    $count = Get-MarkerCount
     $shadow = Get-CimInstance Win32_ShadowCopy | Where-Object ID -eq $created.ShadowID
     $link = Join-Path $root "snap$k"
     cmd /c mklink /d "$link" "$($shadow.DeviceObject)\" | Out-Null
@@ -146,7 +184,9 @@ for ($k = 1; $k -le $Candidates; $k++) {
 }
 $snapshots | Set-Content (Join-Path $Out 'snapshots.tsv')
 
-$proc.WaitForExit()
+$procs | ForEach-Object { $_.WaitForExit() }
+$failed = @($procs | Where-Object { $_.ExitCode -ne 0 })
+if ($failed.Count -gt 0) { throw "$($failed.Count) of $Writers workload writers failed" }
 Dismount-DiskImage -ImagePath $vhd | Out-Null
 
 # ---- Windows recovers a copy of each ------------------------------------

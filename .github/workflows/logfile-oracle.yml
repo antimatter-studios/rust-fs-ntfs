@@ -4,7 +4,15 @@ name: logfile oracle
 # oracle from (#366): test-disks/capture-interrupted-logfile.ps1 snapshots a
 # VHD Windows is writing to, lets Windows recover a copy of each snapshot, and
 # this uploads both. Which snapshots hold pending $LogFile records is decided
-# from the bytes afterwards, not here.
+# from the bytes afterwards: the classify job runs this crate's fsck.ntfs over
+# every pre-image and says, per snapshot, whether the replay redid it or
+# which shape it refused -- undo, a wrapped log, a page spanning clusters,
+# an operation not yet replayed (scripts/classify-interrupted-captures.sh).
+#
+# For the shapes #137 still refuses, for example:
+#   undo:          writers 8, seconds 60, candidates 12
+#   wrapped log:   seconds 240, candidates 16
+#   small cluster: cluster_size 1024 (or 512, 2048)
 #
 # On demand only. It builds no code and gates nothing: a fixture is chosen
 # from its artifact by a person and committed, and from then on the tests
@@ -20,6 +28,18 @@ on:
         description: "Seconds the workload runs"
         required: false
         default: "40"
+      cluster_size:
+        description: "Cluster size the volume is formatted with (512, 1024, 2048, 4096, ...)"
+        required: false
+        default: "4096"
+      writers:
+        description: "Workload processes writing at once"
+        required: false
+        default: "1"
+      log_kb:
+        description: "$LogFile size in KiB, set with chkdsk /L (0 keeps what format chose)"
+        required: false
+        default: "0"
 
 permissions:
   contents: read
@@ -28,7 +48,7 @@ jobs:
   capture:
     name: interrupted-write NTFS images, and what Windows recovers from them
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Capture
@@ -37,6 +57,9 @@ jobs:
           ./test-disks/capture-interrupted-logfile.ps1
           -Candidates ${{ inputs.candidates || '6' }}
           -WorkloadSeconds ${{ inputs.seconds || '40' }}
+          -ClusterSize ${{ inputs.cluster_size || '4096' }}
+          -Writers ${{ inputs.writers || '1' }}
+          -LogKB ${{ inputs.log_kb || '0' }}
           -Out logfile-oracle
       - name: Upload
         if: always()
@@ -44,5 +67,31 @@ jobs:
         with:
           name: logfile-oracle
           path: logfile-oracle/
+          if-no-files-found: error
+          retention-days: 30
+
+  classify:
+    name: what this crate's replay makes of each snapshot
+    needs: capture
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build fsck.ntfs
+        run: |
+          cargo build --release --locked --features cli --bin rust-fs-ntfs
+          mkdir -p tmp/bin
+          ln -sf "$PWD/target/release/rust-fs-ntfs" tmp/bin/fsck.ntfs
+      - uses: actions/download-artifact@v4
+        with:
+          name: logfile-oracle
+          path: logfile-oracle
+      - name: Classify
+        run: FSCK="$PWD/tmp/bin/fsck.ntfs" bash scripts/classify-interrupted-captures.sh logfile-oracle
+      - name: Upload the classification
+        uses: actions/upload-artifact@v4
+        with:
+          name: logfile-oracle-classification
+          path: logfile-oracle/classification.tsv
           if-no-files-found: error
           retention-days: 30
