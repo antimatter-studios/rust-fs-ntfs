@@ -57,7 +57,7 @@ vars:
   # A BRANCH UNTIL v4.3.0 IS TAGGED: fs-windows-test-harness#40 bounds every
   # VM command and names a timeout's command and scenario (#403). This moves
   # to the v4.3.0 tag before merge, as #329 moved to v4.2.0.
-  HARNESS_REF: fix/bounded-remote-commands
+  HARNESS_REF: v4.3.0
 
   # The in-house VHD writer (rust-img-vhd) the Windows jobs build to wrap
   # a raw image for Windows. Not a cargo dependency, so this is the only
