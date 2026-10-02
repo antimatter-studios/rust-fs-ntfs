@@ -63,7 +63,7 @@ shift
 #   suite       2,143 / 108,930 (CI Linux, fixtures built)        2,900 / 150,000
 #   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
 #   scripts     101 / 2,669 (11 shell tests, rebased 2026-09-26)  135 / 3,500
-#   matrix      633 / 35,311 green, 1,521 / 78,075 red (see below)  900 / 50,000
+#   matrix      975 / 67,151 green (derived, see below)             1,300 / 90,000
 #   cli         27 / 1,035 (estimate: CI's 5-file run + test-docs)  36 / 1,380
 #   cli-oracle  15 / 741 (CI Linux, 2026-09-29, 2 files, 3 tools) 20 / 990
 #
@@ -96,6 +96,17 @@ shift
 # fit -- a failing run prints its tail and fails on its own account. It is the
 # only tier whose length depends on a machine rather than on this repository,
 # so it is the one most likely to need raising -- do that with a measurement.
+#
+# THE MATRIX ROW MOVED ON 2026-10-02, from 900/50,000 to 1,300/90,000, and
+# the new figure is DERIVED, not measured: nobody can run the full matrix
+# without a Windows VM. Harness v4.3.0 prints a line as each recipe step
+# starts (#403), so a green run prints one more line per step executed, plus
+# one line as it takes the VM lock. Against this test-matrix.json that is
+# 341 steps, 31,737 bytes of start lines (computed from the matrix, the line
+# format and each scenario's name), and 103 bytes for the lock line: 633 +
+# 342 = 975 lines and 35,311 + 31,840 = 67,151 bytes, plus a third. The
+# measurement was a 46-scenario run and the matrix now has 56, so the next
+# full green run should replace this row with what it actually printed.
 # THE CLI ROW is the installed tools' suite (scripts/test-cli.sh): a line
 # naming the binary, doctor's line per tool, and three lines per passing
 # file (its name, its count, its trailing line). It is small by design, so a
@@ -114,7 +125,7 @@ case "$TIER" in
     asan)       MAX_LINES=1100; MAX_BYTES=72000 ;;
     scripts)    MAX_LINES=135;  MAX_BYTES=3500 ;;
     semver)     MAX_LINES=40;   MAX_BYTES=4000 ;;
-    matrix)     MAX_LINES=900;  MAX_BYTES=50000 ;;
+    matrix)     MAX_LINES=1300; MAX_BYTES=90000 ;;
     cli)        MAX_LINES=36;   MAX_BYTES=1380 ;;
     cli-oracle) MAX_LINES=20;   MAX_BYTES=990 ;;
     *)
