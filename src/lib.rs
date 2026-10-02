@@ -75,31 +75,29 @@ pub mod write;
 #[cfg(test)]
 mod test_scratch;
 
-const DIRTY_RW_MOUNT_ERROR: &str =
-    "dirty NTFS volume: read-write mount refused because $LogFile replay is unavailable";
+/// Make a volume ready for a read-write mount: replay a `$LogFile` that
+/// holds work, as Windows does when it mounts one, and refuse a dirty
+/// volume or a log that cannot be replayed in full, with nothing written
+/// (#137). See [`fsck::prepare_rw_mount_io`]. Windows 8 and later record
+/// an unclean shutdown in the log alone and leave the dirty flag clear, so
+/// the log is read whatever the flag says.
+pub(crate) fn prepare_rw_mount<T: BlockIoTrait>(io: &mut T) -> Result<(), Error> {
+    fsck::prepare_rw_mount_io(io).map(|_| ())
+}
 
-/// Refuse a read-write mount of a volume whose metadata may lag its log:
-/// the dirty flag set, or a `$LogFile` that may hold transactions. Windows
-/// 8 and later record an unclean shutdown in the log alone and leave the
-/// flag clear, so the flag by itself lets such a volume through (#137).
-/// Reads the log through `io`; writes nothing.
-pub(crate) fn require_clean_rw_mount<T: BlockIoTrait>(io: &mut T, flags: u16) -> Result<(), Error> {
-    if flags & read::VOLUME_IS_DIRTY != 0 {
-        return Err(Error::refused(DIRTY_RW_MOUNT_ERROR));
+/// [`prepare_rw_mount`] for an image at a path. The image is opened for
+/// writing only when the log holds work to replay, so a read-only file
+/// whose log holds nothing mounts as it always has.
+pub(crate) fn prepare_rw_mount_path(path: &std::path::Path) -> Result<(), Error> {
+    let mut ro = RwPathIo::open_ro(path)
+        .map_err(|e| Error::io(format!("open '{}': {e}", path.display())))?;
+    let pending = fsck::logfile_state_io(&mut ro).is_ok_and(|s| s.needs_replay());
+    if !pending {
+        // Refuses a dirty volume or an unreadable log; writes nothing.
+        return prepare_rw_mount(&mut ro);
     }
-    let state = fsck::logfile_state_io(io).map_err(|e| {
-        Error::refused(format!(
-            "read-write mount refused: $LogFile could not be read ({e}), so it may hold \
-             transactions this library cannot replay"
-        ))
-    })?;
-    if state.needs_replay() {
-        return Err(Error::refused(format!(
-            "read-write mount refused: {}",
-            state.describe()
-        )));
-    }
-    Ok(())
+    drop(ro);
+    prepare_rw_mount(&mut fsck::PathIo::open(path)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -584,9 +582,10 @@ fn make_dirent(file_record_number: u64, file_type: u8, name: &[u8]) -> FsNtfsDir
 /// other writer touches the same image for the handle's lifetime (e.g.
 /// no concurrent CLI invocations on the same path). See the module-level
 /// "Device exclusivity contract" for the full rationale.
-/// A dirty volume, or one whose `$LogFile` may hold transactions (dirty
-/// flag or not), is refused because the handle permits writes and this
-/// driver cannot replay `$LogFile`.
+/// The handle permits writes, so a `$LogFile` holding work is replayed
+/// first, as Windows does when it mounts a volume (#137). A dirty volume,
+/// or a log that cannot be read or replayed in full, is refused with
+/// nothing written.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle {
     ffi_guard("fs_ntfs_mount", std::ptr::null_mut(), move || {
@@ -613,17 +612,14 @@ pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle
                     return std::ptr::null_mut();
                 }
             };
-            let info = match read::read_volume_info(&mut io) {
-                Ok(info) => info,
-                Err(e) => {
-                    set_error(&e.context("ntfs init"));
-                    return std::ptr::null_mut();
-                }
-            };
-            if let Err(e) = require_clean_rw_mount(&mut io, info.flags) {
-                set_error(&e);
+            if let Err(e) = read::read_volume_info(&mut io) {
+                set_error(&e.context("ntfs init"));
                 return std::ptr::null_mut();
             }
+        }
+        if let Err(e) = prepare_rw_mount_path(std::path::Path::new(path)) {
+            set_error(&e);
+            return std::ptr::null_mut();
         }
 
         // Mimic `ntfs.sys`'s "upgrade on mount". Path-based mount is
@@ -664,9 +660,10 @@ pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle
 /// block-layer abstraction).  Returns NULL on error; call
 /// [`fs_ntfs_last_error`] for the message.  The resulting handle supports
 /// the full read API; mutators work when a `write` callback is provided.
-/// Dirty volumes remain readable when `write` is `None`; a writable mount
-/// is refused while the dirty flag is set or `$LogFile` may hold
-/// transactions, flag or not.
+/// Dirty volumes remain readable when `write` is `None`, and nothing is
+/// replayed. A writable mount replays a `$LogFile` holding work through
+/// `write` first, and is refused, with nothing written, while the dirty
+/// flag is set or the log cannot be read or replayed in full.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) -> *mut FsNtfsHandle {
     ffi_guard(
@@ -689,17 +686,19 @@ pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) ->
                     context: cfg.context,
                     size: cfg.size_bytes,
                 };
-                let info = match read::read_volume_info(&mut io) {
-                    Ok(info) => info,
-                    Err(e) => {
-                        set_error(&e.context("ntfs init"));
-                        return std::ptr::null_mut();
-                    }
+                if let Err(e) = read::read_volume_info(&mut io) {
+                    set_error(&e.context("ntfs init"));
+                    return std::ptr::null_mut();
+                }
+            }
+            if cfg.write.is_some() {
+                let mut io = CallbackBlockIo {
+                    read_fn: cfg.read,
+                    write_fn: cfg.write,
+                    context: cfg.context,
+                    size: cfg.size_bytes,
                 };
-                if let Some(Err(e)) = cfg
-                    .write
-                    .map(|_| require_clean_rw_mount(&mut io, info.flags))
-                {
+                if let Err(e) = prepare_rw_mount(&mut io) {
                     set_error(&e);
                     return std::ptr::null_mut();
                 }
@@ -818,8 +817,9 @@ pub extern "C" fn fs_ntfs_mount_with_fs_core_device(
 /// `_h` mutator family (`fs_ntfs_create_file_h`, `fs_ntfs_mkdir_h`,
 /// `fs_ntfs_write_file_contents_h`, `fs_ntfs_unlink_h`, …) can write
 /// through it.
-/// A dirty volume, or one whose `$LogFile` may hold transactions (dirty
-/// flag or not), is refused before any mount-time version upgrade.
+/// A `$LogFile` holding work is replayed through the device first; a dirty
+/// volume, or a log that cannot be read or replayed in full, is refused
+/// before any mount-time version upgrade.
 ///
 /// The supplied device must report `is_writable() == true`; otherwise
 /// the mount succeeds (the device itself is parsable) but the first
@@ -861,14 +861,11 @@ pub extern "C" fn fs_ntfs_mount_rw_with_fs_core_device(
                     device: device.clone(),
                     size,
                 };
-                let info = match read::read_volume_info(&mut io) {
-                    Ok(info) => info,
-                    Err(e) => {
-                        set_error(&e.context("ntfs init"));
-                        return std::ptr::null_mut();
-                    }
-                };
-                if let Err(e) = require_clean_rw_mount(&mut io, info.flags) {
+                if let Err(e) = read::read_volume_info(&mut io) {
+                    set_error(&e.context("ntfs init"));
+                    return std::ptr::null_mut();
+                }
+                if let Err(e) = prepare_rw_mount(&mut io) {
                     set_error(&e);
                     return std::ptr::null_mut();
                 }

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`fs.ntfs`'s writing verbs no longer write over a `$LogFile` holding
+  work.** They checked only the dirty flag, which Windows 8 and later leave
+  clear after an unclean shutdown, so `fs.ntfs write` on such a volume
+  wrote on metadata missing changes the log had committed, and left the
+  log to be replayed over the result (#137). They now replay it first.
+
 ### Added
 
 - **`$LogFile` is replayed** (#137). `fsck` (and `fsck.ntfs -y`) no longer
@@ -20,6 +28,18 @@
   replayed images. Not yet: undo of unfinished transactions, operations
   those logs did not hold, and logs that wrap during replay -- each
   refused.
+- **A read-write mount replays `$LogFile`** (#137), as Windows does when
+  it mounts a volume, where it used to refuse a log holding work and send
+  the caller to `fsck`. Every read-write entry point -- `fs_ntfs_mount`,
+  `fs_ntfs_mount_with_callbacks` with a write callback,
+  `fs_ntfs_mount_rw_with_fs_core_device`, `Filesystem::mount_rw` and
+  `fs.ntfs`'s writing verbs -- runs the same replay `fsck` does, through
+  the new `fsck::prepare_rw_mount_io`, before anything else is written. A
+  log that cannot be replayed in full is still refused with nothing
+  written, and so is a dirty volume, which is not replayed first. On both
+  volumes Windows left mid-write, each entry point reaches the metadata
+  Windows' own restart did; two new `cli` matrix scenarios have Windows
+  grade a volume replayed at mount and then written to.
 - `fsck.ntfs` reports a log holding work as a problem (`"kind":
   "logfile"`, exit 4), and `-y` replays it. It used to exit 0 over such a
   log whenever the dirty flag was clear.

@@ -2318,6 +2318,88 @@
       ],
       "image": "nfs-cli-windows-interrupted-6-replay.img",
       "_notes": "A volume Windows was writing to when it was captured (test-disks/windows-interrupted-6, after 1982 workload operations), its log holding work Windows had not checkpointed. fsck.ntfs -y replays $LogFile; then Windows grades the result: fsutil dirty query says Clean, every file Windows itself listed after its own recovery of the same image reads back at Windows' size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean."
+    },
+    "cli-windows-interrupted-1-mount-replay-write-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 127,
+        "label": "ORACLE366",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-mount-replay",
+          "snapshot": "1"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        {
+          "op": "win-dirty-query",
+          "expect": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-cli-verify",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-windows-interrupted-1-mount-replay.img",
+      "_notes": "A volume Windows was writing to when it was captured (test-disks/windows-interrupted-1, after 244 workload operations), its log holding work Windows had not checkpointed. No fsck.ntfs -y: fs.ntfs mkdir and write open it read-write, which replays $LogFile at mount as Windows does, then make a directory, two new files and a replacement of a file the log created. Windows grades the result: fsutil dirty query says Clean, every file Windows itself listed after its own recovery of the same image, and every file fs.ntfs wrote, reads back at the expected size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean."
+    },
+    "cli-windows-interrupted-6-mount-replay-write-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 127,
+        "label": "ORACLE366",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-mount-replay",
+          "snapshot": "6"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        {
+          "op": "win-dirty-query",
+          "expect": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-cli-verify",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-windows-interrupted-6-mount-replay.img",
+      "_notes": "A volume Windows was writing to when it was captured (test-disks/windows-interrupted-6, after 1982 workload operations), its log holding work Windows had not checkpointed. No fsck.ntfs -y: fs.ntfs mkdir and write open it read-write, which replays $LogFile at mount as Windows does, then make a directory, two new files and a replacement of a file the log created. Windows grades the result: fsutil dirty query says Clean, every file Windows itself listed after its own recovery of the same image, and every file fs.ntfs wrote, reads back at the expected size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean."
     }
   },
   "_consolidated_by": "chore matrix (fs-windows-test-harness runner)",
