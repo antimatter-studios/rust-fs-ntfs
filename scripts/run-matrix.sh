@@ -77,13 +77,29 @@ if [ "$keep_images" -eq 1 ]; then
     export HARNESS_KEEP_IMAGES=1
 fi
 
+# ── Reading .test-env ───────────────────────────────────────────────────────
+# test_env NAME -- NAME's value as .test-env leaves it, read the way the
+# harness reads it: by sourcing the file. The harness writes every line as
+# `export NAME="value"` (run-tests.sh, write_env_file); scripts/vm.sh and
+# people write bare `NAME=value`. Matching lines with `grep '^NAME='` missed
+# the first form entirely and kept the quotes of any quoted value, so the mux
+# below never started on a harness-written file (#411). Sourced in a subshell
+# so nothing the file sets leaks into this script, and with its output
+# discarded so a chatty file cannot become part of a value.
+test_env() {
+    local env_file="$repo_root/.test-env"
+    [ -f "$env_file" ] || return 0
+    (
+        set +u  # a file naming an unset variable must not end the read early
+        # shellcheck disable=SC1090
+        . "$env_file" >/dev/null 2>&1
+        printf '%s' "${!1-}"
+    )
+}
+
 # ── Resolve image directory ─────────────────────────────────────────────────
-# Read HOST_IMAGE_DIR from .test-env (same source the harness uses).
-# Default: diskimages/ relative to the repo root.
-host_image_dir=""
-if [ -f "$repo_root/.test-env" ]; then
-    host_image_dir=$(grep '^HOST_IMAGE_DIR=' "$repo_root/.test-env" 2>/dev/null | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-fi
+# HOST_IMAGE_DIR from .test-env; default diskimages/ relative to the repo root.
+host_image_dir="$(test_env HOST_IMAGE_DIR)"
 host_image_dir="${host_image_dir:-diskimages}"
 # Resolve relative paths against repo_root.
 if [[ "$host_image_dir" != /* ]]; then
@@ -131,12 +147,23 @@ fi
 echo "$$" > "$scenario_lock/pid"
 
 start_ssh_mux() {
-    # Read VM_HOST and optional SSH_KEY from .test-env (same source as harness).
-    [[ ! -f "$repo_root/.test-env" ]] && return 0
+    # VM_HOST and optional SSH_KEY from .test-env (same source as harness).
     local vm_host ssh_key
-    vm_host=$(grep '^VM_HOST=' "$repo_root/.test-env" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    ssh_key=$(grep '^SSH_KEY=' "$repo_root/.test-env" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    vm_host="$(test_env VM_HOST)"
+    ssh_key="$(test_env SSH_KEY)"
     [[ -z "$vm_host" ]] && return 0
+
+    # Git Bash's ssh is a Cygwin build, and a Cygwin mux client cannot pass
+    # its stdin/stdout/stderr to the master over the control socket: every
+    # multiplexed call dies with `mux_client_request_session: send fds
+    # failed` (or `read from master failed`). That is the CI Windows runner,
+    # so there every ssh goes direct, as it always has.
+    case "$(uname -s)" in
+        CYGWIN* | MINGW* | MSYS*)
+            echo "[run-matrix] SSH mux: off ($(uname -s): its ssh cannot multiplex sessions)" >&2
+            return 0
+            ;;
+    esac
 
     local key_opts=()
     [[ -n "$ssh_key" && -f "$ssh_key" ]] && key_opts=(-i "$ssh_key" -o IdentitiesOnly=yes)
@@ -189,33 +216,6 @@ stop_ssh_mux() {
     [[ -n "${ssh_wrapper_dir:-}" ]] && rm -rf "$ssh_wrapper_dir"
 }
 
-ensure_vm_workdir() {
-    # Read VM_HOST, SSH_KEY, VM_WORKDIR from .test-env (same source as harness).
-    [[ ! -f "$repo_root/.test-env" ]] && return 0
-    local vm_host ssh_key vm_workdir
-    vm_host=$(grep '^VM_HOST=' "$repo_root/.test-env" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    ssh_key=$(grep '^SSH_KEY=' "$repo_root/.test-env" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    vm_workdir=$(grep '^VM_WORKDIR=' "$repo_root/.test-env" 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    [[ -z "$vm_host" || -z "$vm_workdir" ]] && return 0
-
-    local key_opts=()
-    [[ -n "$ssh_key" && -f "$ssh_key" ]] && key_opts=(-i "$ssh_key" -o IdentitiesOnly=yes)
-
-    # PowerShell: create the workdir if it doesn't already exist.
-    local ps_workdir="${vm_workdir//\//\\}"
-    ps_workdir="${ps_workdir//\'/\'\'}"
-    ssh "${key_opts[@]+"${key_opts[@]}"}" \
-        -o BatchMode=yes \
-        -o ConnectTimeout=10 \
-        "$vm_host" \
-        "powershell -NoProfile -NonInteractive -Command \"if (-not (Test-Path '$ps_workdir')) { New-Item -ItemType Directory -Path '$ps_workdir' -Force | Out-Null }; Write-Host '[vm] workdir: $ps_workdir'\"" >&2 \
-        || {
-            echo "[run-matrix] WARNING: could not ensure VM workdir ($vm_workdir); ship-to-vm ops may fail" >&2
-            return 0
-        }
-    echo "[run-matrix] VM workdir ready: $vm_workdir" >&2
-}
-
 cleanup() {
     if [ "$keep_images" -eq 1 ]; then
         echo "[run-matrix] --keep-images set; leaving images in $host_image_dir" >&2
@@ -263,9 +263,11 @@ pre_run_subdirs=$(find "$host_image_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/
 # one TCP connection prevents Windows sshd MaxStartups exhaustion.
 start_ssh_mux
 
-# Ensure the Windows VM workdir exists. Idempotent — cheap SSH round-trip,
-# skipped if VM_HOST or VM_WORKDIR is not configured in .test-env.
-ensure_vm_workdir
+# The VM workdir is the harness's to create: its VM-lock Acquire runs
+# `New-Item -ItemType Directory -Path $Workdir -Force` before anything else
+# touches the VM. This wrapper used to make an unbounded ssh call of its own
+# to do the same, which never ran on a harness-written .test-env (#411) and,
+# had it run, would have been one more remote call with no bound.
 
 # Forward to the real runner.
 bash "$repo_root/../fs-windows-test-harness/scripts/run-tests.sh" "${forwarded_args[@]+"${forwarded_args[@]}"}"
