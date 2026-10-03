@@ -46,6 +46,13 @@ CLEAN=$'The type of the file system is NTFS.\r\nWindows has scanned the file sys
 SNAPSHOT=$'The type of the file system is NTFS.\r\nInsufficient storage available to create either the shadow copy storage file or other shadow copy data.\r\nA snapshot error occured while scanning this drive. Run an offline scan and fix.\r\n'
 PROBLEMS=$'The type of the file system is NTFS.\r\nWindows has scanned the file system and found problems.\r\nRun CHKDSK with the /F (fix) option to correct these.\r\n'
 REPAIRED=$'The type of the file system is NTFS.\r\nWindows has made corrections to the file system.\r\n'
+# rust-fs-ntfs#429: chkdsk warns that it could not make a shadow copy, then
+# scans the live volume. Verbatim (first and last lines) from the read-only
+# pass of cli-windows-interrupted-index-vcn-fsck-replay-win-verify-chkdsk, CI
+# run 37136974900, exit 3: it scanned, and it found errors.
+SHADOW_WARNED_FOUND=$'Insufficient storage available to create either the shadow copy storage file or other shadow copy data.\r\nStage 1: Examining basic file system structure ...\r\nStage 2: Examining file name linkage ...\r\nError detected in index $I30 for file 26.\r\nErrors found.  CHKDSK cannot continue in read-only mode.\r\n'
+# The /scan of the same run, exit 11, which genuinely scanned nothing.
+SNAPSHOT_ONLY=$'The type of the file system is NTFS.\r\nA snapshot error occured while scanning this drive. Run an offline scan and fix.\r\n'
 ODD=$'The type of the file system is NTFS.\r\nSomething chkdsk has never said before.\r\n'
 # What chkdsk printed for mac-format-label-latin1, whose label is "Disk éclipse".
 CLEAN_LABEL=$'The type of the file system is NTFS.\r\nVolume label is Disk \u00e9clipse.\r\nWindows has scanned the file system and found no problems.\r\nNo further action is required.\r\n'
@@ -62,6 +69,10 @@ check clean-utf16         utf16    "$CLEAN"    "no problems"
 check clean-utf16-bom     utf16bom "$CLEAN"    "no problems"
 check snapshot-utf16      utf16    "$SNAPSHOT" "NOT SCANNED (snapshot error)"
 check problems-utf16-bom  utf16bom "$PROBLEMS" "PROBLEMS FOUND"
+# A shadow-copy warning is not the outcome: what the scan found is (#429).
+check shadow-warned-found-ascii ascii "$SHADOW_WARNED_FOUND" "PROBLEMS FOUND"
+check shadow-warned-found-utf16 utf16 "$SHADOW_WARNED_FOUND" "PROBLEMS FOUND"
+check snapshot-only-ascii       ascii "$SNAPSHOT_ONLY"       "NOT SCANNED (snapshot error)"
 # Never reassuring about what it does not understand.
 check unrecognised-ascii  ascii    "$ODD"      "unrecognised: Something chkdsk has never said before."
 check unrecognised-utf16  utf16    "$ODD"      "unrecognised: Something chkdsk has never said before."
@@ -134,6 +145,18 @@ check_verdict legacy-visible \
 check_verdict failed-verdict-visible \
     '{"passed":false,"verdict_shape":"clean","modes":{"/scan":{"exit":0,"state":"scanned","reason":"ok"}}}' \
     'mismatch: verdict did not pass'
+# rust-fs-ntfs#430: the record win-chkdsk.ps1 writes, as pinned by
+# tests/scripts/chkdsk-verdict.ps1, read by the reader. A writer and reader
+# that drift apart fail one side or the other.
+FIX="$ROOT/tests/scripts/fixtures/chkdsk-verdict"
+check_verdict writer-clean             "$(cat "$FIX/clean.json")"             'match'
+check_verdict writer-damaged           "$(cat "$FIX/damaged.json")"           'match'
+check_verdict writer-clean-no-snapshot "$(cat "$FIX/clean-no-snapshot.json")" 'not-scanned: /scan'
+# What the writer wrote before #426, verbatim from every vm/verdict.json of
+# run 37136974900: without per-mode states it stays unknown, never a match.
+check_verdict writer-before-426 \
+    '{"verdict_shape":"clean","exits":{"readonly":3,"/scan":11},"passed":false}' \
+    'unknown: verdict.json has no per-mode states'
 missing_verdict="$(verdict_says "$tmp/missing-verdict.json")"
 if [ "$missing_verdict" = 'unknown: missing verdict.json' ]; then
     pass=$((pass + 1)); printf '  ok    missing-verdict-visible\n'

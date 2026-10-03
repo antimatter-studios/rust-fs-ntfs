@@ -35,6 +35,18 @@ Insufficient storage available to create either the shadow copy storage file or 
 A snapshot error occured while scanning this drive. Run an offline scan and fix.
 '@
 
+# A pass that warned it could not make a shadow copy, scanned the live volume
+# and found errors. Verbatim (first and last lines) from the read-only pass of
+# cli-windows-interrupted-index-vcn-fsck-replay-win-verify-chkdsk, CI run
+# 37136974900, exit 3 (rust-fs-ntfs#429).
+$ShadowWarnedFound = @'
+Insufficient storage available to create either the shadow copy storage file or other shadow copy data.
+Stage 1: Examining basic file system structure ...
+Stage 2: Examining file name linkage ...
+Error detected in index $I30 for file 26.
+Errors found.  CHKDSK cannot continue in read-only mode.
+'@
+
 $Clean = @'
 The type of the file system is NTFS.
 Windows has scanned the file system and found no problems.
@@ -178,6 +190,17 @@ Check ($r.Calls -notcontains '/F /X-offline-fallback') 'Clean: no fallback for a
 $r = Verdict 'Clean' @('readonly', '/scan') @{ 'readonly' = (Answer 3 $Found); '/scan' = (Answer 0 $Clean) }
 Check ($r.V.passed -eq $false) 'Clean: the read-only pass finding problems fails'
 
+# rust-fs-ntfs#429: chkdsk prints the shadow-copy warning as its first line
+# and then scans the live volume. A /scan that did that and found errors ran;
+# only the outcome line "A snapshot error occured while scanning this drive"
+# says it did not.
+$r = Verdict 'Clean' @('readonly', '/scan') @{
+    'readonly' = (Answer 0 $Clean); '/scan' = (Answer 3 $ShadowWarnedFound)
+}
+Check ($r.V.modes -and $r.V.modes['/scan'].state -eq 'failed') 'Clean (#429): a scan that warned about shadow copy storage and found errors is recorded as failed'
+Check ($r.V.passed -eq $false) 'Clean (#429): ... and fails the verdict'
+Check ($r.Calls -notcontains '/F /X-offline-fallback') 'Clean (#429): ... with no offline fallback standing in for it'
+
 # ── the record ─────────────────────────────────────────────────────────
 
 # matrix-fetch-diag.sh reads modes.<mode>.{exit,state,reason} out of
@@ -200,6 +223,33 @@ if (-not $json.modes) {
 }
 Check ($bad.Count -eq 0) "record: every mode carries exit, state and reason ($($bad -join ', '))"
 Check ($json.exits.'/scan-post' -eq 10) 'record: the raw exit codes are still there'
+
+# rust-fs-ntfs#430: the reader of verdict.json (matrix-fetch-diag.sh) was
+# moved to the per-mode record while the writer still wrote the old one, and
+# nothing compared the two. tests/scripts/fixtures/chkdsk-verdict/ holds the
+# exact record this writer emits for three runs; this pins the writer to
+# them, and tests/scripts/matrix-fetch-diag.sh feeds the same files to the
+# reader. Each side is compared after one JSON round trip in this shell, so
+# the two PowerShells' formatting differences cancel out.
+function Same-Record($verdict, [string]$name) {
+    $file = Join-Path $PSScriptRoot "fixtures/chkdsk-verdict/$name.json"
+    $want = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json | ConvertTo-Json -Depth 5 -Compress
+    $got = $verdict | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json | ConvertTo-Json -Depth 5 -Compress
+    if ($got -ne $want) { Write-Host "     got:  $got"; Write-Host "     want: $want" }
+    return $got -eq $want
+}
+$r = Verdict 'Clean' @('readonly', '/scan') @{ 'readonly' = (Answer 0 $Clean); '/scan' = (Answer 0 $Clean) }
+Check (Same-Record $r.V 'clean') 'record (#430): a clean pass writes fixtures/chkdsk-verdict/clean.json'
+$r = Verdict 'Clean' @('readonly', '/scan') @{
+    'readonly' = (Answer 0 $Clean); '/scan' = (Answer 11 $SnapshotNoStorage)
+    '/F /X-offline-fallback' = (Answer 0 $Clean)
+}
+Check (Same-Record $r.V 'clean-no-snapshot') 'record (#430): a clean pass with no snapshot writes fixtures/chkdsk-verdict/clean-no-snapshot.json'
+$r = Verdict 'Damaged' @('readonly', '/scan') @{
+    'readonly' = (Answer 3 $Found); '/scan' = (Answer 0 $Clean)
+    '/F /X' = (Answer 1 $Fixed); '/scan-post' = (Answer 0 $Clean)
+}
+Check (Same-Record $r.V 'damaged') 'record (#430): a damaged pass writes fixtures/chkdsk-verdict/damaged.json'
 
 if ($script:fails -gt 0) {
     Write-Host "chkdsk-verdict: $($script:fails) check(s) failed"
