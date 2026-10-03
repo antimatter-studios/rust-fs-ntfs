@@ -148,8 +148,9 @@ Specific limits, current as of HEAD:
   operations two Windows-written logs hold, checked against what Windows
   recovered from the same images; it refuses, writing nothing, a log
   with a transaction left unfinished (that needs undo), an operation
-  those logs did not hold, a page spanning clusters, a log that wraps
-  during replay, or an LFS version other than 2.x. A writable mount
+  those logs did not hold, a page spanning clusters, or an LFS version
+  other than 2.x. A log that wrapped between the checkpoint and the stop
+  is followed across its end. A writable mount
   replays the same logs and refuses the same ones; a read-only mount
   reads the volume as it is on disk, without replaying. Explicit log
   reset is only for volumes independently known consistent.

@@ -509,6 +509,36 @@ pub fn replay_logfile(path: impl AsRef<Path>) -> Result<ReplayReport, Error> {
     replay_logfile_io(&mut io)
 }
 
+/// The volume as a planned replay would leave it, for reading only: each
+/// read sees the planned writes over what is on disk.
+struct Replayed<'a, T: ?Sized> {
+    io: &'a mut T,
+    writes: &'a std::collections::BTreeMap<u64, Vec<u8>>,
+}
+
+impl<T: BlockIo + ?Sized> BlockIo for Replayed<'_, T> {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        self.io.read_exact_at(offset, buf)?;
+        let end = offset + buf.len() as u64;
+        for (&at, bytes) in self.writes.range(..end) {
+            let (from, to) = (at.max(offset), (at + bytes.len() as u64).min(end));
+            if from < to {
+                buf[(from - offset) as usize..(to - offset) as usize]
+                    .copy_from_slice(&bytes[(from - at) as usize..(to - at) as usize]);
+            }
+        }
+        Ok(())
+    }
+    fn write_all_at(&mut self, offset: u64, _: &[u8]) -> Result<(), String> {
+        Err(format!(
+            "a planned replay is read, not written (byte {offset:#x})"
+        ))
+    }
+    fn size(&self) -> u64 {
+        self.io.size()
+    }
+}
+
 /// Redo every change `$LogFile` holds that may not have reached the
 /// volume, then empty the log, which the volume no longer needs (#137).
 ///
@@ -530,9 +560,15 @@ pub fn replay_logfile_io<T: FsckIo>(io: &mut T) -> Result<ReplayReport, Error> {
             .map_err(|e| Error::io(format!("read byte {at:#x}: {e}")))
     })?;
     // A log that is not this volume's must not be replayed onto it: every
-    // MFT record the log names has to be where this volume's $MFT has it.
+    // MFT record the log names has to be where this volume's $MFT has it,
+    // as the replay leaves it -- the log may grow $MFT and then fill the new
+    // records, and Windows' restart writes both.
     for &(record, at) in &plan.mft_records {
-        let here = crate::mft_io::mft_record_offset_io(io, &params, record)?;
+        let mut replayed = Replayed {
+            io: &mut *io,
+            writes: &plan.writes,
+        };
+        let here = crate::mft_io::mft_record_offset_io(&mut replayed, &params, record)?;
         if here != at {
             return Err(Error::io(format!(
                 "$LogFile puts MFT record {record} at byte {at:#x}, where this volume's $MFT \

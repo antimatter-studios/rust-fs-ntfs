@@ -9,8 +9,9 @@
 //!
 //! # What is replayed, and how that was established
 //!
-//! The ARIES-style restart NTFS performs, as far as two volumes Windows
-//! left mid-write need it (`test-disks/windows-interrupted-{1,6}`):
+//! The ARIES-style restart NTFS performs, as far as five volumes Windows
+//! left mid-write need it (`test-disks/windows-interrupted-*`, three of
+//! whose logs wrapped between the checkpoint and the capture):
 //!
 //! * **analysis** from the last checkpoint: the open attribute table and
 //!   the dirty page table as the checkpoint dumped them, extended by every
@@ -20,8 +21,8 @@
 //!   before the record, and, for an MFT record or an index block, when the
 //!   block's own LSN is older than the record's;
 //! * **undo is not implemented.** A transaction still open at the end of
-//!   the log with anything to undo is refused. Neither fixture has one:
-//!   every transaction in both ends in a `ForgetTransaction` record.
+//!   the log with anything to undo is refused. No fixture has one: every
+//!   transaction in each ends in a `ForgetTransaction` record.
 //!
 //! Every redo operation replayed here was checked against what Windows'
 //! own restart produced from the same pre-image (the `.recovered` images):
@@ -43,6 +44,18 @@
 //! * In an LFS 2.x log the newest pages are written to the tail-copy area
 //!   before their home, so a page is read from whichever valid copy -- home
 //!   or tail -- has the highest last LSN.
+//! * The log wraps from its last page to the first page of its record
+//!   area (the first page at its own home, after the tail-copy area), one
+//!   sequence number up: a record may run across the end, and the record
+//!   after the last page's last starts the new lap.
+//! * `DeallocateFileRecordSegment` clears the in-use flag and increments
+//!   the record's sequence number, skipping 0.
+//! * `DeleteIndexEntryAllocation` moves the entries after it down and
+//!   leaves the bytes past the block's new end as they were; the block's
+//!   update sequence array, which records the end of every sector, shows
+//!   it.
+//! * A log may grow `$MFT` and fill the records it adds, so the replay's
+//!   own `$MFT` -- not the one on disk before it -- says where they are.
 //!
 //! # Formats
 //!
@@ -240,12 +253,26 @@ fn remove(b: &mut [u8], at: usize, n: usize, used: usize) -> Result<(), Error> {
     Ok(())
 }
 
+/// [`remove`], leaving the `n` bytes before `used` as they were.
+fn shift_down(b: &mut [u8], at: usize, n: usize, used: usize) -> Result<(), Error> {
+    if at.checked_add(n).is_none_or(|e| e > used) || used > b.len() {
+        return Err(refuse(format!(
+            "a removal of {n} bytes at {at:#x} runs past the {used:#x} bytes in use"
+        )));
+    }
+    b.copy_within(at + n..used, at);
+    Ok(())
+}
+
 /// The log, read whole, with every valid copy of every record page.
 struct Log<'a> {
     bytes: &'a [u8],
     log_page: usize,
     seq_bits: u32,
     data_offset: usize,
+    /// The first page of the record area: where the log continues when it
+    /// wraps past its end, its sequence number one higher.
+    first_page: usize,
     /// Home page offset -> (last LSN, whether this copy sits at that
     /// offset, page with fixups undone), one per valid copy: the page
     /// itself and any tail copy of it.
@@ -318,13 +345,14 @@ impl Log<'_> {
         let mut data =
             page[within + RECORD_HEADER..(within + RECORD_HEADER + len).min(lps)].to_vec();
         let mut end = within + RECORD_HEADER + data.len();
+        // Whether the log wrapped between this record's start and the next.
+        let mut wrapped = false;
         while data.len() < len {
             home += lps;
             if home + lps > self.bytes.len() {
-                return Err(refuse(format!(
-                    "the record at LSN {lsn:#x} wraps past the log's end, which replay does \
-                     not follow yet"
-                )));
+                // The record continues on the record area's first page.
+                home = self.first_page;
+                wrapped = true;
             }
             let page = self.page(home, lsn)?;
             let take = (len - data.len()).min(lps - self.data_offset);
@@ -337,16 +365,20 @@ impl Log<'_> {
         if lps - next % lps < RECORD_HEADER {
             next = next - next % lps + lps;
         }
+        if next >= self.bytes.len() {
+            // Past the last page: the next record starts the record area's
+            // first page.
+            next = self.first_page;
+            wrapped = true;
+        }
         if next.is_multiple_of(lps) {
             next += self.data_offset;
         }
-        if next + RECORD_HEADER > self.bytes.len() {
-            return Err(refuse(format!(
-                "the record after LSN {lsn:#x} wraps past the log's end, which replay does \
-                 not follow yet"
-            )));
-        }
-        Ok((header, data, self.lsn(self.wrap(lsn), next)))
+        Ok((
+            header,
+            data,
+            self.lsn(self.wrap(lsn) + u64::from(wrapped), next),
+        ))
     }
 }
 
@@ -479,6 +511,7 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
         log_page: lps,
         seq_bits: ra.seq_bits,
         data_offset: ra.data_offset,
+        first_page: 0,
         copies: HashMap::new(),
         newest: 0,
     };
@@ -509,6 +542,7 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
         .map(|(at, _, _, _)| *at)
         .min()
         .unwrap_or(log.len());
+    l.first_page = record_area;
     for (at, home, last, page) in pages {
         if home != at && at < record_area {
             l.copies
@@ -936,8 +970,15 @@ fn redo_file_record(
             put(rec, 0, data)?;
         }
         DEALLOCATE_FILE_RECORD => {
+            // Out of use, and a new sequence number, so a reference to the
+            // file that was here no longer matches it; 0 is skipped.
             let flags = u16_at(rec, 0x16)?;
             put(rec, 0x16, &(flags & !1).to_le_bytes())?;
+            let sequence = match u16_at(rec, 0x10)?.wrapping_add(1) {
+                0 => 1,
+                s => s,
+            };
+            put(rec, 0x10, &sequence.to_le_bytes())?;
         }
         CREATE_ATTRIBUTE => {
             insert(rec, a, used, data)?;
@@ -1042,7 +1083,10 @@ fn redo_index_block(b: &mut [u8], op: u16, pos: usize, data: &[u8]) -> Result<()
         }
         DELETE_INDEX_ENTRY_ALLOCATION => {
             let len = u16_at(b, pos + 8)? as usize;
-            remove(b, pos, len, used)?;
+            // Windows moves the entries after it down and leaves the bytes
+            // past the new end as they were, and the block's update
+            // sequence array records them, so they are not zeroed here.
+            shift_down(b, pos, len, used)?;
             put_u32(b, HEADER + 4, (total - len) as u32)?;
         }
         WRITE_END_OF_INDEX_BUFFER => {
