@@ -34,7 +34,9 @@
 //! The semantics that were not obvious, each settled by that comparison:
 //!
 //! * `UpdateResidentValue` grows the value when the write runs past its
-//!   end; `CreateAttribute` advances the record's next attribute instance;
+//!   end, and shrinks it when a redo shorter than its undo replaces the
+//!   value's tail (`test-disks/windows-interrupted-index-vcn`, where a
+//!   directory's index root drops its child VCN); `CreateAttribute` advances the record's next attribute instance;
 //!   `UpdateMappingPairs` resizes the attribute and recomputes its highest
 //!   VCN from the new runs.
 //! * Records whose header carries flag `0x4` may hold less redo data than
@@ -50,6 +52,10 @@
 //!   after the last page's last starts the new lap.
 //! * `DeallocateFileRecordSegment` clears the in-use flag and increments
 //!   the record's sequence number, skipping 0.
+//! * `SetIndexEntryVcnAllocation` writes the child VCN into the last 8
+//!   bytes of the entry it names inside an index block, as
+//!   `SetIndexEntryVcnRoot` does in an index root
+//!   (`test-disks/windows-interrupted-index-vcn`).
 //! * `DeleteIndexEntryAllocation` moves the entries after it down and
 //!   leaves the bytes past the block's new end as they were; the block's
 //!   update sequence array, which records the end of every sector, shows
@@ -104,6 +110,7 @@ const ADD_INDEX_ENTRY_ALLOCATION: u16 = 0x0E;
 const DELETE_INDEX_ENTRY_ALLOCATION: u16 = 0x0F;
 const WRITE_END_OF_INDEX_BUFFER: u16 = 0x10;
 const SET_INDEX_ENTRY_VCN_ROOT: u16 = 0x11;
+const SET_INDEX_ENTRY_VCN_ALLOCATION: u16 = 0x12;
 const UPDATE_FILE_NAME_ROOT: u16 = 0x13;
 const UPDATE_FILE_NAME_ALLOCATION: u16 = 0x14;
 const SET_BITS_IN_NONRESIDENT_BITMAP: u16 = 0x15;
@@ -137,6 +144,7 @@ const ON_INDEX_BLOCK: &[u16] = &[
     ADD_INDEX_ENTRY_ALLOCATION,
     DELETE_INDEX_ENTRY_ALLOCATION,
     WRITE_END_OF_INDEX_BUFFER,
+    SET_INDEX_ENTRY_VCN_ALLOCATION,
     UPDATE_FILE_NAME_ALLOCATION,
 ];
 
@@ -881,7 +889,8 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
             )));
         }
         if magic == b"FILE" {
-            redo_file_record(&mut block.bytes, op, record_off, attr_off, &redo)
+            let undo_len = u16_at(data, 0x0A)? as usize;
+            redo_file_record(&mut block.bytes, op, record_off, attr_off, &redo, undo_len)
         } else {
             redo_index_block(&mut block.bytes, op, record_off + attr_off, &redo)
         }
@@ -939,13 +948,15 @@ fn redo_data(header: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 /// Redo one operation on an MFT record (fixups undone). `a` is the
-/// attribute's offset in the record, `off` the offset within it.
+/// attribute's offset in the record, `off` the offset within it;
+/// `undo_len` is the length of the bytes the redo replaces.
 fn redo_file_record(
     rec: &mut [u8],
     op: u16,
     a: usize,
     off: usize,
     data: &[u8],
+    undo_len: usize,
 ) -> Result<(), Error> {
     let used = u32_at(rec, 0x18)? as usize;
     if used > rec.len() && op != INITIALIZE_FILE_RECORD {
@@ -1000,6 +1011,18 @@ fn redo_file_record(
             );
             let end = off + data.len();
             if end > vo + vl {
+                let used = resize(rec, used, end.div_ceil(8) * 8)?;
+                put_u32(rec, a + 0x10, (end - vo) as u32)?;
+                set_used(rec, used)?;
+            } else if data.len() < undo_len {
+                // Fewer bytes in place of the value's tail: the value now
+                // ends where the redo does.
+                if off + undo_len != vo + vl {
+                    return Err(refuse(format!(
+                        "{} bytes in place of {undo_len} that do not end the value",
+                        data.len()
+                    )));
+                }
                 let used = resize(rec, used, end.div_ceil(8) * 8)?;
                 put_u32(rec, a + 0x10, (end - vo) as u32)?;
                 set_used(rec, used)?;
@@ -1093,6 +1116,17 @@ fn redo_index_block(b: &mut [u8], op: u16, pos: usize, data: &[u8]) -> Result<()
             put(b, pos, data)?;
             put_u32(b, HEADER + 4, (pos + data.len() - HEADER) as u32)?;
         }
+        SET_INDEX_ENTRY_VCN_ALLOCATION => {
+            // The child VCN is the entry's last 8 bytes, as in the root.
+            let entry_len = u16_at(b, pos + 8)? as usize;
+            if entry_len < 0x18 || data.len() != 8 {
+                return Err(refuse(format!(
+                    "a child VCN of {} bytes for a {entry_len}-byte index entry",
+                    data.len()
+                )));
+            }
+            put(b, pos + entry_len - 8, data)?;
+        }
         UPDATE_FILE_NAME_ALLOCATION => put(b, pos + 0x18, data)?,
         _ => unreachable!("only index-block operations reach here"),
     }
@@ -1141,6 +1175,33 @@ mod tests {
         assert_eq!(&b[..12], &[0, 0, 0, 0, 9, 9, 9, 9, 0, 0, 0, 0]);
         remove(&mut b, 4, 4, 12).unwrap();
         assert_eq!(b, vec![0u8; 16]);
+    }
+
+    #[test]
+    fn a_resident_value_shrinks_when_a_shorter_redo_replaces_its_tail() {
+        // A record holding one resident attribute at 0x38: 0x20 bytes of
+        // header and name, a 0x38-byte value, the end marker after it.
+        let mut rec = vec![0u8; 1024];
+        let a = 0x38;
+        rec[0x18..0x1C].copy_from_slice(&((a + 0x58 + 8) as u32).to_le_bytes());
+        rec[a..a + 4].copy_from_slice(&0x90u32.to_le_bytes());
+        rec[a + 4..a + 8].copy_from_slice(&0x58u32.to_le_bytes());
+        rec[a + 0x10..a + 0x14].copy_from_slice(&0x38u32.to_le_bytes());
+        rec[a + 0x14..a + 0x16].copy_from_slice(&0x20u16.to_le_bytes());
+        rec[a + 0x20..a + 0x58].fill(0xAA);
+        rec[a + 0x58..a + 0x5C].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        // Short of the value's end, a shorter redo is not understood.
+        let mut other = rec.clone();
+        assert!(
+            redo_file_record(&mut other, UPDATE_RESIDENT_VALUE, a, 0x30, &[1; 28], 36).is_err()
+        );
+        // 28 bytes in place of the last 36: the value loses 8.
+        redo_file_record(&mut rec, UPDATE_RESIDENT_VALUE, a, 0x34, &[1; 28], 36).unwrap();
+        assert_eq!(u32_at(&rec, a + 4).unwrap(), 0x50);
+        assert_eq!(u32_at(&rec, a + 0x10).unwrap(), 0x30);
+        assert_eq!(u32_at(&rec, 0x18).unwrap() as usize, a + 0x50 + 8);
+        assert_eq!(&rec[a + 0x34..a + 0x50], &[1; 28]);
+        assert_eq!(u32_at(&rec, a + 0x50).unwrap(), 0xFFFF_FFFF);
     }
 
     #[test]
