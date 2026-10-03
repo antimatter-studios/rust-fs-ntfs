@@ -45,6 +45,9 @@ function New-ChkdskModeResult {
         [AllowEmptyString()] [AllowNull()] [string]$Report = '',
         [int[]]$Accepted = @()
     )
+    if ($Mode -eq '/scan' -and $Exit -ne 0 -and (Test-ChkdskSnapshotFailure $Report)) {
+        return [ordered]@{ exit = $Exit; state = 'not-scanned'; reason = 'no volume snapshot, so the online scan did not run' }
+    }
     if ($Exit -eq 0) {
         return [ordered]@{ exit = $Exit; state = 'scanned'; reason = 'chkdsk found nothing to report' }
     }
