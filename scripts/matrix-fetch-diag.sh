@@ -128,6 +128,18 @@ elif shape == "repair-required":
         for mode, state in states.items()
         if mode not in required and state != "scanned"
     ]
+elif shape == "damaged":
+    # Windows has to find the damage in some pass, repair it with /F /X, and
+    # scan clean afterwards. Which pass finds it depends on the damage: /scan
+    # does not compare $MFTMirr with $MFT, so it is never required.
+    required = {"/F /X": "scanned", "/scan-post": "scanned"}
+    wrong = [
+        f"{mode}={states.get(mode, 'missing')} (expected {expected})"
+        for mode, expected in required.items()
+        if states.get(mode) != expected
+    ]
+    if not any(state == "failed" for mode, state in states.items() if mode not in required):
+        wrong.append("no pass found the damage")
 else:
     print(f"unknown: unsupported verdict shape {shape!r}")
     raise SystemExit
