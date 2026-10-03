@@ -1079,10 +1079,18 @@ fn creating_files_on_a_volume_windows_wrote_grows_its_mft_once_its_records_run_o
     fs.mkdir("/", "grown").expect("mkdir /grown");
     let mut want = BTreeMap::new();
     for i in 0..files {
+        // 32 files to a directory: 32 names fit one index block, so each
+        // directory stays one level deep and this grades $MFT's growth,
+        // not a deep index B-tree (#432).
+        let dir = format!("/grown/b{:03}", i / 32);
+        if i % 32 == 0 {
+            fs.mkdir("/grown", &dir["/grown/".len()..])
+                .unwrap_or_else(|e| panic!("mkdir {dir}: {e:?}"));
+        }
         let name = format!("f{i:04}.bin");
-        let path = format!("/grown/{name}");
+        let path = format!("{dir}/{name}");
         let record = fs
-            .create_file("/grown", &name)
+            .create_file(&dir, &name)
             .unwrap_or_else(|e| panic!("create {path} (file {i} of {files}): {e:?}"));
         let data: Vec<u8> = (0..300 + i).map(|b| (b * 31 + i) as u8).collect();
         fs.write_file_contents(&path, &data)

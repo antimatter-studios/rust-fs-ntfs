@@ -250,11 +250,18 @@ case "$step" in
         # Every record $MFT holds is used, then two growths of 64 more.
         # Each 32-file batch checks how far $MFT has come; the cap is far
         # past what that needs, so a $MFT that never grows fails here.
+        # Each batch has a directory of its own: 32 names fit one index
+        # block, so the directories stay one level deep and what is graded
+        # is $MFT's growth, not a deep index B-tree (rust-fs-ntfs#432).
         i=0
         while [ "$(records)" -le $((start + 64)) ]; do
             [ "$i" -lt 2048 ] || die "$i files written and \$MFT still holds $(records) records, $start at the start"
+            batch="$(printf '/grown/b%03d' $((i / 32)))"
+            run fs "$image" mkdir "$batch"
+            [ "$status" -eq 0 ] || die "fs.ntfs mkdir $batch exited $status: $(cat "$image.cli-err")"
+            printf 'dir\t%s\n' "$batch" >>"$image.manifest"
             for _ in $(seq 32); do
-                path="$(printf '/grown/f%04d.bin' "$i")"
+                path="$(printf '%s/f%04d.bin' "$batch" "$i")"
                 size=$((300 + i))
                 random "$work/data" "$size"
                 set +e
