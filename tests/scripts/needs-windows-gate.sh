@@ -15,7 +15,7 @@ fail=0
 git -C "$WORK" init -q -b main
 git -C "$WORK" config user.email test@example.invalid
 git -C "$WORK" config user.name test
-mkdir -p "$WORK/src" "$WORK/scripts" "$WORK/tests/scripts"
+mkdir -p "$WORK/src" "$WORK/scripts" "$WORK/tests/scripts/fixtures/chkdsk-verdict"
 cat > "$WORK/chores.yml" <<'YML'
 vars:
   FS_CORE_REF: v0.2.16
@@ -30,6 +30,7 @@ echo 'fn main() {}' > "$WORK/src/read.rs"
 echo '#!/bin/sh' > "$WORK/scripts/run-matrix.sh"
 echo '# x' > "$WORK/tests/scripts/chkdsk-verdict.ps1"
 echo '# x' > "$WORK/tests/scripts/other.ps1"
+echo '{}' > "$WORK/tests/scripts/fixtures/chkdsk-verdict/clean.json"
 git -C "$WORK" add -A
 git -C "$WORK" commit -q -m base
 base="$(git -C "$WORK" rev-parse HEAD)"
@@ -56,6 +57,9 @@ case_is true  "the VHD writer pin moves"    "sed -i.bak 's/IMG_VHD_REF: v0.3.0/I
 case_is false "an unrelated chores.yml line" "sed -i.bak 's/desc: build it/desc: build it all/' chores.yml && rm chores.yml.bak"
 case_is true  "the matrix wrapper"          "echo '# x' >> scripts/run-matrix.sh"
 case_is true  "the chkdsk verdict's test"   "echo '# y' >> tests/scripts/chkdsk-verdict.ps1"
+# The records chkdsk-verdict.ps1 pins the writer to (#430): a change to one
+# has to meet the Windows test that compares it.
+case_is true  "a chkdsk verdict record"     "echo '{ }' > tests/scripts/fixtures/chkdsk-verdict/clean.json"
 case_is false "another script test"         "echo '# y' >> tests/scripts/other.ps1"
 
 if [ "$fail" -gt 0 ]; then
