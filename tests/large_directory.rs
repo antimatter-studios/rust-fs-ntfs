@@ -92,12 +92,18 @@ fn list_subdir(img: &str, dir: &str) -> Vec<String> {
     names
 }
 
+/// More names than any directory here can take. The index B-tree now gains
+/// levels as it fills (#432), so the ceiling the fill tests meet is the
+/// directory's resident `$Bitmap:$I30`: 64 bits, one per 4 KiB index block,
+/// which is at most about 2400 of these names.
+const FILL_LIMIT: usize = 3000;
+
 /// Create files named `prefix{NNNN}` in `dir` until `create_file` errors,
 /// returning (count_created, the_error_string).
 fn fill_until_full(img: &str, dir: &str, prefix: &str) -> (usize, String) {
     let dir_path = format!("/{dir}");
     let mut created = 0usize;
-    for i in 0..1000 {
+    for i in 0..FILL_LIMIT {
         let name = format!("{prefix}{i:04}.txt");
         match write::create_file(Path::new(img), &dir_path, &name) {
             Ok(_) => created += 1,
@@ -116,7 +122,7 @@ fn subdir_fills_gracefully_at_capacity() {
     // Index growth now proceeds past the old one-leaf ceiling. A later
     // capacity limit (often the fixed-size MFT) must be a clean refusal.
     assert!(
-        (80..1000).contains(&created),
+        (80..FILL_LIMIT).contains(&created),
         "expected growth past two leaves before a capacity limit, got {created}"
     );
     assert!(
@@ -306,7 +312,7 @@ fn root_dir_fills_gracefully_at_capacity() {
     let img = fresh_vol("root_ceiling");
     let mut created = 0usize;
     let mut err = String::new();
-    for i in 0..1000 {
+    for i in 0..FILL_LIMIT {
         let name = format!("r_{i:04}.txt");
         match write::create_file(Path::new(&img), "/", &name) {
             Ok(_) => created += 1,

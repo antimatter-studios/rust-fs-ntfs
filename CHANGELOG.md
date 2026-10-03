@@ -50,6 +50,17 @@ written against 0.7.0, and `chore check:semver` refuses it otherwise.
   at the value's end shrinks the value, as when a directory's index root
   drops its child VCN.
 
+- **A directory keeps taking names after its index root fills** (#432).
+  Once a directory's index had split into index blocks, each leaf split
+  added a routing entry to the resident `$INDEX_ROOT`, and when the MFT
+  record could hold no more of them the next create failed with
+  "exceeds record capacity" — after about 119 names on a volume with
+  Windows' 1024-byte records. A full root now hands its entries down to a
+  new index block and keeps one entry routing there, and a full interior
+  index block splits like a leaf, so the index gains levels as NTFS's own
+  does. The ceiling is now the directory's resident `$Bitmap:$I30`, 64
+  index blocks.
+
 - **A `$LogFile` that wrapped is replayed** (#137). When the log's writer
   passed its last page and went on at the first page of its record area
   between the last checkpoint and the stop, the replay refused the log;

@@ -1975,6 +1975,34 @@
       ],
       "_notes": "Mac writes 80 sorted names, forcing a second split of the routed INDX leaf. Windows must enumerate and chkdsk the result."
     },
+    "mac-format-mac-split-index-root-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "ROOTSPLT",
+        "alloc_unit_size": 4096
+      },
+      "image": "nfs-mac-format-mac-split-index-root-win-chkdsk.img",
+      "recipe": [
+        { "op": "init-image" },
+        { "op": "mac-format" },
+        { "op": "mac-mkdir", "parent": "/", "basename": "grown" },
+        { "op": "mac-touch-many", "parent": "/grown", "prefix": "f_", "count": "1000" },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        { "op": "win-chkdsk", "modes": "readonly,/scan", "verdict_shape": "Clean", "keep_image": "true" },
+        {
+          "op": "win-enumerate",
+          "required_paths": "grown/f_0000.txt,grown/f_0500.txt,grown/f_0999.txt",
+          "keep_image": "false"
+        },
+        { "op": "win-assert-routed-names", "directory": "grown", "count": "1000" }
+      ],
+      "_notes": "Mac writes 1000 sorted names into one directory (#432). Its leaves split until the resident $INDEX_ROOT of the 4096-byte record cannot hold another routing entry (about 700 names), so the root hands its entries down to a new index block and the index gains a level. Windows must chkdsk the result clean and enumerate every name."
+    },
     "mac-format-mac-write-sparse-zeros-win-chkdsk": {
       "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {

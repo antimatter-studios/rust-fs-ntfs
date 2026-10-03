@@ -465,6 +465,36 @@ where
     Ok(())
 }
 
+/// Write a whole INDX block at `vcn` from clean (pre-fixup) bytes, applying
+/// the update sequence and splitting the transfer at data-run boundaries the
+/// way [`update_indx_block_io`] does. The mapping is checked in full before
+/// anything is written.
+pub(crate) fn write_indx_block_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    ia: &IndexAllocation,
+    vcn: u64,
+    clean: &[u8],
+) -> Result<(), Error> {
+    if clean.len() as u64 != ia.block_size {
+        return Err(Error::io(format!(
+            "an INDX block of {} bytes cannot be written as a {}-byte block",
+            clean.len(),
+            ia.block_size
+        )));
+    }
+    let chunks = map_indx_block(ia, vcn, io.size())?;
+    let mut block = clean.to_vec();
+    apply_fixup_on_write_magic(&mut block, ia.params.bytes_per_sector, b"INDX")?;
+    for chunk in &chunks {
+        io.write_all_at(
+            chunk.disk_offset,
+            &block[chunk.cursor..chunk.cursor + chunk.len],
+        )
+        .map_err(|e| format!("write indx: {e}"))?;
+    }
+    Ok(())
+}
+
 /// INDX block header offsets.
 pub const INDX_USA_OFFSET_FIELD: usize = 0x04;
 pub const INDX_USA_COUNT_FIELD: usize = 0x06;
