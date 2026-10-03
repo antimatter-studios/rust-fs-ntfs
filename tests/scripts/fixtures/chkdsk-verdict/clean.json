@@ -1,0 +1,1 @@
+{"passed":true,"verdict_shape":"clean","modes":{"readonly":{"exit":0,"state":"scanned","reason":"chkdsk found nothing to report"},"/scan":{"exit":0,"state":"scanned","reason":"chkdsk found nothing to report"}},"exits":{"readonly":0,"/scan":0}}

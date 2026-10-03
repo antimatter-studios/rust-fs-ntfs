@@ -48,11 +48,18 @@ chkdsk_says() {
         text="$(cat "$f")"
     fi
     text="$(printf '%s' "$text" | tr -d '\r')"
+    # A DEFINITE OUTCOME COMES BEFORE THE SNAPSHOT ARM (#429). chkdsk opens
+    # with "Insufficient storage available to create either the shadow copy
+    # storage file ..." when it cannot make a shadow copy, and then scans the
+    # live volume anyway; a report that did that and found errors was called
+    # not scanned, pointing the reader at Windows' shadow-copy service instead
+    # of at the corruption. Only the outcome line "A snapshot error occured
+    # while scanning this drive" (chkdsk's spelling) means nothing was scanned.
     case "$text" in
         *"found no problems"*)                         echo "no problems" ;;
-        *"snapshot error"*|*"shadow copy"*)            echo "NOT SCANNED (snapshot error)" ;;
         *"found problems"*|*"Errors found"*|*"errors found"*|*"corrupt"*) echo "PROBLEMS FOUND" ;;
         *"made corrections"*|*"fixed"*)                echo "REPAIRED (was not clean)" ;;
+        *"snapshot error occur"*)                      echo "NOT SCANNED (snapshot error)" ;;
         '')                                            echo "empty report" ;;
         *)                                             echo "unrecognised: $(printf '%s' "$text" | grep -v '^\s*$' | tail -n 1 | cut -c1-60)" ;;
     esac
