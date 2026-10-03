@@ -75,7 +75,8 @@ jq_check "read of a symlink is refused, naming its target" '.code == 1 and (.err
 # dismounted: its checks must not call a healthy Windows volume damaged.
 for f in ntfs-cli-read.img ntfs-compressed.img ntfs-symlink.img ntfs-attrlist.img; do
     fsck.ntfs "$fixtures/$f" >"$SANDBOX/fsck.json" 2>"$SANDBOX/fsck.err"
-    check "fsck.ntfs on Windows' $f exits 0 ($(cat "$SANDBOX/fsck.err"))" test $? -eq 0
+    status=$?
+    check "fsck.ntfs on Windows' $f exits 0 ($(cat "$SANDBOX/fsck.err"))" test "$status" -eq 0
     jq_check "fsck.ntfs on Windows' $f reports clean and read every in-use record" \
         '.clean == true and .found == 0 and .scanned.mft_records > 16' "$SANDBOX/fsck.json"
 done

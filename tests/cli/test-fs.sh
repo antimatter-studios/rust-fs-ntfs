@@ -12,7 +12,8 @@ check "mkfs.ntfs made the image" test -s "$img"
 # root ($MFT, $LogFile, ...: records 0 to 15); `ls` leaves them out, as
 # Windows does, and `--all` shows them.
 fs.ntfs "$img" ls / >"$SANDBOX/ls.json" 2>"$SANDBOX/ls.err"
-check "ls / exits 0 ($(cat "$SANDBOX/ls.err"))" test $? -eq 0
+status=$?
+check "ls / exits 0 ($(cat "$SANDBOX/ls.err"))" test "$status" -eq 0
 jq_check "ls / of a fresh volume is an empty array" '. == []' "$SANDBOX/ls.json"
 fs.ntfs "$img" ls --text / >"$SANDBOX/ls.txt" 2>/dev/null
 check "ls --text / of a fresh volume prints nothing" test ! -s "$SANDBOX/ls.txt"
