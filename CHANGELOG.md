@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Breaking
+
+The next release is **0.8.0**, not 0.7.1: the change below breaks code
+written against 0.7.0, and `chore check:semver` refuses it otherwise.
+
+- **`mft_bitmap::MftBitmap` has a new public field, `records`** (#415):
+  how many records `$MFT`'s `$DATA` holds. A struct literal naming every
+  field no longer compiles. Free-record search and counting stop at
+  `MftBitmap::record_limit()`, the smaller of that and the bitmap's
+  length, because Windows sizes `$MFT:$Bitmap` far ahead of `$MFT`.
+  `fs.ntfs info`'s `mft_total_records` reports the same limit, so it
+  moves when `$MFT` grows and agrees with `mft_free_records`.
+
 ### Changed
 
 - **The release tarball is packaged by rust-fs-core's `release-cli`
