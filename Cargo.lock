@@ -13,9 +13,9 @@ dependencies = [
 
 [[package]]
 name = "am-fs-core"
-version = "0.2.18"
+version = "0.2.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "daaa231cdba3f45a4e5340bb40d70d9aeae14d133566827f2773acef2ceda13a"
+checksum = "e863635b901379df89efa7df22469d3d51963b7bbd9bca124d7552cfe8e04bc1"
 dependencies = [
  "clap",
  "clap_complete",
