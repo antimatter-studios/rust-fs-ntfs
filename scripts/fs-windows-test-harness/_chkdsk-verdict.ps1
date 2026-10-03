@@ -30,9 +30,14 @@
 # scanned / not-scanned / failed, which is what scripts/matrix-fetch-diag.sh
 # reads. `exits` keeps the bare exit codes beside it.
 
+# The outcome line, not the warning (#429). chkdsk also prints "Insufficient
+# storage available to create either the shadow copy storage file ..." as a
+# warning before falling back to the live volume, and a pass that did that and
+# found errors scanned. Only "A snapshot error occured while scanning this
+# drive" (chkdsk's spelling) says the scan did not run.
 function Test-ChkdskSnapshotFailure {
     param([AllowEmptyString()] [AllowNull()] [string]$Report)
-    return [bool]($Report -match '(?i)snapshot\s+error|shadow\s+copy')
+    return [bool]($Report -match '(?i)snapshot\s+error\s+occur')
 }
 
 # One pass, as a record. $Accepted are the non-zero exits this verdict shape
