@@ -22,6 +22,10 @@
   entry's last 8 bytes, as `SetIndexEntryVcnRoot` does in the root. A
   volume Windows left mid-write with such a log, new in `test-disks/`,
   replays to exactly what Windows' own restart produced from it.
+  That volume also settled one more redo semantic: an
+  `UpdateResidentValue` whose redo is shorter than the bytes it replaces
+  at the value's end shrinks the value, as when a directory's index root
+  drops its child VCN.
 
 - **A `$LogFile` that wrapped is replayed** (#137). When the log's writer
   passed its last page and went on at the first page of its record area
