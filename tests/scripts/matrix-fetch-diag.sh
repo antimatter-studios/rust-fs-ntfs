@@ -95,6 +95,15 @@ check_verdict clean-match \
 check_verdict dirty-match \
     '{"passed":true,"verdict_shape":"repair-required","modes":{"readonly":{"exit":0,"state":"scanned","reason":"ok"},"/scan":{"exit":3,"state":"failed","reason":"dirty"},"/F /X":{"exit":0,"state":"scanned","reason":"fixed"},"/scan-post":{"exit":0,"state":"scanned","reason":"clean"}}}' \
     'match'
+check_verdict damaged-match \
+    '{"passed":true,"verdict_shape":"damaged","modes":{"readonly":{"exit":3,"state":"failed","reason":"mirror"},"/scan":{"exit":0,"state":"scanned","reason":"ok"},"/F /X":{"exit":1,"state":"scanned","reason":"fixed"},"/scan-post":{"exit":0,"state":"scanned","reason":"clean"}}}' \
+    'match'
+check_verdict damaged-not-found \
+    '{"passed":true,"verdict_shape":"damaged","modes":{"readonly":{"exit":0,"state":"scanned","reason":"ok"},"/F /X":{"exit":0,"state":"scanned","reason":"ok"},"/scan-post":{"exit":0,"state":"scanned","reason":"clean"}}}' \
+    'mismatch: no pass found the damage'
+check_verdict damaged-post-scan-not-scanned-visible \
+    '{"passed":true,"verdict_shape":"damaged","modes":{"readonly":{"exit":3,"state":"failed","reason":"mirror"},"/F /X":{"exit":1,"state":"scanned","reason":"fixed"},"/scan-post":{"exit":10,"state":"not-scanned","reason":"snapshot"},"/scan-post-offline-fallback":{"exit":0,"state":"scanned","reason":"fallback"}}}' \
+    'not-scanned: /scan-post'
 check_verdict clean-mismatch \
     '{"passed":true,"verdict_shape":"clean","modes":{"/scan":{"exit":3,"state":"failed","reason":"errors"}}}' \
     'mismatch: /scan=failed'

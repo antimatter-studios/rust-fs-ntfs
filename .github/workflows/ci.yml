@@ -822,6 +822,16 @@ jobs:
             -Value "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
             -PropertyType String -Force | Out-Null
           Restart-Service sshd
+      # What a set of chkdsk passes means, driven with chkdsk's real reports
+      # and no VM (#419). Both shells: the matrix runs win-chkdsk.ps1 under
+      # Windows PowerShell 5.1 over SSH, a developer runs the test under pwsh.
+      - name: Test the chkdsk verdict
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tests/scripts/chkdsk-verdict.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/scripts/chkdsk-verdict.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build rust-ntfs (Windows)
         run: cargo build --release --locked --bin rust-ntfs
       - name: Validate rmdir matrix scenarios

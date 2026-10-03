@@ -15,7 +15,7 @@ fail=0
 git -C "$WORK" init -q -b main
 git -C "$WORK" config user.email test@example.invalid
 git -C "$WORK" config user.name test
-mkdir -p "$WORK/src" "$WORK/scripts"
+mkdir -p "$WORK/src" "$WORK/scripts" "$WORK/tests/scripts"
 cat > "$WORK/chores.yml" <<'YML'
 vars:
   FS_CORE_REF: v0.2.16
@@ -28,6 +28,8 @@ YML
 echo 'fn main() {}' > "$WORK/src/mkfs.rs"
 echo 'fn main() {}' > "$WORK/src/read.rs"
 echo '#!/bin/sh' > "$WORK/scripts/run-matrix.sh"
+echo '# x' > "$WORK/tests/scripts/chkdsk-verdict.ps1"
+echo '# x' > "$WORK/tests/scripts/other.ps1"
 git -C "$WORK" add -A
 git -C "$WORK" commit -q -m base
 base="$(git -C "$WORK" rev-parse HEAD)"
@@ -53,6 +55,8 @@ case_is true  "the harness pin moves"       "sed -i.bak 's/HARNESS_REF: v4.2.0/H
 case_is true  "the VHD writer pin moves"    "sed -i.bak 's/IMG_VHD_REF: v0.3.0/IMG_VHD_REF: v0.3.1/' chores.yml && rm chores.yml.bak"
 case_is false "an unrelated chores.yml line" "sed -i.bak 's/desc: build it/desc: build it all/' chores.yml && rm chores.yml.bak"
 case_is true  "the matrix wrapper"          "echo '# x' >> scripts/run-matrix.sh"
+case_is true  "the chkdsk verdict's test"   "echo '# y' >> tests/scripts/chkdsk-verdict.ps1"
+case_is false "another script test"         "echo '# y' >> tests/scripts/other.ps1"
 
 if [ "$fail" -gt 0 ]; then
     echo "needs-windows-gate: $fail of $((pass + fail)) failed"

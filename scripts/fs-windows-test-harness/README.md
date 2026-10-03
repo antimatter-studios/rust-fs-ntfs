@@ -11,6 +11,9 @@ collection use the copies at `{vm.workdir}/scripts/fs-windows-test-harness/`.
 - `_lib.ps1` — VHD mount/dismount helpers, drive-letter mutex
   (`Acquire-DriveLock` / `Release-DriveLock`). Dot-sourced by every
   op script.
+- `_chkdsk-verdict.ps1` — what a set of chkdsk passes says about a volume,
+  including a `/scan` that could not take its snapshot. Dot-sourced by
+  `win-chkdsk.ps1`; tested with no VM by `tests/scripts/chkdsk-verdict.ps1`.
 
 ### Test operation scripts
 Invoked per scenario step by the harness runner (via SSH). Each maps
