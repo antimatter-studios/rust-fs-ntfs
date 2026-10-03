@@ -27,6 +27,16 @@ written against 0.7.0, and `chore check:semver` refuses it otherwise.
 
 ### Fixed
 
+- **`format_filesystem` formats volumes with 1024-byte MFT records**
+  (#436), the size Windows formats with. The root directory's twelve
+  system entries do not fit a resident `$INDEX_ROOT` in a record that
+  small, so the format was refused with "system record 5 too small".
+  When they do not fit, the root now carries one LAST entry routing to an
+  `INDX` block at VCN 0 that holds them, with `$INDEX_ALLOCATION:$I30`
+  and `$BITMAP:$I30` beside it and the block's clusters allocated in
+  `$Bitmap`, as Windows lays it out. Records that hold the resident root,
+  4096 bytes included, are formatted exactly as before.
+
 - **A `$LogFile` holding `SetIndexEntryVcnAllocation` redo is replayed**
   (#137). The operation points an entry inside an index block at another
   child block; replay refused any log holding one, which was the first
