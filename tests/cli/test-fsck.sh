@@ -17,7 +17,8 @@ check "mkfs.ntfs made the image" test -s "$img"
 for flags in "" "-n" "-fn" "-y" "-p"; do
     # shellcheck disable=SC2086  # the words are the point
     fsck.ntfs $flags "$img" >"$SANDBOX/fsck.json" 2>"$SANDBOX/fsck.err"
-    check "fsck.ntfs $flags on a fresh image exits 0 ($(cat "$SANDBOX/fsck.err"))" test $? -eq 0
+    status=$?
+    check "fsck.ntfs $flags on a fresh image exits 0 ($(cat "$SANDBOX/fsck.err"))" test "$status" -eq 0
     jq_check "fsck.ntfs $flags reports clean" \
         '.fs == "ntfs" and .clean == true and .dirty == false and .exit == 0 and .found == 0 and (.findings | length) == 0' \
         "$SANDBOX/fsck.json"
@@ -35,7 +36,8 @@ check "rust-fs-ntfs fsck is the same program" test "$(rust-fs-ntfs fsck --text "
 # hold transactions is still refused; tests/logfile_state.rs and the unit
 # tests in src/fsck.rs make one. `set dirty false` is the explicit override.
 fs.ntfs "$img" set dirty true >"$SANDBOX/set.json" 2>"$SANDBOX/set.err"
-check "set dirty true exits 0 ($(cat "$SANDBOX/set.err"))" test $? -eq 0
+status=$?
+check "set dirty true exits 0 ($(cat "$SANDBOX/set.err"))" test "$status" -eq 0
 jq_check "set dirty true reports the new value" '.dirty == true' "$SANDBOX/set.json"
 check "get dirty is true" test "$(fs.ntfs "$img" get dirty --text)" = true
 fsck.ntfs "$img" >"$SANDBOX/dirty.json" 2>/dev/null

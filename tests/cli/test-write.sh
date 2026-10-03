@@ -16,7 +16,8 @@ mkfs.ntfs -q --text --size 64M --label CLITEST "$img" >/dev/null 2>&1
 check "mkfs.ntfs made the image" test -s "$img"
 
 fs.ntfs "$img" mkdir /d >"$SANDBOX/mkdir.json" 2>"$SANDBOX/mkdir.err"
-check "mkdir /d exits 0 ($(cat "$SANDBOX/mkdir.err"))" test $? -eq 0
+status=$?
+check "mkdir /d exits 0 ($(cat "$SANDBOX/mkdir.err"))" test "$status" -eq 0
 jq_check "mkdir reports the path and a numeric record" '.path == "/d" and (.record | type) == "number"' "$SANDBOX/mkdir.json"
 fs.ntfs "$img" mkdir /d/e >/dev/null 2>&1
 check "mkdir /d/e exits 0" test $? -eq 0
@@ -25,7 +26,8 @@ check "mkdir /d/e exits 0" test $? -eq 0
 for size in 0 1 500 4096 4097 1048576; do
     random "$SANDBOX/src.$size" "$size"
     fs.ntfs "$img" write "/f$size" <"$SANDBOX/src.$size" >"$SANDBOX/w.json" 2>"$SANDBOX/w.err"
-    check "write /f$size exits 0 ($(cat "$SANDBOX/w.err"))" test $? -eq 0
+    status=$?
+    check "write /f$size exits 0 ($(cat "$SANDBOX/w.err"))" test "$status" -eq 0
     jq_check "write /f$size reports $size bytes, created" ".bytes == $size and .created == true" "$SANDBOX/w.json"
     fs.ntfs "$img" read "/f$size" >"$SANDBOX/back.$size" 2>/dev/null
     check "read /f$size matches what was written" cmp -s "$SANDBOX/src.$size" "$SANDBOX/back.$size"
@@ -40,7 +42,8 @@ check "read /d/e/deep matches" cmp -s "$SANDBOX/deep" <(fs.ntfs "$img" read /d/e
 for pair in "4097 1" "1048576 500" "1 4097" "4096 1048576" "500 0" "0 4096"; do
     set -- $pair
     fs.ntfs "$img" write "/f$1" <"$SANDBOX/src.$2" >"$SANDBOX/r.json" 2>"$SANDBOX/r.err"
-    check "replace /f$1 by $2 bytes exits 0 ($(cat "$SANDBOX/r.err"))" test $? -eq 0
+    status=$?
+    check "replace /f$1 by $2 bytes exits 0 ($(cat "$SANDBOX/r.err"))" test "$status" -eq 0
     jq_check "replacing /f$1 reports $2 bytes, not created" ".bytes == $2 and .created == false" "$SANDBOX/r.json"
     check "read /f$1 is the $2-byte content" cmp -s "$SANDBOX/src.$2" <(fs.ntfs "$img" read "/f$1")
 done
@@ -59,7 +62,8 @@ jq_check "ls /d shows e as a directory" '[.[] | select(.name == "e" and .type ==
 # The label: a space survives (the case text output breaks), the 32-unit
 # limit is enforced before anything is written, and "" removes it.
 fs.ntfs "$img" set label "Backup Volume" >"$SANDBOX/label.json" 2>"$SANDBOX/label.err"
-check "set label 'Backup Volume' exits 0 ($(cat "$SANDBOX/label.err"))" test $? -eq 0
+status=$?
+check "set label 'Backup Volume' exits 0 ($(cat "$SANDBOX/label.err"))" test "$status" -eq 0
 check "get label --text is 'Backup Volume'" test "$(fs.ntfs "$img" get label --text)" = "Backup Volume"
 cp "$img" "$SANDBOX/label-before.img"
 fs.ntfs "$img" set label "$(printf 'x%.0s' $(seq 33))" >/dev/null 2>"$SANDBOX/long.err"
