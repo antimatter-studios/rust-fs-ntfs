@@ -23,6 +23,10 @@
 //!   the recovered copy, as Windows listed it: path, size, and Windows' own
 //!   `Get-FileHash` SHA-256.
 //!
+//! * `windows-interrupted-wrap-{span,boundary,mft-grows}*`: the same three
+//!   files for three later captures whose `$LogFile` wrapped between the
+//!   last checkpoint and the snapshot. See [`WRAPPED_LOG_END`].
+//!
 //! Every partition's SHA-256 is in [`PARTITIONS`] and checked on unpacking.
 //!
 //! WHAT WINDOWS' REPLAY CHANGED, read by ntfs-3g without replaying: on
@@ -56,7 +60,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 /// The SHA-256 of each decompressed partition, as captured.
-const PARTITIONS: [(&str, &str); 4] = [
+const PARTITIONS: [(&str, &str); 10] = [
     (
         "windows-interrupted-1",
         "7236ffe64f5532b6f5cd976c1fa81c66e6be6cd31cfb8c22bc0bb588e8fad54f",
@@ -72,6 +76,30 @@ const PARTITIONS: [(&str, &str); 4] = [
     (
         "windows-interrupted-6.recovered",
         "b6f8928649ec6239ac3e6fb40646c9bcd7128dca033a2da14d761a2f90fdc797",
+    ),
+    (
+        "windows-interrupted-wrap-span",
+        "589c38c13024a1404379c62441cb5f3d5fe6fb8f2432ab71ae8f682bcc98c600",
+    ),
+    (
+        "windows-interrupted-wrap-span.recovered",
+        "d9a60e5fe56a03951e9fb2b739155f73bd45767da5f3eb016028486bd1952d41",
+    ),
+    (
+        "windows-interrupted-wrap-boundary",
+        "c787d580c09d56dccd74a0de0ee05fbb2124cabfbe6dac56039b2eb870403480",
+    ),
+    (
+        "windows-interrupted-wrap-boundary.recovered",
+        "e5c6bf187a7241a9094562ec8d8ac5a514e72e8b1a80240e8c3d99e532336676",
+    ),
+    (
+        "windows-interrupted-wrap-mft-grows",
+        "141da94cd9d750f78a62396b1c776592aa7cd493d7ad3f6a0635643e14e183a2",
+    ),
+    (
+        "windows-interrupted-wrap-mft-grows.recovered",
+        "4159123653da5b98eb16774db10b01626c2106a8ba54e5511ac99b3de0047a59",
     ),
 ];
 
@@ -110,7 +138,7 @@ fn unpack(name: &str) -> String {
 }
 
 /// Windows' manifest: path -> (size, SHA-256).
-fn manifest(k: u32) -> BTreeMap<String, (u64, String)> {
+fn manifest(k: &str) -> BTreeMap<String, (u64, String)> {
     let path = format!("test-disks/windows-interrupted-{k}.recovered.manifest");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     text.lines()
@@ -169,7 +197,7 @@ fn ntfs3g(args: &[&str]) -> (bool, String) {
 
 #[test]
 fn the_logs_windows_left_mid_write_are_read_as_holding_work() {
-    for k in [1, 6] {
+    for k in ["1", "6"] {
         let img = unpack(&format!("windows-interrupted-{k}"));
         let mut io = fs_ntfs::block_io::PathIo::open_ro(std::path::Path::new(&img)).unwrap();
         let state = fsck::logfile_state_io(&mut io).expect("read $LogFile");
@@ -180,7 +208,7 @@ fn the_logs_windows_left_mid_write_are_read_as_holding_work() {
         // snapshot 1 it gets no further than `$Secure`, which Windows had
         // logged but not yet written home.
         let (ok, err) = ntfs3g(&["ntfs-3g.probe", "--readwrite", &img]);
-        let why = if k == 1 {
+        let why = if k == "1" {
             "Failed to open $Secure"
         } else {
             "unclean"
@@ -196,12 +224,34 @@ fn the_logs_windows_left_mid_write_are_read_as_holding_work() {
 /// independent reader written for #137 (not this crate's): the newest
 /// `last_end_lsn` of any record page whose update sequence checks out,
 /// tail copies included.
-const LOG_END: [(u32, u64); 2] = [(1, 0x11_d767), (6, 0x2b_48b3)];
+const LOG_END: [(&str, u64); 2] = [("1", 0x11_d767), ("6", 0x2b_48b3)];
+
+/// Volumes whose `$LogFile` wrapped -- the writer passed its last page and
+/// went on at the first page of its record area, one sequence number up --
+/// between the last checkpoint and the capture, so a replay must follow it
+/// across the end (#137). Made by `.github/workflows/logfile-oracle.yml`
+/// with the same capture, and recovered by Windows the same way, as the
+/// two snapshots above; each last LSN read by the same independent reader:
+///
+/// * `wrap-span` (run 37077649836, one writer for 240 s, snapshot 2): a
+///   record starts on the log's last page and ends on the record area's
+///   first.
+/// * `wrap-boundary` (same run, snapshot 5): a record ends at the last
+///   page, and the next starts the new lap.
+/// * `wrap-mft-grows` (run 37077643885, eight writers for 60 s, snapshot
+///   3): a record spans the end, and the log also grows `$MFT` and fills
+///   the records it adds, so the records it names are where `$MFT` has
+///   them only once the replay is written.
+const WRAPPED_LOG_END: [(&str, u64); 3] = [
+    ("wrap-span", 0x21_4840),
+    ("wrap-boundary", 0x50_c32d),
+    ("wrap-mft-grows", 0x52_13e3),
+];
 
 /// Where, in each pre-image, a `$LogFile` record page the replay needs
 /// sits: inside the walk from the oldest dirty page to the log's end, and
 /// in no tail copy.
-const NEEDED_LOG_PAGE: [(u32, u64); 2] = [(1, 0x8_0000), (6, 0x10_0000)];
+const NEEDED_LOG_PAGE: [(&str, u64); 2] = [("1", 0x8_0000), ("6", 0x10_0000)];
 
 #[test]
 fn fsck_refuses_a_log_it_cannot_read_to_the_end_and_writes_nothing() {
@@ -270,11 +320,66 @@ fn fsck_replays_a_volume_windows_left_mid_write_to_what_windows_recovered() {
     }
 }
 
+#[test]
+fn a_log_that_wrapped_is_replayed_across_its_end_to_what_windows_recovered() {
+    // The writer reached the log's last page and went on at the first page
+    // of its record area between the checkpoint and the capture. Windows'
+    // restart follows it there; so must fsck, and so must a read-write
+    // mount, or the newest committed work is lost (#137).
+    for (k, log_end) in WRAPPED_LOG_END {
+        let pre_img = unpack(&format!("windows-interrupted-{k}"));
+        let mut io = fs_ntfs::block_io::PathIo::open_ro(std::path::Path::new(&pre_img)).unwrap();
+        let state = fsck::logfile_state_io(&mut io).expect("read $LogFile");
+        assert!(state.needs_replay(), "{k}: {state:?}");
+        drop(io);
+        let pre = Image::read(&pre_img);
+        let win = Image::read(&unpack(&format!("windows-interrupted-{k}.recovered")));
+        let want = manifest(k);
+        assert!(want.len() > 500, "{k}: the manifest lost its lines");
+
+        let replay: [(&str, Mount); 2] = [
+            ("fsck", |img| {
+                fsck::fsck(img).map(|_| ()).map_err(|e| e.to_string())
+            }),
+            ("Filesystem::mount_rw", RW_MOUNTS[0].1),
+        ];
+        for (how, run) in replay {
+            let img = unpack(&format!("windows-interrupted-{k}"));
+            run(&img).unwrap_or_else(|e| panic!("{k}: {how}: {e}"));
+            let got = walk(&img);
+            let missing: Vec<_> = want
+                .keys()
+                .filter(|p| !got.contains_key(*p))
+                .take(5)
+                .collect();
+            let differ: Vec<_> = want
+                .iter()
+                .filter(|(p, v)| got.get(*p).is_some_and(|g| g != *v))
+                .take(5)
+                .collect();
+            assert!(
+                got == want,
+                "{k}: {how}: {} files after replay, {} in Windows' manifest; missing \
+                 {missing:?}, differing {differ:?}",
+                got.len(),
+                want.len()
+            );
+            let mut io = fs_ntfs::block_io::PathIo::open_ro(std::path::Path::new(&img)).unwrap();
+            let state = fsck::logfile_state_io(&mut io).expect("read $LogFile");
+            assert!(!state.needs_replay(), "{k}: {how} left {state:?}");
+            drop(io);
+            oracle::same_metadata_as_windows(k, &pre, &Image::read(&img), &win, log_end);
+            std::fs::remove_file(&img).unwrap();
+        }
+    }
+}
+
 /// Every way this crate opens a volume for writing, each over an image
 /// path: `Ok` once it mounted (and unmounted again), or the reason it
 /// refused.
-#[allow(clippy::type_complexity)]
-const RW_MOUNTS: [(&str, fn(&str) -> Result<(), String>); 4] = [
+type Mount = fn(&str) -> Result<(), String>;
+
+const RW_MOUNTS: [(&str, Mount); 4] = [
     ("Filesystem::mount_rw", |img| {
         Filesystem::mount_rw(img).map(|_| ()).map_err(|e| e.0)
     }),
@@ -389,7 +494,7 @@ fn a_read_only_mount_of_a_volume_windows_left_mid_write_replays_nothing() {
     // A read-only mount reads the metadata as it is on disk, a little
     // behind the log, and writes nothing -- what every other driver here
     // does with a volume it is not allowed to change.
-    for k in [1, 6] {
+    for k in ["1", "6"] {
         let img = unpack(&format!("windows-interrupted-{k}"));
         let before = std::fs::read(&img).unwrap();
 
@@ -444,7 +549,7 @@ fn a_dirty_volume_is_refused_before_its_log_is_replayed() {
     // The dirty flag asks for a check of the whole volume, which a replay
     // is not. A read-write mount refuses it as before, and does not replay
     // first: nothing is written to a volume the mount then declines.
-    for k in [1, 6] {
+    for k in ["1", "6"] {
         for (name, rw_mount) in RW_MOUNTS {
             let img = unpack(&format!("windows-interrupted-{k}"));
             fsck::set_dirty(&img).expect("mark dirty");
@@ -473,7 +578,8 @@ fn last_error() -> String {
 
 #[test]
 fn what_windows_recovered_reads_here_as_windows_lists_it() {
-    for k in [1, 6] {
+    let wrapped = WRAPPED_LOG_END.map(|(k, _)| k);
+    for k in ["1", "6"].into_iter().chain(wrapped) {
         let img = unpack(&format!("windows-interrupted-{k}.recovered"));
         let want = manifest(k);
         assert!(
@@ -522,7 +628,7 @@ fn windows_replay_changed_what_the_volumes_hold() {
     );
 
     let img = unpack("windows-interrupted-6");
-    let want: std::collections::BTreeSet<String> = manifest(6).into_keys().collect();
+    let want: std::collections::BTreeSet<String> = manifest("6").into_keys().collect();
     let mut seen = std::collections::BTreeSet::new();
     for dir in 0..64 {
         let out = Command::new("ntfsls")
@@ -543,6 +649,28 @@ fn windows_replay_changed_what_the_volumes_hold() {
         "Windows' replay should both remove and add names on snapshot 6 \
          (removed {gone}, added {appeared})"
     );
+}
+
+/// How much each fixture's comparison must have to compare, so a
+/// comparison that has lost its subject fails rather than passing on
+/// nothing: MFT records Windows' replay changed, index blocks compared,
+/// and `$Bitmap` bits the replay set as Windows did. Measured, 2026-10-03:
+///
+/// | fixture        | records | blocks | bits  |
+/// |----------------|---------|--------|-------|
+/// | 1              | 247     | 3      | 2,990 |
+/// | 6              | 206     | 67     | 2,607 |
+/// | wrap-span      | 210     | 67     | 954   |
+/// | wrap-boundary  | 147     | 131    | 439   |
+/// | wrap-mft-grows | 516     | 212    | 1,493 |
+fn floors(k: &str) -> (usize, usize, usize) {
+    match k {
+        "1" | "6" => (150, 3, 1000),
+        "wrap-span" => (150, 50, 800),
+        "wrap-boundary" => (100, 100, 350),
+        "wrap-mft-grows" => (400, 150, 1200),
+        other => panic!("no floors measured for fixture {other}"),
+    }
 }
 
 /// A raw reading of an NTFS image, written for this comparison from
@@ -632,15 +760,22 @@ impl Image {
 
     /// Record `n` as stored, before fixups.
     fn raw_record(&self, n: u64) -> &[u8] {
+        self.raw_record_if_mapped(n)
+            .unwrap_or_else(|| panic!("record {n} is past $MFT"))
+    }
+
+    /// Record `n` as stored, or `None` past this image's `$MFT`: a record
+    /// the log adds after growing `$MFT` has no place before the replay.
+    fn raw_record_if_mapped(&self, n: u64) -> Option<&[u8]> {
         let mut off = n * self.record;
         for &(lcn, len) in &self.mft_runs {
             if off < len * self.cluster {
                 let at = (lcn * self.cluster + off) as usize;
-                return &self.bytes[at..at + self.record as usize];
+                return Some(&self.bytes[at..at + self.record as usize]);
             }
             off -= len * self.cluster;
         }
-        panic!("record {n} is past $MFT");
+        None
     }
 
     fn record(&self, n: u64) -> Option<Vec<u8>> {
@@ -749,7 +884,8 @@ mod oracle {
         out
     }
 
-    pub fn same_metadata_as_windows(k: u32, pre: &Image, ours: &Image, win: &Image, log_end: u64) {
+    pub fn same_metadata_as_windows(k: &str, pre: &Image, ours: &Image, win: &Image, log_end: u64) {
+        let (min_records, min_blocks, min_bits) = super::floors(k);
         let after = windows_after_recovery(win, log_end);
 
         // Every MFT record, as content.
@@ -760,7 +896,11 @@ mod oracle {
                 continue;
             }
             let w = content(win.raw_record(n), b"FILE");
-            if content(pre.raw_record(n), b"FILE") != w {
+            if pre
+                .raw_record_if_mapped(n)
+                .and_then(|r| content(r, b"FILE"))
+                != w
+            {
                 replayed += 1;
             }
             if content(ours.raw_record(n), b"FILE") != w {
@@ -774,7 +914,7 @@ mod oracle {
             &differ[..differ.len().min(20)]
         );
         assert!(
-            replayed > 150,
+            replayed > min_records,
             "snapshot {k}: Windows' replay changed only {replayed} records; the comparison \
              has lost its subject"
         );
@@ -807,7 +947,7 @@ mod oracle {
             }
         }
         assert!(
-            blocks >= 3,
+            blocks >= min_blocks,
             "snapshot {k}: only {blocks} index blocks compared"
         );
 
@@ -852,7 +992,7 @@ mod oracle {
             }
         }
         assert!(
-            changed > 1000,
+            changed > min_bits,
             "snapshot {k}: replay matched only {changed} $Bitmap bits Windows changed"
         );
     }
