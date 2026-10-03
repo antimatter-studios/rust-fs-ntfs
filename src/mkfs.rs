@@ -17,7 +17,7 @@
 use crate::block_io::BlockIo;
 use crate::data_runs::{encode_runs, DataRun};
 use crate::error::Error;
-use crate::mft_io::apply_fixup_on_write;
+use crate::mft_io::{apply_fixup_on_write, apply_fixup_on_write_magic};
 use crate::record_build::{
     align8, build_nonresident_attribute, build_nonresident_data_attribute,
     build_sparse_nonresident_data_attribute, encode_file_reference, nt_time_now, FA_ARCHIVE,
@@ -48,6 +48,8 @@ const ATTR_VOLUME_NAME: u32 = 0x60;
 const ATTR_VOLUME_INFORMATION: u32 = 0x70;
 const ATTR_DATA: u32 = 0x80;
 const ATTR_INDEX_ROOT: u32 = 0x90;
+const ATTR_INDEX_ALLOCATION: u32 = 0xA0;
+const ATTR_BITMAP: u32 = 0xB0;
 const ATTR_END_MARKER: u32 = 0xFFFF_FFFF;
 const COLLATION_FILE_NAME: u32 = 0x01;
 // $SDH (Security Descriptor Hash) view-index — keyed by
@@ -370,6 +372,9 @@ pub mod stream {
 /// recovers from the mirror, so they are written from one constant.
 const MFTMIRR_RECORDS: u64 = 4;
 
+/// Size of the root directory's index blocks, as the boot sector declares.
+const INDEX_BLOCK_SIZE: u32 = 4096;
+
 /// Format an NTFS volume in place over a [`BlockIo`].
 pub fn format_filesystem(
     dev: &mut dyn BlockIo,
@@ -502,7 +507,15 @@ pub fn format_filesystem(
 
     let backup_boot_lcn = cluster_count - 1;
 
-    let last_used_lcn = sds_mirror_lcn + 1;
+    // The root directory's first index block. It is used only when the
+    // root's twelve system entries do not fit a resident $INDEX_ROOT in
+    // one MFT record -- 1024-byte records, the size Windows formats
+    // with (#436). Records large enough to hold them keep the resident
+    // root, and this cluster stays free.
+    let root_index_lcn = sds_mirror_lcn + 1;
+    let root_index_clusters: u64 = u64::from(INDEX_BLOCK_SIZE).div_ceil(cluster_size as u64);
+
+    let last_used_lcn = root_index_lcn + root_index_clusters;
     if last_used_lcn >= mftmirr_lcn || mftmirr_lcn + mftmirr_clusters >= backup_boot_lcn {
         return Err(Error::io("volume too small for chosen layout"));
     }
@@ -1480,7 +1493,7 @@ pub fn format_filesystem(
     // confirmed reference $I30 = 0x468 bytes (12 entries + LAST sentinel)
     // vs ours = 0x30 bytes (just the LAST sentinel).
     {
-        let index_block_size: u32 = 4096;
+        let index_block_size: u32 = INDEX_BLOCK_SIZE;
         sys_entries.push((
             rec::ROOT,
             rec::name(rec::ROOT, cluster_size).expect("known rec_num"),
@@ -1530,7 +1543,7 @@ pub fn format_filesystem(
 
         let index_root =
             build_populated_index_root_attr(3, index_block_size, cluster_size, &entries_blob);
-        let rec_bytes = build_system_record(
+        let rec_bytes = match build_system_record(
             &mft_record_layout,
             rec::ROOT,
             ".",
@@ -1538,7 +1551,60 @@ pub fn format_filesystem(
             0,
             0,
             &[index_root],
-        )?;
+        ) {
+            Ok(rec_bytes) => rec_bytes,
+            // The entries do not fit a resident root in this record size
+            // (#436). Do what Windows does on a 1024-byte-record volume:
+            // the entries go to INDX block VCN 0, and the root keeps one
+            // LAST entry routing there.
+            Err(_) => {
+                let mut block =
+                    build_first_indx_block(&entries_blob, index_block_size as usize, bps)?;
+                apply_fixup_on_write_magic(&mut block, bps, b"INDX")?;
+                let block_bytes = root_index_clusters * cluster_size as u64;
+                block.resize(block_bytes as usize, 0);
+                dev.write_all_at(root_index_lcn * cluster_size as u64, &block)?;
+
+                for c in root_index_lcn..root_index_lcn + root_index_clusters {
+                    bitmap[(c / 8) as usize] |= 1u8 << (c % 8);
+                }
+                let first_byte = (root_index_lcn / 8) as usize;
+                let last_byte = ((root_index_lcn + root_index_clusters - 1) / 8) as usize;
+                dev.write_all_at(
+                    bitmap_lcn * cluster_size as u64 + first_byte as u64,
+                    &bitmap[first_byte..=last_byte],
+                )?;
+
+                let index_root = build_large_index_root_attr(3, index_block_size, cluster_size);
+                let mapping = encode_runs(&[DataRun {
+                    starting_vcn: 0,
+                    length: root_index_clusters,
+                    lcn: Some(root_index_lcn),
+                }])?;
+                let allocation = build_nonresident_attribute(
+                    ATTR_INDEX_ALLOCATION,
+                    Some(stream::I30),
+                    4,
+                    u64::from(index_block_size),
+                    block_bytes,
+                    u64::from(index_block_size),
+                    (root_index_clusters as i64) - 1,
+                    &mapping,
+                )?;
+                let i30 = stream::utf16(stream::I30);
+                let block_bitmap =
+                    build_resident_named(ATTR_BITMAP, 5, &i30, &[1, 0, 0, 0, 0, 0, 0, 0]);
+                build_system_record(
+                    &mft_record_layout,
+                    rec::ROOT,
+                    ".",
+                    true,
+                    0,
+                    0,
+                    &[index_root, allocation, block_bitmap],
+                )?
+            }
+        };
         place_record(&mut mft_buf, rs, rec::ROOT, rec_bytes)?;
     }
 
@@ -2532,6 +2598,68 @@ fn build_populated_index_root_attr(
     buf[entries_at..entries_at + entries_blob.len()].copy_from_slice(entries_blob);
 
     buf
+}
+
+/// Build the `$INDEX_ROOT` `$I30` of a directory whose entries live in
+/// `$INDEX_ALLOCATION`: one LAST entry routing to the index block at VCN 0,
+/// and the INDEX_HEADER's large-index flag set. This is the root Windows
+/// formats a 1024-byte-record volume with (#436).
+fn build_large_index_root_attr(attr_id: u16, index_block_size: u32, cluster_size: u32) -> Vec<u8> {
+    // A LAST entry with a sub-node: 16-byte header + 8-byte child VCN (0).
+    let mut last = vec![0u8; 24];
+    last[8..10].copy_from_slice(&24u16.to_le_bytes());
+    last[12..16].copy_from_slice(&(0x02u32 | 0x01).to_le_bytes());
+    let mut buf = build_populated_index_root_attr(attr_id, index_block_size, cluster_size, &last);
+    let value_offset = u16::from_le_bytes([buf[20], buf[21]]) as usize;
+    // INDEX_HEADER flags, at INDEX_ROOT value 0x10 + 0x0C: LARGE_INDEX.
+    buf[value_offset + 16 + 12] = 0x01;
+    buf
+}
+
+/// Build index block VCN 0 of a directory: an `INDX` leaf holding
+/// `entries_blob` (sorted entries ending in a LAST entry). The bytes are
+/// returned before fixup; the caller applies it before writing.
+///
+/// The header matches the one the write path builds when it first moves a
+/// root's entries into an index block, so a formatted volume and a grown
+/// one carry the same shape.
+fn build_first_indx_block(
+    entries_blob: &[u8],
+    block_size: usize,
+    bytes_per_sector: u16,
+) -> Result<Vec<u8>, Error> {
+    let sector_size = usize::from(bytes_per_sector);
+    if sector_size == 0 || block_size < sector_size || !block_size.is_multiple_of(sector_size) {
+        return Err(Error::io(
+            "index block size is incompatible with the sector size",
+        ));
+    }
+    let usa_offset = 0x28usize;
+    let usa_count = block_size / sector_size + 1;
+    let block_ih = crate::idx_block::INDX_INDEX_HEADER_OFFSET;
+    // The first-entry offset is relative to the INDEX_HEADER; the USA ends
+    // at an absolute block offset.
+    let first_rel = align8(usa_offset + usa_count * 2) - block_ih;
+    let total = first_rel + entries_blob.len();
+    if block_ih + total > block_size {
+        return Err(Error::io(format!(
+            "{} bytes of root index entries do not fit one {block_size}-byte index block",
+            entries_blob.len()
+        )));
+    }
+    let mut block = vec![0u8; block_size];
+    block[0..4].copy_from_slice(b"INDX");
+    block[4..6].copy_from_slice(&(usa_offset as u16).to_le_bytes());
+    block[6..8].copy_from_slice(&(usa_count as u16).to_le_bytes());
+    // LSN (0x08) and this block's VCN (0x10) are both 0.
+    block[block_ih..block_ih + 4].copy_from_slice(&(first_rel as u32).to_le_bytes());
+    block[block_ih + 4..block_ih + 8].copy_from_slice(&(total as u32).to_le_bytes());
+    block[block_ih + 8..block_ih + 12]
+        .copy_from_slice(&((block_size - block_ih) as u32).to_le_bytes());
+    // INDEX_HEADER flags stay 0: a leaf.
+    let at = block_ih + first_rel;
+    block[at..at + entries_blob.len()].copy_from_slice(entries_blob);
+    Ok(block)
 }
 
 /// COLLATION_FILE_NAME ordering. Our system file names are ASCII with
