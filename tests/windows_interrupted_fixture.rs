@@ -31,24 +31,29 @@
 //! 195 names ntfs-3g sees are gone after recovery and 393 appear. So these
 //! logs hold redo work, and the manifests are what a replay must produce.
 //!
-//! Until this crate replays (#137), what can be checked is that it knows
-//! the pre-images' logs hold work, and that it reads what Windows recovered
-//! exactly as Windows does, and that `fsck` refuses the pre-images and
-//! writes nothing, though neither has its dirty flag set (#376).
+//! What is checked: this crate knows the pre-images' logs hold work,
+//! though neither has its dirty flag set (#376); it reads what Windows
+//! recovered exactly as Windows does; and `fsck`, and every read-write
+//! mount, replay each pre-image to the metadata Windows' own restart
+//! reached, or refuse with nothing written a log they cannot replay in
+//! full (#137).
 
 mod common;
 
 use fs_ntfs::facade::{FileType, Filesystem};
 use fs_ntfs::fsck;
 use fs_ntfs::{
-    fs_ntfs_mount, fs_ntfs_mount_rw_with_fs_core_device, fs_ntfs_mount_with_fs_core_device,
-    fs_ntfs_umount,
+    fs_ntfs_mount, fs_ntfs_mount_rw_with_fs_core_device, fs_ntfs_mount_with_callbacks,
+    fs_ntfs_mount_with_fs_core_device, fs_ntfs_umount, FsNtfsBlockdevCfg,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::raw::{c_int, c_void};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
 /// The SHA-256 of each decompressed partition, as captured.
 const PARTITIONS: [(&str, &str); 4] = [
@@ -265,49 +270,194 @@ fn fsck_replays_a_volume_windows_left_mid_write_to_what_windows_recovered() {
     }
 }
 
+/// Every way this crate opens a volume for writing, each over an image
+/// path: `Ok` once it mounted (and unmounted again), or the reason it
+/// refused.
+#[allow(clippy::type_complexity)]
+const RW_MOUNTS: [(&str, fn(&str) -> Result<(), String>); 4] = [
+    ("Filesystem::mount_rw", |img| {
+        Filesystem::mount_rw(img).map(|_| ()).map_err(|e| e.0)
+    }),
+    ("fs_ntfs_mount", |img| {
+        let c_path = CString::new(img).unwrap();
+        let h = fs_ntfs_mount(c_path.as_ptr());
+        if h.is_null() {
+            return Err(last_error());
+        }
+        fs_ntfs_umount(h);
+        Ok(())
+    }),
+    ("fs_ntfs_mount_with_callbacks", |img| {
+        callback_mount(img, true)
+    }),
+    ("fs_ntfs_mount_rw_with_fs_core_device", |img| {
+        let c_path = CString::new(img).unwrap();
+        let dev = unsafe { fs_core::ffi::fs_core_file_open(c_path.as_ptr(), true) };
+        assert!(!dev.is_null(), "open fs-core device on {img}");
+        let h = fs_ntfs_mount_rw_with_fs_core_device(dev);
+        let why = last_error();
+        if !h.is_null() {
+            fs_ntfs_umount(h);
+        }
+        unsafe { fs_core::ffi::fs_core_device_close(dev) };
+        if h.is_null() {
+            Err(why)
+        } else {
+            Ok(())
+        }
+    }),
+];
+
+struct FileCtx(Mutex<File>);
+
+unsafe extern "C" fn read_cb(ctx: *mut c_void, buf: *mut c_void, at: u64, len: u64) -> c_int {
+    let ctx = unsafe { &*(ctx as *const FileCtx) };
+    let mut f = ctx.0.lock().unwrap();
+    let buf = unsafe { std::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+    c_int::from(f.seek(SeekFrom::Start(at)).is_err() || f.read_exact(buf).is_err())
+}
+
+unsafe extern "C" fn write_cb(ctx: *mut c_void, buf: *const c_void, at: u64, len: u64) -> c_int {
+    let ctx = unsafe { &*(ctx as *const FileCtx) };
+    let mut f = ctx.0.lock().unwrap();
+    let buf = unsafe { std::slice::from_raw_parts(buf as *const u8, len as usize) };
+    c_int::from(f.seek(SeekFrom::Start(at)).is_err() || f.write_all(buf).is_err())
+}
+
+/// Mount `img` through host callbacks, with a write callback or without.
+fn callback_mount(img: &str, writable: bool) -> Result<(), String> {
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(img)
+        .unwrap();
+    let size = f.metadata().unwrap().len();
+    let ctx = FileCtx(Mutex::new(f));
+    let cfg = FsNtfsBlockdevCfg {
+        read: read_cb,
+        context: &ctx as *const FileCtx as *mut c_void,
+        size_bytes: size,
+        write: if writable { Some(write_cb) } else { None },
+    };
+    let h = fs_ntfs_mount_with_callbacks(&cfg);
+    if h.is_null() {
+        return Err(last_error());
+    }
+    fs_ntfs_umount(h);
+    Ok(())
+}
+
 #[test]
-fn a_read_write_mount_refuses_a_volume_windows_left_mid_write_and_writes_nothing() {
-    // The dirty flag is clear on both, so a guard that reads only the flag
-    // opens them for writing, and the first write -- the version upgrade --
-    // lands on metadata whose committed changes are still in the log
-    // (#137). A read-only mount stays allowed.
+fn every_read_write_mount_replays_a_volume_windows_left_mid_write_to_what_windows_recovered() {
+    // Windows replays `$LogFile` when it mounts a volume, and so must a
+    // read-write mount here (#137): refusing it sends the user to a
+    // separate repair step for the most common state a disk arrives in,
+    // and writing without it lands this crate's changes on metadata whose
+    // committed updates are still in the log. Each entry point must reach
+    // the metadata Windows' own restart reached from the same pre-image.
+    for (k, log_end) in LOG_END {
+        let pre_img = unpack(&format!("windows-interrupted-{k}"));
+        let pre = Image::read(&pre_img);
+        let win = Image::read(&unpack(&format!("windows-interrupted-{k}.recovered")));
+        let want = manifest(k);
+        for (name, rw_mount) in RW_MOUNTS {
+            let img = unpack(&format!("windows-interrupted-{k}"));
+            rw_mount(&img).unwrap_or_else(|e| panic!("snapshot {k}: {name}: {e}"));
+
+            let got = walk(&img);
+            assert!(
+                got == want,
+                "snapshot {k}: {name}: {} files after the mount, {} in Windows' manifest",
+                got.len(),
+                want.len()
+            );
+            let mut io = fs_ntfs::block_io::PathIo::open_ro(std::path::Path::new(&img)).unwrap();
+            let state = fsck::logfile_state_io(&mut io).expect("read $LogFile");
+            assert!(
+                !state.needs_replay(),
+                "snapshot {k}: {name} left the log holding work: {state:?}"
+            );
+            drop(io);
+            oracle::same_metadata_as_windows(k, &pre, &Image::read(&img), &win, log_end);
+            std::fs::remove_file(&img).unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_read_only_mount_of_a_volume_windows_left_mid_write_replays_nothing() {
+    // A read-only mount reads the metadata as it is on disk, a little
+    // behind the log, and writes nothing -- what every other driver here
+    // does with a volume it is not allowed to change.
     for k in [1, 6] {
         let img = unpack(&format!("windows-interrupted-{k}"));
         let before = std::fs::read(&img).unwrap();
 
         Filesystem::mount(&img).expect("a read-only mount is allowed");
-        let err = Filesystem::mount_rw(&img).expect_err("mount_rw over a log holding work");
-        assert!(err.0.contains("$LogFile"), "snapshot {k}: {err}");
-
+        callback_mount(&img, false)
+            .unwrap_or_else(|e| panic!("snapshot {k}: read-only callback mount: {e}"));
         let c_path = CString::new(img.as_str()).unwrap();
-        assert!(
-            fs_ntfs_mount(c_path.as_ptr()).is_null(),
-            "snapshot {k}: fs_ntfs_mount opened a log holding work"
-        );
-        assert!(
-            last_error().contains("$LogFile"),
-            "snapshot {k}: {}",
-            last_error()
-        );
-
         let dev = unsafe { fs_core::ffi::fs_core_file_open(c_path.as_ptr(), true) };
         assert!(!dev.is_null(), "snapshot {k}: open fs-core device");
         let ro = fs_ntfs_mount_with_fs_core_device(dev);
         assert!(!ro.is_null(), "snapshot {k}: read-only: {}", last_error());
         fs_ntfs_umount(ro);
-        let rw = fs_ntfs_mount_rw_with_fs_core_device(dev);
-        let why = last_error();
         unsafe { fs_core::ffi::fs_core_device_close(dev) };
-        assert!(
-            rw.is_null(),
-            "snapshot {k}: fs_ntfs_mount_rw_with_fs_core_device opened a log holding work"
-        );
-        assert!(why.contains("$LogFile"), "snapshot {k}: {why}");
 
         assert!(
             std::fs::read(&img).unwrap() == before,
-            "snapshot {k}: a refused read-write mount wrote to the volume"
+            "snapshot {k}: a read-only mount wrote to the volume"
         );
+    }
+}
+
+#[test]
+fn a_read_write_mount_refuses_a_log_it_cannot_replay_in_full_and_writes_nothing() {
+    // A torn record page in the middle of the work: the replay cannot be
+    // done whole, so none of it may be done, and the mount is refused as
+    // it was before replay existed. The volume is left exactly as found.
+    for (k, page) in NEEDED_LOG_PAGE {
+        for (name, rw_mount) in RW_MOUNTS {
+            let img = unpack(&format!("windows-interrupted-{k}"));
+            let logfile_lcn = 10_318u64; // $LogFile's one run, in both images
+            let at = logfile_lcn * 4096 + page + 510; // the first sector's USN copy
+            let mut bytes = std::fs::read(&img).unwrap();
+            bytes[at as usize] ^= 0xFF;
+            std::fs::write(&img, &bytes).unwrap();
+
+            let err = rw_mount(&img).expect_err("a mount over a log it cannot replay");
+            assert!(
+                err.contains("$LogFile") && err.contains("read-write mount refused"),
+                "snapshot {k}: {name}: {err}"
+            );
+            assert!(
+                std::fs::read(&img).unwrap() == bytes,
+                "snapshot {k}: {name}: a refused mount wrote to the volume"
+            );
+            std::fs::remove_file(&img).unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_dirty_volume_is_refused_before_its_log_is_replayed() {
+    // The dirty flag asks for a check of the whole volume, which a replay
+    // is not. A read-write mount refuses it as before, and does not replay
+    // first: nothing is written to a volume the mount then declines.
+    for k in [1, 6] {
+        for (name, rw_mount) in RW_MOUNTS {
+            let img = unpack(&format!("windows-interrupted-{k}"));
+            fsck::set_dirty(&img).expect("mark dirty");
+            let before = std::fs::read(&img).unwrap();
+
+            let err = rw_mount(&img).expect_err("a read-write mount of a dirty volume");
+            assert!(err.contains("dirty"), "snapshot {k}: {name}: {err}");
+            assert!(
+                std::fs::read(&img).unwrap() == before,
+                "snapshot {k}: {name}: a refused mount wrote to the volume"
+            );
+            std::fs::remove_file(&img).unwrap();
+        }
     }
 }
 

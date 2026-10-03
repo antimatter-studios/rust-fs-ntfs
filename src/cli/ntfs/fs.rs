@@ -510,24 +510,21 @@ fn split_path(path: &str) -> Result<(String, &str), CliError> {
     Ok((parent.to_string(), name))
 }
 
-/// Run `edit` on a writable open of `target`, then sync it. A volume
-/// Windows marked dirty is refused before anything is written, as the C
-/// ABI's read-write mount refuses it: its `$LogFile` may hold changes
-/// this library cannot replay. A fresh-format volume is upgraded first,
-/// as Windows does on its first read-write mount.
+/// Run `edit` on a writable open of `target`, then sync it. The volume is
+/// prepared as the C ABI's read-write mount prepares it: a `$LogFile`
+/// holding work is replayed first, as Windows does when it mounts a
+/// volume, and a dirty volume, or a log that cannot be read or replayed in
+/// full, is refused before anything is written (#137). A fresh-format
+/// volume is upgraded first, as Windows does on its first read-write mount.
 fn edit<T>(
     target: &OsString,
     offset: u64,
     what: &str,
     edit: impl FnOnce(&mut Device) -> Result<T, Error>,
 ) -> Result<T, CliError> {
-    let (mut dev, info) = device::mount(target, offset, true)?;
-    if is_dirty(&info) {
-        return Err(CliError::failed(format!(
-            "{what}: the volume is dirty, and a write over a $LogFile this library cannot \
-             replay could lose changes; check it with fsck.ntfs (or chkdsk on Windows) first"
-        )));
-    }
+    let (mut dev, _) = device::mount(target, offset, true)?;
+    fs_ntfs::fsck::prepare_rw_mount_io(&mut dev)
+        .map_err(|e| CliError::failed(format!("{what}: {e}")))?;
     fs_ntfs::fsck::upgrade_volume_version_io(&mut dev)
         .map_err(|e| CliError::failed(format!("{what}: upgrade the volume version: {e}")))?;
     let done = edit(&mut dev).map_err(|e| CliError::failed(format!("{what}: {e}")))?;

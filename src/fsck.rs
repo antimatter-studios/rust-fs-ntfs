@@ -24,6 +24,8 @@
 //! log that cannot be replayed in full -- unread, torn, holding an
 //! operation replay does not perform, or a transaction that would need
 //! undoing -- is refused before anything is written (#375, #376, #137).
+//! Every read-write mount runs the same replay first
+//! ([`prepare_rw_mount_io`]), as Windows does when it mounts a volume.
 //! The explicit `reset_logfile` and `clear_dirty` operations require the
 //! caller to know independently that metadata is consistent; using them on
 //! a crashed volume can destroy recoverable changes.
@@ -574,6 +576,50 @@ pub fn replay_logfile_io<T: FsckIo>(io: &mut T) -> Result<ReplayReport, Error> {
         checkpoint_lsn: plan.checkpoint,
         last_lsn: plan.last_lsn,
     })
+}
+
+/// Make a volume ready to be opened for writing, as Windows does when it
+/// mounts one: a `$LogFile` holding work is replayed first
+/// ([`replay_logfile_io`]), so this crate's changes land on metadata that
+/// already holds every change the log committed (#137).
+///
+/// Refused with nothing written when:
+/// * the dirty flag is set. It asks for a check of the whole volume, which
+///   a replay is not, and it is not replayed first: nothing is written to a
+///   volume the mount then declines;
+/// * `$LogFile` cannot be read;
+/// * the log holds work that cannot be replayed in full.
+///
+/// Returns what the replay did, or `None` when the log held nothing to
+/// replay, in which case nothing was written. `io` needs to be writable
+/// only when the log holds work.
+pub fn prepare_rw_mount_io<T: FsckIo>(io: &mut T) -> Result<Option<ReplayReport>, Error> {
+    if is_dirty_io(io)? {
+        return Err(Error::refused(
+            "dirty NTFS volume: read-write mount refused; the dirty flag asks for the whole \
+             volume to be checked (chkdsk on Windows, or fsck.ntfs) before it is written",
+        ));
+    }
+    let state = logfile_state_io(io).map_err(|e| {
+        Error::refused(format!(
+            "read-write mount refused: $LogFile could not be read ({e}), so it may hold \
+             transactions that have not reached the volume"
+        ))
+    })?;
+    let LogfileState::Pending(why) = &state else {
+        return Ok(None);
+    };
+    let report = replay_logfile_io(io)
+        .map_err(|e| Error::refused(format!("read-write mount refused: {why}; {e}")))?;
+    log::info!(
+        target: "fs_ntfs::fsck",
+        "read-write mount replayed $LogFile first: {} redo operations from checkpoint LSN \
+         {:#x} to LSN {:#x}",
+        report.applied,
+        report.checkpoint_lsn,
+        report.last_lsn
+    );
+    Ok(Some(report))
 }
 
 // ---------------------------------------------------------------------------

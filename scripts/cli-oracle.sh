@@ -26,6 +26,12 @@
 #                                    fsck.ntfs -y replays it, and IMAGE.manifest is
 #                                    what Windows listed after recovering the same
 #                                    image itself, for win-cli-verify.ps1
+#   mount-replay IMAGE SNAPSHOT      IMAGE is test-disks/windows-interrupted-SNAPSHOT;
+#                                    fsck.ntfs reports its log, then fs.ntfs mkdir and
+#                                    write, which replay the log at mount as Windows
+#                                    does, and fsck.ntfs after finds nothing.
+#                                    IMAGE.manifest is Windows' listing of its own
+#                                    recovery plus what fs.ntfs wrote
 #
 # The binary is target/release/rust-fs-ntfs (built with `--features cli`),
 # or RUST_FS_NTFS. JSON is read with grep, not jq: the Windows runner's Git
@@ -78,6 +84,28 @@ record_size() {
     if [ "$n" -lt 128 ]; then echo $((n * $(cluster_size "$1"))); else echo $((1 << (256 - n))); fi
 }
 poke() { printf "$3" | dd of="$1" bs=1 seek="$2" conv=notrunc 2>/dev/null; }
+sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+random() { if [ "$2" -gt 0 ]; then head -c "$2" /dev/urandom >"$1"; else : >"$1"; fi; }
+
+# windows_listing SNAPSHOT: what Windows listed after recovering the same
+# image itself -- path, size and Get-FileHash SHA-256 -- as win-cli-verify
+# reads it, to IMAGE.manifest.
+windows_listing() {
+    awk -F '\t' 'NF == 3 { printf "file\t/%s\t%s\t%s\n", $1, $2, $3 }' \
+        "$REPO/test-disks/windows-interrupted-$1.recovered.manifest" >"$image.manifest"
+    [ -s "$image.manifest" ] || die "no manifest for snapshot $1"
+}
+
+# unpack_interrupted SNAPSHOT: IMAGE is the volume Windows left mid-write,
+# and fsck.ntfs must see its log holding work.
+unpack_interrupted() {
+    mkdir -p "$(dirname "$image")"
+    gzip -dc "$REPO/test-disks/windows-interrupted-$1.img.gz" >"$image" ||
+        die "no test-disks/windows-interrupted-$1.img.gz"
+    run fsck "$image"
+    [ "$status" -eq 4 ] || die "fsck.ntfs on the volume Windows left mid-write exited $status, not 4: $out"
+    has '"kind": "logfile"' || die "fsck.ntfs did not report the log holding work: $out"
+}
 
 case "$step" in
     mkfs)
@@ -120,8 +148,6 @@ case "$step" in
         manifest="$image.manifest"
         work="$(mktemp -d)"
         trap 'rm -rf "$work"' EXIT
-        sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
-        random() { if [ "$2" -gt 0 ]; then head -c "$2" /dev/urandom >"$1"; else : >"$1"; fi; }
         : >"$manifest"
         for dir in /d /d/e; do
             run fs "$image" mkdir "$dir"
@@ -153,22 +179,46 @@ case "$step" in
         ;;
     replay)
         [ $# -eq 1 ] || die "replay IMAGE SNAPSHOT"
-        mkdir -p "$(dirname "$image")"
-        gzip -dc "$REPO/test-disks/windows-interrupted-$1.img.gz" >"$image" ||
-            die "no test-disks/windows-interrupted-$1.img.gz"
-        run fsck "$image"
-        [ "$status" -eq 4 ] || die "fsck.ntfs on the volume Windows left mid-write exited $status, not 4: $out"
-        has '"kind": "logfile"' || die "fsck.ntfs did not report the log holding work: $out"
+        unpack_interrupted "$1"
         run fsck -y "$image"
         [ "$status" -eq 1 ] || die "fsck.ntfs -y exited $status, not 1 (corrected): $out"
         has '"logfile": "empty"' || die "fsck.ntfs -y did not leave the log empty: $out"
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the replay exited $status: $out"
-        # Windows' listing of its own recovery of the same image: path,
-        # size and Get-FileHash SHA-256, as win-cli-verify reads them.
-        awk -F '\t' 'NF == 3 { printf "file\t/%s\t%s\t%s\n", $1, $2, $3 }' \
-            "$REPO/test-disks/windows-interrupted-$1.recovered.manifest" >"$image.manifest"
-        [ -s "$image.manifest" ] || die "no manifest for snapshot $1"
+        windows_listing "$1"
+        ;;
+    mount-replay)
+        [ $# -eq 1 ] || die "mount-replay IMAGE SNAPSHOT"
+        unpack_interrupted "$1"
+        windows_listing "$1"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        # No fsck.ntfs -y: the first write's mount replays the log, as
+        # Windows does when it mounts the volume. Then a directory, a
+        # non-resident file in it, a resident file in a directory the log
+        # changed, and a file the log created, replaced. Three new records:
+        # $MFT has no more on snapshot 6 until rust-fs-ntfs#415 grows it.
+        replaced="$(awk -F '\t' '$2 ~ /^\/d000\// { print $2; exit }' "$image.manifest")"
+        [ -n "$replaced" ] || die "Windows' listing has no file under /d000"
+        run fs "$image" mkdir /after-replay
+        [ "$status" -eq 0 ] || die "fs.ntfs mkdir over a log holding work exited $status: $(cat "$image.cli-err")"
+        printf 'dir\t/after-replay\n' >>"$image.manifest"
+        for spec in /after-replay/new.bin:5000 /d000/after-replay.txt:500 "$replaced:4097"; do
+            path="${spec%:*}"
+            size="${spec##*:}"
+            random "$work/data" "$size"
+            set +e
+            "$BIN" fs "$image" write "$path" <"$work/data" >/dev/null 2>"$image.cli-err"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] || die "fs.ntfs write $path ($size bytes) exited $status: $(cat "$image.cli-err")"
+            grep -v "^file	$path	" "$image.manifest" >"$work/m" || true
+            printf 'file\t%s\t%s\t%s\n' "$path" "$size" "$(sha "$work/data")" >>"$work/m"
+            cp "$work/m" "$image.manifest"
+        done
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the writes exited $status: $out"
+        has '"logfile": "empty"' || die "the mount did not leave the log empty: $out"
         ;;
     *)
         die "unknown step '$step'"

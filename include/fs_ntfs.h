@@ -214,9 +214,12 @@ typedef struct {
  * Mount an NTFS filesystem from the given device/image path.
  * Returns NULL on failure. The returned handle permits writes.
  *
- * Dirty volumes are refused before any write. For read-only access to
- * a dirty volume, use fs_ntfs_mount_with_callbacks with cfg->write=NULL
- * or fs_ntfs_mount_with_fs_core_device.
+ * A $LogFile holding work is replayed before the handle is returned, as
+ * Windows does when it mounts a volume. Refused, with nothing written:
+ * a dirty volume, or a log that cannot be read or replayed in full. For
+ * read-only access to such a volume (no replay), use
+ * fs_ntfs_mount_with_callbacks with cfg->write=NULL or
+ * fs_ntfs_mount_with_fs_core_device.
  */
 fs_ntfs_fs_t *fs_ntfs_mount(const char *device_path);
 
@@ -229,8 +232,10 @@ fs_ntfs_fs_t *fs_ntfs_mount(const char *device_path);
  * (see "Handle-based mutation API" below). Pass NULL to mount
  * read-only — `_h` mutators will then fail with -1 / EINVAL.
  *
- * Dirty volumes mount with cfg->write=NULL. A non-NULL write callback
- * requests a writable mount and causes a dirty volume to be refused.
+ * Dirty volumes mount with cfg->write=NULL, and nothing is replayed. A
+ * non-NULL write callback requests a writable mount: a $LogFile holding
+ * work is replayed through it first, and a dirty volume, or a log that
+ * cannot be read or replayed in full, is refused with nothing written.
  */
 fs_ntfs_fs_t *fs_ntfs_mount_with_callbacks(
     const fs_ntfs_blockdev_cfg_t *cfg);
@@ -263,7 +268,9 @@ fs_ntfs_fs_t *fs_ntfs_mount_with_fs_core_device(struct FsCoreDevice *handle);
  * (`fs_ntfs_create_file_h`, `fs_ntfs_mkdir_h`,
  * `fs_ntfs_write_file_contents_h`, `fs_ntfs_unlink_h`, …) can write
  * through it.
- * Dirty volumes are refused before any mount-time write.
+ * A $LogFile holding work is replayed through the device first; a dirty
+ * volume, or a log that cannot be read or replayed in full, is refused
+ * before any mount-time write.
  *
  * The supplied device should report `is_writable=true` (see
  * `fs_core_device_is_writable`); a non-writable device still mounts

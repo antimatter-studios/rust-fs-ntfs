@@ -26,7 +26,8 @@ What's solid today:
   reparse points, EAs, timestamps, file-attribute flag toggling.
 - **Recovery controls** — dirty-flag detection, `$LogFile` redo replay
   for the operations Windows' own logs were checked to need, explicit
-  clear and log reset. `fsck` replays a log holding work, or refuses it
+  clear and log reset. `fsck` and every read-write mount replay a log
+  holding work, as Windows does when it mounts a volume, or refuse it
   whole with nothing written.
   Both path-based and callback-transport APIs.
 - **mkfs** — pure-Rust formatter that produces volumes Microsoft's
@@ -130,11 +131,12 @@ Concrete user-observable list, end-to-end:
 - Add / remove ADS, reparse points, EAs; create symlinks.
 - Patch any combination of the four NT timestamps in
   `$STANDARD_INFORMATION`; toggle `FILE_ATTRIBUTE_*` flags.
-- Refuse a writable mount of a volume that is dirty or whose `$LogFile`
-  may hold transactions (Windows 8+ leaves the flag clear). `fs_ntfs_fsck`
-  replays such a log -- redoing what it recorded, as Windows' own restart
-  does, then emptying it -- and clears the dirty flag; callback transport
-  reports progress.
+- Replay `$LogFile` when a writable mount finds it holding work (Windows
+  8+ leaves the dirty flag clear after an unclean shutdown), as Windows'
+  own restart does: redo what it recorded, then empty it. `fs_ntfs_fsck`
+  does the same and clears the dirty flag; callback transport reports
+  progress. A dirty volume, or a log that cannot be replayed in full, is
+  refused for writing with nothing written.
 - Drive everything from C, Go (cgo), or Swift via the stable
   `fs_ntfs_*` C ABI in `include/fs_ntfs.h`.
 
@@ -147,8 +149,9 @@ Specific limits, current as of HEAD:
   recovered from the same images; it refuses, writing nothing, a log
   with a transaction left unfinished (that needs undo), an operation
   those logs did not hold, a page spanning clusters, a log that wraps
-  during replay, or an LFS version other than 2.x. A writable mount of a
-  volume whose log holds work is refused: run `fsck` first. Explicit log
+  during replay, or an LFS version other than 2.x. A writable mount
+  replays the same logs and refuses the same ones; a read-only mount
+  reads the volume as it is on disk, without replaying. Explicit log
   reset is only for volumes independently known consistent.
 - **Overflowed directories.** Once a directory has more entries
   than fit in `$INDEX_ROOT`, writes that would touch its index

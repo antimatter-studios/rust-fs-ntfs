@@ -105,6 +105,55 @@ fsck.ntfs "$img" >"$SANDBOX/fsck.json" 2>/dev/null
 check "fsck.ntfs after the writes exits 0" test $? -eq 0
 check "the volume is not dirty after the writes" test "$(fs.ntfs "$img" get dirty --text)" = false
 
+# A volume Windows was writing to when it was captured, its $LogFile
+# holding work Windows had not yet written home (dirty flag clear, as
+# Windows 8 and later leave it). A write replays the log first, as Windows
+# does when it mounts the volume: every file Windows listed after its own
+# recovery of the same image is there at Windows' size and SHA-256, the new
+# file beside them, and fsck.ntfs finds nothing left to do.
+sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -d' ' -f1; }
+mid="$SANDBOX/interrupted.img"
+gzip -dc "$REPO/test-disks/windows-interrupted-1.img.gz" >"$mid"
+check "the fixture volume Windows left mid-write unpacked" test -s "$mid"
+random "$SANDBOX/after" 5000
+# The status is taken before the message is built: a command substitution
+# in check's arguments resets $? before `test $?` reads it.
+fs.ntfs "$mid" write /after-replay <"$SANDBOX/after" >/dev/null 2>"$SANDBOX/mid.err"
+status=$?
+check "write over a log holding work exits 0 ($(cat "$SANDBOX/mid.err"))" test "$status" -eq 0
+check "the file written after the replay reads back" cmp -s "$SANDBOX/after" <(fs.ntfs "$mid" read /after-replay)
+fsck.ntfs "$mid" >"$SANDBOX/mid-fsck.json" 2>/dev/null
+status=$?
+check "fsck.ntfs finds nothing after the write (exit $status)" test "$status" -eq 0
+jq_check "fsck.ntfs calls the log empty" '.logfile == "empty"' "$SANDBOX/mid-fsck.json"
+listed=0
+differ=""
+while IFS=$'\t' read -r path size sum; do
+    [ -n "$path" ] || continue
+    listed=$((listed + 1))
+    fs.ntfs "$mid" read "/$path" >"$SANDBOX/one" 2>/dev/null
+    if [ "$(wc -c <"$SANDBOX/one" | tr -d ' ')" != "$size" ] || [ "$(sha256 <"$SANDBOX/one")" != "$sum" ]; then
+        differ="$differ /$path"
+    fi
+done <"$REPO/test-disks/windows-interrupted-1.recovered.manifest"
+check "Windows' manifest lists the workload's files ($listed)" test "$listed" -gt 200
+check "every file Windows recovered reads back at Windows' size and SHA-256 (differ:${differ:0:300})" test -z "$differ"
+
+# The same volume with a page of the work torn: the log cannot be replayed
+# in full, so the write is refused and not a byte of the image changes.
+torn="$SANDBOX/torn.img"
+gzip -dc "$REPO/test-disks/windows-interrupted-1.img.gz" >"$torn"
+# $LogFile is one run at LCN 10318; its record page at 0x80000 is needed,
+# and byte 510 is the first sector's update sequence copy.
+at=$((10318 * 4096 + 0x80000 + 510))
+poke "$torn" "$at" "\\x$(printf '%02x' $(($(u8 "$torn" "$at") ^ 255)))"
+cp "$torn" "$SANDBOX/torn.before"
+fs.ntfs "$torn" write /after-replay <"$SANDBOX/after" >/dev/null 2>"$SANDBOX/torn.err"
+status=$?
+check "write over a log it cannot replay in full exits 1 (exit $status)" test "$status" -eq 1
+jq_check "the refusal names \$LogFile" '.error | contains("$LogFile")' "$SANDBOX/torn.err"
+check "a refused write leaves the image as it was" cmp -s "$torn" "$SANDBOX/torn.before"
+
 # A user file's MFT record with its FILE signature destroyed, and a mirror
 # that disagrees with $MFT: the volume is damaged, and every verb must say
 # so or carry on -- never panic -- and fsck.ntfs must report it unclean.
