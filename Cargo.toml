@@ -10,7 +10,12 @@ readme = "README.md"
 # The fuzz crate is its own package, on its own toolchain, and is not
 # part of this one. Without this, `cargo package` and `cargo publish`
 # try to include it and fail on the nightly-only dependency.
-exclude = ["fuzz"]
+#
+# The captured volumes in test-disks/ are the integration tests' oracle,
+# already gzipped, so the .crate cannot compress them: with the wrapped-log
+# captures they made it 7.2 MB, against 3.3 MB for 0.7.0 and crates.io's
+# 10 MB limit. Nothing a consumer builds reads them.
+exclude = ["fuzz", "test-disks/*.gz", "test-disks/*.manifest"]
 
 [lib]
 name = "fs_ntfs"
