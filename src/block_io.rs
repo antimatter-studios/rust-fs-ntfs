@@ -402,9 +402,9 @@ mod tests {
     // -------------------------------------------------------------------------
 
     fn temp_path(suffix: &str) -> std::path::PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!("block_io_test_{suffix}_{}", std::process::id()));
-        p
+        std::path::PathBuf::from(crate::test_scratch::temp_image_path(format!(
+            "block_io_{suffix}"
+        )))
     }
 
     #[test]
