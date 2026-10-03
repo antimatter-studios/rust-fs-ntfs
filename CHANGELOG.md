@@ -12,6 +12,8 @@ written against 0.7.0, and `chore check:semver` refuses it otherwise.
   field no longer compiles. Free-record search and counting stop at
   `MftBitmap::record_limit()`, the smaller of that and the bitmap's
   length, because Windows sizes `$MFT:$Bitmap` far ahead of `$MFT`.
+  `fs.ntfs info`'s `mft_total_records` reports the same limit, so it
+  moves when `$MFT` grows and agrees with `mft_free_records`.
 
 ### Changed
 

@@ -619,10 +619,10 @@ pub fn envelope(dev: &mut Device, info: &VolumeInfo) -> Result<Json, String> {
     let bitmap = fs_ntfs::bitmap::locate_bitmap_io(dev)?;
     let free_clusters = fs_ntfs::bitmap::count_free_io(dev, &bitmap)?;
     let mft = fs_ntfs::mft_bitmap::locate_io(dev)?;
-    let mft_total_records = match &mft.layout {
-        fs_ntfs::mft_bitmap::MftBitmapLayout::Resident { total_bits, .. } => *total_bits,
-        fs_ntfs::mft_bitmap::MftBitmapLayout::NonResident { total_bits, .. } => *total_bits,
-    };
+    // The records `$MFT` holds and the bitmap describes, as the free
+    // count below is: Windows sizes `$MFT:$Bitmap` far ahead of `$MFT`,
+    // so the bitmap's own length is not a record count (#415).
+    let mft_total_records = mft.record_limit();
     let mft_free_records = fs_ntfs::mft_bitmap::count_free_io(dev, &mft)?;
     let cluster = u64::from(info.cluster_size);
     Ok(Json::object([
