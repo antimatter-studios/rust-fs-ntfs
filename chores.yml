@@ -48,7 +48,7 @@ vars:
   # family, and the bump lands here and in their pins together. That is
   # the cost of one shared copy, and it is the same property that makes
   # drift impossible rather than merely detectable.
-  FS_CORE_REF: v0.2.16
+  FS_CORE_REF: v0.2.18
 
   # The Windows-VM test harness. Not a cargo dependency — a tool this
   # repo's scripts invoke — so nothing but this pin governs which
@@ -406,7 +406,22 @@ tasks:
       # The family scripts are rust-fs-core's alone: fails on a committed copy,
       # a scripts/core.sh that differs from core's, or a call to a local copy.
       - bash scripts/core.sh family-check
+      - task: check:ci-gate
       - scripts/tier.sh clippy -- cargo clippy --locked --all-targets --features cli -- -D warnings
+
+  check:ci-gate:
+    desc: ci-ok needs every gating job in ci.yml, and .github-guard requires ci-ok alone
+    # rust-fs-core's ci-gate, through scripts/core.sh (#409). Two jobs are
+    # declared non-gating, and each has to carry `if:` or
+    # `continue-on-error:` for the declaration to be accepted:
+    #   asan                  advisory by decision, so not in ci-ok's needs;
+    #   validate-mkfs-windows `if: always()` so it can turn a skipped
+    #                         Windows run into a verdict; it IS in ci-ok's
+    #                         needs, and declaring it says that its condition
+    #                         is deliberate rather than a job quietly skipped.
+    # A job added to ci.yml goes into ci-ok's needs, or here with a reason.
+    cmds:
+      - "CI_GATE_NON_GATING='asan validate-mkfs-windows' bash scripts/core.sh ci-gate"
 
   build:
     desc: Debug build

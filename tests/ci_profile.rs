@@ -845,6 +845,7 @@ fn ci_ok_covers_every_gating_job_and_preserves_windows_filter() {
         needs(job("ci-ok")),
         [
             "test",
+            "windows-native-read-fixtures",
             "integration",
             "changes",
             "validate-mkfs-windows",
