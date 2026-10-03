@@ -3004,4 +3004,130 @@ mod tests {
         let type_code = u32::from_le_bytes([t[128], t[129], t[130], t[131]]);
         assert_eq!(type_code, 0x10, "first entry type = $STANDARD_INFORMATION");
     }
+
+    // --- root $I30 shape by MFT record size (#436) -------------------------
+
+    struct MemDev {
+        buf: Vec<u8>,
+    }
+
+    impl crate::block_io::BlockIo for MemDev {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            let off = offset as usize;
+            buf.copy_from_slice(&self.buf[off..off + buf.len()]);
+            Ok(())
+        }
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            let off = offset as usize;
+            self.buf[off..off + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn size(&self) -> u64 {
+            self.buf.len() as u64
+        }
+    }
+
+    fn formatted_with_records(record_size: u32) -> MemDev {
+        const SIZE: u64 = 64 * 1024 * 1024;
+        let mut dev = MemDev {
+            buf: vec![0u8; SIZE as usize],
+        };
+        format_filesystem(
+            &mut dev as &mut dyn BlockIo,
+            SIZE,
+            4096,
+            record_size,
+            Some("REC"),
+            Some(0x436),
+        )
+        .expect("format_filesystem");
+        dev
+    }
+
+    /// Every name in the root directory, read by the upstream `ntfs` crate.
+    fn upstream_root_names(dev: &mut MemDev) -> Vec<String> {
+        use ntfs::Ntfs;
+        let mut reader = crate::block_io::IoReadSeek::new(dev);
+        let mut ntfs = Ntfs::new(&mut reader).expect("Ntfs::new");
+        ntfs.read_upcase_table(&mut reader).expect("upcase");
+        let root = ntfs.root_directory(&mut reader).expect("root");
+        let index = root.directory_index(&mut reader).expect("root index");
+        let mut iter = index.entries();
+        let mut names = Vec::new();
+        while let Some(entry) = iter.next(&mut reader) {
+            let entry = entry.expect("entry");
+            let key = entry.key().expect("key").expect("key ok");
+            names.push(key.name().to_string_lossy());
+        }
+        names
+    }
+
+    fn system_root_names() -> Vec<String> {
+        let mut names: Vec<String> = (0u32..=11)
+            .map(|r| rec::name(r, 4096).expect("known").to_string())
+            .collect();
+        names.sort_by(|a, b| collate_file_name(a, b));
+        names
+    }
+
+    #[test]
+    fn a_1024_byte_record_volume_formats_and_lists_every_system_file() {
+        let mut dev = formatted_with_records(1024);
+        assert_eq!(upstream_root_names(&mut dev), system_root_names());
+    }
+
+    #[test]
+    fn a_1024_byte_record_root_index_block_is_allocated_in_the_bitmap() {
+        let mut dev = formatted_with_records(1024);
+        let ia = crate::idx_block::load_for_directory_io(&mut dev, rec::ROOT as u64)
+            .expect("root $INDEX_ALLOCATION");
+        assert_eq!(ia.allocated_block_vcns(), vec![0]);
+        let bitmap = crate::bitmap::locate_bitmap_io(&mut dev).expect("$Bitmap");
+        let mut clusters = 0;
+        for run in &ia.runs {
+            let lcn = run.lcn.expect("root index run is not sparse");
+            for c in lcn..lcn + run.length {
+                assert!(
+                    crate::bitmap::is_allocated_io(&mut dev, &bitmap, c).unwrap(),
+                    "root index cluster {c} is free in $Bitmap"
+                );
+                clusters += 1;
+            }
+        }
+        assert!(clusters > 0, "root $INDEX_ALLOCATION maps no clusters");
+    }
+
+    #[test]
+    fn a_1024_byte_record_root_takes_new_names() {
+        let mut dev = formatted_with_records(1024);
+        crate::write::create_file_io(&mut dev, "/", "after-format.txt").expect("create");
+        crate::write::mkdir_io(&mut dev, "/", "AfterDir").expect("mkdir");
+        let mut expected = system_root_names();
+        expected.push("after-format.txt".to_string());
+        expected.push("AfterDir".to_string());
+        expected.sort_by(|a, b| collate_file_name(a, b));
+        let mut names = upstream_root_names(&mut dev);
+        // A created name may carry a separate DOS 8.3 entry; keep one per name.
+        names.retain(|n| expected.contains(n));
+        names.dedup();
+        assert_eq!(names, expected);
+    }
+
+    #[test]
+    fn a_4096_byte_record_root_index_stays_resident() {
+        let mut dev = formatted_with_records(4096);
+        let (_, record) =
+            crate::mft_io::read_mft_record_io(&mut dev, rec::ROOT as u64).expect("record 5");
+        assert_eq!(crate::index_io::index_root_flags(&record), Some(0));
+        assert!(
+            crate::attr_io::find_attribute(
+                &record,
+                crate::attr_io::AttrType::IndexAllocation,
+                Some(stream::I30)
+            )
+            .is_none(),
+            "a 4096-byte record holds the whole root index"
+        );
+        assert_eq!(upstream_root_names(&mut dev), system_root_names());
+    }
 }
