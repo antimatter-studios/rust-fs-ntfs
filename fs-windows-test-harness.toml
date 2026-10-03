@@ -57,6 +57,9 @@ cli = [
   "cli-windows-interrupted-6-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-1-mount-replay-write-win-verify-chkdsk",
   "cli-windows-interrupted-6-mount-replay-write-win-verify-chkdsk",
+  "cli-windows-interrupted-wrap-span-fsck-replay-win-verify-chkdsk",
+  "cli-windows-interrupted-wrap-boundary-fsck-replay-win-verify-chkdsk",
+  "cli-windows-interrupted-wrap-mft-grows-fsck-replay-win-verify-chkdsk",
 ]
 
 [project]

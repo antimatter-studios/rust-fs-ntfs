@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **A `$LogFile` that wrapped is replayed** (#137). When the log's writer
+  passed its last page and went on at the first page of its record area
+  between the last checkpoint and the stop, the replay refused the log;
+  it now follows the log across its end. Three volumes Windows left
+  mid-write with wrapped logs, new in `test-disks/`, replay to exactly
+  what Windows' own restart produced from them. Making them settled three
+  more of Windows' redo semantics:
+  - `DeallocateFileRecordSegment` also increments the record's sequence
+    number.
+  - `DeleteIndexEntryAllocation` leaves the bytes past the block's new
+    end as they were, rather than zeroing them.
+  - A log that grows `$MFT` names records past the `$MFT` on disk. They
+    are checked against `$MFT` as the replay leaves it, where they used
+    to be refused as "not mapped".
+
 - **`fs.ntfs`'s writing verbs no longer write over a `$LogFile` holding
   work.** They checked only the dirty flag, which Windows 8 and later leave
   clear after an unclean shutdown, so `fs.ntfs write` on such a volume
