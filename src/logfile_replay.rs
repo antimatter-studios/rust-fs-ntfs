@@ -20,9 +20,15 @@
 //!   a record is applied when its page is in the dirty page table at or
 //!   before the record, and, for an MFT record or an index block, when the
 //!   block's own LSN is older than the record's;
-//! * **undo is not implemented.** A transaction still open at the end of
-//!   the log with anything to undo is refused. No fixture has one: every
-//!   transaction in each ends in a `ForgetTransaction` record.
+//! * **undo** of every transaction still open at the end of the log: its
+//!   records, newest first along their undo-next chain, have their undo
+//!   operation applied at the same target, after redo and whatever the
+//!   page's LSN, since the change may already be on disk. Across
+//!   transactions, newest first. Windows' restart does the same and logs
+//!   each as a compensation record whose redo is the original's undo
+//!   (`test-disks/windows-interrupted-undo`, whose recovered `$LogFile`
+//!   holds them). A transaction prepared or committed and not forgotten
+//!   is refused: no capture has held one.
 //!
 //! Every redo operation replayed here was checked against what Windows'
 //! own restart produced from the same pre-image (the `.recovered` images):
@@ -769,7 +775,9 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
     }
 
     // ---- analysis, from the checkpoint's start ---------------------------
-    let mut open_transactions: BTreeMap<u32, bool> = BTreeMap::new();
+    // Transaction -> (whether anything in it is to be undone, its last
+    // record's LSN).
+    let mut open_transactions: BTreeMap<u32, (bool, u64)> = BTreeMap::new();
     for (lsn, header, data) in &records {
         if *lsn < start || u32_at(header, 0x20)? != LFS_CLIENT_RECORD {
             continue;
@@ -779,8 +787,15 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
         if redo == FORGET_TRANSACTION {
             open_transactions.remove(&transaction);
         } else {
-            *open_transactions.entry(transaction).or_default() |=
-                !matches!(undo, NOOP | COMPENSATION);
+            if matches!(redo, PREPARE_TRANSACTION | COMMIT_TRANSACTION) {
+                return Err(refuse(format!(
+                    "transaction {transaction} is prepared or committed at LSN {lsn:#x} and \
+                     not forgotten, which no capture has shown"
+                )));
+            }
+            let t = open_transactions.entry(transaction).or_default();
+            t.0 |= !matches!(undo, NOOP | COMPENSATION);
+            t.1 = *lsn;
         }
         if redo == OPEN_NONRESIDENT_ATTRIBUTE {
             let e = redo_data(header, data)?;
@@ -799,12 +814,39 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
                 .or_insert((*lsn, None));
         }
     }
-    if let Some((t, _)) = open_transactions.iter().find(|(_, undo)| **undo) {
-        return Err(refuse(format!(
-            "transaction {t} did not finish before the log stopped, and undoing it is not \
-             implemented"
-        )));
+    // ---- undo, gathered: every transaction still open at the log's end
+    // is rolled back, its records newest first along their undo-next chain.
+    // Each becomes a record whose redo is the original's undo, applied
+    // after redo whatever the page's LSN, since the change it reverses may
+    // already be on disk. Across transactions, newest first.
+    let mut undo = Vec::new();
+    for (&transaction, &(to_undo, last)) in &open_transactions {
+        if !to_undo {
+            continue;
+        }
+        let mut lsn = last;
+        while lsn != 0 {
+            let (header, data, _) = l.record(lsn)?;
+            if u32_at(&header, 0x20)? != LFS_CLIENT_RECORD || u32_at(&header, 0x24)? != transaction
+            {
+                return Err(refuse(format!(
+                    "transaction {transaction}'s undo chain reaches LSN {lsn:#x}, which is \
+                     not its record"
+                )));
+            }
+            if !matches!(u16_at(&data, 2)?, NOOP | COMPENSATION) {
+                undo.push((lsn, undo_as_redo(&header, &data)?));
+            }
+            let next = u64_at(&header, 0x10)?;
+            if next >= lsn {
+                return Err(refuse(format!(
+                    "transaction {transaction}'s undo chain goes forward at LSN {lsn:#x}"
+                )));
+            }
+            lsn = next;
+        }
     }
+    undo.sort_by_key(|u| std::cmp::Reverse(u.0));
 
     // ---- redo ------------------------------------------------------------
     let cluster = params.cluster_size as usize;
@@ -812,7 +854,15 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
     let mut blocks: BTreeMap<u64, Block> = BTreeMap::new();
     let mut raw: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
     let mut applied = 0u64;
-    for (lsn, header, data) in &records {
+    let undo: Vec<_> = undo
+        .into_iter()
+        .map(|(lsn, (header, data))| (lsn, header, data))
+        .collect();
+    let all = records
+        .iter()
+        .map(|r| (r, false))
+        .chain(undo.iter().map(|r| (r, true)));
+    for ((lsn, header, data), undoing) in all {
         let lsn = *lsn;
         if u32_at(header, 0x20)? != LFS_CLIENT_RECORD {
             continue;
@@ -846,12 +896,11 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
         }
         let target = u16_at(data, 0x0C)?;
         let vcn = u64_at(data, 0x18)?;
-        let Some((oldest, dirty_lcns)) = dirty.get(&(target, vcn)) else {
-            continue;
-        };
-        if lsn < *oldest {
+        let page_entry = dirty.get(&(target, vcn));
+        if !undoing && page_entry.is_none_or(|(oldest, _)| lsn < *oldest) {
             continue;
         }
+        let dirty_lcns = page_entry.and_then(|(_, l)| l.as_ref());
         // The page's clusters, from its first VCN: one LCN each. A page
         // spans several when clusters are smaller than the page.
         let lcns = (0..u16_at(data, 0x0E)? as usize)
@@ -998,7 +1047,7 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
                 && record_off + attr_off == 0
                 && redo.get(..4) == Some(b"INDX"));
         if block.valid {
-            if u64_at(&block.bytes, 0x08)? >= lsn {
+            if !undoing && u64_at(&block.bytes, 0x08)? >= lsn {
                 continue;
             }
         } else if !initialises {
@@ -1078,6 +1127,26 @@ fn lcns_agree(record: &[u64], page: &[u64]) -> bool {
             .iter()
             .zip(page)
             .any(|(&mine, &theirs)| theirs != 0 && mine != theirs)
+}
+
+/// A client record turned round for undo: its undo operation and data as
+/// the redo, and its redo's as the undo, so the redo path applies the
+/// undo at the same target. Every byte of undo data must be present: the
+/// log leaves out zeros only from redo data.
+fn undo_as_redo(
+    header: &[u8; RECORD_HEADER],
+    data: &[u8],
+) -> Result<([u8; RECORD_HEADER], Vec<u8>), Error> {
+    let mut header = *header;
+    let flags = u16_at(&header, 0x28)? & !RECORD_REDO_ZEROS;
+    put(&mut header, 0x28, &flags.to_le_bytes())?;
+    let mut data = data.to_vec();
+    for (a, b) in [(0x00, 0x02), (0x04, 0x08), (0x06, 0x0A)] {
+        let (x, y) = (u16_at(&data, a)?, u16_at(&data, b)?);
+        put(&mut data, a, &y.to_le_bytes())?;
+        put(&mut data, b, &x.to_le_bytes())?;
+    }
+    Ok((header, data))
 }
 
 /// The redo data of a client record, with any zeros the log left out.

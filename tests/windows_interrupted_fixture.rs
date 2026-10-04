@@ -39,6 +39,10 @@
 //!   capture whose newest log page reached only the tail-copy area. See
 //!   [`TAIL_CONTINUATION_LOG_END`].
 //!
+//! * `windows-interrupted-undo*`: the same three files for a capture whose
+//!   log ends inside a transaction, which a replay must roll back. See
+//!   [`UNDO_LOG_END`].
+//!
 //! Every partition's SHA-256 is in [`PARTITIONS`] and checked on unpacking.
 //!
 //! WHAT WINDOWS' REPLAY CHANGED, read by ntfs-3g without replaying: on
@@ -72,7 +76,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 /// The SHA-256 of each decompressed partition, as captured.
-const PARTITIONS: [(&str, &str); 16] = [
+const PARTITIONS: [(&str, &str); 18] = [
     (
         "windows-interrupted-1",
         "7236ffe64f5532b6f5cd976c1fa81c66e6be6cd31cfb8c22bc0bb588e8fad54f",
@@ -124,6 +128,14 @@ const PARTITIONS: [(&str, &str); 16] = [
     (
         "windows-interrupted-small-cluster",
         "ca6cd15abc881a93baad190ef7ba646932c3a1d6d4f32f42c9ff05fd58ca04ce",
+    ),
+    (
+        "windows-interrupted-undo",
+        "a4a50342be08fded5b654f2bac6424f3ee59eb3152ad8861aaf709ebd8fc3a2a",
+    ),
+    (
+        "windows-interrupted-undo.recovered",
+        "7641f2ab679eb2ba55dac19dd77a34209efd94dcc11c84cdc442679cd73eedb7",
     ),
     (
         "windows-interrupted-tail-continuation",
@@ -317,6 +329,16 @@ const SMALL_CLUSTER_LOG_END: [(&str, u64); 1] = [("small-cluster", 0x82_967f)];
 /// read by the same independent reader.
 const TAIL_CONTINUATION_LOG_END: [(&str, u64); 1] = [("tail-continuation", 0x32_4e8a)];
 
+/// A volume whose log ends inside a transaction: its last three records,
+/// `SetNewAttributeSizes`, `UpdateResidentValue` and
+/// `UpdateFileNameAllocation`, belong to transaction 344, which has no
+/// `ForgetTransaction`, so Windows' restart rolls them back. Replay refused
+/// it before undo was implemented (#137). Made by the same capture, and
+/// recovered by Windows the same way, as the snapshots above (run
+/// 37077655517, four writers for 60 s on 1 KiB clusters, snapshot 3); its
+/// last LSN read by the same independent reader.
+const UNDO_LOG_END: [(&str, u64); 1] = [("undo", 0x32_74ad)];
+
 /// Where, in each pre-image, a `$LogFile` record page the replay needs
 /// sits: inside the walk from the oldest dirty page to the log's end, and
 /// in no tail copy.
@@ -433,6 +455,65 @@ fn a_record_whose_end_only_a_tail_copy_holds_is_replayed_to_what_windows_recover
     // volume Windows recovers (#137).
     for (k, log_end) in TAIL_CONTINUATION_LOG_END {
         fsck_and_mount_rw_replay_to_what_windows_recovered(k, log_end);
+    }
+}
+
+#[test]
+fn a_transaction_the_log_ends_inside_is_rolled_back_to_what_windows_recovered() {
+    // A log may stop before a transaction's ForgetTransaction. Windows'
+    // restart redoes everything and then undoes that transaction, newest
+    // record first, whether or not its changes reached the disk. A replay
+    // that refuses it sends the volume back to Windows; one that only
+    // redoes leaves half a transaction on the volume (#137).
+    for (k, log_end) in UNDO_LOG_END {
+        fsck_and_mount_rw_replay_to_what_windows_recovered(k, log_end);
+    }
+}
+
+/// What Windows' own log says record 2072 held right after its restart on
+/// `undo`. Its restart rolled transaction 344 back with compensation
+/// records whose redo is exactly the original records' undo -- `0x3274f1`
+/// rewrites the `$DATA` sizes at record offset `0x110`, `0x3274de` the 64
+/// bytes at `0x38 + 0x20` -- and then rewrote the record again after
+/// mounting (transaction 24), so the comparison above cannot reach it: its
+/// LSN is past the log's end. Transaction 24's own undo data, though,
+/// records the state it found: `0x3276ce`'s the sizes, `0x3276c1`'s the
+/// mapping pairs at `0x110 + 0x40`. Read from the recovered image's
+/// `$LogFile` by the same independent reader.
+const UNDO_RECORD_2072: [(usize, &str); 3] = [
+    (0x110 + 0x40, "2103622800000000"),
+    (0x110 + 0x28, "000c000000000000"),
+    (
+        0x38 + 0x20,
+        "46b50aaec552dd0146b50aaec552dd0146b50aaec552dd012000000000000000\
+         0000000000000000000000000801000000000000000000000000000000000000",
+    ),
+];
+
+#[test]
+fn a_rolled_back_record_holds_what_windows_own_log_says_it_held_after_restart() {
+    let replay: [(&str, Mount); 2] = [
+        ("fsck", |img| {
+            fsck::fsck(img).map(|_| ()).map_err(|e| e.to_string())
+        }),
+        ("Filesystem::mount_rw", RW_MOUNTS[0].1),
+    ];
+    for (how, run) in replay {
+        let img = unpack("windows-interrupted-undo");
+        run(&img).unwrap_or_else(|e| panic!("undo: {how}: {e}"));
+        let rec = Image::read(&img).record(2072).expect("record 2072");
+        for (at, want) in UNDO_RECORD_2072 {
+            let want: Vec<u8> = (0..want.len() / 2)
+                .map(|i| u8::from_str_radix(&want[2 * i..2 * i + 2], 16).unwrap())
+                .collect();
+            assert_eq!(
+                &rec[at..at + want.len()],
+                &want[..],
+                "undo: {how}: record 2072 at {at:#x} is not what Windows' log says it held \
+                 after restart"
+            );
+        }
+        std::fs::remove_file(&img).unwrap();
     }
 }
 
@@ -694,12 +775,14 @@ fn what_windows_recovered_reads_here_as_windows_lists_it() {
     let index_vcn = INDEX_VCN_LOG_END.map(|(k, _)| k);
     let small_cluster = SMALL_CLUSTER_LOG_END.map(|(k, _)| k);
     let tail_continuation = TAIL_CONTINUATION_LOG_END.map(|(k, _)| k);
+    let undo = UNDO_LOG_END.map(|(k, _)| k);
     for k in ["1", "6"]
         .into_iter()
         .chain(wrapped)
         .chain(index_vcn)
         .chain(small_cluster)
         .chain(tail_continuation)
+        .chain(undo)
     {
         let img = unpack(&format!("windows-interrupted-{k}.recovered"));
         let want = manifest(k);
@@ -787,6 +870,7 @@ fn windows_replay_changed_what_the_volumes_hold() {
 /// | index-vcn      | 134     | 418    | <= 99 |
 /// | small-cluster  | 217     | 259    | 4,760 |
 /// | tail-continuation | 57   | 99     | 1,493 |
+/// | undo           | 342     | 99     | 5,089 |
 ///
 /// `index-vcn`'s records and blocks were measured from the pre-image and
 /// Windows' recovered copy alone; its bits are at most the 99 `$Bitmap`
@@ -801,6 +885,7 @@ fn floors(k: &str) -> (usize, usize, usize) {
         "index-vcn" => (100, 300, 40),
         "small-cluster" => (150, 200, 4000),
         "tail-continuation" => (40, 70, 1100),
+        "undo" => (250, 70, 4000),
         other => panic!("no floors measured for fixture {other}"),
     }
 }
@@ -1112,13 +1197,22 @@ mod oracle {
             win.stream(6, 0x80),
             pre.stream(6, 0x80),
         );
+        // A record Windows rewrote after its restart may have taken clusters
+        // or given them back (a zero-length file's allocation released at
+        // mount, on `undo`): either way the bit is Windows' later work, so
+        // the record's runs count as Windows has them and as replay left
+        // them.
         let mut owned_after = BTreeSet::new();
         for &n in &after {
-            let Some(rec) = win.record(n) else { continue };
-            for (a, _, nr) in attrs(&rec) {
-                if nr {
-                    for (lcn, len) in runs_of(&rec, a) {
-                        owned_after.extend(lcn..lcn + len);
+            for img in [win, ours] {
+                let Some(rec) = img.raw_record_if_mapped(n).and_then(|r| fixed(r, b"FILE")) else {
+                    continue;
+                };
+                for (a, _, nr) in attrs(&rec) {
+                    if nr {
+                        for (lcn, len) in runs_of(&rec, a) {
+                            owned_after.extend(lcn..lcn + len);
+                        }
                     }
                 }
             }
