@@ -46,6 +46,10 @@
 //! * In an LFS 2.x log the newest pages are written to the tail-copy area
 //!   before their home, so a page is read from whichever valid copy -- home
 //!   or tail -- has the highest last LSN.
+//!   A tail copy's last LSN names the record that ends on it; when that
+//!   record started on the page before, the copy is of the page it ends
+//!   on, found from the record's length
+//!   (`test-disks/windows-interrupted-tail-continuation`).
 //! * The log wraps from its last page to the first page of its record
 //!   area (the first page at its own home, after the tail-copy area), one
 //!   sequence number up: a record may run across the end, and the record
@@ -592,14 +596,51 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
         .min()
         .unwrap_or(log.len());
     l.first_page = record_area;
+    // A tail copy's last LSN names the record that ENDS on it. When that
+    // record ends before the offset it starts at, it started on an earlier
+    // page, and the copy is of the page it ends on: placed once every
+    // copy of its start page is known, from the record's length.
+    let mut ends_elsewhere = Vec::new();
     for (at, home, last, page) in pages {
         if home != at && at < record_area {
-            l.copies
-                .entry(home)
-                .or_default()
-                .push((last, false, page.clone()));
+            let within = l.offset(last) % lps;
+            if u32_at(&page, 0x10)? & PAGE_RECORD_END != 0
+                && u64_at(&page, 0x20)? == last
+                && (u16_at(&page, 0x18)? as usize) <= within
+            {
+                ends_elsewhere.push((home, last, page.clone()));
+            } else {
+                l.copies
+                    .entry(home)
+                    .or_default()
+                    .push((last, false, page.clone()));
+            }
         }
         l.copies.entry(at).or_default().push((last, true, page));
+    }
+    let mut placed = Vec::new();
+    for (start, last, page) in ends_elsewhere {
+        // A start page no copy holds leaves this copy unplaced, and the
+        // record unreadable, which the walk refuses by name.
+        let Ok(len) = l
+            .page(start, last)
+            .and_then(|p| u32_at(p, l.offset(last) % lps + 0x18))
+        else {
+            continue;
+        };
+        let on_start = lps - l.offset(last) % lps - RECORD_HEADER;
+        let rest = (len as usize).saturating_sub(on_start);
+        let mut home = start;
+        for _ in 0..rest.div_ceil(lps - l.data_offset).max(1) {
+            home += lps;
+            if home + lps > log.len() {
+                home = l.first_page;
+            }
+        }
+        placed.push((home, last, page));
+    }
+    for (home, last, page) in placed {
+        l.copies.entry(home).or_default().push((last, false, page));
     }
 
     // ---- the checkpoint and the tables it dumped -------------------------

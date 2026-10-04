@@ -35,6 +35,10 @@
 //!   capture on 1 KiB clusters, whose logged pages span several clusters.
 //!   See [`SMALL_CLUSTER_LOG_END`].
 //!
+//! * `windows-interrupted-tail-continuation*`: the same three files for a
+//!   capture whose newest log page reached only the tail-copy area. See
+//!   [`TAIL_CONTINUATION_LOG_END`].
+//!
 //! Every partition's SHA-256 is in [`PARTITIONS`] and checked on unpacking.
 //!
 //! WHAT WINDOWS' REPLAY CHANGED, read by ntfs-3g without replaying: on
@@ -68,7 +72,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 /// The SHA-256 of each decompressed partition, as captured.
-const PARTITIONS: [(&str, &str); 14] = [
+const PARTITIONS: [(&str, &str); 16] = [
     (
         "windows-interrupted-1",
         "7236ffe64f5532b6f5cd976c1fa81c66e6be6cd31cfb8c22bc0bb588e8fad54f",
@@ -120,6 +124,14 @@ const PARTITIONS: [(&str, &str); 14] = [
     (
         "windows-interrupted-small-cluster",
         "ca6cd15abc881a93baad190ef7ba646932c3a1d6d4f32f42c9ff05fd58ca04ce",
+    ),
+    (
+        "windows-interrupted-tail-continuation",
+        "049ff866eeff7b855d4e3f39628809808eaac99fb270cc26c151ab03ddca2920",
+    ),
+    (
+        "windows-interrupted-tail-continuation.recovered",
+        "8e91b7aafcb0f2491ebaa479a5130b8595253e4184168e184e1e32b744af92b9",
     ),
     (
         "windows-interrupted-small-cluster.recovered",
@@ -293,6 +305,18 @@ const INDEX_VCN_LOG_END: [(&str, u64); 1] = [("index-vcn", 0xd3_21e9)];
 /// cluster"); its last LSN read by the same independent reader.
 const SMALL_CLUSTER_LOG_END: [(&str, u64); 1] = [("small-cluster", 0x82_967f)];
 
+/// A volume whose last log record starts near the end of one page and ends
+/// on the next, where only a tail copy holds the newest version of that
+/// next page. A tail copy's last LSN names the record that ends on it, so
+/// this copy names a record that starts on the page before; filed under
+/// that earlier page, it either clashed with the earlier page's own tail
+/// copy ("two different tail copies ... are equally new") or left the
+/// record's end unread ("no valid copy ... holds LSN") (#137). Made by the
+/// same capture, and recovered by Windows the same way, as the snapshots
+/// above (run 37161976800, one writer for 40 s, snapshot 6); its last LSN
+/// read by the same independent reader.
+const TAIL_CONTINUATION_LOG_END: [(&str, u64); 1] = [("tail-continuation", 0x32_4e8a)];
+
 /// Where, in each pre-image, a `$LogFile` record page the replay needs
 /// sits: inside the walk from the oldest dirty page to the log's end, and
 /// in no tail copy.
@@ -396,6 +420,18 @@ fn a_log_whose_pages_span_several_clusters_is_replayed_to_what_windows_recovered
     // page up by the record's own VCN alone skips it, and leaves an MFT
     // record unwritten that the log created (#137).
     for (k, log_end) in SMALL_CLUSTER_LOG_END {
+        fsck_and_mount_rw_replay_to_what_windows_recovered(k, log_end);
+    }
+}
+
+#[test]
+fn a_record_whose_end_only_a_tail_copy_holds_is_replayed_to_what_windows_recovered() {
+    // The newest page of a log may have reached only the tail-copy area,
+    // and the record ending on it may have started on the page before. The
+    // copy belongs to the page it ends on; a replay that files it under
+    // the page the record starts on cannot read the record, and refuses a
+    // volume Windows recovers (#137).
+    for (k, log_end) in TAIL_CONTINUATION_LOG_END {
         fsck_and_mount_rw_replay_to_what_windows_recovered(k, log_end);
     }
 }
@@ -657,11 +693,13 @@ fn what_windows_recovered_reads_here_as_windows_lists_it() {
     let wrapped = WRAPPED_LOG_END.map(|(k, _)| k);
     let index_vcn = INDEX_VCN_LOG_END.map(|(k, _)| k);
     let small_cluster = SMALL_CLUSTER_LOG_END.map(|(k, _)| k);
+    let tail_continuation = TAIL_CONTINUATION_LOG_END.map(|(k, _)| k);
     for k in ["1", "6"]
         .into_iter()
         .chain(wrapped)
         .chain(index_vcn)
         .chain(small_cluster)
+        .chain(tail_continuation)
     {
         let img = unpack(&format!("windows-interrupted-{k}.recovered"));
         let want = manifest(k);
@@ -748,6 +786,7 @@ fn windows_replay_changed_what_the_volumes_hold() {
 /// | wrap-mft-grows | 516     | 212    | 1,493 |
 /// | index-vcn      | 134     | 418    | <= 99 |
 /// | small-cluster  | 217     | 259    | 4,760 |
+/// | tail-continuation | 57   | 99     | 1,493 |
 ///
 /// `index-vcn`'s records and blocks were measured from the pre-image and
 /// Windows' recovered copy alone; its bits are at most the 99 `$Bitmap`
@@ -761,6 +800,7 @@ fn floors(k: &str) -> (usize, usize, usize) {
         "wrap-mft-grows" => (400, 150, 1200),
         "index-vcn" => (100, 300, 40),
         "small-cluster" => (150, 200, 4000),
+        "tail-continuation" => (40, 70, 1100),
         other => panic!("no floors measured for fixture {other}"),
     }
 }
