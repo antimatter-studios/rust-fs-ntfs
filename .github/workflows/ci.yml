@@ -149,6 +149,14 @@ jobs:
         shell: bash
         run: scripts/run-script-tests.sh tests/scripts
 
+      # The PowerShell the capture workflow runs on Windows, driven with
+      # chkdsk's real reports so it is tested on every pull request rather
+      # than only when someone dispatches a capture (#137).
+      - name: capture script tests
+        if: matrix.os == 'ubuntu-latest'
+        shell: pwsh
+        run: pwsh -NoProfile -File tests/scripts/capture-chkdsk.ps1
+
       # Test scope is intentionally narrow: only tests that DON'T need
       # the out-of-tree `test-disks/*.img` fixtures. The fixture-driven
       # integration tests (tests/ads.rs, tests/file_data.rs, etc.)
