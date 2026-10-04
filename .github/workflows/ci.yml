@@ -862,6 +862,15 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      # 1000 names in one directory: the index root fills and hands its
+      # entries down a level (#432).
+      - name: Validate index root split on Windows
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh mac-format-mac-split-index-root-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       # The command-line tools' Windows half (the `cli` group): mkfs.ntfs,
       # fs.ntfs set and fsck.ntfs change the image on this runner, and
       # Windows grades it -- chkdsk, fsutil dirty query. chore has no

@@ -28,7 +28,16 @@ use std::path::Path;
 const VOL_SIZE: u64 = 64 * 1024 * 1024;
 const CLUSTER: u32 = 4096;
 
+/// The MFT record size Windows formats with. A 1024-byte record leaves a
+/// directory's resident `$INDEX_ROOT` room for only a handful of routing
+/// entries, so its index root fills after a few leaf splits.
+const WINDOWS_MFT_RECORD: u32 = 1024;
+
 fn fresh_vol(tag: &str) -> String {
+    fresh_vol_with_records(tag, CLUSTER)
+}
+
+fn fresh_vol_with_records(tag: &str, mft_record_size: u32) -> String {
     let dst = common::temp_image_path(format!("ld_{tag}"));
     let f = std::fs::File::create(&dst).expect("create");
     f.set_len(VOL_SIZE).expect("set_len");
@@ -38,7 +47,7 @@ fn fresh_vol(tag: &str) -> String {
         &mut io,
         VOL_SIZE,
         CLUSTER,
-        CLUSTER,
+        mft_record_size,
         Some("LDTEST"),
         Some(0xD1_4EC7),
     )
@@ -83,12 +92,18 @@ fn list_subdir(img: &str, dir: &str) -> Vec<String> {
     names
 }
 
+/// More names than any directory here can take. The index B-tree now gains
+/// levels as it fills (#432), so the ceiling the fill tests meet is the
+/// directory's resident `$Bitmap:$I30`: 64 bits, one per 4 KiB index block,
+/// which is at most about 2400 of these names.
+const FILL_LIMIT: usize = 3000;
+
 /// Create files named `prefix{NNNN}` in `dir` until `create_file` errors,
 /// returning (count_created, the_error_string).
 fn fill_until_full(img: &str, dir: &str, prefix: &str) -> (usize, String) {
     let dir_path = format!("/{dir}");
     let mut created = 0usize;
-    for i in 0..1000 {
+    for i in 0..FILL_LIMIT {
         let name = format!("{prefix}{i:04}.txt");
         match write::create_file(Path::new(img), &dir_path, &name) {
             Ok(_) => created += 1,
@@ -107,7 +122,7 @@ fn subdir_fills_gracefully_at_capacity() {
     // Index growth now proceeds past the old one-leaf ceiling. A later
     // capacity limit (often the fixed-size MFT) must be a clean refusal.
     assert!(
-        (80..1000).contains(&created),
+        (80..FILL_LIMIT).contains(&created),
         "expected growth past two leaves before a capacity limit, got {created}"
     );
     assert!(
@@ -297,7 +312,7 @@ fn root_dir_fills_gracefully_at_capacity() {
     let img = fresh_vol("root_ceiling");
     let mut created = 0usize;
     let mut err = String::new();
-    for i in 0..1000 {
+    for i in 0..FILL_LIMIT {
         let name = format!("r_{i:04}.txt");
         match write::create_file(Path::new(&img), "/", &name) {
             Ok(_) => created += 1,
@@ -333,4 +348,67 @@ fn root_dir_fills_gracefully_at_capacity() {
         found_in_root(&img, &format!("r_{last:04}.txt")),
         "last root entry findable"
     );
+}
+
+/// Create every name in `order` in `/d` of a fresh volume formatted with
+/// Windows' 1024-byte MFT records, then prove with the upstream `ntfs`
+/// parser that the directory lists each of them exactly once.
+fn directory_takes_every_name(tag: &str, order: &[usize]) {
+    let img = fresh_vol_with_records(tag, WINDOWS_MFT_RECORD);
+    write::mkdir(Path::new(&img), "/", "d").expect("mkdir");
+    for (done, &i) in order.iter().enumerate() {
+        let name = format!("f_{i:04}.txt");
+        write::create_file(Path::new(&img), "/d", &name).unwrap_or_else(|e| {
+            panic!("create {name} after {done} names already in the directory: {e}")
+        });
+    }
+
+    let names = list_subdir(&img, "d");
+    assert_eq!(names.len(), order.len(), "independent parser lost entries");
+    for &i in order {
+        let want = format!("f_{i:04}.txt");
+        assert!(
+            names.contains(&want),
+            "independent parser cannot see {want}"
+        );
+    }
+    let mut expected = names.clone();
+    expected.sort_by_key(|n| n.to_uppercase());
+    assert_eq!(names, expected, "the index no longer collates in order");
+}
+
+/// A 1024-byte record's `$INDEX_ROOT` fills after a few leaf splits. The
+/// next split has to move the root's routing entries down into a new index
+/// block and leave the root a single entry routing to it, so the index
+/// gains a level instead of refusing the name (#432).
+#[test]
+fn a_directory_keeps_growing_after_its_index_root_fills() {
+    let order: Vec<usize> = (0..400).collect();
+    directory_takes_every_name("root_split_ascending", &order);
+}
+
+/// Descending names fill the leftmost leaf, so each separator lands in
+/// front of the root's existing entries rather than after them.
+#[test]
+fn a_directory_keeps_growing_after_its_index_root_fills_from_the_left() {
+    let order: Vec<usize> = (0..400).rev().collect();
+    directory_takes_every_name("root_split_descending", &order);
+}
+
+/// Scattered names split leaves in the middle of the key range, after the
+/// root has already handed its entries down.
+#[test]
+fn a_directory_keeps_growing_when_names_arrive_out_of_order() {
+    const N: usize = 600;
+    // 7919 is prime and does not divide 600, so this visits every index.
+    let order: Vec<usize> = (0..N).map(|i| i * 7919 % N).collect();
+    directory_takes_every_name("root_split_scattered", &order);
+}
+
+/// Enough sorted names that the index block the root handed its entries to
+/// fills too, and has to split into two interior blocks.
+#[test]
+fn an_interior_index_block_splits_when_it_fills() {
+    let order: Vec<usize> = (0..900).collect();
+    directory_takes_every_name("interior_split", &order);
 }
