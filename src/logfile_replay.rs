@@ -1014,19 +1014,29 @@ type PageCluster = ((u16, u64), Vec<u64>);
 /// with the page's LCNs from it on: a record names the VCN of the block it
 /// changes, which may be any cluster of the page.
 fn page_clusters(target: u16, vcn: u64, lcns: &[u64]) -> Result<Vec<PageCluster>, Error> {
-    Ok((0..lcns.len())
-        .map(|i| ((target, vcn + i as u64), lcns[i..].to_vec()))
-        .collect())
+    (0..lcns.len())
+        .map(|i| {
+            let at = vcn.checked_add(i as u64).ok_or_else(|| {
+                refuse(format!(
+                    "a dirty page of {} clusters from VCN {vcn:#x}, past the last VCN",
+                    lcns.len()
+                ))
+            })?;
+            Ok(((target, at), lcns[i..].to_vec()))
+        })
+        .collect()
 }
 
 /// Whether a record's LCNs agree with the page's from the record's VCN on:
 /// a record names clusters only as far as it writes, and the checkpoint
 /// has 0 for a cluster of the page not yet mapped.
 fn lcns_agree(record: &[u64], page: &[u64]) -> bool {
-    !record
-        .iter()
-        .zip(page)
-        .any(|(&mine, &theirs)| theirs != 0 && mine != theirs)
+    // A cluster past the page's end is one the checkpoint never mapped.
+    record.len() <= page.len()
+        && !record
+            .iter()
+            .zip(page)
+            .any(|(&mine, &theirs)| theirs != 0 && mine != theirs)
 }
 
 /// The redo data of a client record, with any zeros the log left out.
