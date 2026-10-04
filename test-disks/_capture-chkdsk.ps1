@@ -20,7 +20,9 @@ function Assert-LogResize([int]$ExitCode, [string[]]$Output, [int]$KB) {
 # Assert-LogSize EXITCODE OUTPUT KB: returns when `chkdsk /L` reports a
 # $LogFile of KB kilobytes, throws naming what it reported otherwise.
 function Assert-LogSize([int]$ExitCode, [string[]]$Output, [int]$KB) {
-    if (($Output -join ' ') -notmatch "current log file size is $KB KB") {
+    # A readback chkdsk failed proves nothing, whatever it printed.
+    if ($ExitCode -ne 0) { throw "chkdsk /L failed ($ExitCode): $Output" }
+    if (($Output -join ' ') -notmatch 'current log file size is (\d+) KB' -or [int]$Matches[1] -ne $KB) {
         throw "chkdsk /L:$KB left a log of another size: $Output"
     }
 }
