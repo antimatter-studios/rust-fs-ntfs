@@ -62,6 +62,12 @@
 //!   it.
 //! * A log may grow `$MFT` and fill the records it adds, so the replay's
 //!   own `$MFT` -- not the one on disk before it -- says where they are.
+//! * On clusters smaller than the 4 KiB page NTFS logs by, a page spans
+//!   several clusters. The checkpoint's dirty page table lists it by its
+//!   first VCN with an LCN per cluster, 0 for a cluster not yet mapped; a
+//!   record names the VCN of the block it changes, which may be any
+//!   cluster of the page, and LCNs from there only as far as it writes
+//!   (`test-disks/windows-interrupted-small-cluster`, 1 KiB clusters).
 //!
 //! # Formats
 //!
@@ -445,6 +451,41 @@ struct Block {
     record: Option<u64>,
 }
 
+/// A dirty page: the oldest LSN that may not be on disk, and the LCN of
+/// each of its clusters from the VCN it is entered under (`None` for a
+/// page first dirtied after the checkpoint).
+type DirtyPage = (u64, Option<Vec<u64>>);
+
+/// One logged page of a raw attribute (a bitmap, a non-resident value),
+/// addressed by its offset in the page. Its clusters need not be
+/// contiguous, so each is read and kept on its own, by LCN.
+struct RawPage<'a, 'r> {
+    raw: &'a mut BTreeMap<u64, Vec<u8>>,
+    read: &'a mut ReadVolume<'r>,
+    /// The page's clusters, in order.
+    lcns: &'a [u64],
+    cluster_size: u64,
+}
+
+impl RawPage<'_, '_> {
+    fn byte(&mut self, at: usize) -> Result<&mut u8, Error> {
+        let cluster = self.cluster_size as usize;
+        let lcn = *self
+            .lcns
+            .get(at / cluster)
+            .ok_or_else(|| refuse(format!("byte {at:#x} is past its page")))?;
+        let bytes = match self.raw.entry(lcn) {
+            std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::btree_map::Entry::Vacant(e) => {
+                let mut buf = vec![0u8; cluster];
+                (self.read)(lcn * self.cluster_size, &mut buf)?;
+                e.insert(buf)
+            }
+        };
+        Ok(&mut bytes[at % cluster])
+    }
+}
+
 /// Reads `buf.len()` bytes of the volume at a byte offset.
 pub type ReadVolume<'a> = dyn FnMut(u64, &mut [u8]) -> Result<(), Error> + 'a;
 
@@ -622,17 +663,31 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
             );
         }
     }
-    // (target attribute, VCN) -> (oldest LSN, LCN).
-    let mut dirty: HashMap<(u16, u64), (u64, Option<u64>)> = HashMap::new();
+    // (target attribute, VCN of the page's first cluster) -> (oldest LSN,
+    // the LCN of each of the page's clusters). A page spans more than one
+    // cluster when clusters are smaller than the page NTFS logs by.
+    let mut dirty: HashMap<(u16, u64), DirtyPage> = HashMap::new();
     if let Some(t) = table(u64_at(&body, 0x20)?, 0x1F)? {
         for (_, e) in entries(&t)? {
-            if u32_at(&e, 0x0C)? != 1 {
-                return Err(refuse("a dirty page spanning more than one cluster"));
+            let count = u32_at(&e, 0x0C)? as usize;
+            let lcns = (0..count)
+                .map(|i| u64_at(&e, 0x20 + 8 * i))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| refuse("a dirty page whose clusters run past its entry"))?;
+            if lcns.is_empty() {
+                return Err(refuse("a dirty page of no clusters"));
             }
-            dirty.insert(
-                (u32_at(&e, 0x04)? as u16, u64_at(&e, 0x10)?),
-                (u64_at(&e, 0x18)?, Some(u64_at(&e, 0x20)?)),
+            // A record names the VCN of the block it changes, which may be
+            // any cluster of the page, so each cluster is entered under its
+            // own VCN with the page's LCNs from there on.
+            let (target, vcn, oldest) = (
+                u32_at(&e, 0x04)? as u16,
+                u64_at(&e, 0x10)?,
+                u64_at(&e, 0x18)?,
             );
+            for (key, lcns) in page_clusters(target, vcn, &lcns)? {
+                dirty.insert(key, (oldest, Some(lcns)));
+            }
         }
     }
     if let Some(t) = table(u64_at(&body, 0x28)?, TRANSACTION_TABLE_DUMP)? {
@@ -750,37 +805,42 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
         }
         let target = u16_at(data, 0x0C)?;
         let vcn = u64_at(data, 0x18)?;
-        let Some(&(oldest, dirty_lcn)) = dirty.get(&(target, vcn)) else {
+        let Some((oldest, dirty_lcns)) = dirty.get(&(target, vcn)) else {
             continue;
         };
-        if lsn < oldest {
+        if lsn < *oldest {
             continue;
         }
-        if u16_at(data, 0x0E)? != 1 {
+        // The page's clusters, from its first VCN: one LCN each. A page
+        // spans several when clusters are smaller than the page.
+        let lcns = (0..u16_at(data, 0x0E)? as usize)
+            .map(|i| u64_at(data, 0x20 + 8 * i))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| refuse(format!("LSN {lsn:#x} names more clusters than it holds")))?;
+        if lcns.is_empty() {
             return Err(refuse(format!(
-                "LSN {lsn:#x} names {} clusters for one page, and replay has been checked \
-                 only on one",
-                u16_at(data, 0x0E)?
+                "LSN {lsn:#x} names no cluster for its page"
             )));
         }
-        let lcn = u64_at(data, 0x20)?;
-        if dirty_lcn.is_some_and(|d| d != lcn) {
-            return Err(refuse(format!(
-                "LSN {lsn:#x} names LCN {lcn:#x} for a page the checkpoint has at another"
-            )));
+        // A record names the page's clusters only as far as it writes, and
+        // the checkpoint has 0 for a cluster of the page not yet mapped:
+        // the two must agree wherever both name one.
+        if let Some(d) = dirty_lcns {
+            if !lcns_agree(&lcns, d) {
+                return Err(refuse(format!(
+                    "LSN {lsn:#x} names LCNs {lcns:x?} for a page the checkpoint has at {d:x?}"
+                )));
+            }
         }
         let &(attr_type, file) = open.get(&target).ok_or_else(|| {
             refuse(format!(
                 "LSN {lsn:#x} names attribute {target:#x}, which is not open"
             ))
         })?;
-        let in_cluster = u16_at(data, 0x14)? as usize * 512;
+        let page_len = lcns.len() * cluster;
+        let in_page = u16_at(data, 0x14)? as usize * 512;
         let (record_off, attr_off) = (u16_at(data, 0x10)? as usize, u16_at(data, 0x12)? as usize);
         let redo = redo_data(header, data)?;
-        let base = lcn
-            .checked_mul(params.cluster_size)
-            .and_then(|b| b.checked_add(in_cluster as u64))
-            .ok_or_else(|| refuse(format!("LSN {lsn:#x} names LCN {lcn:#x}")))?;
 
         if op == SET_BITS_IN_NONRESIDENT_BITMAP
             || op == CLEAR_BITS_IN_NONRESIDENT_BITMAP
@@ -791,29 +851,36 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
                     "LSN {lsn:#x} writes raw bytes into an MFT record or index block"
                 )));
             }
-            let page = match raw.entry(lcn) {
-                std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
-                std::collections::btree_map::Entry::Vacant(e) => {
-                    let mut buf = vec![0u8; cluster];
-                    read(lcn * params.cluster_size, &mut buf)?;
-                    e.insert(buf)
-                }
+            let mut page = RawPage {
+                raw: &mut raw,
+                read: &mut *read,
+                lcns: &lcns,
+                cluster_size: params.cluster_size,
             };
-            let page = &mut page[in_cluster.min(cluster)..];
             if op == UPDATE_NONRESIDENT_VALUE {
-                put(page, record_off + attr_off, &redo)?;
+                let at = in_page + record_off + attr_off;
+                if at + redo.len() > page_len {
+                    return Err(refuse(format!(
+                        "LSN {lsn:#x} writes {} bytes at {at:#x}, past its {page_len}-byte page",
+                        redo.len()
+                    )));
+                }
+                for (i, b) in redo.iter().enumerate() {
+                    *page.byte(at + i)? = *b;
+                }
             } else {
                 let (first, count) = (u32_at(&redo, 0)? as usize, u32_at(&redo, 4)? as usize);
-                if (first + count).div_ceil(8) > page.len() {
+                if in_page + (first + count).div_ceil(8) > page_len {
                     return Err(refuse(format!(
                         "LSN {lsn:#x} sets bits past its page ({first}+{count})"
                     )));
                 }
                 for bit in first..first + count {
+                    let byte = page.byte(in_page + bit / 8)?;
                     if op == SET_BITS_IN_NONRESIDENT_BITMAP {
-                        page[bit / 8] |= 1 << (bit % 8);
+                        *byte |= 1 << (bit % 8);
                     } else {
-                        page[bit / 8] &= !(1 << (bit % 8));
+                        *byte &= !(1 << (bit % 8));
                     }
                 }
             }
@@ -840,19 +907,32 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
             }
             (b"INDX", params.index_block_size as usize)
         };
-        if u16_at(data, 0x16)? as usize * 512 != size || in_cluster + size > cluster {
+        if u16_at(data, 0x16)? as usize * 512 != size || in_page + size > page_len {
             return Err(refuse(format!(
-                "LSN {lsn:#x} names a {}-byte block at {in_cluster:#x} in a {cluster}-byte \
-                 cluster, where this volume's blocks are {size} bytes",
+                "LSN {lsn:#x} names a {}-byte block at {in_page:#x} in a {page_len}-byte \
+                 page, where this volume's blocks are {size} bytes",
                 u16_at(data, 0x16)? as usize * 512
             )));
         }
-        if raw.contains_key(&lcn) {
+        // The clusters the block itself lies in. It is read and written as
+        // one run, so they must follow each other on disk.
+        let spans = &lcns[in_page / cluster..=(in_page + size - 1) / cluster];
+        if spans.windows(2).any(|w| w[1] != w[0].wrapping_add(1)) {
+            return Err(refuse(format!(
+                "LSN {lsn:#x} names a block across clusters {spans:x?}, which are not \
+                 contiguous"
+            )));
+        }
+        if let Some(lcn) = spans.iter().find(|l| raw.contains_key(l)) {
             return Err(refuse(format!(
                 "LCN {lcn:#x} is written both as raw bytes and as {}",
                 std::str::from_utf8(magic).unwrap_or("?")
             )));
         }
+        let base = spans[0]
+            .checked_mul(params.cluster_size)
+            .and_then(|b| b.checked_add((in_page % cluster) as u64))
+            .ok_or_else(|| refuse(format!("LSN {lsn:#x} names LCN {:#x}", spans[0])))?;
         let block = match blocks.entry(base) {
             std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::btree_map::Entry::Vacant(e) => {
@@ -861,7 +941,7 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
                 let mut fixed = bytes.clone();
                 let valid = apply_fixup_on_read_magic(&mut fixed, bps, magic).is_ok();
                 let record = (magic == b"FILE").then(|| {
-                    (vcn * params.cluster_size + in_cluster as u64) / params.file_record_size
+                    (vcn * params.cluster_size + in_page as u64) / params.file_record_size
                 });
                 e.insert(Block {
                     magic,
@@ -924,6 +1004,39 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
         plan.writes.insert(lcn * params.cluster_size, bytes);
     }
     Ok(plan)
+}
+
+/// A dirty-page cluster's key (target attribute, VCN) and the page's LCNs
+/// from it on.
+type PageCluster = ((u16, u64), Vec<u64>);
+
+/// Each cluster of a dirty page the checkpoint lists, keyed by its own VCN
+/// with the page's LCNs from it on: a record names the VCN of the block it
+/// changes, which may be any cluster of the page.
+fn page_clusters(target: u16, vcn: u64, lcns: &[u64]) -> Result<Vec<PageCluster>, Error> {
+    (0..lcns.len())
+        .map(|i| {
+            let at = vcn.checked_add(i as u64).ok_or_else(|| {
+                refuse(format!(
+                    "a dirty page of {} clusters from VCN {vcn:#x}, past the last VCN",
+                    lcns.len()
+                ))
+            })?;
+            Ok(((target, at), lcns[i..].to_vec()))
+        })
+        .collect()
+}
+
+/// Whether a record's LCNs agree with the page's from the record's VCN on:
+/// a record names clusters only as far as it writes, and the checkpoint
+/// has 0 for a cluster of the page not yet mapped.
+fn lcns_agree(record: &[u64], page: &[u64]) -> bool {
+    // A cluster past the page's end is one the checkpoint never mapped.
+    record.len() <= page.len()
+        && !record
+            .iter()
+            .zip(page)
+            .any(|(&mine, &theirs)| theirs != 0 && mine != theirs)
 }
 
 /// The redo data of a client record, with any zeros the log left out.
@@ -1202,6 +1315,26 @@ mod tests {
         assert_eq!(u32_at(&rec, 0x18).unwrap() as usize, a + 0x50 + 8);
         assert_eq!(&rec[a + 0x34..a + 0x50], &[1; 28]);
         assert_eq!(u32_at(&rec, a + 0x50).unwrap(), 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn a_dirty_page_running_past_the_last_vcn_is_refused() {
+        // Two clusters from VCN u64::MAX: the second has no VCN to be
+        // entered under, so the entry is refused, not wrapped to VCN 0.
+        assert!(page_clusters(0x18, u64::MAX, &[0x10, 0x11]).is_err());
+        let keys = page_clusters(0x18, 0x24, &[0x8c, 0x8d]).unwrap();
+        assert_eq!(keys[1], ((0x18, 0x25), vec![0x8d]));
+    }
+
+    #[test]
+    fn a_record_naming_clusters_past_its_page_is_refused() {
+        // From the page's last cluster a record can name only that one; a
+        // second LCN is one the checkpoint never mapped, and a raw redo
+        // would write through it.
+        assert!(!lcns_agree(&[0x8e, 0x8f], &[0x8e]));
+        assert!(lcns_agree(&[0x8c], &[0x8c, 0x8d, 0x8e, 0]));
+        assert!(lcns_agree(&[0x8c, 0x8d], &[0x8c, 0]));
+        assert!(!lcns_agree(&[0x8c], &[0x8d]));
     }
 
     #[test]

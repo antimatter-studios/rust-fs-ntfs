@@ -27,6 +27,21 @@ written against 0.7.0, and `chore check:semver` refuses it otherwise.
 
 ### Fixed
 
+- **A `$LogFile` written on clusters smaller than a page is replayed**
+  (#137). On 512-byte to 2 KiB clusters NTFS still logs 4 KiB pages, so
+  a dirty page names several clusters, and replay refused every such log
+  ("a dirty page spanning more than one cluster"). The checkpoint's dirty
+  page table now carries an LCN per cluster, with 0 for one not yet
+  mapped; a record's own LCNs, which run only as far as it writes, must
+  agree with it; and each cluster of a page is looked up by its own VCN,
+  because a record names the VCN of the 1 KiB MFT record or index block
+  it changes, which may sit in the middle of its page. A block that would
+  span clusters that do not follow each other on disk is refused. The new
+  fixture `test-disks/windows-interrupted-small-cluster*` (logfile oracle
+  run 37077655517, snapshot 8, 1 KiB clusters) is replayed by `fsck` and
+  by `Filesystem::mount_rw` to Windows' own recovery: every file, MFT
+  record, index block and bitmap. Of that run's eight snapshots, seven now
+  replay; the eighth holds an open transaction, which needs undo.
 - **`format_filesystem` formats volumes with 1024-byte MFT records**
   (#436), the size Windows formats with. The root directory's twelve
   system entries do not fit a resident `$INDEX_ROOT` in a record that

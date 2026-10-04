@@ -31,6 +31,10 @@
 //!   whose log holds `SetIndexEntryVcnAllocation` redo. See
 //!   [`INDEX_VCN_LOG_END`].
 //!
+//! * `windows-interrupted-small-cluster*`: the same three files for a
+//!   capture on 1 KiB clusters, whose logged pages span several clusters.
+//!   See [`SMALL_CLUSTER_LOG_END`].
+//!
 //! Every partition's SHA-256 is in [`PARTITIONS`] and checked on unpacking.
 //!
 //! WHAT WINDOWS' REPLAY CHANGED, read by ntfs-3g without replaying: on
@@ -64,7 +68,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 /// The SHA-256 of each decompressed partition, as captured.
-const PARTITIONS: [(&str, &str); 12] = [
+const PARTITIONS: [(&str, &str); 14] = [
     (
         "windows-interrupted-1",
         "7236ffe64f5532b6f5cd976c1fa81c66e6be6cd31cfb8c22bc0bb588e8fad54f",
@@ -112,6 +116,14 @@ const PARTITIONS: [(&str, &str); 12] = [
     (
         "windows-interrupted-index-vcn.recovered",
         "16e5e62ae6719c45eef010a3d3d5823fec1a1ab2e7f252b32dd125263cd77063",
+    ),
+    (
+        "windows-interrupted-small-cluster",
+        "ca6cd15abc881a93baad190ef7ba646932c3a1d6d4f32f42c9ff05fd58ca04ce",
+    ),
+    (
+        "windows-interrupted-small-cluster.recovered",
+        "39d1d61546f12d02ad9d0669a623d65ce9b66dc9f1cd5e87b6d4e3aff5fa313d",
     ),
 ];
 
@@ -269,6 +281,18 @@ const WRAPPED_LOG_END: [(&str, u64); 3] = [
 /// reader.
 const INDEX_VCN_LOG_END: [(&str, u64); 1] = [("index-vcn", 0xd3_21e9)];
 
+/// A volume formatted with 1 KiB clusters, so the 4 KiB pages NTFS logs
+/// by span four clusters each, which replay refused before it handled them
+/// (#137). Its checkpoint's dirty page table lists a page by its first
+/// VCN with an LCN per cluster (0 for one not yet mapped), and a record
+/// names the VCN of the 1 KiB MFT record it changes, which may be any
+/// cluster of that page, with LCNs only as far as it writes. Made by the
+/// same capture, and recovered by Windows the same way, as the snapshots
+/// above (run 37077655517, four writers for 60 s on 1 KiB clusters,
+/// snapshot 8: refused for "a dirty page spanning more than one
+/// cluster"); its last LSN read by the same independent reader.
+const SMALL_CLUSTER_LOG_END: [(&str, u64); 1] = [("small-cluster", 0x82_967f)];
+
 /// Where, in each pre-image, a `$LogFile` record page the replay needs
 /// sits: inside the walk from the oldest dirty page to the log's end, and
 /// in no tail copy.
@@ -359,6 +383,19 @@ fn an_index_entry_vcn_set_in_an_index_block_is_replayed_to_what_windows_recovere
     // refuses it sends the volume back to Windows, and one that skips it
     // leaves a directory whose index reaches the wrong block (#137).
     for (k, log_end) in INDEX_VCN_LOG_END {
+        fsck_and_mount_rw_replay_to_what_windows_recovered(k, log_end);
+    }
+}
+
+#[test]
+fn a_log_whose_pages_span_several_clusters_is_replayed_to_what_windows_recovered() {
+    // On clusters smaller than the 4 KiB page NTFS logs by, a dirty page
+    // and the records that change it name several clusters, and a record
+    // may name a cluster in the middle of its page. A replay that refuses
+    // them sends the volume back to Windows; one that looks a record's
+    // page up by the record's own VCN alone skips it, and leaves an MFT
+    // record unwritten that the log created (#137).
+    for (k, log_end) in SMALL_CLUSTER_LOG_END {
         fsck_and_mount_rw_replay_to_what_windows_recovered(k, log_end);
     }
 }
@@ -619,7 +656,13 @@ fn last_error() -> String {
 fn what_windows_recovered_reads_here_as_windows_lists_it() {
     let wrapped = WRAPPED_LOG_END.map(|(k, _)| k);
     let index_vcn = INDEX_VCN_LOG_END.map(|(k, _)| k);
-    for k in ["1", "6"].into_iter().chain(wrapped).chain(index_vcn) {
+    let small_cluster = SMALL_CLUSTER_LOG_END.map(|(k, _)| k);
+    for k in ["1", "6"]
+        .into_iter()
+        .chain(wrapped)
+        .chain(index_vcn)
+        .chain(small_cluster)
+    {
         let img = unpack(&format!("windows-interrupted-{k}.recovered"));
         let want = manifest(k);
         assert!(
@@ -704,6 +747,7 @@ fn windows_replay_changed_what_the_volumes_hold() {
 /// | wrap-boundary  | 147     | 131    | 439   |
 /// | wrap-mft-grows | 516     | 212    | 1,493 |
 /// | index-vcn      | 134     | 418    | <= 99 |
+/// | small-cluster  | 217     | 259    | 4,760 |
 ///
 /// `index-vcn`'s records and blocks were measured from the pre-image and
 /// Windows' recovered copy alone; its bits are at most the 99 `$Bitmap`
@@ -716,6 +760,7 @@ fn floors(k: &str) -> (usize, usize, usize) {
         "wrap-boundary" => (100, 100, 350),
         "wrap-mft-grows" => (400, 150, 1200),
         "index-vcn" => (100, 300, 40),
+        "small-cluster" => (150, 200, 4000),
         other => panic!("no floors measured for fixture {other}"),
     }
 }
@@ -727,6 +772,8 @@ struct Image {
     bytes: Vec<u8>,
     cluster: u64,
     record: u64,
+    /// Index block size, which spans several clusters when they are small.
+    index: u64,
     mft_runs: Vec<(u64, u64)>,
 }
 
@@ -780,10 +827,13 @@ impl Image {
         let cluster = le(&bytes, 0x0B, 2) * le(&bytes, 0x0D, 1);
         let c = bytes[0x40] as i8;
         let record = if c > 0 { c as u64 * cluster } else { 1 << -c };
+        let c = bytes[0x44] as i8;
+        let index = if c > 0 { c as u64 * cluster } else { 1 << -c };
         let mut img = Image {
             bytes,
             cluster,
             record,
+            index,
             mft_runs: Vec::new(),
         };
         let mft_lcn = le(&img.bytes, 0x30, 8);
@@ -977,19 +1027,30 @@ mod oracle {
                 if t != 0xA0 || !nr {
                     continue;
                 }
-                for (lcn, len) in runs_of(&rec, a) {
-                    for c in lcn..lcn + len {
-                        let w = content(win.cluster_bytes(c, 1), b"INDX");
-                        if w.is_none() {
-                            continue;
-                        }
-                        blocks += 1;
-                        assert!(
-                            content(ours.cluster_bytes(c, 1), b"INDX") == w,
-                            "snapshot {k}: record {n}'s index block at LCN {c} differs from \
-                             what Windows recovered"
-                        );
+                // Block by block through the allocation, which a block
+                // spans several clusters of when clusters are small.
+                let runs = runs_of(&rec, a);
+                let (w_alloc, o_alloc): (Vec<u8>, Vec<u8>) = (
+                    runs.iter()
+                        .flat_map(|&(l, n)| win.cluster_bytes(l, n).to_vec())
+                        .collect(),
+                    runs.iter()
+                        .flat_map(|&(l, n)| ours.cluster_bytes(l, n).to_vec())
+                        .collect(),
+                );
+                let size = win.index as usize;
+                for at in (0..w_alloc.len() / size * size).step_by(size) {
+                    let w = content(&w_alloc[at..at + size], b"INDX");
+                    if w.is_none() {
+                        continue;
                     }
+                    blocks += 1;
+                    assert!(
+                        content(&o_alloc[at..at + size], b"INDX") == w,
+                        "snapshot {k}: record {n}'s index block at VCN {} differs from what \
+                         Windows recovered",
+                        at as u64 / win.cluster
+                    );
                 }
             }
         }
