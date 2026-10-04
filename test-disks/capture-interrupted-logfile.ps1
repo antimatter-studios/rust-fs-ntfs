@@ -53,6 +53,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/_capture-chkdsk.ps1"
 $root = 'C:\oracle366'
 Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory $root -Force | Out-Null
@@ -93,7 +94,7 @@ if ($LogKB -gt 0) {
     # chkdsk resizes $LogFile only with the volume locked; nothing has it
     # open yet, and /X dismounts it first.
     $log = & chkdsk.exe "$($part.DriveLetter):" /X /L:$LogKB 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "chkdsk /L:$LogKB failed ($LASTEXITCODE): $log" }
+    Assert-LogResize $LASTEXITCODE $log $LogKB
     $log | Set-Content (Join-Path $Out 'logsize.txt')
 }
 @{
