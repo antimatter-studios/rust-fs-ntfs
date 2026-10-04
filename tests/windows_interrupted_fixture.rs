@@ -43,6 +43,10 @@
 //!   log ends inside a transaction, which a replay must roll back. See
 //!   [`UNDO_LOG_END`].
 //!
+//! * `windows-interrupted-open-at-checkpoint*`: the same three files for a
+//!   capture whose checkpoint lists a transaction still open. See
+//!   [`OPEN_AT_CHECKPOINT_LOG_END`].
+//!
 //! Every partition's SHA-256 is in [`PARTITIONS`] and checked on unpacking.
 //!
 //! WHAT WINDOWS' REPLAY CHANGED, read by ntfs-3g without replaying: on
@@ -76,7 +80,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 /// The SHA-256 of each decompressed partition, as captured.
-const PARTITIONS: [(&str, &str); 18] = [
+const PARTITIONS: [(&str, &str); 20] = [
     (
         "windows-interrupted-1",
         "7236ffe64f5532b6f5cd976c1fa81c66e6be6cd31cfb8c22bc0bb588e8fad54f",
@@ -128,6 +132,14 @@ const PARTITIONS: [(&str, &str); 18] = [
     (
         "windows-interrupted-small-cluster",
         "ca6cd15abc881a93baad190ef7ba646932c3a1d6d4f32f42c9ff05fd58ca04ce",
+    ),
+    (
+        "windows-interrupted-open-at-checkpoint",
+        "ac44ac703ff18e0b7fe7849931b6cb951cc68d6434d292f8916f97de5ec01281",
+    ),
+    (
+        "windows-interrupted-open-at-checkpoint.recovered",
+        "635dc0df81c9fa4db5acc7e6ccf82fbba02fcf4dd22fa3e495e25d9db9774b8a",
     ),
     (
         "windows-interrupted-undo",
@@ -339,6 +351,18 @@ const TAIL_CONTINUATION_LOG_END: [(&str, u64); 1] = [("tail-continuation", 0x32_
 /// last LSN read by the same independent reader.
 const UNDO_LOG_END: [(&str, u64); 1] = [("undo", 0x32_74ad)];
 
+/// A volume whose last checkpoint lists transaction 464 as still open, so
+/// its undo chain starts before the checkpoint, and which the log ends
+/// without forgetting. Windows' restart rolls it back: among its
+/// compensation records is `0x63423e`, a 24-byte
+/// `InitializeFileRecordSegment` that undoes the deallocation of MFT
+/// record 2559 by rewriting the record's header and nothing else. Replay
+/// refused any checkpoint listing an open transaction (#137). Made by the
+/// same capture, and recovered by Windows the same way, as the snapshots
+/// above (run 37173622839, eight writers for 120 s, snapshot 4); its last
+/// LSN read by the same independent reader.
+const OPEN_AT_CHECKPOINT_LOG_END: [(&str, u64); 1] = [("open-at-checkpoint", 0x63_4233)];
+
 /// Where, in each pre-image, a `$LogFile` record page the replay needs
 /// sits: inside the walk from the oldest dirty page to the log's end, and
 /// in no tail copy.
@@ -489,6 +513,41 @@ const UNDO_RECORD_2072: [(usize, &str); 3] = [
          0000000000000000000000000801000000000000000000000000000000000000",
     ),
 ];
+
+#[test]
+fn a_transaction_open_at_the_checkpoint_is_rolled_back_to_what_windows_recovered() {
+    // The checkpoint's transaction table lists a transaction still open,
+    // whose records before the checkpoint must be undone along with the
+    // rest. A replay that refuses it sends the volume back to Windows (#137).
+    for (k, log_end) in OPEN_AT_CHECKPOINT_LOG_END {
+        fsck_and_mount_rw_replay_to_what_windows_recovered(k, log_end);
+    }
+}
+
+/// MFT record 2559 on `open-at-checkpoint`, whose LSN on Windows' image is
+/// `0x63423e`: the restart's own compensation record, which no later
+/// record names, so Windows' copy is the state right after its restart.
+/// The comparison above skips it, its LSN being past the log's end.
+#[test]
+fn a_deallocation_undone_keeps_the_record_windows_kept() {
+    let win = Image::read(&unpack("windows-interrupted-open-at-checkpoint.recovered"));
+    let want = content(win.raw_record(2559), b"FILE").expect("Windows' record 2559");
+    let replay: [(&str, Mount); 2] = [
+        ("fsck", |img| {
+            fsck::fsck(img).map(|_| ()).map_err(|e| e.to_string())
+        }),
+        ("Filesystem::mount_rw", RW_MOUNTS[0].1),
+    ];
+    for (how, run) in replay {
+        let img = unpack("windows-interrupted-open-at-checkpoint");
+        run(&img).unwrap_or_else(|e| panic!("open-at-checkpoint: {how}: {e}"));
+        assert!(
+            content(Image::read(&img).raw_record(2559), b"FILE").as_ref() == Some(&want),
+            "open-at-checkpoint: {how}: record 2559 is not what Windows' restart left"
+        );
+        std::fs::remove_file(&img).unwrap();
+    }
+}
 
 #[test]
 fn a_rolled_back_record_holds_what_windows_own_log_says_it_held_after_restart() {
@@ -776,6 +835,7 @@ fn what_windows_recovered_reads_here_as_windows_lists_it() {
     let small_cluster = SMALL_CLUSTER_LOG_END.map(|(k, _)| k);
     let tail_continuation = TAIL_CONTINUATION_LOG_END.map(|(k, _)| k);
     let undo = UNDO_LOG_END.map(|(k, _)| k);
+    let open_at_checkpoint = OPEN_AT_CHECKPOINT_LOG_END.map(|(k, _)| k);
     for k in ["1", "6"]
         .into_iter()
         .chain(wrapped)
@@ -783,6 +843,7 @@ fn what_windows_recovered_reads_here_as_windows_lists_it() {
         .chain(small_cluster)
         .chain(tail_continuation)
         .chain(undo)
+        .chain(open_at_checkpoint)
     {
         let img = unpack(&format!("windows-interrupted-{k}.recovered"));
         let want = manifest(k);
@@ -871,6 +932,7 @@ fn windows_replay_changed_what_the_volumes_hold() {
 /// | small-cluster  | 217     | 259    | 4,760 |
 /// | tail-continuation | 57   | 99     | 1,493 |
 /// | undo           | 342     | 99     | 5,089 |
+/// | open-at-checkpoint | 15  | 250    | 2,771 |
 ///
 /// `index-vcn`'s records and blocks were measured from the pre-image and
 /// Windows' recovered copy alone; its bits are at most the 99 `$Bitmap`
@@ -886,6 +948,7 @@ fn floors(k: &str) -> (usize, usize, usize) {
         "small-cluster" => (150, 200, 4000),
         "tail-continuation" => (40, 70, 1100),
         "undo" => (250, 70, 4000),
+        "open-at-checkpoint" => (10, 180, 2000),
         other => panic!("no floors measured for fixture {other}"),
     }
 }
