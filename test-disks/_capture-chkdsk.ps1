@@ -5,6 +5,14 @@
 
 # Assert-LogResize EXITCODE OUTPUT KB: returns when `chkdsk /X /L:KB`
 # succeeded, throws naming the status and the report when it did not.
+#
+# Resizing the log is a correction to chkdsk, which reports it with exit
+# status 1 and "CHKDSK is adjusting the size of the log file" (run
+# 37173621544). Status 1 without that line is some other correction, and
+# any other non-zero status a failure.
 function Assert-LogResize([int]$ExitCode, [string[]]$Output, [int]$KB) {
-    if ($ExitCode -ne 0) { throw "chkdsk /L:$KB failed ($ExitCode): $Output" }
+    if ($ExitCode -eq 0) { return }
+    $resized = ($Output -join ' ') -match 'adjusting the size of the log file'
+    if ($ExitCode -eq 1 -and $resized) { return }
+    throw "chkdsk /L:$KB failed ($ExitCode): $Output"
 }

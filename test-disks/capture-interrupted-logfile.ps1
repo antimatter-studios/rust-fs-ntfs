@@ -95,7 +95,13 @@ if ($LogKB -gt 0) {
     # open yet, and /X dismounts it first.
     $log = & chkdsk.exe "$($part.DriveLetter):" /X /L:$LogKB 2>&1
     Assert-LogResize $LASTEXITCODE $log $LogKB
-    $log | Set-Content (Join-Path $Out 'logsize.txt')
+    # The size is read back, so a run labelled with one log size never
+    # captured another.
+    $now = & chkdsk.exe "$($part.DriveLetter):" /L 2>&1
+    if (($now -join ' ') -notmatch "current log file size is $LogKB KB") {
+        throw "chkdsk /L:$LogKB left a log of another size: $now"
+    }
+    ($log + $now) | Set-Content (Join-Path $Out 'logsize.txt')
 }
 @{
     partition_offset = $part.Offset; partition_size = $part.Size; vhd_bytes = (Get-Item $vhd).Length
