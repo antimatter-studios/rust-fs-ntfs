@@ -685,8 +685,8 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
                 u64_at(&e, 0x10)?,
                 u64_at(&e, 0x18)?,
             );
-            for i in 0..lcns.len() {
-                dirty.insert((target, vcn + i as u64), (oldest, Some(lcns[i..].to_vec())));
+            for (key, lcns) in page_clusters(target, vcn, &lcns)? {
+                dirty.insert(key, (oldest, Some(lcns)));
             }
         }
     }
@@ -826,11 +826,7 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
         // the checkpoint has 0 for a cluster of the page not yet mapped:
         // the two must agree wherever both name one.
         if let Some(d) = dirty_lcns {
-            if lcns
-                .iter()
-                .zip(d)
-                .any(|(&mine, &theirs)| theirs != 0 && mine != theirs)
-            {
+            if !lcns_agree(&lcns, d) {
                 return Err(refuse(format!(
                     "LSN {lsn:#x} names LCNs {lcns:x?} for a page the checkpoint has at {d:x?}"
                 )));
@@ -1008,6 +1004,29 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
         plan.writes.insert(lcn * params.cluster_size, bytes);
     }
     Ok(plan)
+}
+
+/// A dirty-page cluster's key (target attribute, VCN) and the page's LCNs
+/// from it on.
+type PageCluster = ((u16, u64), Vec<u64>);
+
+/// Each cluster of a dirty page the checkpoint lists, keyed by its own VCN
+/// with the page's LCNs from it on: a record names the VCN of the block it
+/// changes, which may be any cluster of the page.
+fn page_clusters(target: u16, vcn: u64, lcns: &[u64]) -> Result<Vec<PageCluster>, Error> {
+    Ok((0..lcns.len())
+        .map(|i| ((target, vcn + i as u64), lcns[i..].to_vec()))
+        .collect())
+}
+
+/// Whether a record's LCNs agree with the page's from the record's VCN on:
+/// a record names clusters only as far as it writes, and the checkpoint
+/// has 0 for a cluster of the page not yet mapped.
+fn lcns_agree(record: &[u64], page: &[u64]) -> bool {
+    !record
+        .iter()
+        .zip(page)
+        .any(|(&mine, &theirs)| theirs != 0 && mine != theirs)
 }
 
 /// The redo data of a client record, with any zeros the log left out.
@@ -1286,6 +1305,26 @@ mod tests {
         assert_eq!(u32_at(&rec, 0x18).unwrap() as usize, a + 0x50 + 8);
         assert_eq!(&rec[a + 0x34..a + 0x50], &[1; 28]);
         assert_eq!(u32_at(&rec, a + 0x50).unwrap(), 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn a_dirty_page_running_past_the_last_vcn_is_refused() {
+        // Two clusters from VCN u64::MAX: the second has no VCN to be
+        // entered under, so the entry is refused, not wrapped to VCN 0.
+        assert!(page_clusters(0x18, u64::MAX, &[0x10, 0x11]).is_err());
+        let keys = page_clusters(0x18, 0x24, &[0x8c, 0x8d]).unwrap();
+        assert_eq!(keys[1], ((0x18, 0x25), vec![0x8d]));
+    }
+
+    #[test]
+    fn a_record_naming_clusters_past_its_page_is_refused() {
+        // From the page's last cluster a record can name only that one; a
+        // second LCN is one the checkpoint never mapped, and a raw redo
+        // would write through it.
+        assert!(!lcns_agree(&[0x8e, 0x8f], &[0x8e]));
+        assert!(lcns_agree(&[0x8c], &[0x8c, 0x8d, 0x8e, 0]));
+        assert!(lcns_agree(&[0x8c, 0x8d], &[0x8c, 0]));
+        assert!(!lcns_agree(&[0x8c], &[0x8d]));
     }
 
     #[test]
