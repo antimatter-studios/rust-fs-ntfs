@@ -27,6 +27,19 @@ written against 0.7.0, and `chore check:semver` refuses it otherwise.
 
 ### Fixed
 
+- **A tail copy of the page a record ends on is read as that page**
+  (#137). A tail copy names its home through its last LSN, the record
+  that ends on it; when that record started on the page before, replay
+  filed the copy under the earlier page. It then either clashed with that
+  page's own tail copy ("two different tail copies ... are equally new")
+  or left the record's end unread ("no valid copy ... holds LSN"), and
+  refused volumes Windows recovers. Such a copy is now placed on the page
+  the record ends on, found from the record's length. The new fixture
+  `test-disks/windows-interrupted-tail-continuation*` (logfile oracle run
+  37161976800, snapshot 6) is replayed by `fsck` and by
+  `Filesystem::mount_rw` to Windows' own recovery. Every snapshot of runs
+  37161976800 (4 KiB clusters) and 37161978435 (1 KiB) that holds work now
+  replays.
 - **A `$LogFile` written on clusters smaller than a page is replayed**
   (#137). On 512-byte to 2 KiB clusters NTFS still logs 4 KiB pages, so
   a dirty page names several clusters, and replay refused every such log
