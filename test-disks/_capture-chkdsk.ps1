@@ -16,3 +16,11 @@ function Assert-LogResize([int]$ExitCode, [string[]]$Output, [int]$KB) {
     if ($ExitCode -eq 1 -and $resized) { return }
     throw "chkdsk /L:$KB failed ($ExitCode): $Output"
 }
+
+# Assert-LogSize EXITCODE OUTPUT KB: returns when `chkdsk /L` reports a
+# $LogFile of KB kilobytes, throws naming what it reported otherwise.
+function Assert-LogSize([int]$ExitCode, [string[]]$Output, [int]$KB) {
+    if (($Output -join ' ') -notmatch "current log file size is $KB KB") {
+        throw "chkdsk /L:$KB left a log of another size: $Output"
+    }
+}

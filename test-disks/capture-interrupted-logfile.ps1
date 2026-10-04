@@ -98,9 +98,7 @@ if ($LogKB -gt 0) {
     # The size is read back, so a run labelled with one log size never
     # captured another.
     $now = & chkdsk.exe "$($part.DriveLetter):" /L 2>&1
-    if (($now -join ' ') -notmatch "current log file size is $LogKB KB") {
-        throw "chkdsk /L:$LogKB left a log of another size: $now"
-    }
+    Assert-LogSize $LASTEXITCODE $now $LogKB
     ($log + $now) | Set-Content (Join-Path $Out 'logsize.txt')
 }
 @{

@@ -51,5 +51,28 @@ Accepts 1 $Resized 'exit 1 after chkdsk adjusted the log size is accepted'
 Refuses 1 $Repaired 'exit 1 for any other correction is refused'
 Refuses 3 $Resized 'exit 3 is refused whatever the report says'
 
+# chkdsk /L after resizing to 2048 KB, exit 0: the lines verbatim from
+# logsize.txt of logfile-oracle run 37179118078.
+$Size2048 = @(
+    'The type of the file system is NTFS.',
+    'The current log file size is 2048 KB.',
+    'The default log file size for this volume is 2048 KB.'
+)
+# Constructed, not captured: a log of 12048 KB, whose report contains the
+# text "2048 KB".
+$Size12048 = @(
+    'The type of the file system is NTFS.',
+    'The current log file size is 12048 KB.'
+)
+function SizeAccepts($code, $out, $what) {
+    try { Assert-LogSize $code $out 2048; Ok $what } catch { Fail "$what (threw: $_)" }
+}
+function SizeRefuses($code, $out, $what) {
+    try { Assert-LogSize $code $out 2048; Fail "$what (returned)" } catch { Ok $what }
+}
+SizeAccepts 0 $Size2048 'a readback of 2048 KB is accepted for 2048'
+SizeRefuses 0 $Size12048 'a readback of 12048 KB is refused for 2048'
+SizeRefuses 3 $Size2048 'a readback chkdsk failed is refused whatever it printed'
+
 if ($script:fails -gt 0) { Write-Host "capture-chkdsk: $script:fails failed"; exit 1 }
 Write-Host 'capture-chkdsk: all checks passed'
