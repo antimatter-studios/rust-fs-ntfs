@@ -2670,6 +2670,47 @@
       "image": "nfs-cli-windows-interrupted-small-cluster-replay.img",
       "_notes": "A volume Windows was writing to when it was captured (test-disks/windows-interrupted-small-cluster), formatted with 1 KiB clusters, so every page its $LogFile names spans four clusters and a record may name a cluster in the middle of its page. fsck.ntfs -y replays the log; then Windows grades the result: fsutil dirty query says Clean, every file Windows itself listed after its own recovery of the same image reads back at Windows' size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean."
     },
+    "cli-windows-interrupted-undo-fsck-replay-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 127,
+        "label": "ORACLE366",
+        "alloc_unit_size": 1024
+      },
+      "recipe": [
+        {
+          "op": "cli-replay",
+          "snapshot": "undo"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        {
+          "op": "win-dirty-query",
+          "expect": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-cli-verify",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-windows-interrupted-undo-replay.img",
+      "_notes": "A volume Windows was writing to when it was captured (test-disks/windows-interrupted-undo), on 1 KiB clusters, whose $LogFile ends inside a transaction that must be rolled back. fsck.ntfs -y replays and undoes it; then Windows grades the result: fsutil dirty query says Clean, every file Windows itself listed after its own recovery of the same image reads back at Windows' size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean."
+    },
     "cli-windows-interrupted-tail-continuation-fsck-replay-win-verify-chkdsk": {
       "status": "pending",
       "volume_params": {

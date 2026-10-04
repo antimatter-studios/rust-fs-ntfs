@@ -27,6 +27,17 @@ written against 0.7.0, and `chore check:semver` refuses it otherwise.
 
 ### Fixed
 
+- **A transaction the log ends inside is rolled back, as Windows does**
+  (#137). Replay refused any volume whose `$LogFile` stopped before a
+  transaction's `ForgetTransaction` ("undoing it is not implemented").
+  Each such transaction's records are now undone after redo, newest first
+  along their undo-next chain, whether or not their changes reached the
+  disk. The new fixture `test-disks/windows-interrupted-undo*` (logfile
+  oracle run 37077655517, snapshot 3) is replayed by `fsck` and by
+  `Filesystem::mount_rw` to Windows' own recovery. The record the
+  rollback rewrites holds what Windows' recovered log says it held after
+  restart. Windows' compensation records there carry, byte for byte, the
+  undo data replay applies.
 - **A tail copy of the page a record ends on is read as that page**
   (#137). A tail copy names its home through its last LSN, the record
   that ends on it; when that record started on the page before, replay
