@@ -27,8 +27,13 @@
 //!   transactions, newest first. Windows' restart does the same and logs
 //!   each as a compensation record whose redo is the original's undo
 //!   (`test-disks/windows-interrupted-undo`, whose recovered `$LogFile`
-//!   holds them). A transaction prepared or committed and not forgotten
-//!   is refused: no capture has held one.
+//!   holds them). A transaction the checkpoint's transaction table lists
+//!   as active is open from the start, its last LSN taken from the table,
+//!   so its undo chain may reach records before the checkpoint; the table
+//!   entry's offset is the id its records carry
+//!   (`test-disks/windows-interrupted-open-at-checkpoint`). A transaction
+//!   prepared or committed and not forgotten is refused: no capture has
+//!   held one.
 //!
 //! Every redo operation replayed here was checked against what Windows'
 //! own restart produced from the same pre-image (the `.recovered` images):
@@ -108,6 +113,10 @@ const ENTRY_ALLOCATED: u32 = 0xFFFF_FFFF;
 /// Open attribute table entry size Windows 8 and later write, the only
 /// one these tables were checked on.
 const OPEN_ATTRIBUTE_ENTRY: usize = 0x28;
+/// Transaction table entry size, and the state of a transaction neither
+/// prepared nor committed.
+const TRANSACTION_ENTRY: usize = 0x28;
+const TRANSACTION_ACTIVE: u8 = 1;
 
 // NTFS log operations (redo and undo codes share one numbering).
 const NOOP: u16 = 0x00;
@@ -737,11 +746,27 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
             }
         }
     }
+    // Transactions open at the checkpoint, by their offset in the table,
+    // which is the id their records carry: (whether there is anything to
+    // undo, the LSN of their last record).
+    let mut checkpoint_transactions: Vec<(u32, (bool, u64))> = Vec::new();
     if let Some(t) = table(u64_at(&body, 0x28)?, TRANSACTION_TABLE_DUMP)? {
-        if !entries(&t)?.is_empty() {
-            return Err(refuse(
-                "the checkpoint lists transactions still open, which would need undo",
-            ));
+        if (u16_at(&t, 0)? as usize) < TRANSACTION_ENTRY {
+            return Err(refuse(format!(
+                "transaction entries of {} bytes",
+                u16_at(&t, 0)?
+            )));
+        }
+        for (at, e) in entries(&t)? {
+            if e[0x04] != TRANSACTION_ACTIVE {
+                return Err(refuse(format!(
+                    "the checkpoint lists transaction {at} in state {}, and only active \
+                     ones have been seen",
+                    e[0x04]
+                )));
+            }
+            let undo_next = u64_at(&e, 0x18)?;
+            checkpoint_transactions.push((at as u32, (undo_next != 0, u64_at(&e, 0x10)?)));
         }
     }
 
@@ -777,7 +802,8 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
     // ---- analysis, from the checkpoint's start ---------------------------
     // Transaction -> (whether anything in it is to be undone, its last
     // record's LSN).
-    let mut open_transactions: BTreeMap<u32, (bool, u64)> = BTreeMap::new();
+    let mut open_transactions: BTreeMap<u32, (bool, u64)> =
+        checkpoint_transactions.into_iter().collect();
     for (lsn, header, data) in &records {
         if *lsn < start || u32_at(header, 0x20)? != LFS_CLIENT_RECORD {
             continue;
@@ -1057,6 +1083,10 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
                 std::str::from_utf8(magic).unwrap_or("?"),
                 op_name(op)
             )));
+        } else {
+            // Nothing of a torn or never-written block survives its
+            // initialisation.
+            block.bytes.fill(0);
         }
         if magic == b"FILE" {
             let undo_len = u16_at(data, 0x0A)? as usize;
@@ -1199,8 +1229,11 @@ fn redo_file_record(
         Ok(used + new_len - len)
     };
     match op {
+        // Overwrites the record's first bytes and leaves the rest: undoing
+        // a deallocation, Windows' restart logs one of 24 bytes, the
+        // header up to its in-use flag, and the record keeps its
+        // attributes (`test-disks/windows-interrupted-open-at-checkpoint`).
         INITIALIZE_FILE_RECORD => {
-            rec.fill(0);
             put(rec, 0, data)?;
         }
         DEALLOCATE_FILE_RECORD => {

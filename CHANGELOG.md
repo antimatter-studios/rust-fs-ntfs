@@ -27,6 +27,19 @@ written against 0.7.0, and `chore check:semver` refuses it otherwise.
 
 ### Fixed
 
+- **A transaction the checkpoint lists as open is rolled back too, and
+  `InitializeFileRecordSegment` leaves the bytes past its data alone**
+  (#137). A checkpoint whose transaction table listed an open transaction
+  was refused. Such a transaction is now open from the start of analysis,
+  with its last LSN taken from the table, and is undone with the rest.
+  Undoing a deallocation, Windows' restart logs a 24-byte
+  `InitializeFileRecordSegment` that rewrites only the record's header.
+  Replay used to zero the whole record first, which left the record with
+  no attributes. Now it overwrites only what the data covers, and zeroes a
+  block only when that block never read as a record. The new fixture
+  `test-disks/windows-interrupted-open-at-checkpoint*` (logfile oracle run
+  37173622839, snapshot 4) is replayed by `fsck` and by
+  `Filesystem::mount_rw` to Windows' own recovery, record 2559 included.
 - **A transaction the log ends inside is rolled back, as Windows does**
   (#137). Replay refused any volume whose `$LogFile` stopped before a
   transaction's `ForgetTransaction` ("undoing it is not implemented").
