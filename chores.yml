@@ -72,7 +72,7 @@ vars:
   # here (tests/ci_profile.rs fails a clone that names its own ref). From
   # v0.5.0 the tool is the `rust-img-vhd` multi-call binary, built with
   # the `cli` feature; the `vhd_tool` it replaced is gone (#387).
-  IMG_VHD_REF: v0.5.1
+  IMG_VHD_REF: v0.6.0
 
   # THE WINDOWS TEST VM is driven by scripts/vm.sh (vmrun, trove for the
   # encryption password, the fixed host-only address). See that file and
