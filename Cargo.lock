@@ -773,9 +773,9 @@ checksum = "323c417e1d9665a65b263ec744ba09030cfb277e9daa0b018a4ab62e57bc8189"
 
 [[package]]
 name = "rust-fs-core"
-version = "0.3.0"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e8e0e8b530dda328cf55180f466791db9ff9da03b6663a5ae1e9cb1fe719768"
+checksum = "b365cc6907eae316a8315540ec91f2a88a0822134b6036300c3b821aed59091f"
 dependencies = [
  "clap",
  "clap_complete",

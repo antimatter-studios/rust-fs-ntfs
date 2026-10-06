@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Tests for scripts/tier.sh's skip gate: the three exit statuses it must
-# tell apart, on a real run through the harness's output-budget.sh.
+# Tests for the skip gate this repository asks rust-fs-core's tier.sh for
+# (`--refuse-skips`, run in place): the three exit statuses it must tell
+# apart, on a real run through core's output-budget.sh.
 #
 # It failed every clean run when first written -- `set -o pipefail` plus a
 # grep that matches nothing -- which is the bug these cases exist to keep
@@ -15,7 +16,7 @@ pass=0; fail=0
 
 check() {
     local name="$1" want="$2"; shift 2
-    bash scripts/tier.sh unit -- "$@" >/dev/null 2>&1
+    bash ../rust-fs-core/scripts/tier.sh --refuse-skips unit -- "$@" >/dev/null 2>&1
     local got=$?
     if [ "$got" = "$want" ]; then
         pass=$((pass + 1)); printf '  ok    %s\n' "$name"

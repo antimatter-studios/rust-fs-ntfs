@@ -30,7 +30,7 @@
 # otherwise read as green. The number is measured, and moves up with the
 # suite -- never down to make a run pass. See `test:cli` in chores.yml.
 #
-# Quiet: the tier runs under scripts/tier.sh, which keeps the whole run in
+# Quiet: the tier runs under ../rust-fs-core/scripts/tier.sh, which keeps the whole run in
 # tmp/logs/cli.log.
 #
 # CLI_TESTS names another directory of test-*.sh files, and CLI_FLOOR

@@ -195,7 +195,7 @@ fn is_shell_assignment(token: &str) -> bool {
 /// front of `cargo` — `echo`, `printf`, `:` — means the text is being
 /// quoted rather than run.
 ///
-/// The one program allowed in front of `cargo` is `scripts/tier.sh`,
+/// The one program allowed in front of `cargo` is `../rust-fs-core/scripts/tier.sh`,
 /// which RUNS what follows its `--` -- see [`through_the_tier_wrapper`].
 ///
 /// The returned slice is the arguments after `test`, which is what
@@ -221,15 +221,15 @@ fn cargo_test_arguments<'a>(tokens: &'a [&'a str]) -> Option<&'a [&'a str]> {
     Some(arguments)
 }
 
-/// The command `scripts/tier.sh` runs, when the line is a tier; the
+/// The command `../rust-fs-core/scripts/tier.sh` runs, when the line is a tier; the
 /// line unchanged when it is not; `None` when it names the wrapper in a
 /// shape the wrapper itself refuses.
 ///
 /// # WHY THE WRAPPER IS READ THROUGH, AND WHY ONLY THIS ONE
 ///
-/// ci.yml runs each `cargo test` through `scripts/tier.sh TIER -- ...`,
+/// ci.yml runs each `cargo test` through `../rust-fs-core/scripts/tier.sh TIER -- ...`,
 /// which writes the whole run to a log and prints a verdict line, so the
-/// PR gate's debug run is spelled `scripts/tier.sh unit-debug -- cargo
+/// PR gate's debug run is spelled `../rust-fs-core/scripts/tier.sh unit-debug -- cargo
 /// test --locked --lib`. [`cargo_test_arguments`] refuses anything in
 /// front of `cargo`, which is what keeps `echo cargo test ...` from
 /// counting -- and it would refuse this too, making the guard fail on a
@@ -237,17 +237,28 @@ fn cargo_test_arguments<'a>(tokens: &'a [&'a str]) -> Option<&'a [&'a str]> {
 ///
 /// So exactly one prefix is read through, and only in the one shape
 /// tier.sh accepts: the program word is `tier.sh` (however it is reached
-/// on disk), then ONE tier name, then `--`. The script `exec`s what
+/// on disk), then its `--refuse-*` gates, then ONE tier name, then `--`. The script `exec`s what
 /// follows `--` as argv, not through a shell, so a leading `NAME=value`
 /// there would be run as a program called `NAME=value` -- which is why
 /// assignments are skipped before the wrapper and not after it. Any
 /// other shape, including an `echo` of the whole line, is not a run.
 fn through_the_tier_wrapper<'a>(tokens: &'a [&'a str]) -> Option<&'a [&'a str]> {
+    // rust-fs-core's runner is run in place as `bash ../rust-fs-core/...`.
+    let tokens = match tokens {
+        ["bash", program, ..] if program.rsplit('/').next() == Some("tier.sh") => &tokens[1..],
+        _ => tokens,
+    };
     match tokens {
-        [program, rest @ ..] if program.rsplit('/').next() == Some("tier.sh") => match rest {
-            [_tier, "--", command @ ..] => Some(command),
-            _ => None,
-        },
+        [program, rest @ ..] if program.rsplit('/').next() == Some("tier.sh") => {
+            let gates = rest
+                .iter()
+                .take_while(|w| w.starts_with("--refuse-"))
+                .count();
+            match &rest[gates..] {
+                [_tier, "--", command @ ..] => Some(command),
+                _ => None,
+            }
+        }
         _ => Some(tokens),
     }
 }
@@ -1559,9 +1570,10 @@ cargo test --release --locked --lib
     #[test]
     fn a_run_through_the_tier_wrapper_is_judged_by_what_it_runs() {
         for line in [
-            "scripts/tier.sh unit-debug -- cargo test --locked --lib",
-            "EXPECT_OVERFLOW_CHECKS=1 scripts/tier.sh unit-debug -- cargo test --locked --lib",
+            "../rust-fs-core/scripts/tier.sh unit-debug -- cargo test --locked --lib",
+            "EXPECT_OVERFLOW_CHECKS=1 ../rust-fs-core/scripts/tier.sh unit-debug -- cargo test --locked --lib",
             "./scripts/tier.sh unit-debug -- cargo test --locked --lib",
+            "bash ../rust-fs-core/scripts/tier.sh --refuse-skips unit-debug -- cargo test --locked --lib",
         ] {
             assert_eq!(
                 runs_with_overflow_checks(line),
@@ -1571,16 +1583,16 @@ cargo test --release --locked --lib
         }
         assert_eq!(
             super::debug_runs_that_prove_the_build_traps(
-                "EXPECT_OVERFLOW_CHECKS=1 scripts/tier.sh unit-debug -- cargo test --locked --lib"
+                "EXPECT_OVERFLOW_CHECKS=1 ../rust-fs-core/scripts/tier.sh unit-debug -- cargo test --locked --lib"
             )
             .len(),
             1,
             "the handshake in front of the wrapper reaches the run"
         );
         for line in [
-            "scripts/tier.sh unit -- cargo test --release --locked --lib",
-            "scripts/tier.sh mkfs -- cargo test --locked --test mkfs_roundtrip",
-            "scripts/tier.sh lint -- cargo clippy --locked --all-targets",
+            "../rust-fs-core/scripts/tier.sh unit -- cargo test --release --locked --lib",
+            "../rust-fs-core/scripts/tier.sh mkfs -- cargo test --locked --test mkfs_roundtrip",
+            "../rust-fs-core/scripts/tier.sh lint -- cargo clippy --locked --all-targets",
         ] {
             assert_eq!(
                 runs_with_overflow_checks(line),
@@ -1595,12 +1607,12 @@ cargo test --release --locked --lib
     #[test]
     fn the_tier_wrapper_in_any_other_shape_is_not_a_run() {
         for line in [
-            "echo scripts/tier.sh unit-debug -- cargo test --locked --lib",
-            "scripts/tier.sh -- cargo test --locked --lib",
-            "scripts/tier.sh unit-debug cargo test --locked --lib",
-            "scripts/tier.sh unit-debug extra -- cargo test --locked --lib",
-            "scripts/tier.sh unit-debug -- echo cargo test --locked --lib",
-            "scripts/tier.sh unit-debug -- EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib",
+            "echo ../rust-fs-core/scripts/tier.sh unit-debug -- cargo test --locked --lib",
+            "../rust-fs-core/scripts/tier.sh -- cargo test --locked --lib",
+            "../rust-fs-core/scripts/tier.sh unit-debug cargo test --locked --lib",
+            "../rust-fs-core/scripts/tier.sh unit-debug extra -- cargo test --locked --lib",
+            "../rust-fs-core/scripts/tier.sh unit-debug -- echo cargo test --locked --lib",
+            "../rust-fs-core/scripts/tier.sh unit-debug -- EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib",
             "scripts/other.sh unit-debug -- cargo test --locked --lib",
         ] {
             assert_eq!(

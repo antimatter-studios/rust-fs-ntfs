@@ -178,7 +178,7 @@ jobs:
       # "lock needs updating" error, rather than letting `cargo publish`
       # regenerate the lock and abort on a dirty tree after the gates pass.
       # Quiet tiers, as in ci.yml: a verdict line per run, the whole run in
-      # tmp/logs/, the tail on failure, exit 65 over budget (scripts/tier.sh).
+      # tmp/logs/, the tail on failure, exit 65 over budget (../rust-fs-core/scripts/tier.sh).
       #
       # AN EXECUTED-TEST FLOOR, because this job gates `cargo publish`.
       # `cargo test` exits 0 on "0 passed; 0 failed", so a suite that
@@ -190,14 +190,14 @@ jobs:
       # executed on 2026-09-17 in run 34985102618, floor 1350.
       - name: full suite with an executed-test floor
         run: |
-          scripts/tier.sh suite -- cargo test --release --locked --features cli --no-fail-fast
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli --no-fail-fast
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
           echo "tests executed: $n (floor 1350)"
           if [ "$n" -lt 1350 ]; then
               echo "::error::only $n tests executed, floor is 1350 -- 1427 ran on 2026-09-17 in run 34985102618. The suite passed, so something stopped tests from being selected rather than failing them. This job gates cargo publish; read tmp/logs/suite.log, uploaded as test-logs-release."
               exit 1
           fi
-      - run: scripts/tier.sh clippy -- cargo clippy --locked --all-targets --features cli -- -D warnings
+      - run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli -- -D warnings
       - name: upload test logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -598,10 +598,10 @@ jobs:
   #
   # PACKAGED, ATTESTED AND ATTACHED BY rust-fs-core's release-cli workflow,
   # the family's one copy (#428). This repository carried its own
-  # package-cli matrix, attest-and-attach job and scripts/package-cli.sh,
+  # package-cli matrix, attest-and-attach job and ../rust-fs-core/scripts/package-cli.sh,
   # one of ten copies that drifted. Core's workflow builds the multi-call
   # binary `rust-fs-ntfs` natively on darwin-arm64 and linux-x86_64, runs
-  # `scripts/core.sh package-cli` -- which lays the tarball out as an install
+  # `../rust-fs-core/scripts/package-cli.sh` -- which lays the tarball out as an install
   # prefix and checks it, with the names, man sections and licences from
   # Cargo.toml's [package.metadata.package-cli] -- and attaches both
   # tarballs, as rust-fs-ntfs-<version>-<platform>.tar.gz, once both legs
@@ -625,7 +625,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
-    uses: antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml@9e900154a7dff2a6c8f136db31def33bed9f09cc # v0.3.0
+    uses: antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml@6615915c4c1625f64efc8d7ea618284f48b87499 # v0.3.3
     with:
-      core-ref: v0.3.0
+      core-ref: v0.3.3
       toolchain: 1.95.0

@@ -24,14 +24,15 @@ bad() { fail=$((fail + 1)); printf 'FAIL %s\n' "$*"; }
 sandbox="$(mktemp -d)"
 trap 'rm -rf "$sandbox"' EXIT
 
-# The command after `tier.sh scripts --` in chores.yml's test:scripts task.
+# The command after rust-fs-core's `tier.sh ... scripts --` in chores.yml's
+# test:scripts task.
 # tier.sh itself is not run: it would overwrite tmp/logs/scripts.log, the log
 # of the very tier this test is running inside.
 chores_cmd="$(awk '
     $0 == "  test:scripts:" { task = 1; next }
     task && /^  [a-z][a-z:_-]*:$/ { exit }
-    task && /^      - scripts\/tier\.sh scripts -- / {
-        sub(/^      - scripts\/tier\.sh scripts -- /, ""); print; exit
+    task && /^      - bash \.\.\/rust-fs-core\/scripts\/tier\.sh (--refuse-[a-z]+ )*scripts -- / {
+        sub(/^      - bash \.\.\/rust-fs-core\/scripts\/tier\.sh (--refuse-[a-z]+ )*scripts -- /, ""); print; exit
     }
 ' "$ROOT/chores.yml")"
 
