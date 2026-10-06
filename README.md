@@ -258,6 +258,20 @@ are documented there.
 Reverse chronological highlights from `git log`. Full per-commit
 history available via `git log` in the repo.
 
+### 2026-10-06 — 0.9.0
+
+- The crate is published as `rust-fs-ntfs`, the repository's name, and the
+  repository moved to the antimatter-studios organisation. A dependent
+  changes one line, `am-fs-ntfs = "0.8"` to `rust-fs-ntfs = "0.9"`; the
+  import (`fs_ntfs`) and the C symbols are unchanged. It depends on
+  `rust-fs-core` 0.3.0.
+
+### 2026-10-06 — 0.8.0
+
+- The last version published as `am-fs-ntfs`, with a description and README
+  naming `rust-fs-ntfs` as its successor. See CHANGELOG.md for what else it
+  carries.
+
 ### 2026-10-02 — 0.7.0
 
 - **Breaking:** `fsck` decides from `$LogFile` on every volume and never

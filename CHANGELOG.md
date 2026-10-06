@@ -1,5 +1,7 @@
 # Changelog
 
+## [Unreleased]
+
 ## [0.9.0] — 2026-10-06
 
 ### Changed
@@ -8,8 +10,6 @@
   until its last version, which stays on crates.io pointing here. A
   dependent changes one line in `Cargo.toml`; the import (`fs_ntfs`) and the C symbols are unchanged.
 - **Depends on `rust-fs-core` 0.3.0**, the same library under its new name.
-
-## [Unreleased]
 
 ## [0.8.0] — 2026-10-06
 
