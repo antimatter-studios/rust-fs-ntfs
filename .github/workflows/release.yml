@@ -613,7 +613,7 @@ jobs:
   #
   # THE ATTESTATION'S SIGNER IS CORE'S WORKFLOW. In a reusable workflow the
   # signing identity is the called file, so a download is checked with
-  #   gh attestation verify <tarball> --repo christhomas/rust-fs-ntfs \
+  #   gh attestation verify <tarball> --repo antimatter-studios/rust-fs-ntfs \
   #     --signer-workflow antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml
   # where releases up to 0.7.0 were signed by this repository's release.yml.
   # ---------------------------------------------------------------------------

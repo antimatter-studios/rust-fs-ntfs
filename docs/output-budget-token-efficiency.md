@@ -1,7 +1,7 @@
 # Output budgets and agent token efficiency
 
 This note describes the output-budget migration in
-[`rust-fs-ntfs` PR #326](https://github.com/christhomas/rust-fs-ntfs/pull/326).
+[`rust-fs-ntfs` PR #326](https://github.com/antimatter-studios/rust-fs-ntfs/pull/326).
 The shared wrapper is owned by `rust-fs-core`; its related follow-up work is
 tracked in
 [`rust-fs-core` issue #153](https://github.com/antimatter-studios/rust-fs-core/issues/153).

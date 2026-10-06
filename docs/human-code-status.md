@@ -31,7 +31,7 @@ failure mode being described.
 
 ### G1 — the resident `$MFT:$Bitmap` read a stale snapshot — **fixed earlier**
 
-[#104](https://github.com/christhomas/rust-fs-ntfs/pull/104), and the report
+[#104](https://github.com/antimatter-studios/rust-fs-ntfs/pull/104), and the report
 calls it "the most important finding". Reads came from a copy taken when the
 attribute was located while writes patched `$MFT`'s record on disk, so a bit set
 by `allocate_io` was invisible to the next read, every MFT rollback failed with
@@ -109,14 +109,14 @@ interesting one:
   `write_bitmap_bytes_io` directly and documented as defence in depth rather
   than as where the guarantee comes from.
 
-### B4 — a rename that committed step 1 and then ran step 2 with no rollback — **partially fixed; same-length path tracked by [#140](https://github.com/christhomas/rust-fs-ntfs/issues/140)**
+### B4 — a rename that committed step 1 and then ran step 2 with no rollback — **partially fixed; same-length path tracked by [#140](https://github.com/antimatter-studios/rust-fs-ntfs/issues/140)**
 
 THE SAME-LENGTH PATH STILL HAS NO ROLLBACK, and it is the more common
 one: `rename_io` dispatches to it whenever the old and new names have the
 same UTF-16 length. The rollback landed in `rename_replace_io`;
 `grep -n restore_mft_record_io src/*.rs` finds that one call site. Both the
 `$INDEX_ROOT` and INDX cases remain tracked by
-[#140](https://github.com/christhomas/rust-fs-ntfs/issues/140).
+[#140](https://github.com/antimatter-studios/rust-fs-ntfs/issues/140).
 
 A variable-length rename is two record writes with no journal between them:
 

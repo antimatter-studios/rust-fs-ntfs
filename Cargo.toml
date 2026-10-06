@@ -4,7 +4,7 @@ version = "0.9.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Pure-Rust NTFS filesystem driver. Exposes a C ABI (fs_ntfs_*) suitable for FFI from C/C++/Go/etc."
-repository = "https://github.com/christhomas/rust-fs-ntfs"
+repository = "https://github.com/antimatter-studios/rust-fs-ntfs"
 readme = "README.md"
 
 # The fuzz crate is its own package, on its own toolchain, and is not

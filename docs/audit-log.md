@@ -13,7 +13,7 @@ result.
 Baseline: `origin/main` at `e718475`, plus the two fixes recorded below. The
 pass followed the corruption-first question in `docs/driver-parity-plan.md`
 and rechecked the findings already attached to issue
-[#135](https://github.com/christhomas/rust-fs-ntfs/issues/135).
+[#135](https://github.com/antimatter-studios/rust-fs-ntfs/issues/135).
 
 | Path | State read before mutation | Result |
 | --- | --- | --- |
@@ -50,37 +50,37 @@ The earlier portions of the same audit were not preserved in a dated ledger.
 Their linked findings are recorded here so the pass is complete rather than
 only listing today's delta:
 
-- [#140](https://github.com/christhomas/rust-fs-ntfs/issues/140): same-length
+- [#140](https://github.com/antimatter-studios/rust-fs-ntfs/issues/140): same-length
   rename rollback and commit ordering.
-- [#141](https://github.com/christhomas/rust-fs-ntfs/issues/141): unlink freed
+- [#141](https://github.com/antimatter-studios/rust-fs-ntfs/issues/141): unlink freed
   clusters before retiring the record.
-- [#142](https://github.com/christhomas/rust-fs-ntfs/issues/142): replacing or
+- [#142](https://github.com/antimatter-studios/rust-fs-ntfs/issues/142): replacing or
   deleting a non-resident ADS leaked its runs.
-- [#146](https://github.com/christhomas/rust-fs-ntfs/issues/146): failed grow
+- [#146](https://github.com/antimatter-studios/rust-fs-ntfs/issues/146): failed grow
   leaked its allocation.
-- [#147](https://github.com/christhomas/rust-fs-ntfs/issues/147): empty
+- [#147](https://github.com/antimatter-studios/rust-fs-ntfs/issues/147): empty
   resident promotion disagreed with its own run list.
-- [#148](https://github.com/christhomas/rust-fs-ntfs/issues/148): raw LCN
+- [#148](https://github.com/antimatter-studios/rust-fs-ntfs/issues/148): raw LCN
   multiplication bypassed the checked volume span.
-- [#157](https://github.com/christhomas/rust-fs-ntfs/issues/157): write guards
+- [#157](https://github.com/antimatter-studios/rust-fs-ntfs/issues/157): write guards
   did not cover all protected system-metafile extents.
-- [#164](https://github.com/christhomas/rust-fs-ntfs/issues/164): writes past
+- [#164](https://github.com/antimatter-studios/rust-fs-ntfs/issues/164): writes past
   `initialized_length` reported success but read back as zeroes.
-- [#168](https://github.com/christhomas/rust-fs-ntfs/issues/168): INDX insertion
+- [#168](https://github.com/antimatter-studios/rust-fs-ntfs/issues/168): INDX insertion
   accepted an unsupported interior node.
-- [#169](https://github.com/christhomas/rust-fs-ntfs/issues/169): INDX insertion
+- [#169](https://github.com/antimatter-studios/rust-fs-ntfs/issues/169): INDX insertion
   trusted unbounded header offsets and sizes.
-- [#170](https://github.com/christhomas/rust-fs-ntfs/issues/170): sparse and
+- [#170](https://github.com/antimatter-studios/rust-fs-ntfs/issues/170): sparse and
   encrypted write flags were read with the wrong mask.
-- [#171](https://github.com/christhomas/rust-fs-ntfs/issues/171): lookup and
+- [#171](https://github.com/antimatter-studios/rust-fs-ntfs/issues/171): lookup and
   insertion used different filename collation.
-- [#218](https://github.com/christhomas/rust-fs-ntfs/issues/218): deep
+- [#218](https://github.com/antimatter-studios/rust-fs-ntfs/issues/218): deep
   zero-length writes advanced metadata and could zero-fill existing data.
-- [#219](https://github.com/christhomas/rust-fs-ntfs/issues/219): the
+- [#219](https://github.com/antimatter-studios/rust-fs-ntfs/issues/219): the
   same-length rename collision check confused two hard-link entries.
-- [#242](https://github.com/christhomas/rust-fs-ntfs/issues/242): restored MFT
+- [#242](https://github.com/antimatter-studios/rust-fs-ntfs/issues/242): restored MFT
   records reused the on-disk USN and could mask a torn restore.
-- [#193](https://github.com/christhomas/rust-fs-ntfs/pull/193): an
+- [#193](https://github.com/antimatter-studios/rust-fs-ntfs/pull/193): an
   `$ATTRIBUTE_LIST` was consulted too late, after the base-record read had
   already returned a partial logical attribute.
 
