@@ -745,8 +745,8 @@ pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) ->
 }
 
 /// Mount via an `FsCoreDevice` handle from a sister crate
-/// (`qcow2_open` from am-img-qcow2, `partitions_open_slice` from
-/// am-partitions, `fs_core_file_open` from am-fs-core).
+/// (`qcow2_open` from rust-img-qcow2, `partitions_open_slice` from
+/// rust-disk-partitions, `fs_core_file_open` from rust-fs-core).
 ///
 /// Returns NULL on failure; consult `fs_ntfs_last_error()` for detail.
 ///

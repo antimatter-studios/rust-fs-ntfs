@@ -26,7 +26,8 @@
 #   2. The sibling checkout ../rust-fs-core. Its path is built from this
 #      file's own location, so it is POSIX on every runner, Git Bash
 #      included, and a local change to core is exercised, not shadowed.
-#   3. Wherever cargo resolved the am-fs-core dependency -- the registry copy
+#   3. Wherever cargo resolved the rust-fs-core dependency (am-fs-core up to
+#      0.2.24, still accepted while the family moves) -- the registry copy
 #      of the pinned release. Reading cargo's JSON needs python3.
 #
 # A COPY IS ACCEPTED ON ITS ANSWER TO --version AND NOTHING ELSE. A script
@@ -78,9 +79,9 @@ try:
 except Exception:
     sys.exit(0)
 print(next((p["manifest_path"].rsplit("/", 1)[0]
-            for p in packages if p["name"] == "am-fs-core"), ""))
+            for p in packages if p["name"] in ("rust-fs-core", "am-fs-core")), ""))
 ' || true)"
-    [ -n "$CORE_DIR" ] || die "cargo could not say where am-fs-core is."
+    [ -n "$CORE_DIR" ] || die "cargo could not say where rust-fs-core is."
     SOURCE="$CORE_DIR/$SCRIPT_REL"
 fi
 

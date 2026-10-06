@@ -69,7 +69,7 @@ jobs:
             core_ref="$(pin FS_CORE_REF)"
             harness_ref="$(pin HARNESS_REF)"
             echo "chore has no build for $(uname -s); cloning siblings directly"
-            echo "  am-fs-core              $core_ref"
+            echo "  rust-fs-core              $core_ref"
             echo "  fs-windows-test-harness $harness_ref"
             git clone --quiet --depth 1 --branch "$core_ref" \
               https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
@@ -416,7 +416,7 @@ jobs:
             core_ref="$(pin FS_CORE_REF)"
             harness_ref="$(pin HARNESS_REF)"
             echo "chore has no build for $(uname -s); cloning siblings directly"
-            echo "  am-fs-core              $core_ref"
+            echo "  rust-fs-core              $core_ref"
             echo "  fs-windows-test-harness $harness_ref"
             git clone --quiet --depth 1 --branch "$core_ref" \
               https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
@@ -617,7 +617,7 @@ jobs:
             core_ref="$(pin FS_CORE_REF)"
             harness_ref="$(pin HARNESS_REF)"
             echo "chore has no build for $(uname -s); cloning siblings directly"
-            echo "  am-fs-core              $core_ref"
+            echo "  rust-fs-core              $core_ref"
             echo "  fs-windows-test-harness $harness_ref"
             git clone --quiet --depth 1 --branch "$core_ref" \
               https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
@@ -788,7 +788,7 @@ jobs:
             core_ref="$(pin FS_CORE_REF)"
             harness_ref="$(pin HARNESS_REF)"
             echo "chore has no build for $(uname -s); cloning siblings directly"
-            echo "  am-fs-core              $core_ref"
+            echo "  rust-fs-core              $core_ref"
             echo "  fs-windows-test-harness $harness_ref"
             git clone --quiet --depth 1 --branch "$core_ref" \
               https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
@@ -807,8 +807,8 @@ jobs:
         # THE PINS COME FROM chores.yml (#190). This copy once spelled
         # its refs inline and was left behind when the release
         # workflow's moved, so the two jobs built their test images with
-        # different versions of the same tool (#387). am-img-vhd
-        # path-deps am-fs-core (`../rust-fs-core`), so that sibling sits
+        # different versions of the same tool (#387). rust-img-vhd
+        # path-deps rust-fs-core (`../rust-fs-core`), so that sibling sits
         # beside it.
         shell: pwsh
         run: |

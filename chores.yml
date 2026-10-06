@@ -53,9 +53,9 @@ vars:
   # family script (#428). release.yml's `cli` job passes this same tag as
   # its core-ref, and tests/scripts/release-cli-from-core.sh holds the two
   # equal. Cargo.toml, Cargo.lock and fuzz/Cargo.lock take the registry
-  # am-fs-core at the same version; no build here path-depends on this
+  # rust-fs-core at the same version; no build here path-depends on this
   # checkout, which supplies the family scripts.
-  FS_CORE_REF: v0.2.23
+  FS_CORE_REF: v0.3.0
 
   # The Windows-VM test harness. Not a cargo dependency — a tool this
   # repo's scripts invoke — so nothing but this pin governs which
@@ -116,7 +116,7 @@ tasks:
       - 'include/*.h'
       # fs_core.h is a source of ours because we ship it (see the cp below).
       # THIS PATH AND THE cp MUST AGREE, and nothing checks that they do —
-      # it is the same path Cargo.toml resolves am-fs-core from.
+      # it is the same path Cargo.toml resolves rust-fs-core from.
       - '../rust-fs-core/include/fs_core.h'
 
     # Templated, which is fine here where it is not fine above: the check

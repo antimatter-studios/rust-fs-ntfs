@@ -12,34 +12,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "am-fs-core"
-version = "0.2.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e863635b901379df89efa7df22469d3d51963b7bbd9bca124d7552cfe8e04bc1"
-dependencies = [
- "clap",
- "clap_complete",
- "clap_mangen",
-]
-
-[[package]]
-name = "am-fs-ntfs"
-version = "0.8.0"
-dependencies = [
- "am-fs-core",
- "clap",
- "criterion",
- "libc",
- "libtest-mimic",
- "log",
- "ntfs",
- "saphyr",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
 name = "anes"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -798,6 +770,34 @@ name = "roff"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "323c417e1d9665a65b263ec744ba09030cfb277e9daa0b018a4ab62e57bc8189"
+
+[[package]]
+name = "rust-fs-core"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e8e0e8b530dda328cf55180f466791db9ff9da03b6663a5ae1e9cb1fe719768"
+dependencies = [
+ "clap",
+ "clap_complete",
+ "clap_mangen",
+]
+
+[[package]]
+name = "rust-fs-ntfs"
+version = "0.9.0"
+dependencies = [
+ "clap",
+ "criterion",
+ "libc",
+ "libtest-mimic",
+ "log",
+ "ntfs",
+ "rust-fs-core",
+ "saphyr",
+ "serde",
+ "serde_json",
+ "sha2",
+]
 
 [[package]]
 name = "rustc_version"

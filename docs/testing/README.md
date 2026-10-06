@@ -29,7 +29,7 @@ which is exactly why this page leads with reproducible commands instead of prose
 |------|------:|-----------------------|
 | **Unit tests** (in `src/`, always-runnable gate) | **525** | `cargo test --lib` |
 | **Integration tests** (in `tests/`, 89 files) | **645** | `cargo test --tests` |
-| **Block-device substrate tests** (`../rust-fs-core`) | **88** | `cargo test -p am-fs-core` |
+| **Block-device substrate tests** (`../rust-fs-core`) | **88** | `cargo test -p rust-fs-core` |
 | **Total automated Rust tests** | **1,258** | (sum of the above) |
 | **Fuzz targets** (libFuzzer, continuous) | **3** | `cargo +nightly fuzz run <target>` |
 | **Real-Windows `chkdsk` matrix scenarios** | **44** | see [06-windows-chkdsk-matrix](06-windows-chkdsk-matrix.md) |

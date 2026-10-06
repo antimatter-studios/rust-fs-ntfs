@@ -9,7 +9,7 @@ tracked in
 ## Current design
 
 `scripts/tier.sh` assigns each test tier measured line and byte limits, asks
-Cargo where the resolved `am-fs-core` package lives, and makes a transient copy
+Cargo where the resolved `rust-fs-core` package lives, and makes a transient copy
 of core's canonical `scripts/output-budget.sh`. The copy is removed when the
 tier exits. This keeps the wrapper version tied to Cargo resolution without a
 stale repository copy.

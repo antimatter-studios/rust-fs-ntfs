@@ -19,7 +19,7 @@
 //!
 //! Three `cargo-fuzz` targets, added on 2026-05-03. No workflow ran
 //! them, and `fuzz/Cargo.toml` named the dependency `fs-ntfs` where the
-//! package is `am-fs-ntfs` -- so they had never compiled either. A fuzz
+//! package is `rust-fs-ntfs` -- so they had never compiled either. A fuzz
 //! harness that cannot build is indistinguishable from one that builds
 //! and finds nothing, which is the failure this arrangement exists to
 //! refuse.

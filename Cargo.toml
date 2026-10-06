@@ -1,9 +1,9 @@
 [package]
-name = "am-fs-ntfs"
-version = "0.8.0"
+name = "rust-fs-ntfs"
+version = "0.9.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Renamed to rust-fs-ntfs: this crate receives no further versions. Depend on rust-fs-ntfs instead; the import is unchanged (use fs_ntfs)."
+description = "Pure-Rust NTFS filesystem driver. Exposes a C ABI (fs_ntfs_*) suitable for FFI from C/C++/Go/etc."
 repository = "https://github.com/christhomas/rust-fs-ntfs"
 readme = "README.md"
 
@@ -16,6 +16,11 @@ readme = "README.md"
 # captures they made it 7.2 MB, against 3.3 MB for 0.7.0 and crates.io's
 # 10 MB limit. Nothing a consumer builds reads them.
 exclude = ["fuzz", "test-disks/*.gz", "test-disks/*.manifest"]
+
+# The name this crate had on crates.io: the semver check's baseline until
+# a release exists under the new one (rust-fs-core's semver-check.sh).
+[package.metadata.semver]
+former-name = "am-fs-ntfs"
 
 [lib]
 name = "fs_ntfs"
@@ -65,9 +70,9 @@ licenses = ["LICENSE-APACHE", "LICENSE-MIT"]
 [features]
 # The command-line tools and nothing else. The plumbing they share --
 # dispatch, --version, doctor, the output contract, man pages and
-# completions -- is am-fs-core's `cli` feature, turned on only here, so
+# completions -- is rust-fs-core's `cli` feature, turned on only here, so
 # the static library gains nothing. clap is MIT/Apache-2.0.
-cli = ["dep:clap", "am-fs-core/cli"]
+cli = ["dep:clap", "rust-fs-core/cli"]
 
 [dependencies]
 # `log` is the de-facto standard logging facade. Consumers (FSKit
@@ -95,7 +100,7 @@ libc = "0.2"
 # Strictly additive — ntfs's existing BlockIo trait is unchanged; this
 # adds a bridge module so external `fs_core::BlockDevice` implementors
 # (a `Qcow2Reader`, a `SliceReader`, etc.) can be driven by ntfs.
-am-fs-core = { version = "0.2.23" }
+rust-fs-core = { version = "0.3.0" }
 # The command-line tools' argument parser, behind the `cli` feature (see
 # the `rust-fs-ntfs` target above). No derive: the builder API keeps each
 # tool's command a function the man pages and completions are made from.

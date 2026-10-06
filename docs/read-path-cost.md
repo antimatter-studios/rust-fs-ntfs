@@ -11,7 +11,7 @@ not what anything is judged by.
 
 ## 2026-09-23 — mounted metadata cache
 
-Issue #131 puts `am-fs-core` 0.2.11's `CachingDevice` at the NTFS mount
+Issue #131 puts `rust-fs-core` 0.2.11's `CachingDevice` at the NTFS mount
 boundary. The focused regression formats a 32 MiB volume, mounts it through a
 `CountingDevice`, and stats `/hello.txt` twice through the same C ABI handle.
 The count is taken below the cache, so it records requests that reached the
@@ -145,7 +145,7 @@ resolves each directory by path first. The comparison worth making is
 
 ## What this means for a cache
 
-`am-fs-core` 0.2.8's `CachingDevice` would serve this traffic well:
+`rust-fs-core` 0.2.8's `CachingDevice` would serve this traffic well:
 the same index blocks and the same MFT records, over and over, at
 offsets that repeat exactly. It cannot be wired in as things stand,
 for a structural reason rather than a missing line of code:
