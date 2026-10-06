@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-06
+
+### Renamed
+
+- **The last version published as `am-fs-ntfs`.** The crate is renamed to
+  `rust-fs-ntfs`, the repository's name; every later version is published under
+  that name only, starting at 0.9.0. The description and the README say where
+  the crate went. The import is unchanged: `use fs_ntfs::...` keeps working.
+
+
 ### Breaking
 
 The next release is **0.8.0**, not 0.7.1: the change below breaks code
