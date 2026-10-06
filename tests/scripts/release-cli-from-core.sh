@@ -12,7 +12,7 @@
 #     with this repository's write grants and a moved ref would change what
 #     runs with them;
 #   - with `core-ref` equal to chores.yml's FS_CORE_REF, so the release
-#     packages with the same core scripts/core.sh was copied from and the
+#     packages with the same core whose scripts run in place here and the
 #     pull-request `cli` job packaged with;
 #   - with `toolchain` equal to rust-toolchain.toml's channel;
 #   - granting exactly what its attach job needs, and gated on the same two
@@ -96,12 +96,10 @@ copy_complaints() {
     grep -qE '^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*actions/attest-build-provenance' "$root/.github/workflows/release.yml" \
         && echo "release.yml still attests the tarballs itself"
     hits="$(grep -nE 'scripts/package-cli\.sh' "$root"/.github/workflows/*.yml "$root/chores.yml" "$root"/scripts/*.sh 2>/dev/null \
-        | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
-    [ -n "$hits" ] && echo "these run a local copy instead of scripts/core.sh package-cli: ${hits//$root\//}"
+        | grep -vE ':[0-9]+:[[:space:]]*#' | grep -v 'rust-fs-core/scripts/package-cli\.sh' || true)"
+    [ -n "$hits" ] && echo "these run a local copy instead of ../rust-fs-core/scripts/package-cli.sh: ${hits//$root\//}"
     grep -qE '^\[package\.metadata\.package-cli\]' "$root/Cargo.toml" \
         || echo "Cargo.toml has no [package.metadata.package-cli]; core's script reads what ships from it"
-    grep -qE '\|package-cli[|)]' "$root/scripts/core.sh" \
-        || echo "scripts/core.sh does not run package-cli; copy core's again"
 }
 
 # The repository as it is.
@@ -151,7 +149,6 @@ expect "$(good_call | sed 's/needs: \[crates-test, validate-windows\]/needs: [cr
 expect "$(good_call | grep -v 'uses:')" "no job calls" "no call at all"
 
 mkdir -p "$sandbox/tree/scripts" "$sandbox/tree/.github/workflows" "$sandbox/tree/tests/scripts"
-cp "$ROOT/scripts/core.sh" "$sandbox/tree/scripts/core.sh"
 printf '[package.metadata.package-cli]\n' > "$sandbox/tree/Cargo.toml"
 printf 'tasks: {}\n' > "$sandbox/tree/chores.yml"
 cat > "$sandbox/tree/.github/workflows/release.yml" <<'EOF'

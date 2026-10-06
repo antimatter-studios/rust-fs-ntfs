@@ -8,17 +8,14 @@ tracked in
 
 ## Current design
 
-`scripts/tier.sh` assigns each test tier measured line and byte limits, asks
-Cargo where the resolved `rust-fs-core` package lives, and makes a transient copy
-of core's canonical `scripts/output-budget.sh`. The copy is removed when the
-tier exits. This keeps the wrapper version tied to Cargo resolution without a
-stale repository copy.
-
-`cargo metadata --locked` also fetches and unpacks a missing registry source,
-so a separate fetch step is unnecessary even with an empty Cargo cache. The
-discovery probe clears `RUSTFLAGS` and `RUSTDOCFLAGS` only for metadata; this
-keeps it on the default toolchain when an ASan tier supplies nightly-only
-flags, while the wrapped test command still receives those flags unchanged.
+Each test tier has measured line and byte limits, one row per tier in
+`scripts/tier-budgets.txt`. rust-fs-core's `scripts/tier.sh`, run in place
+from the sibling `../rust-fs-core` checkout at the pinned version, reads the
+row for the tier it is given and runs the command under core's
+`scripts/output-budget.sh` beside it. This repository keeps no copy of either,
+so the wrapper's version is the pinned core's and nothing here can drift
+(rust-fs-core#212). `--refuse-skips` additionally fails a passing tier whose
+log holds `SKIP:` lines.
 
 On success, the command's output stays in `tmp/logs/<tier>.log`. The terminal
 gets one verdict containing the tier, line and byte counts, and full log path:
@@ -57,7 +54,7 @@ For a failed wrapped command, the canonical wrapper emits a compact capsule:
 - the total log line count; and
 - the full local log path.
 
-The workflow step or local `scripts/tier.sh <tier> -- <command>` invocation
+The workflow step or local `bash ../rust-fs-core/scripts/tier.sh --refuse-skips <tier> -- <command>` invocation
 provides command context, while the tier label identifies the corresponding
 policy and log. The tail normally exposes the failing test or command
 diagnostic without replaying the entire transcript. `tier.sh` returns the

@@ -92,9 +92,9 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
 name = "rust-fs-core"
-version = "0.3.0"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e8e0e8b530dda328cf55180f466791db9ff9da03b6663a5ae1e9cb1fe719768"
+checksum = "b365cc6907eae316a8315540ec91f2a88a0822134b6036300c3b821aed59091f"
 
 [[package]]
 name = "rust-fs-ntfs"

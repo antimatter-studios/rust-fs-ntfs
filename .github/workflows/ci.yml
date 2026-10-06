@@ -119,14 +119,14 @@ jobs:
         run: cargo deny --all-features check
 
       # THE ONE REQUIRED CHECK STANDS FOR EVERY JOB (#409). rust-fs-core's
-      # family-check (no copy of a family script, scripts/core.sh is core's)
+      # family-check (no copy of a family script, every call in place)
       # and ci-gate (ci-ok needs every job, .github-guard requires ci-ok
-      # alone), run through scripts/core.sh. The non-gating declaration
+      # alone), run in place from ../rust-fs-core. The non-gating declaration
       # lives in the chore task, once. Once, on ubuntu: neither varies by OS.
       - name: family scripts and the one required check
         if: matrix.os == 'ubuntu-latest'
         run: |
-          bash scripts/core.sh family-check
+          bash ../rust-fs-core/scripts/family-check.sh
           chore check:ci-gate
 
       # clippy gate. Pre-commit hook runs the same invocation locally
@@ -138,7 +138,7 @@ jobs:
       # Run it on both Linux architectures; macOS adds nothing x86 lacks.
       - name: cargo clippy
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm'
-        run: scripts/tier.sh clippy -- cargo clippy --locked --all-targets --features cli -- -D warnings
+        run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli -- -D warnings
 
       # The shell tests (tests/scripts/*.sh): the scripts that turn the
       # Windows VM's output into verdicts. By glob, like `chore test:scripts`.
@@ -205,7 +205,7 @@ jobs:
       # sibling crates run the same shape on windows-latest where the default
       # shell is pwsh. Keep it POSIX and keep it in one pipeline.
       #
-      # EACH RUN IS A QUIET TIER. `scripts/tier.sh <tier> -- cargo test ...`
+      # EACH RUN IS A QUIET TIER. `../rust-fs-core/scripts/tier.sh <tier> -- cargo test ...`
       # (the same line `chore test:<tier>` runs) writes the whole run to
       # tmp/logs/<tier>.log and prints one verdict line; a failure prints the
       # log's tail, and a pass that printed more than the tier's measured
@@ -216,7 +216,7 @@ jobs:
       # uploaded as the `test-logs-*` artifact at the end of the job.
       - name: unit tests (release) with an executed-test floor
         run: |
-          scripts/tier.sh unit -- cargo test --release --locked --lib
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips unit -- cargo test --release --locked --lib
           # Measured 637 executed. Floor 600, ~6% of slack.
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/unit.log | awk '{s+=$4} END{print s+0}')
           echo "tests executed: $n (floor 600)"
@@ -233,7 +233,7 @@ jobs:
       # zero catches nothing. Raise it when the files grow.
       - name: fixture-free integration tests with an executed-test floor
         run: |
-          scripts/tier.sh mkfs -- cargo test --release --locked --features cli --test mkfs_roundtrip --test mkfs_bin_smoke
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips mkfs -- cargo test --release --locked --features cli --test mkfs_roundtrip --test mkfs_bin_smoke
           # Measured 16 executed (mkfs_roundtrip 9 + mkfs_bin_smoke 7) on
           # 2026-09-29, when mkfs_bin_smoke gained the --version test. Floor 15.
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/mkfs.log | awk '{s+=$4} END{print s+0}')
@@ -305,7 +305,7 @@ jobs:
       # nor the evidence. See the floor commentary above the release run.
       - name: unit tests (debug, overflow checks armed) with an executed-test floor
         run: |
-          scripts/tier.sh unit-debug -- cargo test --locked --lib
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips unit-debug -- cargo test --locked --lib
           # Measured 637 executed. Floor 600, ~6% of slack.
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/unit-debug.log | awk '{s+=$4} END{print s+0}')
           echo "tests executed: $n (floor 600)"
@@ -497,14 +497,14 @@ jobs:
 
       - name: full suite with an executed-test floor
         run: |
-          scripts/tier.sh suite -- cargo test --release --locked --features cli --no-fail-fast
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli --no-fail-fast
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
           echo "tests executed: $n (floor 1350)"
           if [ "$n" -lt 1350 ]; then
               echo "::error::only $n tests executed, floor is 1350 -- 1427 ran on 2026-09-17 in run 34985102618. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
               exit 1
           fi
-      - run: scripts/tier.sh clippy -- cargo clippy --locked --all-targets --features cli -- -D warnings
+      - run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli -- -D warnings
       - name: upload test logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -650,7 +650,7 @@ jobs:
           RUSTFLAGS: "-Zsanitizer=address"
           RUSTDOCFLAGS: "-Zsanitizer=address"
         run: |
-          scripts/tier.sh asan -- cargo "+$ASAN_TOOLCHAIN" test --release --locked --lib \
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips asan -- cargo "+$ASAN_TOOLCHAIN" test --release --locked --lib \
             --target x86_64-unknown-linux-gnu
           # A floor on an ADVISORY job, which is not a contradiction. This job
           # cannot gate a merge (it is not in .github-guard's required set),
@@ -859,7 +859,7 @@ jobs:
       - name: Validate enumeration without required paths on Windows
         shell: bash
         run: |
-          scripts/tier.sh matrix -- bash scripts/run-matrix.sh mac-format-basic-256mib \
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips matrix -- bash scripts/run-matrix.sh mac-format-basic-256mib \
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
@@ -1116,7 +1116,7 @@ jobs:
   # pull request, not the release.
   #
   # The same job builds the release tarball with rust-fs-core's package-cli,
-  # run through scripts/core.sh as core's release-cli workflow runs it at a
+  # run in place from ../rust-fs-core as core's release-cli workflow runs it at a
   # release, and lets it check its own layout (the binary, a relative
   # symlink per dotted name, the man pages and completions, the CAVEATS and
   # the licences, every name answering --version as this crate), so a
@@ -1188,7 +1188,7 @@ jobs:
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
           mkdir -p tmp/package
           cd tmp/package
-          tarball="$(bash ../../scripts/core.sh package-cli "$version" linux-x86_64 ../../target/release | tail -n 1)"
+          tarball="$(bash ../../../rust-fs-core/scripts/package-cli.sh "$version" linux-x86_64 ../../target/release | tail -n 1)"
           tar -tvzf "$tarball"
       - name: Keep the tier log
         # Not before the tier ran: there is no log then, and this step's red
@@ -1210,7 +1210,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # The version scripts/semver-check.sh expects. A prebuilt binary,
+      # The version ../rust-fs-core/scripts/semver-check.sh expects. A prebuilt binary,
       # checksum-verified by the action, rather than a ten-minute build.
       CARGO_SEMVER_CHECKS_VERSION: "0.50.0"
       # A failing tier prints only its verdict by default. Here the tail IS

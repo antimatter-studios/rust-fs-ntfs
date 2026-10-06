@@ -1,0 +1,88 @@
+# tier-budgets.txt -- the measured output budget of every test tier.
+#
+# One row per tier: `TIER LINES BYTES`; `#` starts a comment. rust-fs-core's
+# scripts/tier.sh reads it when called as `tier.sh TIER -- COMMAND`, run in
+# place from ../rust-fs-core, and refuses a tier with no row rather than run
+# it unbudgeted. The numbers are this repository's; the runner is core's.
+#
+# Lines / bytes each tier may print on a PASSING run. Measured 2026-09-18:
+# locally on an arm64 Mac, cold (every crate compiled -- a line per crate)
+# and warm; and on GitHub's runners, from the job logs of run 35294303960
+# (main at 6670e25) with the timestamps stripped. Each budget is the larger
+# measurement plus roughly a third, so ordinary growth fits and a change in
+# kind -- a test that starts printing, a flag that turns on per-test output
+# -- does not. The suite is measured on CI only: without the fixtures (which
+# only Linux can build) it does not pass, and a failing run is not budgeted.
+#
+#   tier        measured (lines / bytes)                          budget
+#   clippy      196 / 8,654 (CI Linux, 2026-09-19)                260 / 11,500
+#   unit        744 / 47,145 cold (Mac), 653 / 44,386 (CI Linux)  1,000 / 64,000
+#   unit-debug  723 / 46,497 cold (Mac), 674 / 46,723 (CI Linux)  1,000 / 64,000
+#   mkfs        115 / 3,858 cold (Mac), 24 / 1,022 warm           160 / 5,200
+#   suite       2,143 / 108,930 (CI Linux, fixtures built)        2,900 / 150,000
+#   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
+#   scripts     101 / 2,669 (11 shell tests, rebased 2026-09-26)  135 / 3,500
+#   matrix      975 / 67,151 green (derived, see below)             1,300 / 90,000
+#   cli         27 / 1,035 (estimate: CI's 5-file run + test-docs)  36 / 1,380
+#   cli-oracle  15 / 741 (CI Linux, 2026-09-29, 2 files, 3 tools) 20 / 990
+#
+# THE CLIPPY ROW MOVED ON 2026-09-19, from 150/5,000 to 260/11,500. Adding
+# tests/fuzz_decoders.rs gave `--all-targets` another target to lint, and a
+# cold clippy prints a line per crate compiled: the measured figure went from
+# 94 lines to 196 on CI (run 35448280025, job 105910912877). Raised to that
+# plus a third, by the same rule as every other row. This is the "raise the
+# budget deliberately" the failure message asks for -- the run passed, it
+# simply printed more than the old measurement allowed.
+
+# THE SCRIPTS ROW MOVED ON 2026-09-26, from 80/1,800 to 110/2,500.
+# `chore test:scripts` on fix/diagnostics-verdict-shape at b815f12 printed
+# 82 lines / 1,831 bytes from six shell tests, including 13 new verdict
+# cases in tests/scripts/matrix-fetch-diag.sh. Both limits are that passing
+# measurement plus roughly a third; every test verdict remains in the log.
+# The combined shell suite, including the CI PR-trigger and routed-path
+# regression tests, measured 101 lines and 2,669 bytes after rebase on
+# 2026-09-26. The cap is 135 lines / 3,500 bytes, about one third of headroom.
+
+# THE SEMVER ROW is rust-fs-ext4's measurement of the same script: 11 lines /
+# 489 bytes passing with the baseline's rustdoc cached, one line more when it
+# is built. Its lines are fixed, not per item, so 40 / 4,000 leaves room for a
+# warning block without hiding a flood; a failing run prints its tail (#399).
+
+# THE MATRIX ROW is measured on a GREEN 46-scenario run (2026-09-18, 46 min,
+# max_parallel=4): 633 lines / 35,311 bytes, budgeted at that plus a third.
+# Only a passing run is budgeted, so the 1,521 lines the same matrix printed
+# when ten scenarios failed and were retried five times each do not have to
+# fit -- a failing run prints its tail and fails on its own account. It is the
+# only tier whose length depends on a machine rather than on this repository,
+# so it is the one most likely to need raising -- do that with a measurement.
+#
+# THE MATRIX ROW MOVED ON 2026-10-02, from 900/50,000 to 1,300/90,000, and
+# the new figure is DERIVED, not measured: nobody can run the full matrix
+# without a Windows VM. Harness v4.3.0 prints a line as each recipe step
+# starts (#403), so a green run prints one more line per step executed, plus
+# one line as it takes the VM lock. Against this test-matrix.json that is
+# 341 steps, 31,737 bytes of start lines (computed from the matrix, the line
+# format and each scenario's name), and 103 bytes for the lock line: 633 +
+# 342 = 975 lines and 35,311 + 31,840 = 67,151 bytes, plus a third. The
+# measurement was a 46-scenario run and the matrix now has 56, so the next
+# full green run should replace this row with what it actually printed.
+# THE CLI ROW is the installed tools' suite (scripts/test-cli.sh): a line
+# naming the binary, doctor's line per tool, and three lines per passing
+# file (its name, its count, its trailing line). It is small by design, so a
+# file that starts printing per check shows as a breach, not as noise.
+# CLI-ORACLE is the same script over tests/cli-oracle/, the checks against
+# volumes another platform wrote; the same shape, fewer files. On CI's
+# runner doctor adds a line per same-named program later on PATH (ntfs-3g's
+# /usr/sbin/mkfs.ntfs and /sbin/mkfs.ntfs), which is why both rows were
+# first estimated low and are now CI's measurement.
+clippy        260   11500
+unit         1000   64000
+unit-debug   1000   64000
+mkfs          160    5200
+suite        2900  150000
+asan         1100   72000
+scripts       135    3500
+semver         40    4000
+matrix       1300   90000
+cli            36    1380
+cli-oracle     20     990

@@ -648,11 +648,10 @@ unit: ok (653 lines, 44377 bytes) — …/tmp/logs/unit.log
 A failure prints the last 40 lines of the log instead. A tier that passed
 but printed more than its budget fails with exit status 65, apart from a
 failing suite: the budgets are measured, they live in one table in
-`scripts/tier.sh`, and CI runs every `cargo test` through the same script.
-The work is done by the canonical `scripts/output-budget.sh` supplied by
-`rust-fs-core`. `scripts/tier.sh` uses the sibling core checkout in a full
-development environment, or the packaged Cargo dependency in a standalone
-clone. The design and its token-efficiency tradeoffs are documented in
+`scripts/tier-budgets.txt`, and CI runs every `cargo test` through the same
+runner. The runner and the wrapper are rust-fs-core's `scripts/tier.sh` and
+`scripts/output-budget.sh`, run in place from the sibling `../rust-fs-core`
+checkout at the pinned version; this repository keeps no copy. The design and its token-efficiency tradeoffs are documented in
 [`docs/output-budget-token-efficiency.md`](docs/output-budget-token-efficiency.md).
 The broader coordination and workflow benefits are summarised in
 [`docs/agent-workflow-benefits.md`](docs/agent-workflow-benefits.md).

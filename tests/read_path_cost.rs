@@ -509,7 +509,7 @@ const CEILING: [(&str, u64); 3] = [
 #[test]
 fn what_a_read_costs_in_calls_to_the_device() {
     let Some(img) = fixture() else {
-        // Named so `scripts/tier.sh`'s skip gate sees it: a measurement
+        // Named so `../rust-fs-core/scripts/tier.sh`'s skip gate sees it: a measurement
         // that did not happen is not a measurement that passed (#298).
         eprintln!(
             "SKIP: test-disks/{FIXTURE} is not present — run \
@@ -579,7 +579,7 @@ fn what_a_read_costs_in_calls_to_the_device() {
     // THE CEILING. A number here that nobody can breach measures nothing,
     // and one that trips on ordinary growth gets raised without being
     // read. Raise these deliberately, with the run they were measured on,
-    // the way the budgets in scripts/tier.sh are raised.
+    // the way the budgets in ../rust-fs-core/scripts/tier.sh are raised.
     for (what, ceiling) in CEILING {
         let (shared_reads, percall_reads) = match what {
             "walk" => (shared.walk.reads, percall.walk.reads),
