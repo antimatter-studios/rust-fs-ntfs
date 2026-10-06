@@ -57,7 +57,7 @@ cat > "$bin/cargo" <<'EOF'
 [ -z "${RUSTFLAGS-}" ] && [ -z "${RUSTDOCFLAGS-}" ] || exit 86
 python3 - "$CORE_MANIFEST" <<'PY'
 import json, sys
-print(json.dumps({"packages": [{"name": "am-fs-core", "manifest_path": sys.argv[1]}]}))
+print(json.dumps({"packages": [{"name": "rust-fs-core", "manifest_path": sys.argv[1]}]}))
 PY
 EOF
 chmod +x "$bin/cargo"
@@ -91,9 +91,9 @@ ADAPTER_RECORD="$tmp/unreached" PATH="$bin:$PATH" \
 metadata_status=$?
 check 'metadata failure uses adapter status' test "$metadata_status" -eq 1
 cat > "$tmp/metadata.expected" <<'EOF'
-tier.sh: cargo could not say where am-fs-core is, or its copy has no
+tier.sh: cargo could not say where rust-fs-core is, or its copy has no
          scripts/output-budget.sh. The wrapper lives in rust-fs-core;
-         check the am-fs-core dependency resolves and is at a version
+         check the rust-fs-core dependency resolves and is at a version
          that ships it (v0.2.13 or later).
 EOF
 check 'metadata failure is exactly the concise adapter diagnostic' \
@@ -102,7 +102,7 @@ check 'metadata failure creates no copy' no_new_copies
 
 cat > "$bin/cargo" <<'EOF'
 #!/usr/bin/env bash
-printf '{"packages":[{"name":"am-fs-core","manifest_path":"%s"}]}\n' "$CORE_MANIFEST"
+printf '{"packages":[{"name":"rust-fs-core","manifest_path":"%s"}]}\n' "$CORE_MANIFEST"
 EOF
 missing="$tmp/core-without-wrapper"
 mkdir -p "$missing"
@@ -120,7 +120,7 @@ check 'missing wrapper creates no copy' no_new_copies
 # ran fine" is the quietest failure available here.
 cat > "$bin/cargo" <<'EOF'
 #!/usr/bin/env bash
-printf '{"packages":[{"name":"am-fs-core","manifest_path":"%s"}]}\n' "$CORE_MANIFEST"
+printf '{"packages":[{"name":"rust-fs-core","manifest_path":"%s"}]}\n' "$CORE_MANIFEST"
 EOF
 impostor="$tmp/core-with-impostor"
 mkdir -p "$impostor/scripts"

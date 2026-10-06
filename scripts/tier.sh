@@ -162,7 +162,7 @@ CORE_MANIFEST="$(RUSTFLAGS= RUSTDOCFLAGS= \
 import json, sys
 packages = json.load(sys.stdin)["packages"]
 print(next((p["manifest_path"]
-            for p in packages if p["name"] == "am-fs-core"), ""))
+            for p in packages if p["name"] == "rust-fs-core"), ""))
 ' 2>/dev/null)"
 metadata_status=$?
 set -e
@@ -173,9 +173,9 @@ if [ -n "$CORE_MANIFEST" ] && command -v cygpath >/dev/null 2>&1; then
 fi
 CORE_DIR="$(dirname "$CORE_MANIFEST")"
 if [ "$metadata_status" -ne 0 ] || [ -z "$CORE_MANIFEST" ] || [ ! -f "$CORE_DIR/scripts/output-budget.sh" ]; then
-    echo "tier.sh: cargo could not say where am-fs-core is, or its copy has no" >&2
+    echo "tier.sh: cargo could not say where rust-fs-core is, or its copy has no" >&2
     echo "         scripts/output-budget.sh. The wrapper lives in rust-fs-core;" >&2
-    echo "         check the am-fs-core dependency resolves and is at a version" >&2
+    echo "         check the rust-fs-core dependency resolves and is at a version" >&2
     echo "         that ships it (v0.2.13 or later)." >&2
     exit 1
 fi

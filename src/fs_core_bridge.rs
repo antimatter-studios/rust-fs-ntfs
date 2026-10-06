@@ -3,7 +3,7 @@
 //!
 //! Direction supported here: **inbound** — wrap any
 //! `fs_core::BlockDevice` (a `Qcow2Reader`, a `SliceReader` produced by
-//! `am-partitions`, an `FsCoreFromSomethingElse`) and present it as
+//! `rust-disk-partitions`, an `FsCoreFromSomethingElse`) and present it as
 //! ntfs's local `BlockIo`. This is the path that lets ntfs mount a
 //! partition that lives inside a virtual disk image.
 //!

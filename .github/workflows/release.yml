@@ -125,7 +125,7 @@ jobs:
             core_ref="$(pin FS_CORE_REF)"
             harness_ref="$(pin HARNESS_REF)"
             echo "chore has no build for $(uname -s); cloning siblings directly"
-            echo "  am-fs-core              $core_ref"
+            echo "  rust-fs-core              $core_ref"
             echo "  fs-windows-test-harness $harness_ref"
             git clone --quiet --depth 1 --branch "$core_ref" \
               https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
@@ -259,7 +259,7 @@ jobs:
             core_ref="$(pin FS_CORE_REF)"
             harness_ref="$(pin HARNESS_REF)"
             echo "chore has no build for $(uname -s); cloning siblings directly"
-            echo "  am-fs-core              $core_ref"
+            echo "  rust-fs-core              $core_ref"
             echo "  fs-windows-test-harness $harness_ref"
             git clone --quiet --depth 1 --branch "$core_ref" \
               https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
@@ -279,7 +279,7 @@ jobs:
         # workflows drifted three releases apart (#128); declaring it in
         # one place is what stops that recurring (#190), and
         # tests/ci_profile.rs fails a clone that names its own ref (#387).
-        # am-img-vhd path-deps am-fs-core (`../rust-fs-core`), so that
+        # rust-img-vhd path-deps rust-fs-core (`../rust-fs-core`), so that
         # sibling sits beside it.
         shell: pwsh
         run: |
@@ -551,7 +551,7 @@ jobs:
             core_ref="$(pin FS_CORE_REF)"
             harness_ref="$(pin HARNESS_REF)"
             echo "chore has no build for $(uname -s); cloning siblings directly"
-            echo "  am-fs-core              $core_ref"
+            echo "  rust-fs-core              $core_ref"
             echo "  fs-windows-test-harness $harness_ref"
             git clone --quiet --depth 1 --branch "$core_ref" \
               https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
@@ -562,13 +562,32 @@ jobs:
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-27
         with:
           toolchain: "1.95.0"
+      # ALREADY PUBLISHED IS NOT A FAILURE. A crate's first version under a
+      # new name cannot come from here: trusted publishing needs the crate to
+      # exist before its publisher can be registered, so that version is
+      # published by hand from this tag's commit, and this job then has
+      # nothing to upload.
+      - name: is this version already on crates.io
+        id: published
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="$(grep -m1 '^name = ' Cargo.toml | sed 's/name = //; s/"//g')"
+          version="$(grep -m1 '^version = ' Cargo.toml | sed 's/version = //; s/"//g')"
+          code="$(curl -s -o /dev/null -w '%{http_code}' \
+            -A "${GITHUB_REPOSITORY} release (github.com/${GITHUB_REPOSITORY})" \
+            "https://crates.io/api/v1/crates/$name/$version")"
+          echo "crates.io answered $code for $name $version"
+          if [ "$code" = 200 ]; then echo "already=true" >> "$GITHUB_OUTPUT"; else echo "already=false" >> "$GITHUB_OUTPUT"; fi
       - uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1.0.4
+        if: steps.published.outputs.already != 'true'
         id: auth
       - name: cargo publish
+        if: steps.published.outputs.already != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        # No --locked: publish rewrites the am-fs-core path dep into its
-        # registry version (0.2.x from crates.io), which --locked forbids.
+        # No --locked: publish rewrites the rust-fs-core path dep into its
+        # registry version (0.3.x from crates.io), which --locked forbids.
         run: cargo publish
 
   # ---------------------------------------------------------------------------
@@ -585,7 +604,7 @@ jobs:
   # `scripts/core.sh package-cli` -- which lays the tarball out as an install
   # prefix and checks it, with the names, man sections and licences from
   # Cargo.toml's [package.metadata.package-cli] -- and attaches both
-  # tarballs, as am-fs-ntfs-<version>-<platform>.tar.gz, once both legs
+  # tarballs, as rust-fs-ntfs-<version>-<platform>.tar.gz, once both legs
   # pass. The pull-request `cli` job runs the same package-cli.
   #
   # PINNED BY COMMIT, because the called workflow runs with the grants below.
@@ -594,7 +613,7 @@ jobs:
   #
   # THE ATTESTATION'S SIGNER IS CORE'S WORKFLOW. In a reusable workflow the
   # signing identity is the called file, so a download is checked with
-  #   gh attestation verify <tarball> --repo christhomas/rust-fs-ntfs \
+  #   gh attestation verify <tarball> --repo antimatter-studios/rust-fs-ntfs \
   #     --signer-workflow antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml
   # where releases up to 0.7.0 were signed by this repository's release.yml.
   # ---------------------------------------------------------------------------
@@ -606,7 +625,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
-    uses: antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml@0f7714910080f5f2a080ed6032cccf19bc338064 # v0.2.23
+    uses: antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml@9e900154a7dff2a6c8f136db31def33bed9f09cc # v0.3.0
     with:
-      core-ref: v0.2.23
+      core-ref: v0.3.0
       toolchain: 1.95.0

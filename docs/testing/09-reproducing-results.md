@@ -9,7 +9,7 @@ you add fixtures, a nightly toolchain, and (for the top layer) a Windows VM.
 
 ```
    Tier 0  ·  no setup          ·  cargo test --lib        ·  525 tests, seconds
-   Tier 1  ·  no setup          ·  cargo test -p am-fs-core ·   88 tests, seconds
+   Tier 1  ·  no setup          ·  cargo test -p rust-fs-core ·   88 tests, seconds
    Tier 2  ·  + disk fixtures   ·  cargo test --tests       ·  645 tests
    Tier 3  ·  + nightly + fuzz  ·  cargo +nightly fuzz run   ·  3 targets
    Tier 4  ·  + Windows VM      ·  scripts/matrix-baseline.sh ·  44 chkdsk scenarios
@@ -38,7 +38,7 @@ grep -rhc '#\[test\]' src/*.rs | paste -sd+ - | bc        # → 525
 ## Tier 1 — the block-device substrate (no setup)
 
 ```bash
-cargo test -p am-fs-core
+cargo test -p rust-fs-core
 grep -rhc '#\[test\]' ../rust-fs-core/tests/*.rs | paste -sd+ - | bc   # → 88
 ```
 

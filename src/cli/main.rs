@@ -2,7 +2,7 @@
 //!
 //! Installed as `rust-fs-ntfs` and linked as each dotted name. The
 //! dispatch and the output contract every tool shares are `fs_core::cli`
-//! (am-fs-core's `cli` feature); `ntfs` is the tools themselves.
+//! (rust-fs-core's `cli` feature); `ntfs` is the tools themselves.
 
 mod ntfs;
 #[cfg(test)]

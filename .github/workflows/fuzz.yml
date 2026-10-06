@@ -12,7 +12,7 @@ name: fuzz
 #
 # THIS WORKFLOW IS WHY THE TARGETS EXIST. Three of them were added on
 # 2026-05-03 and no workflow ran them; fuzz/Cargo.toml also named the
-# dependency `fs-ntfs` where the package is `am-fs-ntfs`, so they had
+# dependency `fs-ntfs` where the package is `rust-fs-ntfs`, so they had
 # never compiled either, and fuzz/.gitignore ignored the corpus they
 # would have needed. A harness nothing runs is indistinguishable from
 # one that runs and finds nothing.

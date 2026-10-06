@@ -22,7 +22,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-am-fs-ntfs = { path = ".." }
+rust-fs-ntfs = { path = ".." }
 
 [[bin]]
 name = "decode_runs"

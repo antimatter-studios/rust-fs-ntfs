@@ -193,7 +193,7 @@ failing, which is why they can merge without a VM run.
 
 `scripts/tier.sh` owns the table of tiers and their measured budgets. The
 wrapper doing the work belongs to `rust-fs-core`: `tier.sh` asks cargo where
-the resolved `am-fs-core` package is, checks that its
+the resolved `rust-fs-core` package is, checks that its
 `scripts/output-budget.sh` answers `--version` with
 `rust-fs-core-output-budget 1`, and copies it into `tmp/` for the run.
 **Never copy that wrapper into this repository.**

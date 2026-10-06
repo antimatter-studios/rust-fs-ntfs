@@ -242,8 +242,8 @@ fs_ntfs_fs_t *fs_ntfs_mount_with_callbacks(
 
 /*
  * Mount via an FsCoreDevice handle from a sister crate
- * (`qcow2_open` from am-img-qcow2, `partitions_open_slice` from
- * am-partitions, `fs_core_file_open` from am-fs-core).
+ * (`qcow2_open` from rust-img-qcow2, `partitions_open_slice` from
+ * rust-disk-partitions, `fs_core_file_open` from rust-fs-core).
  *
  * Read-only — mutator API calls on the resulting handle (`_h` family)
  * return EINVAL with "handle has no recorded mount source". For RW

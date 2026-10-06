@@ -1,18 +1,4 @@
-# am-fs-ntfs — pure-Rust NTFS driver
-
-> **Renamed to [`rust-fs-ntfs`](https://crates.io/crates/rust-fs-ntfs).**
-> `am-fs-ntfs` 0.8.0 is the last version published under this name. New versions
-> are published only as `rust-fs-ntfs`, starting at 0.9.0. To move, change one line
-> in `Cargo.toml`:
->
-> ```toml
-> # before
-> am-fs-ntfs = "0.8"
-> # after
-> rust-fs-ntfs = "0.9"
-> ```
->
-> The import is unchanged: `use fs_ntfs::...` keeps working.
+# rust-fs-ntfs — pure-Rust NTFS driver
 
 A pure-Rust read/write NTFS driver, dual-licensed Apache-2.0 / MIT,
 with no kernel dependencies and no FFI to a C-language NTFS library.
@@ -354,10 +340,10 @@ history available via `git log` in the repo.
 
 ### 2026-09-04 — 0.3.5
 
-- Dropped the git submodules: `am-fs-core` and the Windows test harness
+- Dropped the git submodules: `rust-fs-core` and the Windows test harness
   now resolve from sibling checkouts pinned by `chore siblings`, matching
   the rest of the family. This was the last repo still using submodules.
-- The lockfile moves `am-fs-core` 0.2.2 → 0.2.4 — it had been two
+- The lockfile moves `rust-fs-core` 0.2.2 → 0.2.4 — it had been two
   releases behind, which is the drift a per-consumer submodule pin hides.
 - Covered the create rollback: disabling either half of
   `undo_new_record_io` had left the suite green. Four tests now pin it.
@@ -440,7 +426,7 @@ history available via `git log` in the repo.
 
 ### 2026-05-21
 
-- `chore(vendor)`: `am-fs-core` is now a git submodule at
+- `chore(vendor)`: `rust-fs-core` is now a git submodule at
   `vendor/rust-fs-core` rather than an unmanaged `../rust-fs-core`
   sibling path. Clone with `--recurse-submodules` (or
   `git submodule update --init --recursive`) and the crate is
@@ -608,7 +594,7 @@ chore test:cli:oracle              # against Windows-written volumes, and ntfs-3
 
 Reports are JSON on stdout (`--text` for people); a failure is
 `{"error": "...", "code": N}` on stderr, `N` being the exit status. A
-release attaches `am-fs-ntfs-<version>-<platform>.tar.gz` for macOS arm64
+release attaches `rust-fs-ntfs-<version>-<platform>.tar.gz` for macOS arm64
 and Linux x86_64, laid out as an install prefix (`bin/`,
 `share/man`, the zsh, bash and fish completions, `share/rust-fs-ntfs/CAVEATS`,
 the licences).

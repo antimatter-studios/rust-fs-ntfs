@@ -1,7 +1,7 @@
 # Output budgets and agent token efficiency
 
 This note describes the output-budget migration in
-[`rust-fs-ntfs` PR #326](https://github.com/christhomas/rust-fs-ntfs/pull/326).
+[`rust-fs-ntfs` PR #326](https://github.com/antimatter-studios/rust-fs-ntfs/pull/326).
 The shared wrapper is owned by `rust-fs-core`; its related follow-up work is
 tracked in
 [`rust-fs-core` issue #153](https://github.com/antimatter-studios/rust-fs-core/issues/153).
@@ -9,7 +9,7 @@ tracked in
 ## Current design
 
 `scripts/tier.sh` assigns each test tier measured line and byte limits, asks
-Cargo where the resolved `am-fs-core` package lives, and makes a transient copy
+Cargo where the resolved `rust-fs-core` package lives, and makes a transient copy
 of core's canonical `scripts/output-budget.sh`. The copy is removed when the
 tier exits. This keeps the wrapper version tied to Cargo resolution without a
 stale repository copy.

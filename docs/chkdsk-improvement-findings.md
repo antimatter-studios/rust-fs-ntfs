@@ -2250,9 +2250,9 @@ the expected behaviour cleanly.
 
 ### Iter I findings — post-S1+S2+S3 trace (2026-05-21)
 
-After [PR #39 (S1)](https://github.com/christhomas/rust-fs-ntfs/pull/39),
-[PR #40 (S3)](https://github.com/christhomas/rust-fs-ntfs/pull/40),
-and [PR #41 (S2)](https://github.com/christhomas/rust-fs-ntfs/pull/41)
+After [PR #39 (S1)](https://github.com/antimatter-studios/rust-fs-ntfs/pull/39),
+[PR #40 (S3)](https://github.com/antimatter-studios/rust-fs-ntfs/pull/40),
+and [PR #41 (S2)](https://github.com/antimatter-studios/rust-fs-ntfs/pull/41)
 landed, re-ran `scripts/procmon-chkdsk-trace.ps1` on the same 256 MiB
 volume scenario. (PR-number / sub-PR-letter mismatch: S3 merged
 before S2 — S2 went through an extra review round to correct the
