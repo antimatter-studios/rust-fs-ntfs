@@ -1,5 +1,19 @@
 # am-fs-ntfs — pure-Rust NTFS driver
 
+> **Renamed to [`rust-fs-ntfs`](https://crates.io/crates/rust-fs-ntfs).**
+> `am-fs-ntfs` 0.8.0 is the last version published under this name. New versions
+> are published only as `rust-fs-ntfs`, starting at 0.9.0. To move, change one line
+> in `Cargo.toml`:
+>
+> ```toml
+> # before
+> am-fs-ntfs = "0.8"
+> # after
+> rust-fs-ntfs = "0.9"
+> ```
+>
+> The import is unchanged: `use fs_ntfs::...` keeps working.
+
 A pure-Rust read/write NTFS driver, dual-licensed Apache-2.0 / MIT,
 with no kernel dependencies and no FFI to a C-language NTFS library.
 The crate ships a stable C ABI (`fs_ntfs_*`) so it can be linked

@@ -3,7 +3,7 @@ name = "am-fs-ntfs"
 version = "0.8.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Pure-Rust NTFS filesystem driver. Exposes a C ABI (fs_ntfs_*) suitable for FFI from C/C++/Go/etc."
+description = "Renamed to rust-fs-ntfs: this crate receives no further versions. Depend on rust-fs-ntfs instead; the import is unchanged (use fs_ntfs)."
 repository = "https://github.com/christhomas/rust-fs-ntfs"
 readme = "README.md"
 
