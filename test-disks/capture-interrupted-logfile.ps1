@@ -39,6 +39,20 @@
 #   -WorkloadSeconds, -LogKB    a run long enough, or a log small enough,
 #                               that the log wraps between a checkpoint and
 #                               the snapshot (LogKB 0 keeps format's size)
+#   -Mix files|views            files (the default) creates, writes, renames
+#                               and deletes. views adds, per operation,
+#                               what the files mix never logs: quota
+#                               tracking is on, so every allocation updates
+#                               the owner's $Quota entry in place; every
+#                               file gets a security descriptor of its own
+#                               ($Secure's $SDH/$SII); every 4th gets an
+#                               object id ($ObjId's $O), every 8th becomes
+#                               a junction's target ($Reparse's $R), and
+#                               every 5th is truncated to a shorter
+#                               non-resident length. These are the shapes
+#                               behind the redo operations no capture has
+#                               held yet (UpdateRecordData*, the view
+#                               indexes, WriteEndOfFileRecordSegment).
 #
 # Run elevated on Windows (GitHub's windows-latest is). Windows PowerShell 5.1
 # or PowerShell 7.
@@ -49,6 +63,8 @@ param(
     [int]$ClusterSize = 4096,
     [int]$Writers = 1,
     [int]$LogKB = 0,
+    [ValidateSet('files', 'views')]
+    [string]$Mix = 'files',
     [string]$Out = 'logfile-oracle'
 )
 
@@ -104,8 +120,15 @@ if ($LogKB -gt 0) {
 @{
     partition_offset = $part.Offset; partition_size = $part.Size; vhd_bytes = (Get-Item $vhd).Length
     cluster_size = $ClusterSize; writers = $Writers; log_kb = $LogKB; workload_seconds = $WorkloadSeconds
+    mix = $Mix
 } | ConvertTo-Json | Set-Content (Join-Path $Out 'layout.json')
 Write-Host "volume $vol at byte $($part.Offset) of $vhd"
+if ($Mix -eq 'views') {
+    # Tracking, not enforcement: usage is charged to each owner's $Quota
+    # entry and nothing is refused for exceeding a limit.
+    $q = & fsutil.exe quota track $vol.TrimEnd('\') 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "fsutil quota track failed ($LASTEXITCODE): $q" }
+}
 
 # ---- the workload, in its own processes ---------------------------------
 # Metadata-heavy on purpose: every create, rename and delete is a logged
@@ -114,7 +137,7 @@ Write-Host "volume $vol at byte $($part.Offset) of $vhd"
 # keeps its own markers file.
 $workload = Join-Path $root 'workload.ps1'
 @'
-param($Vol, $Markers, $Seconds, $Writer, $Writers)
+param($Vol, $Markers, $Seconds, $Writer, $Writers, $Mix)
 $rng = New-Object System.Random (366 + $Writer)
 $end = (Get-Date).AddSeconds($Seconds)
 $n = 0
@@ -131,6 +154,29 @@ while ((Get-Date) -lt $end) {
     $buf = New-Object byte[] $len
     for ($j = 0; $j -lt $len; $j++) { $buf[$j] = $unit[$j % $unit.Length] }
     [System.IO.File]::WriteAllBytes($file, $buf)
+    if ($Mix -eq 'views') {
+        # A descriptor no other file has: an allow entry for a SID that
+        # names this file's index, which needs no such account to exist.
+        $acl = Get-Acl -LiteralPath $file
+        $sid = New-Object System.Security.Principal.SecurityIdentifier ('S-1-5-21-366-137-{0}' -f $i)
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule ($sid, 'Read', 'Allow')))
+        Set-Acl -LiteralPath $file -AclObject $acl
+        if ($i % 4 -eq 0) {
+            $o = & fsutil.exe objectid create $file 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "fsutil objectid create $file failed: $o" }
+        }
+        if ($i % 8 -eq 0) {
+            # The target is an empty directory outside the tree of files,
+            # so nothing that walks the volume recursively loops.
+            $target = Join-Path $Vol 'junction-target'
+            [System.IO.Directory]::CreateDirectory($target) | Out-Null
+            New-Item -ItemType Junction -Path (Join-Path $dir ('j{0:D7}' -f $i)) -Target $target | Out-Null
+        }
+        if ($i % 5 -eq 0 -and $len -gt 8192) {
+            $fs = [System.IO.File]::Open($file, 'Open', 'Write')
+            try { $fs.SetLength([int]($len / 2)) } finally { $fs.Dispose() }
+        }
+    }
     if ($i % 3 -eq 0) { [System.IO.File]::Move($file, "$file.renamed") }
     if ($n -ge 400 -and $n % 2 -eq 0) {
         $old = $i - 400 * $Writers
@@ -149,7 +195,7 @@ $procs = @(for ($w = 0; $w -lt $Writers; $w++) {
     Start-Process -FilePath $shell -PassThru -NoNewWindow -ArgumentList @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $workload,
         '-Vol', $vol, '-Markers', (Join-Path $Out "markers-$w.log"), '-Seconds', $WorkloadSeconds,
-        '-Writer', $w, '-Writers', $Writers)
+        '-Writer', $w, '-Writers', $Writers, '-Mix', $Mix)
 })
 # Without its handle cached now, a Start-Process object reports no ExitCode
 # once the process has gone.

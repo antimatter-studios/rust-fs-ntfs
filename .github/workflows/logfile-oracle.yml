@@ -13,6 +13,7 @@ name: logfile oracle
 #   undo:          writers 8, seconds 60, candidates 12
 #   wrapped log:   seconds 240, candidates 16
 #   small cluster: cluster_size 1024 (or 512, 2048)
+#   view indexes, quota updates, truncation: mix views
 #
 # On demand only. It builds no code and gates nothing: a fixture is chosen
 # from its artifact by a person and committed, and from then on the tests
@@ -40,6 +41,10 @@ on:
         description: "$LogFile size in KiB, set with chkdsk /L (0 keeps what format chose)"
         required: false
         default: "0"
+      mix:
+        description: "Workload: files (create, write, rename, delete) or views (adds quota tracking, security descriptors, object ids, junctions, truncation)"
+        required: false
+        default: "files"
 
 permissions:
   contents: read
@@ -60,6 +65,7 @@ jobs:
           -ClusterSize ${{ inputs.cluster_size || '4096' }}
           -Writers ${{ inputs.writers || '1' }}
           -LogKB ${{ inputs.log_kb || '0' }}
+          -Mix ${{ inputs.mix || 'files' }}
           -Out logfile-oracle
       - name: Upload
         if: always()
