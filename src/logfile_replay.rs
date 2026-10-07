@@ -71,6 +71,16 @@
 //!   bytes of the entry it names inside an index block, as
 //!   `SetIndexEntryVcnRoot` does in an index root
 //!   (`test-disks/windows-interrupted-index-vcn`).
+//! * `UpdateRecordDataRoot` overwrites the data of a view index entry in
+//!   an index root, which starts at the offset the entry's first two bytes
+//!   give: with quota tracking on, `$Quota`'s `$Q` entry for a file's
+//!   owner, whose version, flags, bytes charged and (24-byte redo) change
+//!   time every allocation updates in place
+//!   (`test-disks/windows-interrupted-quota`). It leaves the record's LSN
+//!   as it was, as Windows does, so every such redo after the record's
+//!   last stamped change is applied. Its index-block counterpart,
+//!   `UpdateRecordDataAllocation`, is still refused: no capture has held
+//!   one.
 //! * `DeleteIndexEntryAllocation` moves the entries after it down and
 //!   leaves the bytes past the block's new end as they were; the block's
 //!   update sequence array, which records the end of every sector, shows
@@ -147,6 +157,7 @@ const FORGET_TRANSACTION: u16 = 0x1B;
 const OPEN_NONRESIDENT_ATTRIBUTE: u16 = 0x1C;
 const OPEN_ATTRIBUTE_TABLE_DUMP: u16 = 0x1D;
 const TRANSACTION_TABLE_DUMP: u16 = 0x20;
+const UPDATE_RECORD_DATA_ROOT: u16 = 0x21;
 const ZERO_END_OF_FILE_RECORD: u16 = 0x25;
 
 /// Operations on an MFT record (`$MFT`'s `$DATA`).
@@ -162,6 +173,7 @@ const ON_FILE_RECORD: &[u16] = &[
     DELETE_INDEX_ENTRY_ROOT,
     SET_INDEX_ENTRY_VCN_ROOT,
     UPDATE_FILE_NAME_ROOT,
+    UPDATE_RECORD_DATA_ROOT,
     ZERO_END_OF_FILE_RECORD,
 ];
 /// Operations on an index block (`$INDEX_ALLOCATION`).
@@ -1095,7 +1107,13 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
             redo_index_block(&mut block.bytes, op, record_off + attr_off, &redo)
         }
         .map_err(|e| e.context(format!("LSN {lsn:#x}, {}", op_name(op))))?;
-        put_u64(&mut block.bytes, 0x08, lsn)?;
+        // Windows writes a view index entry's data in place and leaves the
+        // record's LSN as it was: `$Quota`'s record keeps an LSN older
+        // than every UpdateRecordDataRoot it holds, on the pre-image and
+        // after Windows' restart (`test-disks/windows-interrupted-quota`).
+        if op != UPDATE_RECORD_DATA_ROOT {
+            put_u64(&mut block.bytes, 0x08, lsn)?;
+        }
         block.valid = true;
         block.changed = true;
         applied += 1;
@@ -1341,6 +1359,24 @@ fn redo_file_record(
             put(rec, a + off + entry_len - 8, data)?;
         }
         UPDATE_FILE_NAME_ROOT => put(rec, a + off + 0x18, data)?,
+        UPDATE_RECORD_DATA_ROOT => {
+            // A view index entry -- `$Quota`'s `$Q`, `$ObjId`'s `$O` --
+            // keeps its data at the offset its first two bytes give, for
+            // the length the next two give; the redo overwrites the start
+            // of that data.
+            let entry = a + off;
+            let (at, len) = (
+                u16_at(rec, entry)? as usize,
+                u16_at(rec, entry + 2)? as usize,
+            );
+            if data.len() > len {
+                return Err(refuse(format!(
+                    "{} bytes of data for a view index entry holding {len}",
+                    data.len()
+                )));
+            }
+            put(rec, entry + at, data)?
+        }
         ZERO_END_OF_FILE_RECORD => put(rec, a + off, data)?,
         _ => unreachable!("only file-record operations reach here"),
     }
@@ -1431,6 +1467,27 @@ mod tests {
         assert_eq!(&b[..12], &[0, 0, 0, 0, 9, 9, 9, 9, 0, 0, 0, 0]);
         remove(&mut b, 4, 4, 12).unwrap();
         assert_eq!(b, vec![0u8; 16]);
+    }
+
+    #[test]
+    fn a_view_index_entry_has_its_data_overwritten_and_no_more() {
+        // A `$Q` entry at 0x88 into an index root at 0x1b8: data at 0x14,
+        // 0x40 bytes of it, as on `test-disks/windows-interrupted-quota`.
+        let mut rec = vec![0u8; 1024];
+        rec[0x18..0x1C].copy_from_slice(&0x300u32.to_le_bytes());
+        let (a, off) = (0x1b8, 0x88);
+        rec[a + off..a + off + 2].copy_from_slice(&0x14u16.to_le_bytes());
+        rec[a + off + 2..a + off + 4].copy_from_slice(&0x40u16.to_le_bytes());
+        let before = rec.clone();
+        // More data than the entry holds is refused, and nothing written.
+        assert!(
+            redo_file_record(&mut rec, UPDATE_RECORD_DATA_ROOT, a, off, &[7; 0x41], 0x41).is_err()
+        );
+        assert_eq!(rec, before);
+        redo_file_record(&mut rec, UPDATE_RECORD_DATA_ROOT, a, off, &[7; 24], 24).unwrap();
+        assert_eq!(&rec[a + off + 0x14..a + off + 0x14 + 24], &[7; 24]);
+        assert_eq!(&rec[..a + off + 0x14], &before[..a + off + 0x14]);
+        assert_eq!(&rec[a + off + 0x14 + 24..], &before[a + off + 0x14 + 24..]);
     }
 
     #[test]

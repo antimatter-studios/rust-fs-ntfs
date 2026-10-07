@@ -4,6 +4,13 @@
 
 ### Added
 
+- **A `$LogFile` holding `UpdateRecordDataRoot` redo is replayed** (#137).
+  With quota tracking on, NTFS charges every allocation to the owner's
+  `$Quota` entry in place and logs it as this operation. `fsck` and every
+  read-write mount refused any log holding one; they now overwrite the
+  entry's data, and leave the record's LSN where it was, as Windows does.
+  A volume Windows left mid-write with quotas on, new in `test-disks/`,
+  replays to what Windows' own restart produced from it.
 - **The `$LogFile` capture has a workload that touches the view indexes.**
   `logfile-oracle.yml`'s `mix: views` turns quota tracking on and gives
   every file its own security descriptor, some an object id or a junction,
