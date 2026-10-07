@@ -12,6 +12,12 @@
 
 ### Changed
 
+- **`cargo install` puts only `rust-fs-ntfs` on PATH.** `rust-ntfs`, the
+  Windows test matrix's driver, is built only with the test-only `harness`
+  feature, so neither `cargo install rust-fs-ntfs` nor `--features cli`
+  installs it beside the tools. The matrix, the test tiers and clippy build
+  with the feature, and `tests/one_binary_on_path.rs` holds the manifest to
+  one installed binary (#452).
 - **The family's scripts run in place from rust-fs-core, and this repository
   keeps no copy.** `scripts/core.sh` and `scripts/tier.sh` are gone; CI and
   chores run `../rust-fs-core/scripts/NAME.sh` at the pinned version

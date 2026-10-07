@@ -345,7 +345,7 @@ fi
 # ── build phase ─────────────────────────────────────────────────
 if [[ "${DO_BUILD}" == "1" ]]; then
     echo "[test] === build phase ==="
-    cargo build --release --bin rust-ntfs
+    cargo build --release --features harness --bin rust-ntfs
     cargo build --manifest-path vendor/harness/runner/Cargo.toml --release --bin run-matrix
 fi
 

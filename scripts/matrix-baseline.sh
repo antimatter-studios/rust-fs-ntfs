@@ -62,7 +62,7 @@ echo "[matrix-baseline] cargo build --release (path-stable)"
 export RUSTFLAGS="${RUSTFLAGS:-} \
     --remap-path-prefix=$PWD=. \
     --remap-path-prefix=$HOME/.cargo/registry=/registry"
-cargo build --release --quiet
+cargo build --release --features harness --quiet
 
 # 2. Run the matrix.
 matrix_log="$(mktemp -t matrix-baseline.XXXXXX.log)"

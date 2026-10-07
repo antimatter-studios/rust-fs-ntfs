@@ -25,9 +25,21 @@ const TEST_LABEL: &str = "BINSMOKE";
 const TEST_SERIAL_HEX: &str = "deadbeefcafe1234";
 const TEST_SERIAL: u64 = 0xdeadbeefcafe1234;
 
+/// The `rust-ntfs` binary, which cargo builds only with the test-only
+/// `harness` feature (#452). Without it each test here fails by name
+/// rather than the file quietly selecting nothing.
+fn rust_ntfs() -> &'static str {
+    match option_env!("CARGO_BIN_EXE_rust-ntfs") {
+        Some(exe) => exe,
+        None => panic!(
+            "rust-ntfs is built only with the `harness` feature: run with --features cli,harness"
+        ),
+    }
+}
+
 #[test]
 fn mkfs_bin_formats_a_pre_sized_file_and_parses_clean() {
-    let bin = env!("CARGO_BIN_EXE_rust-ntfs");
+    let bin = rust_ntfs();
     let img = common::temp_image_path("mkfs_bin_img");
 
     // Pre-size with std (no `truncate` shell-out — keeps the test
@@ -82,7 +94,7 @@ fn mkfs_bin_create_size_creates_then_formats() {
     // --create-size end-to-end: point at a non-existent path with
     // --create-size 64M, expect the binary to create + size + format.
     // No prior `truncate` step.
-    let bin = env!("CARGO_BIN_EXE_rust-ntfs");
+    let bin = rust_ntfs();
     let img = common::temp_image_path("mkfs_bin_createsize");
 
     let out = Command::new(bin)
@@ -117,7 +129,7 @@ fn mkfs_bin_create_size_creates_then_formats() {
 
 #[test]
 fn mkfs_bin_dry_run_does_not_modify_file() {
-    let bin = env!("CARGO_BIN_EXE_rust-ntfs");
+    let bin = rust_ntfs();
     let img = common::temp_image_path("mkfs_bin_dryrun");
 
     let pattern = vec![0xAAu8; SIZE_BYTES as usize];
@@ -144,7 +156,7 @@ fn mkfs_bin_dry_run_does_not_modify_file() {
 
 #[test]
 fn mkfs_bin_rejects_undersized_records_before_creating_the_target() {
-    let bin = env!("CARGO_BIN_EXE_rust-ntfs");
+    let bin = rust_ntfs();
     for (record_size, constraint) in [("512", "$Secure"), ("1024", "root directory")] {
         let img = common::temp_image_path(format!("mkfs_bin_record_{record_size}"));
 
@@ -186,7 +198,7 @@ fn mkfs_bin_rejects_undersized_records_before_creating_the_target() {
 
 #[test]
 fn mkfs_bin_accepts_the_smallest_supported_2048_byte_record() {
-    let bin = env!("CARGO_BIN_EXE_rust-ntfs");
+    let bin = rust_ntfs();
     let img = common::temp_image_path("mkfs_bin_record_2048");
 
     let out = Command::new(bin)
@@ -213,7 +225,7 @@ fn mkfs_bin_accepts_the_smallest_supported_2048_byte_record() {
 
 #[test]
 fn mkfs_bin_help_advertises_only_record_sizes_the_formatter_can_build() {
-    let out = Command::new(env!("CARGO_BIN_EXE_rust-ntfs"))
+    let out = Command::new(rust_ntfs())
         .args(["format", "--help"])
         .output()
         .expect("spawn rust-ntfs format --help");

@@ -296,7 +296,7 @@ tasks:
     # two lines in front of every run. Same check, silent when it passes.
     deps: [siblings:gate]
     cmds:
-      - cargo build --release --locked --bin rust-ntfs --quiet
+      - cargo build --release --locked --features harness --bin rust-ntfs --quiet
       # The command-line tools, which the `cli` scenarios run on the host
       # (scripts/cli-oracle.sh).
       - cargo build --release --locked --features cli --bin rust-fs-ntfs --quiet
@@ -414,7 +414,7 @@ tasks:
       # or a call to a local copy.
       - bash ../rust-fs-core/scripts/family-check.sh
       - task: check:ci-gate
-      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli -- -D warnings
+      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness -- -D warnings
 
   check:ci-gate:
     desc: ci-ok needs every gating job in ci.yml, and .github-guard requires ci-ok alone
@@ -468,7 +468,7 @@ tasks:
     desc: 'The two fixture-free integration files -- ci.yml "fixture-free integration tests"'
     deps: [siblings:gate]
     cmds:
-      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips mkfs -- cargo test --release --locked --features cli --test mkfs_roundtrip --test mkfs_bin_smoke
+      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips mkfs -- cargo test --release --locked --features cli,harness --test mkfs_roundtrip --test mkfs_bin_smoke
 
   test:suite:
     desc: 'Every unit and integration test, release -- ci.yml "full suite"'
@@ -477,7 +477,7 @@ tasks:
     # panic one test at a time, 4,755 lines of the same missing file.
     cmds:
       - test-disks/check-fixtures.sh
-      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli --no-fail-fast
+      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli,harness --no-fail-fast
 
   test:
     desc: 'Every test tier CI runs, quietly: unit, unit (debug), mkfs, the whole suite, the installed tools'
@@ -554,7 +554,7 @@ tasks:
     cmds:
       - |
         set -u
-        out=$(cargo test --release --locked -- --ignored 2>&1)
+        out=$(cargo test --release --locked --features cli,harness -- --ignored 2>&1)
         printf '%s\n' "$out" | grep -E '^test .* \.\.\. (ok|FAILED)' || true
         passed=$(printf '%s\n' "$out" | grep -cE '^test .* \.\.\. ok' || true)
         if [ "${passed:-0}" -gt 0 ]; then
