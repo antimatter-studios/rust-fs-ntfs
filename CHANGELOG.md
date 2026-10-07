@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **The `$LogFile` capture has a workload that touches the view indexes.**
+  `logfile-oracle.yml`'s `mix: views` turns quota tracking on and gives
+  every file its own security descriptor, some an object id or a junction,
+  and truncates some, so captures can hold the redo operations replay still
+  refuses because no capture has held them (#137).
+
 ### Changed
 
 - **The family's scripts run in place from rust-fs-core, and this repository
