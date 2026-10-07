@@ -144,16 +144,19 @@ Concrete user-observable list, end-to-end:
 
 Specific limits, current as of HEAD:
 
-- **`$LogFile` replay is redo only** (#137). `fsck` replays the redo
-  operations two Windows-written logs hold, checked against what Windows
-  recovered from the same images; it refuses, writing nothing, a log
-  with a transaction left unfinished (that needs undo), an operation
-  those logs did not hold, a page spanning clusters, or an LFS version
-  other than 2.x. A log that wrapped between the checkpoint and the stop
-  is followed across its end. A writable mount
-  replays the same logs and refuses the same ones; a read-only mount
-  reads the volume as it is on disk, without replaying. Explicit log
-  reset is only for volumes independently known consistent.
+- **`$LogFile` replay covers what Windows-written logs were checked to
+  need** (#137). `fsck` redoes every operation the captured Windows logs
+  hold and rolls back the transactions they leave open, each checked
+  against what Windows recovered from the same images, across a wrapped
+  log and on pages spanning several clusters. It refuses, writing
+  nothing, a log holding an operation no capture has held
+  (`UpdateRecordDataAllocation`, `WriteEndOfFileRecordSegment`,
+  `DeleteDirtyClusters`, `HotFix`, `UpdateRelativeDataInIndex*`), a
+  transaction prepared or committed and not forgotten, or an LFS version
+  other than 2.x. A writable mount replays the same logs and refuses the
+  same ones; a read-only mount reads the volume as it is on disk, without
+  replaying. Explicit log reset is only for volumes independently known
+  consistent.
 - **Overflowed directories.** Once a directory has more entries
   than fit in `$INDEX_ROOT`, writes that would touch its index
   (`create_file`, `mkdir`, `rmdir`, `unlink`, `rename`) refuse with
