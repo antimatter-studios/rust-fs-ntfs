@@ -51,6 +51,10 @@
 //!   quota tracking on, whose log updates `$Quota` entries in place. See
 //!   [`QUOTA_LOG_END`].
 //!
+//! * `windows-interrupted-fresh-log*`: the same three files for a capture
+//!   whose last checkpoint is the first after the log was emptied, and
+//!   names no start and no tables. See [`FRESH_LOG_END`].
+//!
 //! Every partition's SHA-256 is in [`PARTITIONS`] and checked on unpacking.
 //!
 //! WHAT WINDOWS' REPLAY CHANGED, read by ntfs-3g without replaying: on
@@ -84,7 +88,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 /// The SHA-256 of each decompressed partition, as captured.
-const PARTITIONS: [(&str, &str); 22] = [
+const PARTITIONS: [(&str, &str); 24] = [
     (
         "windows-interrupted-1",
         "7236ffe64f5532b6f5cd976c1fa81c66e6be6cd31cfb8c22bc0bb588e8fad54f",
@@ -172,6 +176,14 @@ const PARTITIONS: [(&str, &str); 22] = [
     (
         "windows-interrupted-quota.recovered",
         "acada3119e1f84168b984ad59cbdf6185a9c947d532ed63e4f83b76534c2c426",
+    ),
+    (
+        "windows-interrupted-fresh-log",
+        "053034bc24eeefacdd5942bc36582e4cf41458776c2d299e42978c7d88fa2ef1",
+    ),
+    (
+        "windows-interrupted-fresh-log.recovered",
+        "82ec1c217ae55a204a2ca762a15141154d0f3ba19cb974d7208c5a4320742fed",
     ),
 ];
 
@@ -391,6 +403,17 @@ const OPEN_AT_CHECKPOINT_LOG_END: [(&str, u64); 1] = [("open-at-checkpoint", 0x6
 /// LSN read by the same independent reader.
 const QUOTA_LOG_END: [(&str, u64); 1] = [("quota", 0x33_eced)];
 
+/// A volume captured 5 s into its workload, just after the capture had
+/// `chkdsk /L` resize -- and so empty -- its `$LogFile`: the last
+/// checkpoint is the first one written since, and its restart area names
+/// no start of checkpoint (`0`) and no open attribute, dirty page or
+/// transaction table. Replay read that `0` as an LSN and refused the log
+/// ("no valid copy of the log page at 0x0 holds LSN 0x0") (#137). Made by
+/// the same capture, and recovered by Windows the same way, as `quota`
+/// (run 37600787594, snapshot 1); its last LSN read by the same
+/// independent reader.
+const FRESH_LOG_END: [(&str, u64); 1] = [("fresh-log", 0x22_578d)];
+
 /// Where, in each pre-image, a `$LogFile` record page the replay needs
 /// sits: inside the walk from the oldest dirty page to the log's end, and
 /// in no tail copy.
@@ -553,6 +576,17 @@ fn a_transaction_open_at_the_checkpoint_is_rolled_back_to_what_windows_recovered
 }
 
 #[test]
+fn a_checkpoint_that_names_no_start_is_replayed_from_itself_to_what_windows_recovered() {
+    // The first checkpoint after the log was emptied has nothing before it
+    // to start from and no tables to dump: analysis and redo start at the
+    // checkpoint itself. A replay that reads its `0` as an LSN refuses a
+    // volume Windows recovers (#137).
+    for (k, log_end) in FRESH_LOG_END {
+        fsck_and_mount_rw_replay_to_what_windows_recovered(k, log_end);
+    }
+}
+
+#[test]
 fn a_quota_entry_updated_in_an_index_root_is_replayed_to_what_windows_recovered() {
     // With quota tracking on, NTFS charges each allocation to the owner's
     // `$Quota` entry in place, logged as UpdateRecordDataRoot. Windows'
@@ -587,9 +621,17 @@ fn a_quota_entry_updated_in_an_index_root_is_replayed_to_what_windows_recovered(
 /// * the index entry at `0xd70`, its `$FILE_NAME` from the creation time
 ///   on (`0x18` into the entry): the undo of `0x33ef83`.
 ///
+/// On `fresh-log`, the same transaction does the same to the same entries,
+/// and to the root's entry at `0x378` of its index block at VCN 0:
+///
+/// * the `$Q` entry's data: the undo of `0x225986`, then the change time
+///   from the undo of `0x226386`;
+/// * the entry at `0xd70` of VCN 2: the undo of `0x225a3c`;
+/// * the entry at `0x378` of VCN 0: the undo of `0x2257e1`.
+///
 /// Fields: fixture, MFT record, the index block's VCN in that record's
 /// `$INDEX_ALLOCATION` (or `None` for the record itself), offset, bytes.
-const AFTER_RESTART_UNSTAMPED: [(&str, u64, Option<u64>, usize, &str); 2] = [
+const AFTER_RESTART_UNSTAMPED: [(&str, u64, Option<u64>, usize, &str); 5] = [
     (
         "quota",
         24,
@@ -604,6 +646,29 @@ const AFTER_RESTART_UNSTAMPED: [(&str, u64, Option<u64>, usize, &str); 2] = [
         0xd70 + 0x18,
         "5307c6f53e56dd0150a5c6f53e56dd0150a5c6f53e56dd0150a5c6f53e56dd01\
          000000000000000000000000000000000600001000000000",
+    ),
+    (
+        "fresh-log",
+        24,
+        None,
+        0x1b8 + 0x88 + 0x14,
+        "020000000100000000142500000000000ec11cfa3e56dd01",
+    ),
+    (
+        "fresh-log",
+        5,
+        Some(2),
+        0xd70 + 0x18,
+        "5307c6f53e56dd0150a5c6f53e56dd0150a5c6f53e56dd0150a5c6f53e56dd01\
+         000000000000000000000000000000000600001000000000",
+    ),
+    (
+        "fresh-log",
+        5,
+        Some(0),
+        0x378 + 0x18,
+        "8534aef53e56dd018534aef53e56dd018534aef53e56dd018534aef53e56dd01\
+         000000000000000000000000000000000600002000000000",
     ),
 ];
 
@@ -720,7 +785,9 @@ fn fsck_and_mount_rw_replay_to_what_windows_recovered(k: &str, log_end: u64) {
     let pre = Image::read(&pre_img);
     let win = Image::read(&unpack(&format!("windows-interrupted-{k}.recovered")));
     let want = manifest(k);
-    assert!(want.len() > 500, "{k}: the manifest lost its lines");
+    // `fresh-log` was captured 5 s in: Windows listed 125 files.
+    let lines = if k == "fresh-log" { 100 } else { 500 };
+    assert!(want.len() > lines, "{k}: the manifest lost its lines");
 
     let replay: [(&str, Mount); 2] = [
         ("fsck", |img| {
@@ -1066,9 +1133,11 @@ fn windows_replay_changed_what_the_volumes_hold() {
 /// | undo           | 342     | 99     | 5,089 |
 /// | open-at-checkpoint | 15  | 250    | 2,771 |
 /// | quota          | 43      | 73     | 106   |
+/// | fresh-log      | 213     | 4      | 535   |
 ///
-/// `quota`'s were measured on 2026-10-07, with Windows' changes after its
-/// restart that moved no LSN undone ([`AFTER_RESTART_UNSTAMPED`]).
+/// `quota`'s and `fresh-log`'s were measured on 2026-10-07, with Windows'
+/// changes after its restart that moved no LSN undone
+/// ([`AFTER_RESTART_UNSTAMPED`]).
 ///
 /// `index-vcn`'s records and blocks were measured from the pre-image and
 /// Windows' recovered copy alone; its bits are at most the 99 `$Bitmap`
@@ -1086,6 +1155,7 @@ fn floors(k: &str) -> (usize, usize, usize) {
         "undo" => (250, 70, 4000),
         "open-at-checkpoint" => (10, 180, 2000),
         "quota" => (30, 50, 80),
+        "fresh-log" => (150, 3, 400),
         other => panic!("no floors measured for fixture {other}"),
     }
 }
