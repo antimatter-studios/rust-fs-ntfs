@@ -26,19 +26,21 @@ former-name = "am-fs-ntfs"
 name = "fs_ntfs"
 crate-type = ["staticlib", "rlib"]
 
-# Unified CLI — format / ls / touch / mkdir / write / rm / rmdir
-# subcommands. Cross-platform: builds and runs identically on
-# Linux/macOS/Windows because it only depends on this crate's own
-# pure-Rust read/write paths. One binary so distribution (GitHub
-# Releases, Homebrew taps) ships a single artefact.
+# THE TEST MATRIX'S DRIVER -- format / ls / touch / mkdir / write / rm /
+# rmdir / set_dirty and the rest, which the Windows chkdsk matrix runs
+# against its images. Not a user's tool and not in the release tarball, so
+# it is BEHIND THE TEST-ONLY `harness` FEATURE: `cargo install` installs
+# every target whose required features it was given, and no install a user
+# types gives this one (#452). The matrix, the test tiers and clippy build
+# with `--features harness`; tests/one_binary_on_path.rs holds the manifest
+# to it.
 #
-# Embedding consumers (GUI apps, OS-integration shims) link the
-# library directly via the C ABI in `include/fs_ntfs.h` rather than
-# shelling out to this CLI; the `format` subcommand and the embedded
-# `format_filesystem()` FFI entry point share the same implementation.
+# The `format` subcommand and the `format_filesystem()` FFI entry point
+# share the same implementation.
 [[bin]]
 name = "rust-ntfs"
 path = "src/bin/rust_ntfs/main.rs"
+required-features = ["harness"]
 
 # THE COMMAND-LINE TOOLS: one multi-call binary, named for the repository.
 # It dispatches on argv[0], the way busybox and e2fsprogs do, so a release
@@ -73,6 +75,9 @@ licenses = ["LICENSE-APACHE", "LICENSE-MIT"]
 # completions -- is rust-fs-core's `cli` feature, turned on only here, so
 # the static library gains nothing. clap is MIT/Apache-2.0.
 cli = ["dep:clap", "rust-fs-core/cli"]
+# Test-only: builds `rust-ntfs`, the test matrix's driver (see its target
+# above). Nothing a consumer or a user installs turns it on.
+harness = []
 
 [dependencies]
 # `log` is the de-facto standard logging facade. Consumers (FSKit

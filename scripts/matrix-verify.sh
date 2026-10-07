@@ -65,7 +65,7 @@ if [ ! -f "$binary_path" ] || [ "$build" -eq 1 ]; then
     export RUSTFLAGS="${RUSTFLAGS:-} \
         --remap-path-prefix=$PWD=. \
         --remap-path-prefix=$HOME/.cargo/registry=/registry"
-    cargo build --release --quiet
+    cargo build --release --features harness --quiet
 fi
 local_bin_sha=$(sha256sum "$binary_path" | awk '{print $1}')
 tested_bin_sha=$(python3 -c "import json,sys; print(json.load(open('$baseline'))['binary_sha256'])")

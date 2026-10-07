@@ -17,11 +17,22 @@ mod common;
 use std::path::Path;
 use std::process::{Command, Output};
 
-const EXE: &str = env!("CARGO_BIN_EXE_rust-ntfs");
 const VOL: u64 = 16 * 1024 * 1024;
 
+/// The binary, which cargo builds only with the test-only `harness`
+/// feature (#452). Without it every test here fails by name rather than
+/// the file quietly selecting nothing.
+fn exe() -> &'static str {
+    match option_env!("CARGO_BIN_EXE_rust-ntfs") {
+        Some(exe) => exe,
+        None => panic!(
+            "rust-ntfs is built only with the `harness` feature: run with --features cli,harness"
+        ),
+    }
+}
+
 fn run(args: &[&str]) -> Output {
-    Command::new(EXE)
+    Command::new(exe())
         .args(args)
         .output()
         .expect("spawn rust-ntfs")

@@ -23,9 +23,10 @@ name: Release
 # The `cli` feature's multi-call binary ships; `rust-ntfs`, the CLI the test
 # matrix drives, does not.
 #
-# `--features cli` on the suite and on clippy: the multi-call target
-# requires it, and cargo silently leaves out a target whose features are
-# off -- its tests and its lints with it.
+# `--features cli,harness` on the suite and on clippy: the multi-call target
+# requires `cli` and the matrix's `rust-ntfs` the test-only `harness`, and
+# cargo silently leaves out a target whose features are off -- its tests and
+# its lints with it.
 
 on:
   push:
@@ -190,14 +191,14 @@ jobs:
       # executed on 2026-09-17 in run 34985102618, floor 1350.
       - name: full suite with an executed-test floor
         run: |
-          bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli --no-fail-fast
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli,harness --no-fail-fast
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
           echo "tests executed: $n (floor 1350)"
           if [ "$n" -lt 1350 ]; then
               echo "::error::only $n tests executed, floor is 1350 -- 1427 ran on 2026-09-17 in run 34985102618. The suite passed, so something stopped tests from being selected rather than failing them. This job gates cargo publish; read tmp/logs/suite.log, uploaded as test-logs-release."
               exit 1
           fi
-      - run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli -- -D warnings
+      - run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness -- -D warnings
       - name: upload test logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -289,7 +290,7 @@ jobs:
           git clone --depth 1 --branch $core https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
           cargo install --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
       - name: Build rust-ntfs (Windows)
-        run: cargo build --release --locked --bin rust-ntfs
+        run: cargo build --release --locked --features harness --bin rust-ntfs
       - name: Generate raw image and wrap in GPT-partitioned VHD
         shell: pwsh
         run: |

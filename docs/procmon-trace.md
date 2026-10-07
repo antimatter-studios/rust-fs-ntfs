@@ -41,7 +41,7 @@ export WIN_VM_HOST=192.0.2.10            # your Windows VM's IP/hostname
 export WIN_VM_KEY=~/.ssh/win-vm-key      # path to the private key
 
 # 1. Build rust-ntfs locally and produce an nfs.img to send to the VM.
-cargo build --release --bin rust-ntfs
+cargo build --release --features harness --bin rust-ntfs
 mkdir -p /tmp/procmon-input
 ./target/release/rust-ntfs format -L CITEST --serial deadbeefcafe1234 \
     --create-size 256M /tmp/procmon-input/nfs.img
