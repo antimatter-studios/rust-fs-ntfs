@@ -15,7 +15,10 @@
 //!
 //! * **analysis** from the last checkpoint: the open attribute table and
 //!   the dirty page table as the checkpoint dumped them, extended by every
-//!   record after it, and the transactions still open at the end;
+//!   record after it, and the transactions still open at the end. The
+//!   first checkpoint after the log was emptied names no start (`0`) and
+//!   dumps no tables, and analysis starts at the checkpoint itself
+//!   (`test-disks/windows-interrupted-fresh-log`);
 //! * **redo** from the oldest dirty page's LSN to the log's last record:
 //!   a record is applied when its page is in the dirty page table at or
 //!   before the record, and, for an MFT record or an index block, when the
@@ -683,7 +686,14 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
             u32_at(&body, 0x00)?
         )));
     }
-    let start = u64_at(&body, 0x08)?;
+    // The first checkpoint after the log was emptied has nothing before it
+    // to start from: its start is 0 and it dumped no tables, so analysis
+    // starts at the checkpoint itself
+    // (`test-disks/windows-interrupted-fresh-log`).
+    let start = match u64_at(&body, 0x08)? {
+        0 => checkpoint,
+        s => s,
+    };
     let table = |lsn: u64, op: u16| -> Result<Option<Vec<u8>>, Error> {
         if lsn == 0 {
             return Ok(None);
