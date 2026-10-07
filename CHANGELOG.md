@@ -36,6 +36,12 @@
 - **A release's notes are its CHANGELOG section**, and a tag the CHANGELOG
   does not describe stops before anything is published (rust-fs-core#209).
 
+### Fixed
+
+- **A transient HTTP 5xx from the chore release download no longer fails a CI
+  job.** Every chore download in `ci.yml`, `fuzz.yml` and `release.yml`
+  retries up to five times on any error.
+
 ## [0.9.0] — 2026-10-06
 
 ### Changed
