@@ -160,6 +160,16 @@ it**. Do not silence output to fit, and do not route around `tier.sh`.
   and the staging-branch integration workflow. Read it before any work that
   changes what is written to a volume.
 
+## Keep the features page current
+
+`docs/features.md` lists every feature with its state, the release it shipped
+in, its tracking issue and the test that checks it. **A pull request that
+adds, fixes, refuses or removes behaviour updates its row in the same pull
+request**, with the PR number under **Since** (`Unreleased (#N)` until a
+release, then the version). A finding that leaves something unsupported gets
+a row too, naming its issue. Releases turn every `Unreleased` into the
+version they ship as.
+
 ## Running tests
 
 The tasks are the interface; CI runs exactly these:
