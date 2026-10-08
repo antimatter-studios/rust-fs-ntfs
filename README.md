@@ -10,174 +10,19 @@ the test contract, not byte-equivalence with any third-party tool.
 
 ## Status
 
-The crate is in **active development**, not yet 1.0.
-
-What's solid today:
-
-- **Read** — a complete in-house reader (the crate originally built
-  on Colin Finck's `ntfs` read-only parser but has since superseded
-  it; that crate now lives only as a dev-dependency test oracle, see
-  Credits): stat, readdir, file content, ADS, reparse points,
-  symlinks, junctions, Unicode names.
-- **Write** — original work over that in-house reader:
-  resident + non-resident `$DATA` writes, resident → non-resident
-  promotion, grow / truncate, create / unlink / mkdir / rmdir,
-  rename (same- and variable-length), hard links, ADS write/delete,
-  reparse points, EAs, timestamps, file-attribute flag toggling.
-- **Recovery controls** — dirty-flag detection, `$LogFile` redo replay
-  for the operations Windows' own logs were checked to need, explicit
-  clear and log reset. `fsck` and every read-write mount replay a log
-  holding work, as Windows does when it mounts a volume, or refuse it
-  whole with nothing written.
-  Both path-based and callback-transport APIs.
-- **mkfs** — pure-Rust formatter that produces volumes Microsoft's
-  `chkdsk /scan` accepts and Windows `ntfs.sys` mounts and writes
-  to. This was the multi-month wall the project broke through on
-  **2026-05-02** (see Changelog).
-
-What's still landing:
-
-- B+ tree insert / delete in `$INDEX_ALLOCATION` once a directory has
-  overflowed out of `$INDEX_ROOT` (W3.2 / W3.3 in
-  `docs/future-features.md`). Insert is not absent, which is worse than
-  absent: it runs, and picks the leaf by free space rather than by where
-  the name collates, writing no routing entry (#301).
-- `$MFT` self-growth when `$MFT:$Bitmap` is exhausted (W2.6).
-- A handful of mkfs scenarios in the multi-VM matrix that still
-  trip `chkdsk` in repair mode — tracked in `test-matrix.json`.
-
-## Features
-
-### Read
-
-| Operation | Status |
-|---|---|
-| Mount + parse boot sector / `$MFT` / `$Volume` | yes |
-| `stat` (resident + non-resident attrs) | yes |
-| `readdir` (`$INDEX_ROOT` + `$INDEX_ALLOCATION`) | yes |
-| `read` (resident, non-resident, fragmented `$DATA`) | yes |
-| `readlink` (symlink + junction reparse points) | yes |
-| Alternate Data Streams (named `$DATA`) | yes |
-| Extended Attributes (`$EA`, `$EA_INFORMATION`) | yes |
-| `$OBJECT_ID` (16-byte GUID) | yes |
-| Volume statistics (`$Bitmap`, `$MFT:$Bitmap`) | yes |
-
-Directory listings are cheap `$I30` index snapshots: they do not stat every
-target record. A stale index row may therefore be returned (including its
-duplicated file/directory type) and then be refused by a path lookup whose
-sequence check finds that the MFT slot now holds a different file. Callers
-must handle lookup/open failure after enumeration; this is the documented
-consistency boundary, not a promise that every listed name remains openable.
-
-### Write
-
-| Operation | Status |
-|---|---|
-| In-place data write (existing non-resident `$DATA`) | yes |
-| Replace contents (resident, with auto-promote on overflow) | yes |
-| `grow` / `truncate` non-resident `$DATA` | yes |
-| `create_file` / `unlink` | yes (parents that fit in `$INDEX_ROOT`) |
-| `mkdir` / `rmdir` | yes (parents that fit in `$INDEX_ROOT`) |
-| `rename` (same-length + variable-length) | yes |
-| Hard links (`$FILE_NAME` fan-out + link-count) | yes |
-| ADS write / delete (resident + promote) | yes |
-| Reparse point write / remove + symlink create | yes |
-| EA write / remove | yes |
-| Timestamp writes (atime / mtime / ctime / crtime) | yes |
-| File-attribute flag toggling | yes |
-| mkfs (format a blank image to NTFS) | yes |
-| fsck (clear dirty + reset log) | only when dirty log is empty |
-| `$INDEX_ALLOCATION` insert / delete (overflowed dirs) | insert runs but places the entry by free space, not by key — #301. Delete: not yet (W3.3) |
-| `$MFT` self-growth (full `$MFT:$Bitmap`) | not yet — W2.6 |
-
-### NTFS feature coverage
-
-| Feature | Read | Write |
-|---|---|---|
-| Resident attributes | yes | yes |
-| Non-resident attributes | yes | yes |
-| `$INDEX_ROOT` directories | yes | yes |
-| `$INDEX_ALLOCATION` directories (B+ tree) | yes | partial — read-traversal yes; insert runs but ignores the routing keys (#301), delete not implemented |
-| Alternate Data Streams | yes | yes (resident + auto-promote) |
-| Reparse points (symlinks, junctions, generic) | yes | yes |
-| Extended Attributes (`$EA`) | yes | yes |
-| Unicode names (UTF-16, up to 255 chars) | yes | yes |
-| Case-folding (`$UpCase` collation) | yes | yes (Microsoft canonical NT 3.x table baked in) |
-| Compressed `$DATA` | partial — uncompressed runs only | no |
-| Sparse `$DATA` | partial — non-hole reads only | no |
-| Encrypted `$DATA` (EFS) | no | no |
-| Attribute lists (`$ATTRIBUTE_LIST`) | no — records that overflow are rejected | no |
-| USN journal (`$UsnJrnl`) updates | n/a | no |
-| Transactional NTFS (TxF) | n/a | no — deprecated by Microsoft |
-| Volume resize (`$Bitmap` grow/shrink) | n/a | no |
-
-## What works
-
-Concrete user-observable list, end-to-end:
-
-- Mount an NTFS image or `/dev/diskN` and walk its tree.
-- Format a blank image as NTFS, mount it on Windows, write to it
-  through `ntfs.sys`, and pass `chkdsk /scan` (read-only validation).
-- Replace a small file's contents and have it stay resident; replace
-  a small file's contents with a large blob and have it auto-promote
-  to non-resident with cluster allocation against `$Bitmap`.
-- Create / delete files and directories under any parent that fits
-  in `$INDEX_ROOT` (the typical case for fresh and lightly-populated
-  volumes).
-- Rename a file with either same UTF-16 length (fast in-place patch)
-  or variable length (re-inserts the index entry).
-- Add and remove hard links; link counts and `$FILE_NAME` records
-  stay consistent.
-- Add / remove ADS, reparse points, EAs; create symlinks.
-- Patch any combination of the four NT timestamps in
-  `$STANDARD_INFORMATION`; toggle `FILE_ATTRIBUTE_*` flags.
-- Replay `$LogFile` when a writable mount finds it holding work (Windows
-  8+ leaves the dirty flag clear after an unclean shutdown), as Windows'
-  own restart does: redo what it recorded, then empty it. `fs_ntfs_fsck`
-  does the same and clears the dirty flag; callback transport reports
-  progress. A dirty volume, or a log that cannot be replayed in full, is
-  refused for writing with nothing written.
-- Drive everything from C, Go (cgo), or Swift via the stable
-  `fs_ntfs_*` C ABI in `include/fs_ntfs.h`.
-
-## What doesn't work
-
-Specific limits, current as of HEAD:
-
-- **`$LogFile` replay covers what Windows-written logs were checked to
-  need** (#137). `fsck` redoes every operation the captured Windows logs
-  hold and rolls back the transactions they leave open, each checked
-  against what Windows recovered from the same images, across a wrapped
-  log and on pages spanning several clusters. It refuses, writing
-  nothing, a log holding an operation no capture has held
-  (`UpdateRecordDataAllocation`, `WriteEndOfFileRecordSegment`,
-  `DeleteDirtyClusters`, `HotFix`, `UpdateRelativeDataInIndex*`), a
-  transaction prepared or committed and not forgotten, or an LFS version
-  other than 2.x. A writable mount replays the same logs and refuses the
-  same ones; a read-only mount reads the volume as it is on disk, without
-  replaying. Explicit log reset is only for volumes independently known
-  consistent.
-- **Overflowed directories.** Once a directory has more entries
-  than fit in `$INDEX_ROOT`, writes that would touch its index
-  (`create_file`, `mkdir`, `rmdir`, `unlink`, `rename`) refuse with
-  a fail-fast error. Reads through such directories do work.
-- **Full `$MFT`.** When `$MFT:$Bitmap` is exhausted, `create_file`
-  and `mkdir` fail. Self-growing `$MFT` is the W2.6 work item.
-- **Compressed `$DATA` writes.** Reading non-compressed extents is
-  fine; any write to a compressed file is refused.
-- **Encrypted (EFS) data.** Not implemented either way.
-- **Sparse-aware writes.** Writes assume plain ranges; reads of
-  hole regions do return zero, but writing into a hole won't
-  re-encode the run list.
-- **`$AttributeList` overflow.** MFT records that have spilled into
-  an attribute list are rejected on read. Affects very fragmented
-  files on old, heavily churned volumes.
-- **USN journal updates.** Mutations are not reflected in
-  `$UsnJrnl`.
-- **Transactional NTFS (TxF).** Deprecated by Microsoft; not a goal.
-- **Volume resize.** This crate expects a pre-sized image.
-- **Disk-level operations.** No partitioning. mkfs operates on a
-  pre-existing partition or raw image.
+In active development, not yet 1.0. Reading covers resident, non-resident,
+fragmented, sparse and LZNT1-compressed data, attribute lists, alternate data
+streams, reparse points, extended attributes and Unicode names; WOF-compressed
+and encrypted files are refused. Writing covers data, create, unlink, mkdir,
+rmdir, rename, hard links, streams, reparse points, extended attributes,
+timestamps and flags, in directories of up to 64 index blocks. `$LogFile` is
+replayed as Windows' own restart replays it, on `fsck` and on a read-write
+mount, and a log that cannot be replayed in full is refused with nothing
+written. `mkfs.ntfs` makes volumes Windows mounts and writes and `chkdsk`
+accepts. **[docs/features.md](docs/features.md) is the full list**: every
+feature, its state (supported, partial, refused, not supported or upcoming),
+the release it shipped in, its tracking issue or write-plan item, and the test
+that checks it. Every pull request that changes behaviour updates it.
 
 ## Scenario field translations (NTFS ↔ harness)
 
@@ -232,29 +77,6 @@ are documented there.
   byte-decoders most likely to regress (data-runs, attribute headers,
   INDX block headers).
 - **Bench:** `benches/byte_decoders.rs` (Criterion). Not part of CI.
-
-## Roadmap
-
-- [ ] **W2.6** — `$MFT` self-growth when `$MFT:$Bitmap` exhausts.
-  Unblocks `create_file` / `mkdir` on volumes whose initial MFT
-  reservation is full.
-- [ ] **W3.2** — `$INDEX_ALLOCATION` B+ tree insert with split +
-  promotion from resident `$INDEX_ROOT`. Not a greenfield task: an
-  insert path already runs against overflowed parents and places
-  entries in the wrong leaf (#301), so W3.2 is a correction as much as
-  an addition.
-- [ ] **W3.3** — `$INDEX_ALLOCATION` B+ tree delete with rebalance.
-  Symmetric to W3.2; needed by `rmdir` / `unlink` / `rename`-out
-  on overflowed parents.
-- [ ] **W3 fixtures** — empty / deep / full B+ tree images for
-  exercising W3.2 / W3.3 splits and merges.
-- [ ] **mkfs hardening** — close out the remaining `failed` and
-  `pending` matrix scenarios in `test-matrix.json`.
-- [ ] **`$AttributeList` support** — at least on the read side so
-  heavily fragmented files don't get rejected.
-- [ ] **Compressed-read support** — `LZNT1` decompression so files
-  written by Windows with compression enabled can be read back.
-- [ ] Cut a 0.2 release tag once W2.6 + W3.2 + W3.3 land.
 
 ## Changelog
 

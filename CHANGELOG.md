@@ -4,6 +4,12 @@
 
 ### Added
 
+- **`docs/features.md`, a features page kept current by every pull request.**
+  Each feature's state, the release it shipped in, its tracking issue and the
+  test that checks it. The README's status, feature, "What works", "What
+  doesn't work" and roadmap sections, which still called LZNT1 reads,
+  attribute lists and overflowed-directory writes missing, are a short
+  summary pointing to it.
 - **A `$LogFile` holding `UpdateRecordDataRoot` redo is replayed** (#137).
   With quota tracking on, NTFS charges every allocation to the owner's
   `$Quota` entry in place and logs it as this operation. `fsck` and every
