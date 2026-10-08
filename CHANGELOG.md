@@ -41,6 +41,12 @@
 - **A transient HTTP 5xx from the chore release download no longer fails a CI
   job.** Every chore download in `ci.yml`, `fuzz.yml` and `release.yml`
   retries up to five times on any error.
+- **A `$LogFile` whose checkpoint names no start is replayed** (#137). The
+  first checkpoint NTFS writes after its log was emptied (by `chkdsk /L`,
+  say) has nothing before it to start from: its start of checkpoint is 0
+  and it dumps no tables. Replay read that 0 as an LSN and refused the log;
+  analysis now starts at the checkpoint itself, as Windows' restart does on
+  the volume new in `test-disks/`.
 
 ## [0.9.0] — 2026-10-06
 

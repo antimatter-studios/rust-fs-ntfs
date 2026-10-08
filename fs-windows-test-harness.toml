@@ -66,6 +66,7 @@ cli = [
   "cli-windows-interrupted-undo-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-open-at-checkpoint-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-quota-fsck-replay-win-verify-chkdsk",
+  "cli-windows-interrupted-fresh-log-fsck-replay-win-verify-chkdsk",
   "cli-windows-6-grow-mft-win-verify-chkdsk",
 ]
 

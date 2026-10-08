@@ -2833,6 +2833,47 @@
       ],
       "image": "nfs-cli-windows-interrupted-quota-replay.img",
       "_notes": "A volume Windows was writing to when it was captured with quota tracking on (test-disks/windows-interrupted-quota), whose $LogFile holds UpdateRecordDataRoot redo records: the file owner's $Quota entry charged in place. fsck.ntfs -y replays the log; then Windows grades the result: fsutil dirty query says Clean, every file Windows itself listed after its own recovery of the same image reads back at Windows' size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean."
+    },
+    "cli-windows-interrupted-fresh-log-fsck-replay-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 127,
+        "label": "ORACLE366",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-replay",
+          "snapshot": "fresh-log"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        {
+          "op": "win-dirty-query",
+          "expect": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-cli-verify",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-windows-interrupted-fresh-log-replay.img",
+      "_notes": "A volume Windows was writing to when it was captured, 5 s after its $LogFile was emptied (test-disks/windows-interrupted-fresh-log): the last checkpoint is the first since, and names no start and no tables. fsck.ntfs -y replays the log from the checkpoint itself; then Windows grades the result: fsutil dirty query says Clean, every file Windows itself listed after its own recovery of the same image reads back at Windows' size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean."
     }
   },
   "_consolidated_by": "chore matrix (fs-windows-test-harness runner)",
