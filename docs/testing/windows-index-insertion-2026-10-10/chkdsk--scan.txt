@@ -1,0 +1,82 @@
+The type of the file system is NTFS.
+Volume label is I30INS.
+
+Stage 1: Examining basic file system structure ...
+Progress: 0 of 512 done; Stage:  0%; Total:  5%; ETA:   0:00:03
+Progress: 512 of 512 done; Stage: 100%; Total: 18%; ETA:   0:00:03 .
+
+
+  512 file records processed.
+
+File verification completed.
+ Phase duration (File record verification): 85.52 milliseconds.
+Progress: 0 of 0 done; Stage: 99%; Total: 41%; ETA:   0:00:03 ..
+
+
+  0 large file records processed.
+
+ Phase duration (Orphan file record recovery): 8.94 milliseconds.
+Progress: 0 of 0 done; Stage: 99%; Total: 41%; ETA:   0:00:02 ...
+
+
+  0 bad file records processed.
+
+ Phase duration (Bad file record checking): 3.12 milliseconds.
+
+Stage 2: Examining file name linkage ...
+Progress: 540 of 540 done; Stage: 100%; Total: 84%; ETA:   0:00:01
+
+
+  540 index entries processed.
+
+Index verification completed.
+ Phase duration (Index verification): 10.99 milliseconds.
+Progress: 0 of 0 done; Stage: 99%; Total: 84%; ETA:   0:00:01 .
+
+
+  0 unindexed files scanned.
+
+ Phase duration (Orphan reconnection): 3.37 milliseconds.
+Progress: 0 of 0 done; Stage: 99%; Total: 84%; ETA:   0:00:01 ..
+
+
+  0 unindexed files recovered to lost and found.
+
+ Phase duration (Orphan recovery to lost and found): 3.78 milliseconds.
+Progress: 0 of 0 done; Stage: 99%; Total: 84%; ETA:   0:00:01 ...
+
+
+  0 reparse records processed.
+
+Progress: 0 of 0 done; Stage: 99%; Total: 84%; ETA:   0:00:01
+
+
+  0 reparse records processed.
+
+ Phase duration (Reparse point and Object ID verification): 7.84 milliseconds.
+
+Stage 3: Examining security descriptors ...
+Security descriptor verification completed.
+ Phase duration (Security descriptor verification): 1.62 milliseconds.
+Progress: 0 of 0 done; Stage: 100%; Total: 99%; ETA:   0:00:00 .
+
+
+  14 data files processed.
+
+ Phase duration (Data attribute verification): 5.70 milliseconds.
+
+Windows has scanned the file system and found no problems.
+No further action is required.
+
+    311679 KB total disk space.
+     37952 KB in 265 files.
+       140 KB in 16 indexes.
+         0 KB in bad sectors.
+      4059 KB in use by the system.
+      3120 KB occupied by the log file.
+    269528 KB available on disk.
+
+      4096 bytes in each allocation unit.
+     77919 total allocation units on disk.
+     67382 allocation units available on disk.
+Total duration: 133.12 milliseconds (133 ms).
