@@ -5,6 +5,10 @@ on:
     branches: [main]
     tags: ['v*']
   pull_request:
+  # The merge queue's run: main plus the queued pull requests, the run that
+  # decides whether they land. The queue reads ci-ok only from a workflow
+  # that triggers here.
+  merge_group:
   # Manual trigger — exposed as "Run workflow" in the GitHub Actions UI.
   # Lets us run validate-mkfs-windows on demand without cutting a tag.
   # Tweak the Rust crate, push, click "Run workflow", get real chkdsk
@@ -22,6 +26,10 @@ jobs:
   test:
     name: test-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # A change to documentation alone runs only the ubuntu leg, which carries
+    # fmt, clippy, the family checks and the shared-block check: lint is what
+    # checks a documentation change. The ARM64 and macOS legs are dropped.
+    needs: changes
     strategy:
       fail-fast: false
       matrix:
@@ -29,6 +37,7 @@ jobs:
         # `u8` on aarch64 Linux and `i8` on x86_64 and macOS, so a lint
         # about a C-ABI pointer cast can fail on one and not the other (#268).
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        exclude: ${{ fromJSON(needs.changes.outputs.code == 'false' && '[{"os":"ubuntu-24.04-arm"},{"os":"macos-latest"}]' || '[]') }}
     steps:
       - uses: actions/checkout@v4
       - name: check out sibling repos
@@ -328,6 +337,9 @@ jobs:
 
   windows-native-read-fixtures:
     name: Windows-authored native read fixtures
+    # Skipped, with integration and cli after it, for documentation alone.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     # Measured at 2.1 to 2.4 minutes. Without a bound, a step that hangs holds
     # the runner for GitHub's six hours and prints nothing (#388).
@@ -559,6 +571,8 @@ jobs:
   # cannot go red is not one.
   asan:
     name: unit tests under ASan (nightly toolchain, advisory)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     # ADVISORY, DECLARED (#409). ci-ok does not need this job, by decision: a
     # pinned nightly can break independently of stable. Job-level
@@ -709,19 +723,66 @@ jobs:
   # third-party action: the answer is one `git diff --name-only` against
   # the merge base, and a filter action would be another unpinned
   # dependency in front of the gate it decides.
+  #
+  # `code` is false only when every path is documentation (rust-fs-core's
+  # scripts/code-changed.sh): the pull request's diff, the merge queue
+  # group's (its base_sha to its head_sha: what the queue is about to land),
+  # or a push to main's (before to after). A tag, a dispatch, or a push it
+  # cannot diff runs everything. The ARM64 and macOS legs, the Windows
+  # fixtures and what reads them, and ASan run only when it is true, and
+  # ci-ok accepts their skip when, and only when, it is false.
   changes:
     name: what this pull request touches
     runs-on: ubuntu-latest
     outputs:
       mkfs: ${{ steps.filter.outputs.mkfs || steps.unfiltered.outputs.mkfs }}
+      code: ${{ steps.code.outputs.code }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - id: filter
-        if: github.event_name == 'pull_request'
+      - name: rust-fs-core at the pinned tag, for code-changed.sh
+        run: |
+          set -euo pipefail
+          core_ref="$(sed -n 's/^ *FS_CORE_REF: *//p' chores.yml | head -1)"
+          git clone --depth 1 --branch "$core_ref" \
+            https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+      - id: code
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MQ_BASE: ${{ github.event.merge_group.base_sha }}
+          MQ_HEAD: ${{ github.event.merge_group.head_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          range=
+          case "$EVENT" in
+            pull_request) range="$PR_BASE...$PR_HEAD" ;;
+            merge_group) range="$MQ_BASE...$MQ_HEAD" ;;
+            push)
+              case "$REF" in
+                refs/heads/*)
+                  if [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != 0000000000000000000000000000000000000000 ] &&
+                    git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then
+                    range="$PUSH_BEFORE...$PUSH_AFTER"
+                  fi ;;
+              esac ;;
+          esac
+          if [ -n "$range" ]; then
+            code="$(git diff --name-only "$range" | bash ../rust-fs-core/scripts/code-changed.sh)"
+          else
+            code=true
+          fi
+          echo "code=$code ($EVENT${range:+ $range})"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+      - id: filter
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
           # The code that decides bytes on disk, the workflow that validates
@@ -735,10 +796,13 @@ jobs:
           else
               echo "mkfs=false" >> "$GITHUB_OUTPUT"
           fi
-      # Tags, main pushes and manual dispatches validate on Windows.
+      # Tags, main pushes and manual dispatches validate on Windows, except a
+      # push to main that changes documentation alone.
       - id: unfiltered
-        if: github.event_name != 'pull_request'
-        run: echo 'mkfs=true' >> "$GITHUB_OUTPUT"
+        if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+        env:
+          CODE: ${{ steps.code.outputs.code }}
+        run: echo "mkfs=$CODE" >> "$GITHUB_OUTPUT"
 
   validate-mkfs-windows-run:
     name: Windows chkdsk execution
@@ -1271,4 +1335,7 @@ jobs:
       - name: Check every gating job
         env:
           GATE_NEEDS_JSON: ${{ toJSON(needs) }}
+          # false only for a change to documentation alone: then, and only
+          # then, a skipped job is not a failed one.
+          CODE: ${{ needs.changes.outputs.code }}
         run: bash scripts/ci-verdict.sh aggregate
