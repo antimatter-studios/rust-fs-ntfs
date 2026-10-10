@@ -44,3 +44,9 @@ python3 ../fs-windows-test-harness/scripts/local-vm.py --state "$VM_STATE" exec 
 ```
 
 Use the same command without the final scenario filter for the complete matrix.
+
+## Full matrix follow-up
+
+The subsequent [full matrix run](../windows-full-matrix-2026-10-10/README.md)
+passed all 72 scenarios and 438 steps. The targeted result above remains the
+evidence for the original isolated correction.
