@@ -1,93 +1,289 @@
 {
   "schema_version": 1,
-  "tested_at_sha": "8fe30c3d7fb15d5448ef6e2c551971365f242130",
-  "tested_at_branch": "release/v0.3.0",
-  "tested_at_utc": "2026-06-02T13:57:49Z",
-  "binary_sha256": "949837cd36ce8c5c2f7251418d96529b51196416bf6e2f51eaae65a8cff1ee6d",
-  "test_matrix_json_sha256": "42c8bec041fc15bf654ae89bdc58826080707ac3e05bc82e72cf6199a0cc1f7b",
-  "harness_submodule_sha": "b83f8e5ed1f5c43a5c29a001a3785c85f778b75a",
+  "tested_at_sha": "6f2c132ea24e64340c7d62cebbe4419ffaad2719",
+  "tested_at_branch": "test/windows-index-allocation-insertion",
+  "tested_at_utc": "2026-10-10T04:40:10Z",
+  "binary_sha256": "467badeeafa25bed77cb5d14895f30a1c1a4364ce966a315da905dca77945b85",
+  "test_matrix_json_sha256": "21e0013066d68719b3555c569e7af773da7b84bd50553500058d1ce5494a17e3",
+  "harness_submodule_sha": "357a6e98e2fb8ea86a5e3028647f41b7369c964b",
   "host": {
-    "os": "Darwin",
-    "version": "25.4.0",
-    "arch": "arm64"
+    "os": "Linux",
+    "version": "6.18.50+rpt-rpi-2712",
+    "arch": "aarch64"
   },
   "vm": {
     "address": "<redacted>",
-    "os_caption": "Microsoft Windows 11 Pro",
-    "os_build": "26200",
-    "os_version": "10.0.26200",
+    "os_caption": "Microsoft Windows 11 IoT Enterprise LTSC Evaluation",
+    "os_build": "26100",
+    "os_version": "10.0.26100",
     "os_arch": "ARM 64-bit Processor",
     "ntfs_sys": "10.0.26100.1 (WinBuild.160101.0800)",
     "chkdsk_version": "10.0.26100.1 (WinBuild.160101.0800)",
-    "powershell_version": "5.1.26100.8457"
+    "powershell_version": "5.1.26100.1591"
   },
   "scenarios": {
+    "cli-corrupt-mirror-fsck-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "damaged",
+      "exits": {
+        "readonly": 3,
+        "/scan": 0,
+        "/F /X": 1,
+        "/scan-post": 0
+      }
+    },
+    "cli-corrupt-signature-fsck-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "damaged",
+      "exits": {
+        "readonly": 3,
+        "/scan": 13,
+        "/F /X": 1,
+        "/scan-post": 0
+      }
+    },
+    "cli-mkfs-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "cli-populate-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "cli-set-dirty-fsck-win-dirty-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "repair-required",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13,
+        "/F /X": 0,
+        "/scan-post": 0
+      }
+    },
+    "cli-windows-6-grow-mft-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "cli-windows-interrupted-1-fsck-replay-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "cli-windows-interrupted-1-mount-replay-write-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "cli-windows-interrupted-6-fsck-replay-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "cli-windows-interrupted-6-mount-replay-write-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "cli-windows-interrupted-fresh-log-fsck-replay-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "cli-windows-interrupted-index-vcn-fsck-replay-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 11,
+        "/scan-offline-fallback": 0
+      }
+    },
+    "cli-windows-interrupted-open-at-checkpoint-fsck-replay-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "cli-windows-interrupted-quota-fsck-replay-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "cli-windows-interrupted-small-cluster-fsck-replay-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "cli-windows-interrupted-tail-continuation-fsck-replay-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "cli-windows-interrupted-undo-fsck-replay-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "cli-windows-interrupted-wrap-boundary-fsck-replay-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "cli-windows-interrupted-wrap-mft-grows-fsck-replay-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "cli-windows-interrupted-wrap-span-fsck-replay-win-verify-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "foreign-fragmented-indx-512-win-enumerate-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 11,
+        "/scan-offline-fallback": 0
+      }
+    },
     "mac-format-basic-256mib": {
-      "status": "ok"
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
     },
     "mac-format-cluster-1k": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 11
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-cluster-512": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 11
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-cluster-64k": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-cluster-8k": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-hardlink-unlink-win-chkdsk": {
-      "status": "ok"
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
     },
     "mac-format-label-32chars": {
-      "status": "ok"
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
     },
     "mac-format-label-cjk": {
-      "status": "ok"
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
     },
     "mac-format-label-empty": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-label-latin1": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-large-1gib": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-mac-enumerate-empty": {
@@ -96,6 +292,22 @@
     "mac-format-mac-mkdir-mac-touch-mac-enumerate": {
       "status": "ok"
     },
+    "mac-format-mac-split-index-root-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "mac-format-mac-split-routed-leaf-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
     "mac-format-mac-touch-mac-write-mac-enumerate": {
       "status": "ok"
     },
@@ -103,160 +315,220 @@
       "status": "ok"
     },
     "mac-format-mac-write-sparse-mixed-win-chkdsk": {
-      "status": "ok"
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
     },
     "mac-format-mac-write-sparse-zeros-win-chkdsk": {
-      "status": "ok"
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
     },
     "mac-format-mac-write-win-repeat-mount-3-win-chkdsk": {
-      "status": "ok"
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "mac-format-mkdir-rmdir-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
+    },
+    "mac-format-mkdir-rmdir-win-chkdsk-64k": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
     },
     "mac-format-mkdir-set-dirty-win-chkdsk": {
       "status": "ok",
       "verdict_shape": "repair-required",
       "exits": {
+        "readonly": 0,
         "/scan": 13,
-        "/scan-post": 0,
-        "/F /X": 1,
-        "readonly": 3
+        "/F /X": 0,
+        "/scan-post": 0
       }
     },
     "mac-format-rename-win-chkdsk": {
-      "status": "ok"
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
     },
     "mac-format-set-dirty-win-chkdsk": {
-      "status": "ok"
+      "status": "ok",
+      "verdict_shape": "repair-required",
+      "exits": {
+        "readonly": 0,
+        "/scan": 13,
+        "/F /X": 0,
+        "/scan-post": 0
+      }
     },
     "mac-format-small-64mib": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-tiny-32mib": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 11
+        "readonly": 0,
+        "/scan": 11,
+        "/scan-offline-fallback": 0
       }
     },
     "mac-format-volume-16gib-cluster-4k": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-volume-32mib-cluster-512": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 11
+        "readonly": 0,
+        "/scan": 11,
+        "/scan-offline-fallback": 0
       }
     },
     "mac-format-volume-4gib-cluster-4k": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-volume-4gib-cluster-64k": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-win-repeat-mount-10-win-chkdsk": {
-      "status": "ok"
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
     },
     "mac-format-win-repeat-mount-5-win-chkdsk": {
-      "status": "ok"
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
     },
     "mac-format-win-write-deep-nesting-win-chkdsk": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-win-write-large": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-win-write-mac-enumerate": {
       "status": "ok"
     },
     "mac-format-win-write-many-small": {
-      "status": "ok"
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
     },
     "mac-format-win-write-many-win-delete-half-win-chkdsk": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-win-write-medium": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-win-write-modify-win-chkdsk": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-win-write-remount-win-chkdsk": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-win-write-rename-win-chkdsk": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-win-write-then-delete": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-win-write-tiny": {
       "status": "ok",
       "verdict_shape": "clean",
       "exits": {
-        "readonly": 3,
-        "/scan": 13
+        "readonly": 0,
+        "/scan": 0
       }
     },
     "mac-format-win-write-win-delete-mac-verify-empty": {
@@ -266,17 +538,10 @@
       "status": "ok",
       "verdict_shape": "repair-required",
       "exits": {
+        "readonly": 0,
         "/scan": 13,
-        "/scan-post": 0,
-        "/F /X": 1,
-        "readonly": 3
-      }
-    },
-    "quota-probe": {
-      "status": "unknown",
-      "verdict_shape": "clean",
-      "exits": {
-        "readonly": 0
+        "/F /X": 0,
+        "/scan-post": 0
       }
     },
     "win-format-mac-enumerate-empty": {
@@ -300,13 +565,21 @@
         "readonly": 0,
         "/scan": 0
       }
+    },
+    "win-format-win-write-many-mac-insert-index-allocation-win-chkdsk": {
+      "status": "ok",
+      "verdict_shape": "clean",
+      "exits": {
+        "readonly": 0,
+        "/scan": 0
+      }
     }
   },
   "summary": {
-    "passed": 46,
+    "passed": 72,
     "failed": 0,
-    "unknown": 1,
-    "total": 47,
-    "total_duration_s": 1403.48
+    "unknown": 0,
+    "total": 72,
+    "total_duration_s": 3442.65
   }
 }

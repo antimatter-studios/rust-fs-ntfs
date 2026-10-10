@@ -73,7 +73,7 @@ multi-VM test matrix (`test-matrix.json`) has Windows mount, write and
 | Sparse writes (`write_sparse_file`) | Supported | 0.3.0 | | `sparse_write.rs` |
 | `write_at`, `truncate`, `grow` on compressed, sparse or encrypted `$DATA` | Refused | 0.5.0 | | `write_transform_guards.rs` |
 | `create_file`, `unlink`, `mkdir`, `rmdir` | Supported | 0.1.0 | | `write_create.rs`, `write_unlink.rs`, `write_mkdir.rs`, `write_rmdir.rs` |
-| Directories past `$INDEX_ROOT`: entries added and removed, index blocks split, the index gaining levels | Supported, up to 64 index blocks per directory | 0.8.0 (#432) | | `large_directory.rs`, `indx_insert_bounds.rs`, `indx_insert_interior.rs` |
+| Directories past `$INDEX_ROOT`: entries added and removed, index blocks split, the index gaining levels | Supported, up to 64 index blocks per directory | 0.8.0 (#432) | | `large_directory.rs`, `indx_insert_bounds.rs`, `indx_insert_interior.rs`; Windows matrix `win-format-win-write-many-mac-insert-index-allocation-win-chkdsk` |
 | A directory needing more than 64 index blocks (a non-resident `$Bitmap:$I30`) | Refused | 0.8.0 (#432) | | `large_directory.rs` |
 | `rename`: same and different length; atomic replace | Supported | 0.1.0; replace 0.3.0 | | `write_rename.rs`, `write_rename_varlen.rs`, `capi_rename_overwrite.rs` |
 | Hard links | Supported | 0.1.0 | | `write_link.rs`, `hardlink_scenarios.rs` |

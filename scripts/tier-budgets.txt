@@ -22,7 +22,7 @@
 #   suite       2,143 / 108,930 (CI Linux, fixtures built)        2,900 / 150,000
 #   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
 #   scripts     101 / 2,669 (11 shell tests, rebased 2026-09-26)  135 / 3,500
-#   matrix      975 / 67,151 green (derived, see below)             1,300 / 90,000
+#   matrix      1,381 / 100,339 green (72 cases, 2026-10-10)       1,850 / 135,000
 #   cli         27 / 1,035 (estimate: CI's 5-file run + test-docs)  36 / 1,380
 #   cli-oracle  15 / 741 (CI Linux, 2026-09-29, 2 files, 3 tools) 20 / 990
 #
@@ -65,7 +65,17 @@
 # format and each scenario's name), and 103 bytes for the lock line: 633 +
 # 342 = 975 lines and 35,311 + 31,840 = 67,151 bytes, plus a third. The
 # measurement was a 46-scenario run and the matrix now has 56, so the next
-# full green run should replace this row with what it actually printed.
+# full green run replaces this derived row with the measurement below.
+# THE MATRIX ROW MOVED ON 2026-10-10, from 1,300/90,000 to 1,850/135,000.
+# The complete 72-scenario matrix at 6f2c132, with harness 357a6e9, passed
+# all 438 recipe steps on Linux ARM64 / Windows ARM64 QEMU/KVM: 1,381 lines
+# and 100,339 bytes, 72 passed / 0 failed / 0 ignored, no retries or skipped
+# recipe steps. Both caps are that measured green output plus about a third.
+# The original budget gate exited 65; replaying the exact retained log through
+# tier.sh with this row passes. Driver binaries and scenario definitions did
+# not change between the real run and the budget replay. Evidence and hashes:
+# docs/testing/windows-full-matrix-2026-10-10/.
+#
 # THE CLI ROW is the installed tools' suite (scripts/test-cli.sh): a line
 # naming the binary, doctor's line per tool, and three lines per passing
 # file (its name, its count, its trailing line). It is small by design, so a
@@ -83,6 +93,6 @@ suite        2900  150000
 asan         1100   72000
 scripts       135    3500
 semver         40    4000
-matrix       1300   90000
+matrix       1850  135000
 cli            36    1380
 cli-oracle     20     990

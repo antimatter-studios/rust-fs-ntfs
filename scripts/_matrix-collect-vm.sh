@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/_matrix-collect-vm.sh — internal helper used by
 # matrix-baseline.sh. Collects VM metadata + per-scenario verdict.json
-# files from the Windows test VM, parses the harness stdout, and writes
+# files from the Windows test VM, reads structured runner results, and writes
 # test-diagnostics/matrix-results.json.
 #
 # Usage:
@@ -37,7 +37,7 @@ ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_HOST" \
 # Gather per-scenario verdicts
 verdicts_json="$(mktemp -t verdicts.XXXXXX.json)"
 ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_HOST" \
-    "powershell -ExecutionPolicy Bypass -File '$scripts_vm/verdict-collect.ps1'" \
+    "powershell -ExecutionPolicy Bypass -File '$scripts_vm/verdict-collect.ps1' -Root '$VM_WORKDIR/diag'" \
     > "$verdicts_json"
 
 trap 'rm -f "$vm_info_json" "$verdicts_json"' EXIT
@@ -45,6 +45,7 @@ trap 'rm -f "$vm_info_json" "$verdicts_json"' EXIT
 # Hand off to the Python builder
 python3 "$repo_root/scripts/_matrix-build-json.py" \
     --matrix-log "$matrix_log" \
+    --runner-results "$repo_root/test-diagnostics/matrix/results.json" \
     --vm-info "$vm_info_json" \
     --verdicts "$verdicts_json" \
     --output "$repo_root/test-diagnostics/matrix-results.json"

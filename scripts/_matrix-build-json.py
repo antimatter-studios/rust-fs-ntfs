@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Build test-diagnostics/matrix-results.json from harness stdout + VM artifacts.
+"""Build test-diagnostics/matrix-results.json from runner results + VM artifacts.
 
 Invoked by `scripts/_matrix-collect-vm.sh`. Not intended to be called
 directly. Consumes:
 
-  --matrix-log   stdout/stderr of a `bash scripts/run-matrix.sh` run
+  --matrix-log   stdout/stderr of a `bash scripts/run-matrix.sh` run (duration)
+  --runner-results  structured test-diagnostics/matrix/results.json
   --vm-info      JSON from scripts/win/vm-info.ps1
   --verdicts     JSON from scripts/win/verdict-collect.ps1
   --output       path to write matrix-results.json
@@ -25,15 +26,32 @@ def run(cmd):
     return subprocess.check_output(cmd, shell=True, text=True).strip()
 
 
-def parse_scenarios(log_path):
-    """Parse harness stdout for `test NAME ... ok|FAILED` lines."""
+def parse_scenarios(results_path):
+    """Read authoritative results; parallel stdout/stderr lines can interleave."""
+    rows = json.loads(Path(results_path).read_text())
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("runner results must be a nonempty list")
     scenarios = {}
-    pat = re.compile(r"^test ([a-z0-9-]+)\s+\.\.\.\s+(ok|FAILED)$")
-    for line in Path(log_path).read_text().splitlines():
-        m = pat.match(line)
-        if m:
-            scenarios[m.group(1)] = {"status": m.group(2)}
+    statuses = {"passed": "ok", "failed": "FAILED", "errored": "FAILED"}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("runner result must be an object")
+        name, status = row.get("name"), row.get("status")
+        if not isinstance(name, str) or not name or name in scenarios:
+            raise ValueError(f"invalid or duplicate scenario name: {name!r}")
+        if not isinstance(status, str) or status not in statuses:
+            raise ValueError(f"unsupported runner status for {name}: {status!r}")
+        scenarios[name] = {"status": statuses[status]}
     return scenarios
+
+
+def merge_verdicts(scenarios, verdicts):
+    """Decorate executed cases; stale VM artifacts cannot invent test results."""
+    for name, entry in scenarios.items():
+        if name in verdicts:
+            verdict = verdicts[name]
+            entry["verdict_shape"] = verdict.get("verdict_shape")
+            entry["exits"] = verdict.get("exits", {})
 
 
 def parse_total_duration(log_path):
@@ -48,6 +66,7 @@ def parse_total_duration(log_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--matrix-log", required=True)
+    ap.add_argument("--runner-results", required=True)
     ap.add_argument("--vm-info", required=True)
     ap.add_argument("--verdicts", required=True)
     ap.add_argument("--output", required=True)
@@ -65,16 +84,11 @@ def main():
 
     vm = json.loads(Path(args.vm_info).read_text())
     verdicts = json.loads(Path(args.verdicts).read_text())
-    scenarios = parse_scenarios(args.matrix_log)
-
-    # Merge verdict data into scenarios
-    for name, v in verdicts.items():
-        if name not in scenarios:
-            # Verdict exists but harness didn't report a test line for it —
-            # likely a scenario that was skipped or filtered out.
-            scenarios[name] = {"status": "unknown"}
-        scenarios[name]["verdict_shape"] = v.get("verdict_shape")
-        scenarios[name]["exits"] = v.get("exits", {})
+    try:
+        scenarios = parse_scenarios(args.runner_results)
+    except (OSError, ValueError) as error:
+        sys.exit(f"cannot collect runner results {args.runner_results}: {error}")
+    merge_verdicts(scenarios, verdicts)
 
     out = {
         "schema_version": 1,

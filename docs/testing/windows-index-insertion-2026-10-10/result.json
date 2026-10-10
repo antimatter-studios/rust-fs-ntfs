@@ -1,0 +1,136 @@
+{
+  "scope": "targeted scenario only; does not replace full matrix baseline",
+  "scenario": "win-format-win-write-many-mac-insert-index-allocation-win-chkdsk",
+  "driver_source_sha": "fe450f1798993cf1c8d7b4866a0855761d9aa5c6",
+  "harness_sha": "357a6e98e2fb8ea86a5e3028647f41b7369c964b",
+  "binary_sha256": "467badeeafa25bed77cb5d14895f30a1c1a4364ce966a315da905dca77945b85",
+  "matrix_sha256": "21e0013066d68719b3555c569e7af773da7b84bd50553500058d1ce5494a17e3",
+  "config_sha256": "3fec8eb822a2ee6971a9a381bdb7d113fbb6bc5009484950dbc0812385254f5d",
+  "guest": "Windows 11 IoT Enterprise LTSC 2024 Evaluation ARM64 build 26100.1742; QEMU/KVM on Raspberry Pi 5 Linux ARM64",
+  "started_at_utc": "2026-10-09T23:31:04Z",
+  "duration_seconds": 346.39,
+  "passed": 1,
+  "failed": 0,
+  "ignored": 0,
+  "required_names_verified": 257,
+  "listing_entries": 263,
+  "chkdsk": {
+    "passed": true,
+    "verdict_shape": "clean",
+    "modes": {
+      "readonly": {
+        "exit": 0,
+        "state": "scanned",
+        "reason": "chkdsk found nothing to report"
+      },
+      "/scan": {
+        "exit": 0,
+        "state": "scanned",
+        "reason": "chkdsk found nothing to report"
+      }
+    },
+    "exits": {
+      "readonly": 0,
+      "/scan": 0
+    }
+  },
+  "steps": [
+    {
+      "index": 0,
+      "op": "init-image",
+      "exit_code": 0,
+      "expected_exit": 0,
+      "duration_ms": 256,
+      "skipped": false
+    },
+    {
+      "index": 1,
+      "op": "ship-to-vm",
+      "exit_code": 0,
+      "expected_exit": 0,
+      "duration_ms": 16279,
+      "skipped": false
+    },
+    {
+      "index": 2,
+      "op": "win-format",
+      "exit_code": 0,
+      "expected_exit": 0,
+      "duration_ms": 38677,
+      "skipped": false
+    },
+    {
+      "index": 3,
+      "op": "win-write-many-size",
+      "exit_code": 0,
+      "expected_exit": 0,
+      "duration_ms": 214014,
+      "skipped": false
+    },
+    {
+      "index": 4,
+      "op": "ship-to-host",
+      "exit_code": 0,
+      "expected_exit": 0,
+      "duration_ms": 15918,
+      "skipped": false
+    },
+    {
+      "index": 5,
+      "op": "mac-touch",
+      "exit_code": 0,
+      "expected_exit": 0,
+      "duration_ms": 251,
+      "skipped": false
+    },
+    {
+      "index": 6,
+      "op": "ship-to-vm",
+      "exit_code": 0,
+      "expected_exit": 0,
+      "duration_ms": 10046,
+      "skipped": false
+    },
+    {
+      "index": 7,
+      "op": "win-chkdsk",
+      "exit_code": 0,
+      "expected_exit": 0,
+      "duration_ms": 38118,
+      "skipped": false
+    },
+    {
+      "index": 8,
+      "op": "win-enumerate",
+      "exit_code": 0,
+      "expected_exit": 0,
+      "duration_ms": 12816,
+      "skipped": false
+    }
+  ],
+  "logs": {
+    "tmp/logs/matrix.log": {
+      "sha256": "7e7bf08f024fe31ab057928f3a99af4fa865ebd53f61a87d64ef6aa3d027e548",
+      "lines": 104,
+      "bytes": 5901
+    },
+    "tmp/logs/scripts.log": {
+      "sha256": "e30d061d80b74f3e1aa46579892fe1cb4e5857cdfc0085b9546892563dbc1f18",
+      "lines": 103,
+      "bytes": 2784
+    }
+  },
+  "raw_evidence_sha256": {
+    "verdict.json": "b5077b5968c71e60014f2ee66c62591e685010388af5f6cf46aa93c80c442bc1",
+    "enumerate.txt": "6ea87aae95ef4ea0850168205936f6700a71de858b2a01a2fb6217eff26a1f22",
+    "chkdsk-readonly.txt": "65eca8e51cb0fa3c70dcbbe879c0d0347d68a5771f4ed210033b095c1a1c07c1",
+    "chkdsk--scan.txt": "4942be66c5a1c65b2a9575d15c9c47c4a0dc3e5ddeb926dc0b15f37c8b34b548"
+  },
+  "evidence_sha256": {
+    "verdict.json": "edeee67a58db67321b375e9a8a063e871cd1152893b1e2d366656459189c4bfc",
+    "enumerate.txt": "48ae549b0470345f4a7cdb24846156509c57e647b4bda3867beb92addac75de9",
+    "chkdsk-readonly.txt": "9114dd62c3b2b1ec17629395ce48299fc2caf2b66c264a369f4f5228226f4f32",
+    "chkdsk--scan.txt": "a207fac70d884695e39b304eb683db1bd6f3991fc48d094224083ffccf8111b2"
+  },
+  "evidence_normalization": "Committed Windows text uses LF and trimmed trailing whitespace; original bytes remain in the raw evidence archive."
+}
