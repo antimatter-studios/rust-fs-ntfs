@@ -806,7 +806,7 @@ fn parse_workflow(text: &str) -> Workflow {
                 })
                 .collect();
             jobs.push(Job {
-                keys: keys_of(body),
+                keys: gating_keys_of(body),
                 steps,
             });
         }
@@ -921,6 +921,30 @@ fn runs_on_pull_request(wf: &Workflow) -> bool {
 
 /// Keys whose presence on a step or job means its result does not gate.
 const NON_GATING_KEYS: [&str; 2] = ["if", "continue-on-error"];
+
+/// A job's keys, less an `if:` that is rust-fs-core's documentation-only
+/// path gate: exactly `needs.changes.outputs.code == 'true'`, on a job that
+/// needs `changes` and is not allowed to fail. ci-ok accepts that job's
+/// skip only when the change was documentation alone, so on every change
+/// that could break it the job runs and gates; ci-gate refuses any other
+/// shape. Every other `if:` still marks the job as not gating.
+fn gating_keys_of(job: &Yaml) -> Vec<String> {
+    let keys = keys_of(job);
+    let needs_changes = match field(job, "needs") {
+        Some(needs) => match needs.as_sequence() {
+            Some(list) => list.iter().any(|n| n.as_str() == Some("changes")),
+            None => needs.as_str() == Some("changes"),
+        },
+        None => false,
+    };
+    let path_gated = field(job, "if").and_then(Yaml::as_str)
+        == Some("needs.changes.outputs.code == 'true'")
+        && needs_changes
+        && !keys.iter().any(|k| k == "continue-on-error");
+    keys.into_iter()
+        .filter(|k| !(path_gated && k == "if"))
+        .collect()
+}
 
 /// Walk a workflow's steps and collect what `select` finds in each
 /// `run:`.

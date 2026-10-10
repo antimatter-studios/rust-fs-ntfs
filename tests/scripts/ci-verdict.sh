@@ -8,8 +8,8 @@ pass=0
 fail=0
 
 check() {
-    local name="$1" mode="$2" want="$3" json="$4" got
-    GATE_NEEDS_JSON="$json" bash "$ROOT/scripts/ci-verdict.sh" "$mode" >/dev/null 2>&1
+    local name="$1" mode="$2" want="$3" json="$4" code="${5:-}" got
+    CODE="$code" GATE_NEEDS_JSON="$json" bash "$ROOT/scripts/ci-verdict.sh" "$mode" >/dev/null 2>&1
     got=$?
     if { [ "$want" = pass ] && [ "$got" -eq 0 ]; } ||
        { [ "$want" = fail ] && [ "$got" -ne 0 ]; }; then
@@ -42,6 +42,14 @@ for job in test windows-native-read-fixtures integration changes validate-mkfs-w
             "$(jq -c --arg job "$job" --arg result "$result" '.[$job].result=$result' <<< "$aggregate")"
     done
 done
+# A change to documentation alone skips the Windows fixtures and what reads
+# them. Their skip is green only when the changes job said code is false.
+docs_only="$(jq -c '.["windows-native-read-fixtures"].result="skipped" | .integration.result="skipped" | .cli.result="skipped"' <<< "$aggregate")"
+check aggregate-docs-only-skips aggregate pass "$docs_only" false
+check aggregate-code-skips aggregate fail "$docs_only" true
+check aggregate-unknown-code-skips aggregate fail "$docs_only"
+check aggregate-docs-only-failure aggregate fail "$(jq -c '.cli.result="failure"' <<< "$docs_only")" false
+check aggregate-docs-only-changes-skipped aggregate fail "$(jq -c '.changes.result="skipped"' <<< "$docs_only")" false
 check aggregate-missing-integration aggregate fail '{"test":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"},"cli":{"result":"success"}}'
 check aggregate-missing-cli aggregate fail '{"test":{"result":"success"},"integration":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"}}'
 check aggregate-missing-semver aggregate fail "$(jq -c 'del(.semver)' <<< "$aggregate")"
