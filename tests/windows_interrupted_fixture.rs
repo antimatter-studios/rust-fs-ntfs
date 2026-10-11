@@ -75,8 +75,9 @@ mod common;
 use fs_ntfs::facade::{FileType, Filesystem};
 use fs_ntfs::fsck;
 use fs_ntfs::{
-    fs_ntfs_mount, fs_ntfs_mount_rw_with_fs_core_device, fs_ntfs_mount_with_callbacks,
-    fs_ntfs_mount_with_fs_core_device, fs_ntfs_umount, FsNtfsBlockdevCfg,
+    fs_ntfs_create_file, fs_ntfs_mount, fs_ntfs_mount_rw_with_fs_core_device,
+    fs_ntfs_mount_with_callbacks, fs_ntfs_mount_with_fs_core_device, fs_ntfs_umount,
+    FsNtfsBlockdevCfg,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -935,6 +936,88 @@ fn every_read_write_mount_replays_a_volume_windows_left_mid_write_to_what_window
             );
             drop(io);
             oracle::same_metadata_as_windows(k, &pre, &Image::read(&img), &win, log_end);
+            std::fs::remove_file(&img).unwrap();
+        }
+    }
+}
+
+/// Every way this crate writes to a volume over an image path with no
+/// read-write mount first: each creates the file `/{name}` and returns its
+/// MFT record number, or the reason it refused.
+type PathWrite = fn(&str, &str) -> Result<u64, String>;
+
+const PATH_WRITES: [(&str, PathWrite); 3] = [
+    ("Filesystem::mount, then create_file", |img, name| {
+        let fs = Filesystem::mount(img).map_err(|e| e.0)?;
+        fs.create_file("/", name).map_err(|e| e.0)
+    }),
+    ("write::create_file", |img, name| {
+        fs_ntfs::write::create_file(std::path::Path::new(img), "/", name).map_err(|e| e.to_string())
+    }),
+    ("fs_ntfs_create_file", |img, name| {
+        let c_img = CString::new(img).unwrap();
+        let c_parent = CString::new("/").unwrap();
+        let c_name = CString::new(name).unwrap();
+        let rn = fs_ntfs_create_file(c_img.as_ptr(), c_parent.as_ptr(), c_name.as_ptr());
+        u64::try_from(rn).map_err(|_| last_error())
+    }),
+];
+
+#[test]
+fn every_write_without_a_read_write_mount_replays_the_log_first_or_writes_nothing() {
+    // `mount_rw` replays the log before anything is written (#137). These
+    // write over an image path with no read-write mount, and skipped that
+    // check: on snapshot 6 each put its file in MFT record 1069 and left
+    // the log holding work, where a write after `mount_rw` takes 1277.
+    // Windows' restart, run on that volume later, gives 1069 to a file of
+    // its own, and one of the two is lost. So each must refuse with
+    // nothing written, or replay first: the log holding no work, every
+    // file Windows recovered in place, and the new file in the record a
+    // write after `mount_rw` takes.
+    for (k, _) in LOG_END {
+        let want = manifest(k);
+        let after_mount_rw = {
+            let img = unpack(&format!("windows-interrupted-{k}"));
+            let fs = Filesystem::mount_rw(&img)
+                .unwrap_or_else(|e| panic!("snapshot {k}: mount_rw: {e}"));
+            let rn = fs
+                .create_file("/", "written")
+                .unwrap_or_else(|e| panic!("snapshot {k}: create_file after mount_rw: {e}"));
+            std::fs::remove_file(&img).unwrap();
+            rn
+        };
+        for (how, write) in PATH_WRITES {
+            let img = unpack(&format!("windows-interrupted-{k}"));
+            let before = std::fs::read(&img).unwrap();
+            match write(&img, "written") {
+                Err(why) => assert!(
+                    std::fs::read(&img).unwrap() == before,
+                    "snapshot {k}: {how} refused ({why}) and wrote to the volume anyway"
+                ),
+                Ok(rn) => {
+                    let mut io =
+                        fs_ntfs::block_io::PathIo::open_ro(std::path::Path::new(&img)).unwrap();
+                    let state = fsck::logfile_state_io(&mut io).expect("read $LogFile");
+                    assert!(
+                        !state.needs_replay(),
+                        "snapshot {k}: {how} wrote MFT record {rn} and left the log holding \
+                         work: {state:?}"
+                    );
+                    drop(io);
+                    let got = walk(&img);
+                    assert!(
+                        got == want,
+                        "snapshot {k}: {how}: {} files after the write, {} in Windows' manifest",
+                        got.len(),
+                        want.len()
+                    );
+                    assert_eq!(
+                        rn, after_mount_rw,
+                        "snapshot {k}: {how} wrote MFT record {rn}; after mount_rw the same \
+                         file takes {after_mount_rw}"
+                    );
+                }
+            }
             std::fs::remove_file(&img).unwrap();
         }
     }
