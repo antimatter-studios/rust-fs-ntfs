@@ -26,13 +26,20 @@ VM_WORKDIR="${VM_WORKDIR:-C:/fswth/rust-fs-ntfs}"
 VM_WORKDIR_PS="${VM_WORKDIR//\//\\}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The rust-img-vhd and rust-fs-core tags CI builds rust-img-vhd at, so the
+# VM builds the same tool.
+pin() { sed -n "s/^ *$1: *//p" "$REPO_ROOT/chores.yml" | head -1; }
+VHD_REF="$(pin IMG_VHD_REF)"
+CORE_REF="$(pin FS_CORE_REF)"
+[ -n "$VHD_REF" ] && [ -n "$CORE_REF" ] ||
+    { echo "[setup] chores.yml names no IMG_VHD_REF or no FS_CORE_REF" >&2; exit 1; }
 
 echo "[setup] Pushing setup-windows-vm.ps1 to ${VM_HOST}"
 ssh "${VM_HOST}" "if (-not (Test-Path '${VM_WORKDIR_PS}\\scripts')) { New-Item -ItemType Directory -Path '${VM_WORKDIR_PS}\\scripts' -Force | Out-Null }"
 scp "${REPO_ROOT}/scripts/setup-windows-vm.ps1" "${VM_HOST}:${VM_WORKDIR}/scripts/setup-windows-vm.ps1"
 
 echo "[setup] Running setup-windows-vm.ps1 on ${VM_HOST}"
-ssh "${VM_HOST}" "powershell -ExecutionPolicy Bypass -File '${VM_WORKDIR_PS}\\scripts\\setup-windows-vm.ps1'"
+ssh "${VM_HOST}" "powershell -ExecutionPolicy Bypass -File '${VM_WORKDIR_PS}\\scripts\\setup-windows-vm.ps1' -VhdRef ${VHD_REF} -CoreRef ${CORE_REF}"
 
 echo
 echo "[setup] Done. Try a real iteration:"
