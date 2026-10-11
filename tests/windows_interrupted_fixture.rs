@@ -1079,6 +1079,39 @@ fn a_read_write_mount_refuses_a_log_it_cannot_replay_in_full_and_writes_nothing(
 }
 
 #[test]
+fn a_read_write_mount_refuses_a_log_holding_work_unless_asked_to_replay_it() {
+    // Windows leaves a log holding work after a crash, which replaying it
+    // recovers, and after a Fast Startup shutdown or a hibernation, which
+    // replaying it corrupts: Windows resumes from what it cached and does
+    // not see the replay's changes. Only `hiberfil.sys` tells the two
+    // apart, and only on the volume Windows boots from; a data volume Fast
+    // Startup left looks exactly like a crashed one. So a read-write mount
+    // does not replay unasked. It refuses, with nothing written, and names
+    // `fsck`, which replays on request (#137).
+    for (k, _) in LOG_END {
+        for (name, rw_mount) in RW_MOUNTS {
+            let img = unpack(&format!("windows-interrupted-{k}"));
+            let before = std::fs::read(&img).unwrap();
+
+            let err = rw_mount(&img).expect_err("a read-write mount of a log holding work");
+            assert!(
+                err.contains("$LogFile") && err.contains("read-write mount refused"),
+                "snapshot {k}: {name}: {err}"
+            );
+            assert!(
+                err.contains("fsck"),
+                "snapshot {k}: {name}: the refusal does not say how to replay: {err}"
+            );
+            assert!(
+                std::fs::read(&img).unwrap() == before,
+                "snapshot {k}: {name}: a refused mount wrote to the volume"
+            );
+            std::fs::remove_file(&img).unwrap();
+        }
+    }
+}
+
+#[test]
 fn a_dirty_volume_is_refused_before_its_log_is_replayed() {
     // The dirty flag asks for a check of the whole volume, which a replay
     // is not. A read-write mount refuses it as before, and does not replay
