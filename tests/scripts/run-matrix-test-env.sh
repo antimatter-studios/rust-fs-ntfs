@@ -15,6 +15,12 @@
 # What the stand-in was asked to connect to, and with which key, is the
 # evidence that the values were read.
 #
+# The only .test-env under test is the sandbox's own. chore's dotenv exports
+# the developer's .test-env into every task, this test included, and a
+# HOST_IMAGE_DIR from there (the README suggests /tmp) used to fail the case
+# that has none. So the test runs as if under a developer's .test-env that
+# sets everything run-matrix.sh reads, and none of it may reach the run.
+#
 # Quiet on success (the scripts tier is budgeted): one summary line.
 set -uo pipefail
 
@@ -35,6 +41,11 @@ bad() {
 mkdir -p "$tmp/consumer/scripts" "$tmp/fs-windows-test-harness/scripts" "$tmp/bin" "$tmp/msys-bin"
 cp "$ROOT/scripts/run-matrix.sh" "$tmp/consumer/scripts/run-matrix.sh"
 : > "$tmp/key"
+
+# What chore exports from a developer's own .test-env. VM_HOST is set by
+# run_matrix itself, to prove the sandbox's file wins over it.
+export HOST_IMAGE_DIR="$tmp/developer images"
+export SSH_KEY="$tmp/developer-key"
 
 # The harness: record that it ran, and succeed.
 # shellcheck disable=SC2016 # expands in the generated script
@@ -171,6 +182,13 @@ case "$log" in
     *"SSH mux: off"*) ok ;;
     *) bad "Git Bash: the run says the mux is off, and why" "$log" ;;
 esac
+
+# ── 4. Nothing reached the developer's own settings ────────────────────────
+if [ ! -e "$tmp/developer images" ]; then
+    ok
+else
+    bad "no run writes to the HOST_IMAGE_DIR of the developer's own .test-env" "$(ls -A "$tmp")"
+fi
 
 printf 'run-matrix-test-env: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
