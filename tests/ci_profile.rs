@@ -2902,6 +2902,55 @@ fn every_sibling_clone_takes_its_ref_from_a_variable() {
     );
 }
 
+/// The VHD writer is built from its own checkout alone, at the dependencies
+/// its lockfile names (#462).
+///
+/// rust-img-vhd took `rust-fs-core` by path until v0.6.1, so every
+/// "Install rust-img-vhd" step cloned core beside it at `FS_CORE_REF`, and
+/// the tool was built against whatever core this repository pinned rather
+/// than the one rust-img-vhd was tested with. From v0.6.1 it takes core
+/// from crates.io (rust-img-vhd#148): no workflow clones core for it, and
+/// every install of it passes `--locked`.
+#[test]
+fn the_vhd_writer_is_installed_alone_and_locked() {
+    let dir = manifest_dir().join(".github").join("workflows");
+    let mut installs = 0;
+    let mut wrong = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("read .github/workflows") {
+        let path = entry.expect("workflow entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            continue;
+        }
+        let file = path.file_name().unwrap().to_string_lossy().into_owned();
+        for (n, line) in read_or_panic(&path).lines().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with('#') {
+                continue;
+            }
+            if code.contains("rust-fs-core.git") && code.contains("RUNNER_TEMP") {
+                wrong.push(format!(
+                    "{file}:{}: clones core beside the writer: {code}",
+                    n + 1
+                ));
+            }
+            if code.starts_with("cargo install") && code.contains("rust-img-vhd") {
+                installs += 1;
+                if !code.split_whitespace().any(|w| w == "--locked") {
+                    wrong.push(format!(
+                        "{file}:{}: installs without --locked: {code}",
+                        n + 1
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        installs >= 4,
+        "expected the workflows to install rust-img-vhd; found {installs} installs"
+    );
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// Every `curl` command in a shell script or workflow, comments dropped and
 /// `\` continuations joined, so a flag on the next line still counts.
 fn curl_commands(text: &str) -> Vec<String> {
