@@ -23,14 +23,15 @@ use std::path::Path;
 
 /// Open `image` for one of the path-based mutators below. Each of them
 /// opens the image afresh with no read-write mount before it, so each runs
-/// the check a read-write mount runs (#137): a `$LogFile` holding work is
-/// replayed first, and a dirty volume, or a log that cannot be read or
-/// replayed in full, is refused with nothing written. Without it, a write
-/// landed on metadata whose committed changes were still in the log, in an
-/// MFT record Windows' own restart would later give to another file.
+/// the check a read-write mount runs (#137): a dirty volume, a log that
+/// cannot be read, and a `$LogFile` holding work are refused with nothing
+/// written. The replay is asked for with a read-write mount or `fsck`
+/// before the write. Without the check, a write landed on metadata whose
+/// committed changes were still in the log, in an MFT record Windows' own
+/// restart would later give to another file.
 fn open_for_write(image: &Path) -> Result<PathIo, Error> {
     let mut io = PathIo::open_rw(image)?;
-    crate::prepare_rw_mount(&mut io)?;
+    crate::prepare_rw_mount(&mut io, false)?;
     Ok(io)
 }
 

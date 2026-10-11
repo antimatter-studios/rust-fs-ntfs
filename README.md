@@ -17,8 +17,9 @@ and encrypted files are refused. Writing covers data, create, unlink, mkdir,
 rmdir, rename, hard links, streams, reparse points, extended attributes,
 timestamps and flags, in directories of up to 64 index blocks. `$LogFile` is
 replayed as Windows' own restart replays it, on `fsck` and on a read-write
-mount, and a log that cannot be replayed in full is refused with nothing
-written. `mkfs.ntfs` makes volumes Windows mounts and writes and `chkdsk`
+mount that asks for it; any other read-write mount refuses a log holding
+work, which Windows also leaves after a Fast Startup shutdown, and a log
+that cannot be replayed in full is refused with nothing written. `mkfs.ntfs` makes volumes Windows mounts and writes and `chkdsk`
 accepts. **[docs/features.md](docs/features.md) is the full list**: every
 feature, its state (supported, partial, refused, not supported or upcoming),
 the release it shipped in, its tracking issue or write-plan item, and the test

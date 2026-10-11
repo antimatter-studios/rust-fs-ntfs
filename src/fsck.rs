@@ -24,8 +24,10 @@
 //! log that cannot be replayed in full -- unread, torn, holding an
 //! operation replay does not perform, or a transaction that would need
 //! undoing -- is refused before anything is written (#375, #376, #137).
-//! Every read-write mount runs the same replay first
-//! ([`prepare_rw_mount_io`]), as Windows does when it mounts a volume.
+//! A read-write mount runs the same replay first only when asked
+//! ([`prepare_rw_mount_replaying_io`]); otherwise it refuses a log holding
+//! work ([`prepare_rw_mount_io`]): Windows leaves one after a Fast Startup
+//! shutdown or a hibernation too, and then a replay corrupts the volume.
 //! The explicit `reset_logfile` and `clear_dirty` operations require the
 //! caller to know independently that metadata is consistent; using them on
 //! a crashed volume can destroy recoverable changes.
@@ -726,10 +728,30 @@ fn refuse_if_hibernated<T: FsckIo>(io: &mut T, doing: &str) -> Result<(), Error>
     }
 }
 
+/// Check a volume before it is opened for writing, and write nothing.
+///
+/// Refused when:
+/// * the dirty flag is set. It asks for a check of the whole volume;
+/// * `$LogFile` cannot be read;
+/// * `$LogFile` holds work (#137). Windows leaves a log holding work after
+///   a crash, which replaying it recovers, and after a Fast Startup
+///   shutdown or a hibernation, which replaying it corrupts: Windows
+///   resumes from what it cached and does not see the replay's changes.
+///   Only `hiberfil.sys` tells the two apart, and only on the volume
+///   Windows boots from, so the replay is the caller's to ask for: run
+///   `fsck`, or [`prepare_rw_mount_replaying_io`].
+///
+/// Returns `None`: nothing was replayed.
+pub fn prepare_rw_mount_io<T: FsckIo>(io: &mut T) -> Result<Option<ReplayReport>, Error> {
+    prepare_rw_mount_as(io, false)
+}
+
 /// Make a volume ready to be opened for writing, as Windows does when it
-/// mounts one: a `$LogFile` holding work is replayed first
+/// mounts one after a crash: a `$LogFile` holding work is replayed first
 /// ([`replay_logfile_io`]), so this crate's changes land on metadata that
-/// already holds every change the log committed (#137).
+/// already holds every change the log committed (#137). For a caller that
+/// knows Windows is not going to resume from a Fast Startup shutdown or a
+/// hibernation on this volume; see [`prepare_rw_mount_io`].
 ///
 /// Refused with nothing written when:
 /// * the dirty flag is set. It asks for a check of the whole volume, which
@@ -742,7 +764,11 @@ fn refuse_if_hibernated<T: FsckIo>(io: &mut T, doing: &str) -> Result<(), Error>
 /// Returns what the replay did, or `None` when the log held nothing to
 /// replay, in which case nothing was written. `io` needs to be writable
 /// only when the log holds work.
-pub fn prepare_rw_mount_io<T: FsckIo>(io: &mut T) -> Result<Option<ReplayReport>, Error> {
+pub fn prepare_rw_mount_replaying_io<T: FsckIo>(io: &mut T) -> Result<Option<ReplayReport>, Error> {
+    prepare_rw_mount_as(io, true)
+}
+
+fn prepare_rw_mount_as<T: FsckIo>(io: &mut T, replay: bool) -> Result<Option<ReplayReport>, Error> {
     if is_dirty_io(io)? {
         return Err(Error::refused(
             "dirty NTFS volume: read-write mount refused; the dirty flag asks for the whole \
@@ -759,6 +785,16 @@ pub fn prepare_rw_mount_io<T: FsckIo>(io: &mut T) -> Result<Option<ReplayReport>
     let LogfileState::Pending(why) = &state else {
         return Ok(None);
     };
+    if !replay {
+        return Err(Error::refused(format!(
+            "read-write mount refused: {why}. Windows leaves a $LogFile holding work after a \
+             crash, which replaying it recovers, and after a Fast Startup shutdown or a \
+             hibernation, which replaying it corrupts: Windows resumes from what it cached \
+             and does not see the replay. Once Windows is known to have shut down fully, \
+             replay the log with `fsck.ntfs -y` (fs_ntfs::fsck::fsck), or mount asking for \
+             the replay"
+        )));
+    }
     let report = replay_logfile_io(io)
         .map_err(|e| Error::refused(format!("read-write mount refused: {why}; {e}")))?;
     log::info!(

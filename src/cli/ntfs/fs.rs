@@ -541,10 +541,11 @@ fn split_path(path: &str) -> Result<(String, &str), CliError> {
 }
 
 /// Run `edit` on a writable open of `target`, then sync it. The volume is
-/// prepared as the C ABI's read-write mount prepares it: a `$LogFile`
-/// holding work is replayed first, as Windows does when it mounts a
-/// volume, and a dirty volume, or a log that cannot be read or replayed in
-/// full, is refused before anything is written (#137). A fresh-format
+/// prepared as the C ABI's read-write mount prepares it: a dirty volume, a
+/// log that cannot be read, and a `$LogFile` holding work are refused
+/// before anything is written (#137). Windows leaves a log holding work
+/// after a Fast Startup shutdown as well as after a crash, so the replay is
+/// the user's to ask for, with `fsck.ntfs -y`. A fresh-format
 /// volume is upgraded first, as Windows does on its first read-write mount.
 fn edit<T>(
     target: &OsString,
