@@ -58,10 +58,8 @@ jobs:
         shell: pwsh
         run: |
           $vhd = (Select-String -Path chores.yml -Pattern '^\s*IMG_VHD_REF:\s*(\S+)').Matches[0].Groups[1].Value
-          $core = (Select-String -Path chores.yml -Pattern '^\s*FS_CORE_REF:\s*(\S+)').Matches[0].Groups[1].Value
           git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
-          git clone --depth 1 --branch $core https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
-          cargo install --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
+          cargo install --locked --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
       - name: Build Windows-authored fixtures
         shell: pwsh
         run: pwsh -File test-disks/build-windows-native-read-fixtures.ps1
@@ -280,15 +278,13 @@ jobs:
         # workflows drifted three releases apart (#128); declaring it in
         # one place is what stops that recurring (#190), and
         # tests/ci_profile.rs fails a clone that names its own ref (#387).
-        # rust-img-vhd path-deps rust-fs-core (`../rust-fs-core`), so that
-        # sibling sits beside it.
+        # From v0.6.1 the checkout builds alone, at the dependencies its
+        # lockfile names (#462).
         shell: pwsh
         run: |
           $vhd = (Select-String -Path chores.yml -Pattern '^\s*IMG_VHD_REF:\s*(\S+)').Matches[0].Groups[1].Value
-          $core = (Select-String -Path chores.yml -Pattern '^\s*FS_CORE_REF:\s*(\S+)').Matches[0].Groups[1].Value
           git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
-          git clone --depth 1 --branch $core https://github.com/antimatter-studios/rust-fs-core.git $env:RUNNER_TEMP/rust-fs-core
-          cargo install --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
+          cargo install --locked --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
       - name: Build rust-ntfs (Windows)
         run: cargo build --release --locked --features harness --bin rust-ntfs
       - name: Generate raw image and wrap in GPT-partitioned VHD
