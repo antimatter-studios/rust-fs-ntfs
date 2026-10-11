@@ -57,6 +57,7 @@ States:
 | `$LogFile` replay on `fsck`, on a read-write mount, and before a path-based write, as Windows' restart does, for every operation captured Windows logs hold; open transactions rolled back; wrapped logs; small clusters | Supported | 0.8.0 (#137); path-based writes Unreleased (#465) | | `windows_interrupted_fixture.rs` |
 | `UpdateRecordDataRoot` redo; a checkpoint that names no start | Supported | Unreleased (#456, #457) | | `windows_interrupted_fixture.rs` |
 | A log holding an operation no capture has held, a prepared or committed transaction not forgotten, or an LFS version other than 2.x | Refused for writing, with nothing written | 0.8.0 (#137) | #137 | `windows_interrupted_fixture.rs` |
+| A replay stopped after any write (a power cut), run again | Supported: it reaches the volume an uninterrupted replay does, and the log reads as clean from the moment it starts being emptied | Unreleased (#514) | #137 | `windows_interrupted_fixture.rs` |
 | A read-only mount of a volume whose log holds work | Partial: read as it is on disk, without replaying | 0.8.0 | #137 | |
 | Clear the dirty flag; reset the log | Supported, for volumes known consistent | 0.1.0 | | `fsck.rs`, `capi_fsck.rs`, `capi_fsck_callbacks.rs` |
 | Repair beyond log replay and the dirty flag | Not supported | | | |

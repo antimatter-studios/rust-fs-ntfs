@@ -487,6 +487,49 @@ pub fn fsck_io<'cb, T: FsckIo>(
     })
 }
 
+/// Empty `$LogFile` once its replay has reached the volume, so that a stop
+/// after any write leaves a log a rerun handles (#137). `log` is the log
+/// as the replay read it, at `log_offset` on the volume.
+///
+/// Filling it with `0xFF` front to back, as [`reset_logfile_io`] does,
+/// erased the restart pages first: a stop after that left records with no
+/// restart area, which no replay could read, and the volume could no longer
+/// be written. So the restart pages are marked clean first, the one
+/// [`logfile_state_io`] reads first ahead of the other: from then on the
+/// log reads as holding nothing to replay, whatever its records hold. Then
+/// the records are erased, and the restart pages last, the second before
+/// the first, whose header names the page size, each in a write of its own.
+fn empty_replayed_log_io<T: FsckIo>(io: &mut T, log: &[u8], log_offset: u64) -> Result<(), Error> {
+    let sync = |io: &mut T| {
+        io.sync()
+            .map_err(|e| Error::io(format!("replay $LogFile: sync: {e}")))
+    };
+    let (sps, marked) = crate::logfile::restart_pages_marked_clean(&mut |off, len| {
+        let start = usize::try_from(off).ok()?;
+        log.get(start..start.checked_add(len)?).map(<[u8]>::to_vec)
+    })?;
+    for (off, page) in &marked {
+        io.write_all_at(log_offset + off, page)
+            .map_err(|e| format!("replay $LogFile: mark the log clean: {e}"))?;
+    }
+    sync(io)?;
+    let fill = [LOGFILE_EMPTY_FILL; LOGFILE_CHUNK];
+    let mut at = 2 * sps;
+    while at < log.len() {
+        let n = (log.len() - at).min(LOGFILE_CHUNK);
+        io.write_all_at(log_offset + at as u64, &fill[..n])
+            .map_err(|e| format!("replay $LogFile: empty the log: {e}"))?;
+        at += n;
+    }
+    sync(io)?;
+    for off in [sps, 0] {
+        io.write_all_at(log_offset + off as u64, &fill[..sps])
+            .map_err(|e| format!("replay $LogFile: empty the log: {e}"))?;
+        sync(io)?;
+    }
+    Ok(())
+}
+
 /// What [`replay_logfile_io`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayReport {
@@ -595,9 +638,7 @@ pub fn replay_logfile_io<T: FsckIo>(io: &mut T) -> Result<ReplayReport, Error> {
     }
     io.sync()
         .map_err(|e| format!("replay $LogFile: sync: {e}"))?;
-    reset_logfile_io(io, None)?;
-    io.sync()
-        .map_err(|e| format!("replay $LogFile: sync: {e}"))?;
+    empty_replayed_log_io(io, &log, log_offset)?;
     log::info!(
         target: "fs_ntfs::fsck",
         "$LogFile replayed: {} records, {} redo operations, {} blocks written",

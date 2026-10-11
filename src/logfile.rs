@@ -36,7 +36,7 @@
 //! was consulted; ntfs-3g is used only as a program, in the tests.
 
 use crate::error::Error;
-use crate::mft_io::apply_fixup_on_read_magic;
+use crate::mft_io::{apply_fixup_on_read_magic, apply_fixup_on_write_magic};
 
 /// Log pages are protected by an update sequence array with a 512-byte
 /// stride, whatever the device's sector size.
@@ -178,6 +178,60 @@ fn restart_page(read: &mut ReadLog<'_>, off: u64, page_size: usize) -> Result<Re
         record_header_length,
         client_restart_lsn,
     })
+}
+
+/// The log's readable restart pages with `RESTART_VOLUME_IS_CLEAN` set,
+/// each ready to be written back over itself (fixups applied), and the
+/// system page size, which is where the second one starts.
+///
+/// The first returned is the one [`state`] reads when both are readable:
+/// the higher current LSN, the first page on a tie. Written in this order,
+/// the page [`state`] reads is marked clean by the first write, so a stop
+/// between the two leaves a log that reads as clean. The flag is what
+/// Windows sets on a clean dismount; ntfs-3g and the Linux kernel driver
+/// read it as clean too.
+pub(crate) fn restart_pages_marked_clean(
+    read: &mut ReadLog<'_>,
+) -> Result<(usize, Vec<(u64, Vec<u8>)>), Error> {
+    let header = read(0, 0x18).ok_or(Error::io("the log is shorter than a restart page header"))?;
+    let system_page_size =
+        u32_at(&header, 0x10).ok_or(Error::io("the log is shorter than a restart page header"))?;
+    if !(512..=65536).contains(&system_page_size) || !system_page_size.is_power_of_two() {
+        return Err(Error::io(format!(
+            "restart page names a system page size of {system_page_size}"
+        )));
+    }
+    let sps = system_page_size as usize;
+    let mut pages = Vec::new();
+    for off in [0, sps as u64] {
+        let Ok(ra) = restart_page(read, off, sps) else {
+            continue;
+        };
+        let Some(mut page) = read(off, sps) else {
+            continue;
+        };
+        apply_fixup_on_read_magic(&mut page, LFS_STRIDE, b"RSTR")?;
+        let at = u16_at(&page, RESTART_AREA_OFFSET_FIELD)
+            .ok_or(Error::io("restart page: truncated header"))? as usize
+            + RESTART_AREA_FLAGS_OFFSET;
+        let flags = (ra.flags | RESTART_VOLUME_IS_CLEAN).to_le_bytes();
+        page.get_mut(at..at + 2)
+            .ok_or(Error::io("restart page: restart area outside the page"))?
+            .copy_from_slice(&flags);
+        apply_fixup_on_write_magic(&mut page, LFS_STRIDE, b"RSTR")?;
+        pages.push((ra.current_lsn, off, page));
+    }
+    if pages.is_empty() {
+        return Err(Error::io("$LogFile has no readable restart page"));
+    }
+    pages.sort_by_key(|(lsn, off, _)| (std::cmp::Reverse(*lsn), *off));
+    Ok((
+        sps,
+        pages
+            .into_iter()
+            .map(|(_, off, page)| (off, page))
+            .collect(),
+    ))
 }
 
 /// Byte offset in the log of `lsn`, or `None` if the geometry is nonsense.
