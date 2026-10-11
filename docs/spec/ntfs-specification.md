@@ -1,152 +1,88 @@
-# NTFS Specification
+# NTFS storage and behavior specification
 
-> Consolidated, attributed reference for the `rust-fs-ntfs` library. See
-> [readme.md](readme.md) for licensing posture, attribution scheme, and the list
-> of permitted sources.
+## Reading guide
 
-## Table of contents
+NTFS represents a file as a collection of attributes in one or more Master File
+Table (MFT) records. A pathname is a route through directory indexes to a record;
+it is not the file's identity. A stream can occupy bytes inside the record or
+clusters elsewhere on the volume. The record describes those clusters with a
+mapping-pairs list. Allocation bitmaps describe ownership at different levels.
+Metadata recovery adds another layer: a record on disk may be older than a logged
+change that must be replayed before writing safely.
 
-| §   | Topic                          | File                                                                       |
-| --- | ------------------------------ | -------------------------------------------------------------------------- |
-| 1   | Volume geometry & boot sector  | [sections/01-geometry-boot.md](sections/01-geometry-boot.md)               |
-| 2   | MFT & records                  | [sections/02-mft-records.md](sections/02-mft-records.md)                   |
-| 3   | Data runs & cluster allocation | [sections/03-data-runs-bitmap.md](sections/03-data-runs-bitmap.md)         |
-| 4   | Indexes & directories          | [sections/04-indexes-directories.md](sections/04-indexes-directories.md)   |
-| 5   | $LogFile & journal             | [sections/05-logfile-journal.md](sections/05-logfile-journal.md)           |
-| 6   | Special streams                | [sections/06-special-streams.md](sections/06-special-streams.md)           |
+These relationships are implemented in [record_build.rs](../../src/record_build.rs),
+[read.rs](../../src/read.rs), [data_runs.rs](../../src/data_runs.rs),
+[index_io.rs](../../src/index_io.rs), and [logfile_replay.rs](../../src/logfile_replay.rs).
+Microsoft's [MFT developer notes](https://learn.microsoft.com/en-us/windows/win32/devnotes/master-file-table)
+describe the record-and-attribute model. **DOCUMENTED / IMPLEMENTED.**
 
-Supporting docs:
+Read chapters 1–4 to follow a pathname down to physical bytes, chapter 6 for the
+payload structures attached to files, and chapter 5 for interrupted operations.
+Chapter 7 joins them into file lifecycles and explains the current driver's limits.
 
-- [readme.md](readme.md) — sources, attribution tags, workflow
-- [notes/open-questions.md](notes/open-questions.md) — `[UNVERIFIED]` claims awaiting test
-- [notes/references.md](notes/references.md) — master reference list
+## Contents
 
-## Document conventions
+| Chapter | Topic | Main questions |
+| --- | --- | --- |
+| [1](sections/01-geometry-boot.md) | Geometry and boot | Where does addressing start? What are the units and size encodings? |
+| [2](sections/02-mft-records.md) | Records and attributes | How are records protected, referenced, reused, and extended? |
+| [3](sections/03-data-runs-bitmap.md) | Mapping and allocation | Where are stream bytes? What do holes and initialized length mean? |
+| [4](sections/04-indexes-directories.md) | Names and indexes | How do directory keys route to records and grow into trees? |
+| [5](sections/05-logfile-journal.md) | Recovery and change journal | How do restart pages, redo, undo, and change notifications differ? |
+| [6](sections/06-special-streams.md) | Other payloads and system files | How are EAs, reparse data, security, volume metadata, and IDs represented? |
+| [7](sections/07-file-lifecycle.md) | Behavior across structures | What changes during create, write, resize, link, rename, delete, and mount? |
 
-- All factual claims carry an attribution tag — see
-  [readme.md → Attribution tags](readme.md#attribution-tags).
-- "MFT entry" and "MFT record" are interchangeable; prefer "record".
-- "Cluster" = NTFS allocation unit; "sector" = underlying device block. Cluster ≥ sector.
-- Hex byte offsets are zero-based within the structure unless stated otherwise.
-- Little-endian unless explicitly noted.
+Supporting material:
 
-### Status legend
+- [Evidence conventions](readme.md)
+- [Source and test coverage](coverage.md)
+- [Knowledge gaps and experiments](notes/open-questions.md)
+- [Primary references](notes/references.md)
 
-| Symbol | Meaning                                                                  |
-| ------ | ------------------------------------------------------------------------ |
-| ✅     | Implemented in `rust-fs-ntfs` and exercised by tests                     |
-| 🟡     | Partial — read path works, write path TBD (or vice versa)                |
-| ⛔     | Not implemented — captured here for reference only                       |
-| 🔬     | Tracked as `[UNVERIFIED]` — needs an experimental confirmation pass      |
+## Conventions
 
-### Page layout for section files
+All numeric fields in the tables are little-endian unless stated otherwise.
+Offsets are hexadecimal bytes relative to the named containing structure.
+`u16`, `u32`, and `u64` indicate unsigned integers of that width; `i8` and signed
+mapping-pair deltas require sign extension. A UTF-16 length is a count of 16-bit
+code units unless the field explicitly counts bytes. Names are not NUL-terminated
+unless their structure says so.
 
-Every file under `sections/` follows the same template:
+- **LCN**: logical cluster number relative to the volume's beginning.
+- **VCN**: virtual cluster number relative to an attribute's logical stream.
+- **File reference**: 48-bit record number plus 16-bit reuse sequence.
+- **USA**: update sequence array, protecting multi-stride transfers.
+- **LSN**: log sequence number in `$LogFile`.
+- **USN**: change-journal sequence number, or update sequence number in a USA;
+  context distinguishes these unrelated uses of the abbreviation.
 
-```markdown
-[← Prev: <prev-title>](<prev-file>) | [TOC](../ntfs-specification.md) | [Next: <next-title>](<next-file>)
+A sector, cluster, FILE record, INDX block, and log page are different units.
+Never substitute one size for another. Nor should a bitmap bit be called a VCN:
+its meaning depends on which bitmap is being read.
 
-# <N>. <Section title>
+Limits in parser code describe what this driver accepts. Format limits and Windows
+version limits require independent evidence. In particular, NTFS does not require
+512-byte logical sectors exclusively, all files do not fit in one MFT record, and
+the MFT is not an indefinitely contiguous array after its bootstrap extent.
 
-## Overview
-…
+## Boundaries of this reference
 
-## <Subsection> {#anchor-slug}
-…facts with attribution tags…
+This is a source-grounded reference, not a claim to have reconstructed all NTFS.
+Kernel caching, file sharing and open-handle semantics, ACL enforcement, VSS,
+BitLocker, Storage Spaces, EFS cryptography, and TxF recovery remain outside the
+implemented storage model. Structures known only by name are included as gaps,
+not filled with invented field layouts.
 
-## References
-…links cited in this section…
+The previous draft's proposed CRC32 footer on ordinary NTFS 3.1 FILE records,
+`TXBG`/`TXCM` log signatures, and disabled-undo recovery model have no basis in the
+reviewed implementation or linked record documentation. They are removed rather
+than left as instructions to a future implementer. USA checks detect incomplete
+transfers; they are not general checksums of record contents.
 
-## Open questions
-…section-local `[UNVERIFIED]` items…
+## Revision record
 
-[← Prev: <prev-title>](<prev-file>) | [TOC](../ntfs-specification.md) | [Next: <next-title>](<next-file>)
-```
-
-- Every non-trivial subsection has a stable anchor slug `{#anchor-slug}` so other
-  sections can deep-link into it as `[§N.M Title](path#anchor-slug)`.
-- The first and last section files use only the directions that exist (no Prev on §1,
-  no Next on the last).
-- Prefer relative paths: `../ntfs-specification.md`, `02-mft-records.md`.
-- When citing another section inline, link the anchor:
-  `see [USA fixup](02-mft-records.md#usa-fixup) for the per-sector tail rewrite`.
-
-## Cross-section concerns
-
-- **NTFS versions** (1.2 / 3.0 / 3.1) — definitional content lives in §1
-  ([Volume geometry](sections/01-geometry-boot.md)); per-version feature differences
-  are repeated locally in each section that depends on them.
-- **Update Sequence Array (USA)** fixup — applies to every multi-sector record (MFT,
-  INDX, RCRD). Defined once in [§2 MFT records](sections/02-mft-records.md#usa-fixup)
-  and referenced from §4 and §5.
-- **Endianness, signature checks, magic numbers** — listed in
-  [§1 Volume geometry](sections/01-geometry-boot.md) alongside the boot sector
-  reference.
-- **Repair semantics** — `rust-fs-ntfs` does not implement repair. Repair-flavoured
-  rules (chkdsk-style validation, `$LogFile` replay) are out of scope; we only
-  document the format invariants those rules imply.
-
-## Capability and knowledge gaps
-
-This section is the negative-knowledge complement to the per-section content.
-Together, "what we know" (spec sections) + "what we do not know or have not
-implemented" (this section) = 100% of the design space.
-
-### Unimplemented features
-
-These are format-level capabilities that `rust-fs-ntfs` does not implement.
-Reading volumes that use them may be partial; writing them is not supported.
-
-| Feature | Section | Tracking |
-| ------- | ------- | -------- |
-| LZNT1 compression (read + write) | §6 LZNT1 | Not started |
-| `$LogFile` crash-recovery replay | §5 WAL recovery | Not started |
-| DOS 8.3 short-name generation (write) | §4 DOS alias | `status.md` |
-| B+ tree split/merge for large directories | §4 `$INDEX_ALLOCATION` | `status.md` |
-| `$MFTMirr` maintenance on every write | §2 `$MFTMirr` | Not started |
-| `$ATTRIBUTE_LIST` base-overflow emission | §2 `$ATTRIBUTE_LIST` | Not started |
-| Backup boot sector bidirectional sync | §1 backup boot | `status.md` |
-| `$Extend\$Reparse` index entry maintenance | §6 `$Reparse` index | `status.md` |
-| Non-resident `$BITMAP:$I30` (large dirs) | §4 index bitmap | `status.md` |
-| Bad-cluster relocation (`$BadClus` updates) | §3 `$BadClus` | Not started |
-| EFS (`$EFS` `$LOGGED_UTILITY_STREAM`) | §6 EFS | Not started |
-| Transactional NTFS (`$TXF_DATA`) | §6 `$TXF_DATA` | Not started |
-| `$Quota` enforcement | §6 `$Quota` | Not started |
-| `$ObjId` maintenance on create/rename/delete | §6 `$ObjId` | Not started |
-
-### Highest-priority unverified claims
-
-These are structural claims that affect write-path correctness but have not yet
-been confirmed by a black-box test or a permitted spec citation. Items marked
-`[BLOCKING]` are suspected to cause chkdsk failures or Windows mount errors if
-wrong.
-
-| Claim | Section | Priority | Notes |
-| ----- | ------- | -------- | ----- |
-| MFT record CRC32 footer is computed *after* USA revert, on post-fixup bytes | §2 USA | `[BLOCKING]` | Not yet validated; `rust-fs-ntfs` does not emit or check it |
-| `$MFTMirr` mirrors exactly `N = mirror_size / record_size` records, not a hardcoded 4 | §2 `$MFTMirr` | `[BLOCKING]` | Used in repair decision matrix; not exercised by any test |
-| `COLLATION_NTOFS_SID = 0x11` — numeric value for `$Quota:$O` | §4 collation | Medium | Not emitted by codebase; numeric value is conventional |
-| `$VOLUME_INFORMATION` flag bit values (`0x0001` dirty, `0x8000` modified_by_chkdsk, etc.) | §6 `$Volume` | Medium | Conventional values; not tested against `[MS-NTFS]` |
-| `$Secure:$SDS` entry MUST NOT span a 256 KiB mirror boundary | §6 `$SDS` | Medium | Implied by mirror granularity; not verified against Windows |
-| `$STANDARD_INFORMATION` timestamp authority — SI wins over `$FILE_NAME` on conflict | §2 timestamps | Low | Operational observation only; no spec citation |
-| `chkdsk /F` NEVER collapses base-overflow extension records back to base | §2 `$ATTRIBUTE_LIST` | Low | Behaviour of closed-source chkdsk is not documented |
-| Backup boot sector is exactly at the last sector of the partition | §1 backup boot | Low | Conventional; `rust-fs-ntfs` writes it there but doesn't test recovery from it |
-
-### What the spec does NOT cover
-
-- Kernel-internal memory management, caching, or paging within `ntfs.sys`.
-- Windows kernel object model (FCBs, SCBs, CCBs) — format-level only.
-- SMB/NFS or network-layer interaction with NTFS.
-- Volume Shadow Copy Service (VSS) / snapshot interaction.
-- Storage Spaces, BitLocker, or hardware RAID interplay with NTFS geometry.
-
----
-
-## Changelog
-
-Append-only. Date, change, rationale.
-
-| Date       | Change                                                                       |
-| ---------- | ---------------------------------------------------------------------------- |
-| 2026-05-03 | Skeleton + first-cut sections drafted across §1–§6                           |
-| 2026-05-25 | [UNVERIFIED]→[OBSERVED] upgrades: SDH hash (src/sds.rs), collation codes (src/mkfs.rs), file attribute bits (src/record_build.rs, src/write.rs). Fixed $SII collation code (0x10 not 0x13). Added FA_NTFS_VIEW_INDEX and FILE_ATTRIBUTE_REPARSE_POINT to §2 table. Corrected namespace heuristic in §4. Added capability-gap matrix. |
+| Date | Change |
+| --- | --- |
+| 2026-05-03 | Initial six-chapter draft. |
+| 2026-05-25 | Earlier source-derived updates to security hashes, collation and namespaces. |
+| 2026-10-11 | Reconciled chapters with native read/write, MFT growth, index splitting, compression reads, and redo/undo replay; separated evidence types; added lifecycle explanations and a concrete question register. |
