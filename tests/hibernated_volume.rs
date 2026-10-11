@@ -34,6 +34,10 @@ use fs_ntfs::{fs_ntfs_mount, fs_ntfs_umount};
 const SIZE: u64 = 64 << 20;
 
 /// A volume this crate formatted, holding `/hiberfil.sys` with `contents`.
+///
+/// The file is written under another name and then renamed. Created empty
+/// as `hiberfil.sys`, it is shorter than its header, which is a volume
+/// Windows is hibernated on, and every write that would fill it is refused.
 fn volume_with_hiberfil(stem: &str, contents: &[u8]) -> String {
     let img = common::temp_image_path(stem);
     std::fs::File::create(&img)
@@ -43,10 +47,12 @@ fn volume_with_hiberfil(stem: &str, contents: &[u8]) -> String {
     format_filesystem(&mut dev, SIZE, 4096, 4096, None, Some(1)).expect("format");
     drop(dev);
     let fs = Filesystem::mount_rw(&img).expect("mount the fresh volume");
-    fs.create_file("/", "hiberfil.sys")
-        .expect("create hiberfil.sys");
-    fs.write_file_contents("/hiberfil.sys", contents)
-        .expect("write hiberfil.sys");
+    fs.create_file("/", "hiberfil.new")
+        .expect("create hiberfil.new");
+    fs.write_file_contents("/hiberfil.new", contents)
+        .expect("write hiberfil.new");
+    fs.rename("/hiberfil.new", "hiberfil.sys")
+        .expect("rename hiberfil.new to hiberfil.sys");
     img
 }
 
