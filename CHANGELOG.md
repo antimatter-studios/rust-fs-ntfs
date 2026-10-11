@@ -57,6 +57,11 @@
   and it dumps no tables. Replay read that 0 as an LSN and refused the log;
   analysis now starts at the checkpoint itself, as Windows' restart does on
   the volume new in `test-disks/`.
+- **`chore test:scripts` passes under a developer's own `.test-env`.**
+  chore exports that file into every task, and `run-matrix-test-env.sh`
+  passed its `HOST_IMAGE_DIR` (the README suggests `/tmp`) on to the
+  sandboxed run, which failed the case that names none. The test clears the
+  developer's settings, and checks that nothing reaches them.
 
 ## [0.9.0] — 2026-10-06
 
