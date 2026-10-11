@@ -38,18 +38,16 @@
 #   - From the host, through the guest's ssh:
 #       chore vm:setup
 #   - On the VM directly, as an administrator (provisioning App Installer
-#     for all users needs one), naming IMG_VHD_REF and FS_CORE_REF:
-#       powershell -ExecutionPolicy Bypass -File setup-windows-vm.ps1 -VhdRef v0.6.0 -CoreRef v0.3.8
+#     for all users needs one), naming IMG_VHD_REF:
+#       powershell -ExecutionPolicy Bypass -File setup-windows-vm.ps1 -VhdRef v0.6.1
 #
 # Idempotent: every step checks before installing, so re-running is safe.
 
 param(
     [string]$Workdir = "$env:USERPROFILE\dev",
-    # rust-img-vhd's tag and the rust-fs-core tag it path-depends on:
-    # IMG_VHD_REF and FS_CORE_REF in chores.yml, the pins CI builds it at,
-    # which setup-windows-vm.sh reads and passes.
-    [Parameter(Mandatory = $true)][string]$VhdRef,
-    [Parameter(Mandatory = $true)][string]$CoreRef
+    # rust-img-vhd's tag: IMG_VHD_REF in chores.yml, the pin CI builds it
+    # at, which setup-windows-vm.sh reads and passes.
+    [Parameter(Mandatory = $true)][string]$VhdRef
 )
 
 $ErrorActionPreference = "Continue"  # winget writes progress to stderr;
@@ -219,31 +217,23 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 # the binary matches the VM's gnullvm toolchain target and CPU arch without
 # us maintaining a cross-build pipeline.
 #
-# It used to clone the default branch and pull it on every run. That is a
-# different tool from the one CI builds, and rust-img-vhd path-depends on
-# rust-fs-core (`../rust-fs-core`), which was never there, so it stopped
-# building at all ("failed to read ...\rust-fs-core\Cargo.toml"). Now both
-# are cloned at their pins, side by side, as CI's "Install rust-img-vhd"
-# step does, in a directory of their own for each pair of pins.
-$vhdPair = Join-Path $workdirPath "rust-img-vhd-$VhdRef-core-$CoreRef"
-$vhdRepoDir = Join-Path $vhdPair "rust-img-vhd"
-foreach ($sibling in @(
-        @{ Name = "rust-img-vhd"; Ref = $VhdRef },
-        @{ Name = "rust-fs-core"; Ref = $CoreRef })) {
-    $dir = Join-Path $vhdPair $sibling.Name
-    if (Test-Path $dir) {
-        Write-Host "[setup] $($sibling.Name) $($sibling.Ref) already cloned"
-        continue
-    }
-    Write-Host "[setup] cloning $($sibling.Name) $($sibling.Ref) into $dir"
-    git clone --quiet --depth 1 --branch $sibling.Ref "https://github.com/antimatter-studios/$($sibling.Name).git" $dir 2>&1 |
+# It used to clone the default branch and pull it on every run, which is a
+# different tool from the one CI builds. Each tag gets a directory of its
+# own; from v0.6.1 the checkout needs nothing beside it (rust-img-vhd#148),
+# and --locked builds the dependency versions its own CI tested.
+$vhdRepoDir = Join-Path $workdirPath "rust-img-vhd-$VhdRef"
+if (Test-Path $vhdRepoDir) {
+    Write-Host "[setup] rust-img-vhd $VhdRef already cloned"
+} else {
+    Write-Host "[setup] cloning rust-img-vhd $VhdRef into $vhdRepoDir"
+    git -c advice.detachedHead=false clone --quiet --depth 1 --branch $VhdRef "https://github.com/antimatter-studios/rust-img-vhd.git" $vhdRepoDir 2>&1 |
         Select-Object -Last 3 | ForEach-Object { Write-Host "        $_" }
-    if ($LASTEXITCODE -ne 0) { throw "git clone $($sibling.Name) $($sibling.Ref) failed (exit $LASTEXITCODE)" }
+    if ($LASTEXITCODE -ne 0) { throw "git clone rust-img-vhd $VhdRef failed (exit $LASTEXITCODE)" }
 }
 
-Write-Host "[setup] cargo install --path $vhdRepoDir --features cli --bin rust-img-vhd"
+Write-Host "[setup] cargo install --locked --path $vhdRepoDir --features cli --bin rust-img-vhd"
 Push-Location $vhdRepoDir
-cargo install --path . --features cli --bin rust-img-vhd 2>&1 |
+cargo install --locked --path . --features cli --bin rust-img-vhd 2>&1 |
     Select-Object -Last 3 | ForEach-Object { Write-Host "        $_" }
 $cargoExit = $LASTEXITCODE
 Pop-Location

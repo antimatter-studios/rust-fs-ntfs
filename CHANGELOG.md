@@ -47,10 +47,11 @@
   - The test work paths are excluded from Defender's real-time scanning:
     with them scanned, LLVM-MinGW's ~9,000 files unpacked at 1.6 a second,
     against 18 a second without.
-  - `rust-img-vhd` is built at `IMG_VHD_REF`, beside `rust-fs-core` at
-    `FS_CORE_REF`, as CI builds it, and with rustup's default host set to
-    gnullvm, so its `rust-toolchain.toml` does not pick MSVC. It used to
-    build the default branch with no `rust-fs-core` beside it.
+  - `rust-img-vhd` is built at `IMG_VHD_REF`, as CI builds it, with
+    `--locked`, and with rustup's default host set to gnullvm, so its
+    `rust-toolchain.toml` does not pick MSVC. It used to build the default
+    branch, which needed a `rust-fs-core` checkout beside it that was never
+    there.
   - A failed clone or `cargo install` stops the setup. It printed "Setup
     complete" over both.
 - **`cargo install` puts only `rust-fs-ntfs` on PATH.** `rust-ntfs`, the
