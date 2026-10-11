@@ -35,6 +35,10 @@
   keeps no copy.** `scripts/core.sh` and `scripts/tier.sh` are gone; CI and
   chores run `../rust-fs-core/scripts/NAME.sh` at the pinned version
   (rust-fs-core 0.3.3, #212).
+- **The Windows jobs build the VHD writer from its own checkout, at
+  rust-img-vhd v0.6.1, with `--locked`.** No `rust-fs-core` is cloned beside it
+  any more, so the writer is built against the core it was tested with, not
+  the one this repository pins (#462).
 - **The tier budgets are a data file.** The measured table that lived inside
   the old `scripts/tier.sh` is `scripts/tier-budgets.txt`, with its
   measurements, and rust-fs-core's runner reads it (`tier.sh --refuse-skips
