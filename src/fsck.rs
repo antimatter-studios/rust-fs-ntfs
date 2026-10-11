@@ -46,7 +46,7 @@
 //! memory-mapped image) can drive the same logic via callbacks. See the
 //! C ABI `fs_ntfs_fsck_with_callbacks` for the external entry point.
 
-use crate::error::Error;
+use crate::error::{Error, Kind};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -458,6 +458,10 @@ pub fn fsck_io<'cb, T: FsckIo>(
     //   done completely, refused before a byte is written.
     //
     // Then the dirty flag, if set, is cleared.
+    //
+    // NOTHING AT ALL ON A VOLUME WINDOWS IS HIBERNATED ON. It resumes from
+    // what it cached, and would not see the replay or the cleared flag.
+    refuse_if_hibernated(io, "fsck")?;
     let mut emit = |phase: &str, done: u64, total: u64| {
         if let Some(cb) = progress.as_deref_mut() {
             cb(phase, done, total);
@@ -614,6 +618,73 @@ pub fn replay_logfile_io<T: FsckIo>(io: &mut T) -> Result<ReplayReport, Error> {
     })
 }
 
+/// `hiberfil.sys`'s header: the first page, which says whether Windows is
+/// hibernated on the volume.
+const HIBERFIL_HEADER_BYTES: usize = 4096;
+
+/// Why the volume must not be written, if Windows is hibernated on it
+/// (#137); `None` if it is not.
+///
+/// Hibernation and Fast Startup save the running kernel, NTFS's cached
+/// metadata included, in `hiberfil.sys` in the root, and the next boot
+/// resumes from it. Windows does not see a change made in between: its
+/// next write lands on metadata that no longer matches what it cached. The
+/// log cannot tell this from a crash, so a replay is no answer either.
+///
+/// The test is ntfs-3g's, which refuses a read-write mount on it: a header
+/// beginning `hibr`, or `HIBR` from Windows 8, or a file too short to hold
+/// a header at all. A header of zeros is not hibernated. A `hiberfil.sys`
+/// that cannot be read is an error, which a caller about to write refuses.
+pub fn hibernation_io<T: FsckIo>(io: &mut T) -> Result<Option<String>, Error> {
+    let record = match crate::read::resolve_path(io, "/hiberfil.sys") {
+        Ok(record) => record,
+        Err(e) if e.kind() == Kind::NotFound => return Ok(None),
+        Err(e) => return Err(e.context("look up hiberfil.sys")),
+    };
+    let header = crate::read::read_attribute_range(
+        io,
+        record,
+        AttrType::Data,
+        None,
+        0,
+        HIBERFIL_HEADER_BYTES,
+    )
+    .map_err(|e| e.context("read hiberfil.sys's header"))?;
+    if header.len() < HIBERFIL_HEADER_BYTES {
+        return Ok(Some(format!(
+            "hiberfil.sys is {} bytes, too short to hold its {HIBERFIL_HEADER_BYTES}-byte header",
+            header.len()
+        )));
+    }
+    match &header[..4] {
+        b"hibr" | b"HIBR" => Ok(Some(format!(
+            "hiberfil.sys's header begins {:?}",
+            String::from_utf8_lossy(&header[..4])
+        ))),
+        _ => Ok(None),
+    }
+}
+
+/// Refuse to write to a volume Windows is hibernated on, before anything
+/// is written: see [`hibernation_io`]. `doing` names what was refused.
+fn refuse_if_hibernated<T: FsckIo>(io: &mut T, doing: &str) -> Result<(), Error> {
+    let why = hibernation_io(io).map_err(|e| {
+        Error::refused(format!(
+            "{doing} refused: hiberfil.sys could not be read ({e}), so Windows may be \
+             hibernated on this volume"
+        ))
+    })?;
+    match why {
+        None => Ok(()),
+        Some(why) => Err(Error::refused(format!(
+            "{doing} refused: Windows is hibernated on this NTFS volume ({why}). It resumes \
+             from the state it saved there, NTFS's cached metadata included, and would not \
+             see anything written now. Start Windows and shut it down fully, with Fast \
+             Startup off, then try again"
+        ))),
+    }
+}
+
 /// Make a volume ready to be opened for writing, as Windows does when it
 /// mounts one: a `$LogFile` holding work is replayed first
 /// ([`replay_logfile_io`]), so this crate's changes land on metadata that
@@ -623,6 +694,7 @@ pub fn replay_logfile_io<T: FsckIo>(io: &mut T) -> Result<ReplayReport, Error> {
 /// * the dirty flag is set. It asks for a check of the whole volume, which
 ///   a replay is not, and it is not replayed first: nothing is written to a
 ///   volume the mount then declines;
+/// * Windows is hibernated on the volume ([`hibernation_io`]);
 /// * `$LogFile` cannot be read;
 /// * the log holds work that cannot be replayed in full.
 ///
@@ -636,6 +708,7 @@ pub fn prepare_rw_mount_io<T: FsckIo>(io: &mut T) -> Result<Option<ReplayReport>
              volume to be checked (chkdsk on Windows, or fsck.ntfs) before it is written",
         ));
     }
+    refuse_if_hibernated(io, "read-write mount")?;
     let state = logfile_state_io(io).map_err(|e| {
         Error::refused(format!(
             "read-write mount refused: $LogFile could not be read ({e}), so it may hold \

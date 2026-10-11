@@ -88,6 +88,7 @@ multi-VM test matrix (`test-matrix.json`) has Windows mount, write and
 | A recycled MFT record keeps counting its sequence number | Supported | 0.5.0 | | `record_sequence_reuse.rs` |
 | An allocation the volume cannot honour | Refused before anything is written | 0.5.0 | | `allocation_bounds.rs`, `write_run_bounds.rs` |
 | A read-write mount of, or a path-based write to, a dirty volume, or one whose log cannot be replayed in full | Refused | 0.7.0; path-based writes Unreleased (#465) | #137 | `windows_interrupted_fixture.rs` |
+| A read-write mount of, or `fsck` on, a volume Windows is hibernated on: `hiberfil.sys` begins `hibr` or `HIBR`, or is too short to hold its header | Refused, with nothing written | Unreleased (#496) | #137 | `hibernated_volume.rs` |
 | `$MFT` self-growth once a resident `$MFT:$Bitmap` is full | Not supported | | W2.6 | |
 | Compressed `$DATA` writes | Refused | 0.5.0 | | `write_transform_guards.rs` |
 | `$UsnJrnl` updates | Not supported | | | |
