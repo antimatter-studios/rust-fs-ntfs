@@ -69,8 +69,11 @@ run_matrix() {
     rm -rf "$tmp/consumer/diskimages" "$tmp/host images"
     : > "$tmp/ssh.log"
     : > "$tmp/harness.log"
-    # VM_HOST in the environment must lose to the file, as it does for the
-    # harness, which sources the file over whatever it inherited.
+    # The developer's settings are cleared: the sandbox's file is the only
+    # one under test. VM_HOST in the environment must lose to the file, as
+    # it does for the harness, which sources the file over whatever it
+    # inherited.
+    env -u HOST_IMAGE_DIR -u SSH_KEY \
     VM_HOST=from-the-environment@elsewhere \
     SSH_LOG="$tmp/ssh.log" HARNESS_LOG="$tmp/harness.log" \
     PATH="${extra:+$extra:}$tmp/bin:$PATH" \
