@@ -48,6 +48,15 @@
 
 ### Fixed
 
+- **A write with no read-write mount before it replays the log first, or
+  is refused** (#137). `Filesystem::mount` followed by a mutator,
+  `write::create_file` and every other path-based mutator in `write`, and
+  `fs_ntfs_create_file` and the other C ABI functions that take an image
+  path, wrote without the check a read-write mount runs. On a volume
+  Windows left mid-write, the new file took an MFT record Windows' restart
+  gives to a file of its own, so when Windows later replayed its log one of
+  the two was lost. Each now replays a log holding work first, and refuses
+  a dirty volume or a log it cannot replay in full, with nothing written.
 - **A transient HTTP 5xx from the chore release download no longer fails a CI
   job.** Every chore download in `ci.yml`, `fuzz.yml` and `release.yml`
   retries up to five times on any error.

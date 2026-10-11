@@ -51,7 +51,7 @@ States:
 |---|---|---|---|---|
 | `fsck.ntfs` / `fsck::check_io`: dirty flag, `$LogFile`, `$MFTMirr`, every index | Supported | 0.6.0 | | `cli_fsck.rs`, `tests/cli/test-fsck.sh` |
 | `$LogFile` state, read from every record page | Supported | 0.6.0 | | `logfile_state.rs` |
-| `$LogFile` replay on `fsck` and on a read-write mount, as Windows' restart does, for every operation captured Windows logs hold; open transactions rolled back; wrapped logs; small clusters | Supported | 0.8.0 (#137) | | `windows_interrupted_fixture.rs` |
+| `$LogFile` replay on `fsck`, on a read-write mount, and before a path-based write, as Windows' restart does, for every operation captured Windows logs hold; open transactions rolled back; wrapped logs; small clusters | Supported | 0.8.0 (#137); path-based writes Unreleased (#465) | | `windows_interrupted_fixture.rs` |
 | `UpdateRecordDataRoot` redo; a checkpoint that names no start | Supported | Unreleased (#456, #457) | | `windows_interrupted_fixture.rs` |
 | A log holding an operation no capture has held, a prepared or committed transaction not forgotten, or an LFS version other than 2.x | Refused for writing, with nothing written | 0.8.0 (#137) | #137 | `windows_interrupted_fixture.rs` |
 | A read-only mount of a volume whose log holds work | Partial: read as it is on disk, without replaying | 0.8.0 | #137 | |
@@ -84,7 +84,7 @@ multi-VM test matrix (`test-matrix.json`) has Windows mount, write and
 | Volume label | Supported | 0.1.3 | | `volume_label.rs` |
 | A recycled MFT record keeps counting its sequence number | Supported | 0.5.0 | | `record_sequence_reuse.rs` |
 | An allocation the volume cannot honour | Refused before anything is written | 0.5.0 | | `allocation_bounds.rs`, `write_run_bounds.rs` |
-| A read-write mount of a dirty volume, or one whose log cannot be replayed in full | Refused | 0.7.0 | #137 | `windows_interrupted_fixture.rs` |
+| A read-write mount of, or a path-based write to, a dirty volume, or one whose log cannot be replayed in full | Refused | 0.7.0; path-based writes Unreleased (#465) | #137 | `windows_interrupted_fixture.rs` |
 | `$MFT` self-growth once a resident `$MFT:$Bitmap` is full | Not supported | | W2.6 | |
 | Compressed `$DATA` writes | Refused | 0.5.0 | | `write_transform_guards.rs` |
 | `$UsnJrnl` updates | Not supported | | | |

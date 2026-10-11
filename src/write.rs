@@ -21,6 +21,19 @@ use crate::mft_io::{
 
 use std::path::Path;
 
+/// Open `image` for one of the path-based mutators below. Each of them
+/// opens the image afresh with no read-write mount before it, so each runs
+/// the check a read-write mount runs (#137): a `$LogFile` holding work is
+/// replayed first, and a dirty volume, or a log that cannot be read or
+/// replayed in full, is refused with nothing written. Without it, a write
+/// landed on metadata whose committed changes were still in the log, in an
+/// MFT record Windows' own restart would later give to another file.
+fn open_for_write(image: &Path) -> Result<PathIo, Error> {
+    let mut io = PathIo::open_rw(image)?;
+    crate::prepare_rw_mount(&mut io)?;
+    Ok(io)
+}
+
 // ---------------------------------------------------------------------------
 // Timestamps
 // ---------------------------------------------------------------------------
@@ -53,7 +66,7 @@ const SI_SECURITY_ID: usize = 0x34;
 /// parent directory's `$FILE_NAME` index (Windows itself only updates
 /// them on rename/create).
 pub fn set_times(path: &Path, file_path: &str, times: FileTimes) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(path)?;
+    let mut io = open_for_write(path)?;
     set_times_io(&mut io, file_path, times)
 }
 
@@ -72,7 +85,7 @@ pub fn set_times_by_record_number(
     record_number: u64,
     times: FileTimes,
 ) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(path)?;
+    let mut io = open_for_write(path)?;
     set_times_by_record_number_io(&mut io, record_number, times)
 }
 
@@ -305,7 +318,7 @@ pub fn read_si_full_io<T: BlockIo + ?Sized>(
 /// support") — this API is the minimal "point a file at the
 /// existing catalog entry" surface.
 pub fn set_security_id(path: &Path, file_path: &str, security_id: u32) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(path)?;
+    let mut io = open_for_write(path)?;
     set_security_id_io(&mut io, file_path, security_id)
 }
 
@@ -344,7 +357,7 @@ pub fn set_file_attributes(
     file_path: &str,
     change: FileAttributesChange,
 ) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(path)?;
+    let mut io = open_for_write(path)?;
     set_file_attributes_io(&mut io, file_path, change)
 }
 
@@ -363,7 +376,7 @@ pub fn set_file_attributes_by_record_number(
     record_number: u64,
     change: FileAttributesChange,
 ) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(path)?;
+    let mut io = open_for_write(path)?;
     set_file_attributes_by_record_number_io(&mut io, record_number, change)
 }
 
@@ -419,7 +432,7 @@ pub fn write_at(image: &Path, file_path: &str, offset: u64, data: &[u8]) -> Resu
     if data.is_empty() {
         return Ok(0);
     }
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     write_at_io(&mut io, file_path, offset, data)
 }
 
@@ -448,7 +461,7 @@ pub fn write_at_by_record_number(
     if data.is_empty() {
         return Ok(0);
     }
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     write_at_by_record_number_io(&mut io, record_number, offset, data)
 }
 
@@ -784,7 +797,7 @@ fn bytes_to_run_end(run: &DataRun, cluster_size: u64, file_offset: u64) -> Resul
 /// Rejects: grow (new_size &gt; current size), resident `$DATA`,
 /// compressed / sparse / encrypted flag set.
 pub fn truncate(image: &Path, file_path: &str, new_size: u64) -> Result<u64, Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     truncate_io(&mut io, file_path, new_size)
 }
 
@@ -808,7 +821,7 @@ pub fn truncate_by_record_number(
     record_number: u64,
     new_size: u64,
 ) -> Result<u64, Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     truncate_by_record_number_io(&mut io, record_number, new_size)
 }
 
@@ -944,7 +957,7 @@ pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
 ///   header's reserved space (we don't shift following attributes —
 ///   that's W2.1 work). Most grows need 0 or 1 extra encoded bytes.
 pub fn grow_nonresident(image: &Path, file_path: &str, new_size: u64) -> Result<u64, Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     grow_nonresident_io(&mut io, file_path, new_size)
 }
 
@@ -962,7 +975,7 @@ pub fn grow_nonresident_by_record_number(
     record_number: u64,
     new_size: u64,
 ) -> Result<u64, Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     grow_nonresident_by_record_number_io(&mut io, record_number, new_size)
 }
 
@@ -1265,7 +1278,7 @@ fn write_u64_at(record: &mut [u8], off: usize, v: Option<u64>) {
 /// Walking + patching `$INDEX_ALLOCATION` blocks is a separate
 /// primitive (index_io::find_in_index_allocation, future work).
 pub fn rename_same_length(image: &Path, old_path: &str, new_name: &str) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     rename_same_length_io(&mut io, old_path, new_name)
 }
 
@@ -1582,7 +1595,7 @@ fn validate_basename(name: &str) -> Result<(), Error> {
 /// * Filename collation is case-insensitive ASCII-only (proper
 ///   NTFS upcase-table collation is future work).
 pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     create_file_io(&mut io, parent_path, basename)
 }
 
@@ -1886,7 +1899,7 @@ fn insert_entry_in_parent(
     entry_bytes: &[u8],
     basename: &str,
 ) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     insert_entry_in_parent_io(
         &mut io,
         parent_rec,
@@ -2519,7 +2532,7 @@ fn build_named_resident_attribute(
 ///
 /// Shares the index growth limits of [`create_file`].
 pub fn mkdir(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     mkdir_io(&mut io, parent_path, basename)
 }
 
@@ -2662,7 +2675,7 @@ pub fn write_ea(
     ea_value: &[u8],
     flags: u8,
 ) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     write_ea_io(&mut io, file_path, ea_name, ea_value, flags)
 }
 
@@ -2696,7 +2709,7 @@ pub fn write_ea_io<T: BlockIo + ?Sized>(
 
 /// Remove an EA by name (case-insensitive). Errors if not found.
 pub fn remove_ea(image: &Path, file_path: &str, ea_name: &[u8]) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     remove_ea_io(&mut io, file_path, ea_name)
 }
 
@@ -2866,7 +2879,7 @@ pub fn write_reparse_point(
     reparse_tag: u32,
     data: &[u8],
 ) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     write_reparse_point_io(&mut io, file_path, reparse_tag, data)
 }
 
@@ -2904,7 +2917,7 @@ pub fn write_reparse_point_io<T: BlockIo + ?Sized>(
 /// Remove the `$REPARSE_POINT` attribute and clear the
 /// `FILE_ATTRIBUTE_REPARSE_POINT` flag.
 pub fn remove_reparse_point(image: &Path, file_path: &str) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     remove_reparse_point_io(&mut io, file_path)
 }
 
@@ -3002,7 +3015,7 @@ pub fn create_symlink(
     target: &str,
     relative: bool,
 ) -> Result<u64, Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     create_symlink_io(&mut io, parent_path, basename, target, relative)
 }
 
@@ -3229,7 +3242,7 @@ pub fn read_volume_label_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<String, E
 /// Returns `Err` if the encoded label exceeds
 /// [`VOLUME_LABEL_MAX_UTF16`] code units.
 pub fn set_volume_label(image: &Path, label: &str) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     set_volume_label_io(&mut io, label)
 }
 
@@ -3400,7 +3413,7 @@ pub fn read_object_id_extended_io<T: BlockIo + ?Sized>(
 /// 48 bytes of DLT Birth-volume / Birth-object / Birth-domain GUIDs
 /// (MS-FSCC §2.4.6), use [`write_object_id_extended`].
 pub fn write_object_id(image: &Path, file_path: &str, object_id: &[u8; 16]) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     write_object_id_io(&mut io, file_path, object_id)
 }
 
@@ -3430,7 +3443,7 @@ pub fn write_object_id_extended(
     birth_object_id: &[u8; 16],
     birth_domain_id: &[u8; 16],
 ) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     write_object_id_extended_io(
         &mut io,
         file_path,
@@ -3486,7 +3499,7 @@ fn write_object_id_inner<T: BlockIo + ?Sized>(
 /// had no `$OBJECT_ID` (idempotent — not an error). Returns `Ok(true)`
 /// if an attribute was removed.
 pub fn remove_object_id(image: &Path, file_path: &str) -> Result<bool, Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     remove_object_id_io(&mut io, file_path)
 }
 
@@ -3520,7 +3533,7 @@ pub fn link(
     new_parent_path: &str,
     new_basename: &str,
 ) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     link_io(&mut io, existing_path, new_parent_path, new_basename)
 }
 
@@ -3776,7 +3789,7 @@ pub fn write_named_stream_resident(
     stream_name: &str,
     data: &[u8],
 ) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     write_named_stream_resident_io(&mut io, file_path, stream_name, data)
 }
 
@@ -3836,7 +3849,7 @@ pub fn write_named_stream(
     stream_name: &str,
     data: &[u8],
 ) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     write_named_stream_io(&mut io, file_path, stream_name, data)
 }
 
@@ -3904,7 +3917,7 @@ pub fn list_named_streams_io<T: BlockIo + ?Sized>(
 /// Delete a named `$DATA` stream from a file. Fails if the stream
 /// doesn't exist.
 pub fn delete_named_stream(image: &Path, file_path: &str, stream_name: &str) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     delete_named_stream_io(&mut io, file_path, stream_name)
 }
 
@@ -3997,7 +4010,7 @@ pub fn promote_resident_data_to_nonresident(
     file_path: &str,
     new_data: &[u8],
 ) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     promote_resident_data_to_nonresident_io(&mut io, file_path, new_data)
 }
 
@@ -4158,7 +4171,7 @@ fn promote_data_commit_io<T: BlockIo + ?Sized>(
 /// [`promote_resident_data_to_nonresident`]). On any failure, every cluster
 /// allocation made here is rolled back.
 pub fn write_sparse_file(image: &Path, file_path: &str, data: &[u8]) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     write_sparse_file_io(&mut io, file_path, data)
 }
 
@@ -4427,7 +4440,7 @@ pub fn replace_file_contents_io<T: BlockIo + ?Sized>(
 /// The dispatcher attempts a resident write first and retries with promotion
 /// only when the resident writer returns its typed capacity outcome.
 pub fn write_file_contents(image: &Path, file_path: &str, new_data: &[u8]) -> Result<u64, Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     write_file_contents_io(&mut io, file_path, new_data)
 }
 
@@ -4461,7 +4474,7 @@ pub fn promote_attribute_to_nonresident(
     attr_name: Option<&str>,
     new_data: &[u8],
 ) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     promote_attribute_to_nonresident_io(&mut io, file_path, attr_type, attr_name, new_data)
 }
 
@@ -4605,7 +4618,7 @@ fn promote_attribute_commit_io<T: BlockIo + ?Sized>(
 /// (other than the implicit LAST sentinel) or if it's overflowed to
 /// `$INDEX_ALLOCATION`. Returns `Ok(())` on success.
 pub fn rmdir(image: &Path, dir_path: &str) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     rmdir_io(&mut io, dir_path)
 }
 
@@ -4749,7 +4762,7 @@ pub fn write_resident_contents(
     file_path: &str,
     new_data: &[u8],
 ) -> Result<u64, Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     write_resident_contents_io(&mut io, file_path, new_data)
 }
 
@@ -4796,7 +4809,7 @@ fn write_resident_contents_attempt_io<T: BlockIo + ?Sized>(
 /// Timestamps are refreshed to "now" in the updated index entry and
 /// `$FILE_NAME` attribute(s), matching Windows' observable behavior.
 pub fn rename(image: &Path, old_path: &str, new_basename: &str) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     rename_io(&mut io, old_path, new_basename)
 }
 
@@ -5166,7 +5179,7 @@ fn build_file_name_value(
 /// an MFT record + clusters (recoverable by scan); a reversed order
 /// could leave the file name pointing at a freed+reallocated record.
 pub fn unlink(image: &Path, file_path: &str) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     unlink_io(&mut io, file_path)
 }
 
@@ -5352,7 +5365,7 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
 /// [`unlink_io`]. Both `unlink` and `rmdir` deliberately refuse the
 /// other's type; this is the single entrypoint that routes correctly.
 pub fn remove(image: &Path, path: &str) -> Result<(), Error> {
-    let mut io = PathIo::open_rw(image)?;
+    let mut io = open_for_write(image)?;
     remove_io(&mut io, path)
 }
 
