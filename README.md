@@ -500,37 +500,38 @@ a sibling checkout at `../fs-windows-test-harness/` pinned in
 are in `fs-windows-test-harness.toml`; the Windows-side PowerShell they
 run is in `scripts/fs-windows-test-harness/`.
 
-**Setting up the Windows VM is the harness's documentation, not this
-crate's:** follow
-[`docs/vm-setup.md`](https://github.com/antimatter-studios/fs-windows-test-harness/blob/main/docs/vm-setup.md)
-in the harness. It covers the VMware network (a host-only adapter with a
-static address, so `VM_HOST` never moves), OpenSSH and key login, the
-firewall profile, and the encrypted VM's password. Then
-`scripts/setup-windows-vm.sh` provisions what this crate needs on it
-(`format.com` / `chkdsk` tooling and `rust-img-vhd`).
+**The Windows VM is the harness's persistent Windows ARM64 guest under
+QEMU**, and setting it up is the harness's documentation, not this crate's:
+follow
+[`docs/qemu-vm.md`](https://github.com/antimatter-studios/fs-windows-test-harness/blob/main/docs/qemu-vm.md)
+in the harness. It runs on Linux ARM64 with KVM (a Raspberry Pi 5 among
+them) and on Apple Silicon macOS with HVF: install the guest once, and every
+run after that reuses it. Then `chore vm:setup` provisions what this crate
+needs on it (`format.com` / `chkdsk` tooling and `rust-img-vhd`).
 
 This machine's VM settings go in a gitignored `.test-env` at the repo
 root. The harness reads it as shell, so **quote any value with a space**:
 
 ```sh
-VM_HOST=chris@                         # the user; `chore vm:up` adds the address it finds
-VM_STATIC_IP=172.16.18.253             # the fixed address `chore vm:network` gives the VM
-SSH_KEY=/Users/<you>/.ssh/fs-windows-vm.pub
-VM_WORKDIR=C:/Users/chris/dev/rust-fs-ntfs-matrix
+VM_HOST=fswth-local                    # the guest, as `scripts/vm.sh exec` names it
+SSH_KEY=                               # empty: the guest's own ssh config names its key
+VM_WORKDIR=C:/fswth/rust-fs-ntfs       # this crate's work directory on the guest
 HOST_IMAGE_DIR=/tmp
-VM_VMX="/Users/<you>/Virtual Machines.localized/<name>.vmwarevm/<name>.vmx"
+VM_STATE=/path/to/guest/state          # only if not the harness's default state directory
 ```
 
-The VM is started and stopped by chore, reading its encryption password
-from trove (`antimatter-studios/windows-test-vm`) — unlock trove in the
-shell first:
+The VM is started and stopped by chore, which runs the harness's
+`scripts/local-vm.py` in place from the sibling checkout. Every task that
+reaches the guest runs inside `scripts/vm.sh exec`, which puts the guest's
+`ssh` and `scp` first on `PATH` and keeps any other run off the guest
+until it finishes:
 
 ```sh
 chore matrix -- smoke            # build the CLI if it changed, start the VM, run, fetch evidence
 chore matrix -- <scenario filter>
-chore vm:status                  # running or not, and whether SSH answers
-chore vm:up / vm:down            # start (and find its address) / clean shutdown
-chore vm:network                 # give the VM its fixed address, or say what is missing
+chore vm:status                  # what the guest is doing
+chore vm:up / vm:down            # start it (a running guest is reused) / clean shutdown
+chore vm:setup                   # provision this crate's tools on the guest
 ```
 
 After a run, `test-diagnostics/matrix/<scenario>/vm/` holds what Windows

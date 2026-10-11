@@ -7,7 +7,6 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/repo/scripts" "$tmp/repo/test-diagnostics/matrix/verdict-only" "$tmp/bin"
 ln -s "$ROOT/scripts/matrix-fetch-diag.sh" "$tmp/repo/scripts/matrix-fetch-diag.sh"
-ln -s "$ROOT/scripts/vm-ssh-agent.sh" "$tmp/repo/scripts/vm-ssh-agent.sh"
 printf '{"steps":[{"host":"vm"}]}\n' > "$tmp/repo/test-diagnostics/matrix/verdict-only/recipe.json"
 printf '%s\n' '{"passed":true,"verdict_shape":"clean","modes":{"/scan":{"exit":3,"state":"failed","reason":"errors"}}}' > "$tmp/verdict.json"
 

@@ -6,8 +6,8 @@
 # `export NAME="value"`, and sources the file to read it back. run-matrix.sh
 # used to grep for `^VM_HOST=` and keep everything after the `=`, so it never
 # matched a file the harness wrote, and its SSH connection mux never started
-# (#411). A file written by hand, or rewritten by scripts/vm.sh, has bare
-# `NAME=value` lines; that format must keep working too.
+# (#411). A file written by hand has bare `NAME=value` lines; that format
+# must keep working too.
 #
 # Black-box: the real run-matrix.sh runs in a sandbox, beside a stand-in
 # harness, with a stand-in `ssh` on PATH that records what it was asked to do
@@ -136,7 +136,6 @@ else
 fi
 
 # ── 2. A hand-written file: bare and single-quoted values ───────────────────
-# scripts/vm.sh rewrites VM_HOST as a bare NAME=value line.
 cat > "$tmp/consumer/.test-env" <<EOF
 VM_HOST=chris@172.16.18.253
 SSH_KEY='$tmp/key'

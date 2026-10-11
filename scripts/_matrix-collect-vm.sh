@@ -7,7 +7,9 @@
 # Usage:
 #   bash scripts/_matrix-collect-vm.sh <matrix-stdout-log>
 #
-# Requires Python 3 (uses it as a structured-JSON builder).
+# Requires Python 3 (uses it as a structured-JSON builder). Run it through
+# `scripts/vm.sh exec`, whose ssh is the QEMU guest's: its config names the
+# key, and SSH_KEY is empty. A .test-env that names a key still has it used.
 
 set -euo pipefail
 
@@ -30,13 +32,13 @@ scripts_vm="$VM_WORKDIR/scripts/fs-windows-test-harness"
 
 # Gather VM info
 vm_info_json="$(mktemp -t vm-info.XXXXXX.json)"
-ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_HOST" \
+ssh ${SSH_KEY:+-i "$SSH_KEY"} -o StrictHostKeyChecking=accept-new "$VM_HOST" \
     "powershell -ExecutionPolicy Bypass -File '$scripts_vm/vm-info.ps1'" \
     > "$vm_info_json"
 
 # Gather per-scenario verdicts
 verdicts_json="$(mktemp -t verdicts.XXXXXX.json)"
-ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$VM_HOST" \
+ssh ${SSH_KEY:+-i "$SSH_KEY"} -o StrictHostKeyChecking=accept-new "$VM_HOST" \
     "powershell -ExecutionPolicy Bypass -File '$scripts_vm/verdict-collect.ps1' -Root '$VM_WORKDIR/diag'" \
     > "$verdicts_json"
 

@@ -25,6 +25,17 @@
 
 ### Changed
 
+- **The Windows test VM is fs-windows-test-harness's QEMU guest, and the
+  VMware driver is gone.** `HARNESS_REF` moves to v4.4.0, whose persistent
+  Windows ARM64 guest runs under QEMU on Linux ARM64 (KVM, a Raspberry Pi 5
+  among them) and on Apple Silicon (HVF). `chore vm:up`, `vm:status` and
+  `vm:down` run the harness's `scripts/local-vm.py` in place, `chore
+  vm:setup` provisions the guest, and every task that reaches it runs inside
+  `scripts/vm.sh exec`, where `ssh` and `scp` are the guest's and no other
+  run can use it at the same time. `vmrun`, the trove password and SSH
+  agent, `VM_VMX`, `VM_STATIC_IP`, `vm:address` and `vm:network` are
+  removed. `.test-env` names `VM_HOST=fswth-local`, an empty `SSH_KEY`, and
+  `VM_STATE` for a guest outside the harness's default state directory.
 - **`cargo install` puts only `rust-fs-ntfs` on PATH.** `rust-ntfs`, the
   Windows test matrix's driver, is built only with the test-only `harness`
   feature, so neither `cargo install rust-fs-ntfs` nor `--features cli`

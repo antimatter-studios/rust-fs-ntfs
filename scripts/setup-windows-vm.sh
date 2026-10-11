@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# setup-windows-vm.sh -- one-time provisioning of a Windows ARM64 VM
-# for local test iteration. Mac-side wrapper around setup-windows-vm.ps1.
+# setup-windows-vm.sh -- one-time provisioning of the Windows ARM64 test VM
+# (fs-windows-test-harness's QEMU guest) for local test iteration. Host-side
+# wrapper around setup-windows-vm.ps1, run through the guest's ssh:
+#
+#     chore vm:setup        # scripts/vm.sh exec -- bash scripts/setup-windows-vm.sh
 #
 # What it does:
 #   1. SSH to the VM and copy setup-windows-vm.ps1 over.
 #   2. Execute it (idempotent -- safe to re-run).
 #   3. Verify the test pipeline can build at least once.
 #
-# After this completes, the matrix runner
-# (../fs-windows-test-harness/scripts/test-windows-matrix.sh) should work against
-# the VM.
+# After this completes, `chore matrix -- smoke` should work against the VM.
 #
 # Cost (one-time, on a fresh VM):
 #   * Rustup     ~50 MB  / ~30 s
@@ -20,8 +21,8 @@
 
 set -euo pipefail
 
-VM_HOST="${VM_HOST:-chris@192.168.213.145}"
-VM_WORKDIR="${VM_WORKDIR:-C:/Users/chris/dev/rust-fs-ntfs}"
+VM_HOST="${VM_HOST:-fswth-local}"
+VM_WORKDIR="${VM_WORKDIR:-C:/fswth/rust-fs-ntfs}"
 VM_WORKDIR_PS="${VM_WORKDIR//\//\\}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,4 +36,4 @@ ssh "${VM_HOST}" "powershell -ExecutionPolicy Bypass -File '${VM_WORKDIR_PS}\\sc
 
 echo
 echo "[setup] Done. Try a real iteration:"
-echo "    bash ${REPO_ROOT}/../fs-windows-test-harness/scripts/test-windows-matrix.sh"
+echo "    chore matrix -- smoke"
