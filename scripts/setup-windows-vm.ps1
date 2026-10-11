@@ -3,7 +3,8 @@
 # on it.
 #
 # What this installs:
-#   -. Defender exclusions for the paths the tools and the matrix write to.
+#   -. Defender exclusions for the paths the tools and the matrix write to,
+#      and for drives D: to Z:, where the matrix mounts its test volumes.
 #   0. winget -- App Installer, which the guest's Windows 11 IoT Enterprise
 #      LTSC does not ship, pinned to a winget-cli release; and winget's
 #      catalogue. See Install-Winget for why both are provisioned.
@@ -149,16 +150,30 @@ function Install-Winget {
 # vCPUs, is most of their install time: winget unpacked LLVM-MinGW's ~9,000
 # files at 1.6 a second with these paths scanned, and at 18 a second without
 # (measured 2026-10-11 on the QEMU guest). The same paths take the matrix's
-# disk images. This is a disposable test VM; nothing else on it is excluded.
-Write-Host "[setup] Defender: excluding the test work paths from real-time scanning"
-Add-MpPreference -ExclusionPath @(
+# disk images.
+#
+# THE TEST VOLUMES TOO. The matrix mounts each image at whatever drive letter
+# is free, and every file a scenario writes there would be scanned, so every
+# letter from D: to Z: is excluded. Real-time scanning cannot simply be
+# turned off: Tamper Protection is on in this guest (a signature update
+# switches it on), it silently ignores `Set-MpPreference
+# -DisableRealtimeMonitoring`, and the only supported way to turn it off is
+# the Windows Security app, which Windows 11 IoT Enterprise LTSC does not
+# ship. Exclusions it allows. This is a disposable test VM; C: outside these
+# paths is still scanned.
+Write-Host "[setup] Defender: excluding the test work paths and drives D: to Z: from real-time scanning"
+$testDrives = [char[]]([int][char]'D'..[int][char]'Z') | ForEach-Object { "${_}:\" }
+Add-MpPreference -ExclusionPath (@(
     "$env:TEMP\WinGet",
     "$env:LOCALAPPDATA\Microsoft\WinGet",
     "$env:USERPROFILE\.cargo",
     "$env:USERPROFILE\.rustup",
     $Workdir,
     "C:\fswth"
-)
+) + $testDrives)
+$excluded = @((Get-MpPreference).ExclusionPath)
+$missing = @($testDrives | Where-Object { $excluded -notcontains $_ })
+if ($missing.Count -gt 0) { throw "Defender did not take the exclusions for $($missing -join ', ')" }
 
 Install-Winget
 
@@ -246,6 +261,8 @@ Write-Host ""
 Write-Host "=== Verification ==="
 & rustc --version 2>&1 | Select-Object -First 1
 & cargo --version 2>&1 | Select-Object -First 1
+$mp = Get-MpComputerStatus
+Write-Host "Defender: real-time scanning $($mp.RealTimeProtectionEnabled), Tamper Protection $($mp.IsTamperProtected), $(@((Get-MpPreference).ExclusionPath).Count) paths excluded"
 $vhdToolBin = Get-Command rust-img-vhd -ErrorAction SilentlyContinue
 if ($vhdToolBin) {
     Write-Host "rust-img-vhd: $($vhdToolBin.Source) ($(& $vhdToolBin.Source --version 2>&1 | Select-Object -First 1))"
