@@ -63,6 +63,12 @@
   where no Windows API can reach it (#497). `set_file_attributes` changes
   only the bits `SetFileAttributes` can, and refuses DIRECTORY, SPARSE_FILE,
   REPARSE_POINT, COMPRESSED, ENCRYPTED and the reserved bits (#502).
+- **A `$DATA` run list split across MFT records is read** (#473). A file
+  whose mapping pairs continue in an extension record -- a heavily
+  fragmented file on a long-lived Windows volume -- was refused by every
+  read and by `stat`. Its segments are now stitched together in VCN order,
+  and segments that leave a gap or end short of the allocated size are
+  still refused.
 - **A write with no read-write mount before it replays the log first, or
   is refused** (#137). `Filesystem::mount` followed by a mutator,
   `write::create_file` and every other path-based mutator in `write`, and
