@@ -69,6 +69,17 @@
   read and by `stat`. Its segments are now stitched together in VCN order,
   and segments that leave a gap or end short of the allocated size are
   still refused.
+- **`fsck.ntfs` accounts for every cluster** (#517). `check_io` never
+  compared `$Bitmap` with the clusters files use, so a volume with leaked
+  clusters, clusters a file holds marked free, two files sharing a run, or a
+  run past the volume's end was reported clean. It now collects the run
+  list of every non-resident attribute in every in-use MFT record and
+  reports each of the four by kind, with `cluster_allocation` among the
+  report's `checks` and the clusters compared under `scanned`. Over a log
+  that holds work the comparison waits for the replay, since `$Bitmap` and
+  the run lists disagree until then. The features page no longer says
+  `check_io` checks every index: it checks none (#515). `CheckFinding` has
+  six new variants and `CheckReport` a `clusters_scanned` field.
 - **A write with no read-write mount before it replays the log first, or
   is refused** (#137). `Filesystem::mount` followed by a mutator,
   `write::create_file` and every other path-based mutator in `write`, and
