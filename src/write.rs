@@ -5934,7 +5934,54 @@ fn resolve_parent_and_child_io<T: BlockIo + ?Sized>(
     let parent_full = format!("/{parent_path}");
     let parent_rec = resolve_path_to_record_number_io(io, &parent_full)?;
     let file_rec = resolve_path_to_record_number_io(io, old_path)?;
-    Ok((parent_rec, file_rec, basename.to_string()))
+    // THE NAME AS STORED, NOT AS SPELLED.
+    //
+    // Resolution matches each component case-insensitively, as the index
+    // collates, and every caller then looks the record's `$FILE_NAME` up by
+    // the name returned here, case-sensitively. Returning the caller's
+    // spelling renamed `FILE.TXT` through `/d/file.txt` in the index and
+    // left the record's `$FILE_NAME` saying `FILE.TXT`, a file ntfs3 cannot
+    // open, and made a case-only rename spelled like its target a no-op
+    // (#491).
+    let stored = stored_file_name_io(io, file_rec, parent_rec, basename)?;
+    Ok((
+        parent_rec,
+        file_rec,
+        stored.unwrap_or_else(|| basename.to_string()),
+    ))
+}
+
+/// The spelling `file_rec`'s `$FILE_NAME` under `parent_rec` stores for
+/// `name`: the one whose name collates equal to `name` under `$UpCase`.
+fn stored_file_name_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_rec: u64,
+    parent_rec: u64,
+    name: &str,
+) -> Result<Option<String>, Error> {
+    let upcase = crate::upcase::UpcaseTable::load_io(io)?;
+    let (_, record) = read_mft_record_io(io, file_rec)?;
+    let wanted: Vec<u16> = name.encode_utf16().collect();
+    let stored = attr_io::iter_attributes(&record)
+        .filter(|loc| loc.type_code == AttrType::FileName as u32)
+        .find_map(|loc| {
+            let value = loc.attr_offset + loc.resident_value_offset? as usize;
+            let len = loc.resident_value_length? as usize;
+            let parent = u64::from_le_bytes(record.get(value..value + 8)?.try_into().ok()?);
+            let name_length = *record.get(value + 0x40)? as usize;
+            if parent & 0x0000_FFFF_FFFF_FFFF != parent_rec || len < 0x42 + name_length * 2 {
+                return None;
+            }
+            let stored: Vec<u16> = record
+                .get(value + 0x42..value + 0x42 + name_length * 2)?
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            (upcase.cmp_names(&stored, &wanted) == std::cmp::Ordering::Equal)
+                .then(|| String::from_utf16(&stored).ok())
+                .flatten()
+        });
+    Ok(stored)
 }
 
 /// Walk `file_path` natively and return the target's MFT record number.
