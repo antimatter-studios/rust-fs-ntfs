@@ -56,8 +56,8 @@ cli = [
   "cli-empty-directory-win-verify-chkdsk",
   "cli-windows-interrupted-1-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-6-fsck-replay-win-verify-chkdsk",
-  "cli-windows-interrupted-1-mount-replay-write-win-verify-chkdsk",
-  "cli-windows-interrupted-6-mount-replay-write-win-verify-chkdsk",
+  "cli-windows-interrupted-1-write-after-replay-win-verify-chkdsk",
+  "cli-windows-interrupted-6-write-after-replay-win-verify-chkdsk",
   "cli-windows-interrupted-wrap-span-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-wrap-boundary-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-wrap-mft-grows-fsck-replay-win-verify-chkdsk",
@@ -304,13 +304,14 @@ host = "host"
 command = "bash scripts/cli-oracle.sh replay {image_dir}/{run_id}/{scenario.image} {step.snapshot}"
 expect_exit = 0
 
-[ops.cli-mount-replay]
-# The same volume, with no fsck.ntfs: fs.ntfs mkdir and write open it
-# read-write, which replays its $LogFile at mount as Windows does, then
-# write. Writes <image>.manifest: Windows' listing of its own recovery of
-# the same image, plus every file fs.ntfs wrote, for win-cli-verify.
+[ops.cli-write-after-replay]
+# The same volume: fs.ntfs mkdir must be refused with nothing written while
+# its $LogFile holds work (#137), then fsck.ntfs -y replays it, and fs.ntfs
+# mkdir and write. Writes <image>.manifest: Windows' listing of its own
+# recovery of the same image, plus every file fs.ntfs wrote, for
+# win-cli-verify.
 host = "host"
-command = "bash scripts/cli-oracle.sh mount-replay {image_dir}/{run_id}/{scenario.image} {step.snapshot}"
+command = "bash scripts/cli-oracle.sh write-after-replay {image_dir}/{run_id}/{scenario.image} {step.snapshot}"
 expect_exit = 0
 
 [ops.cli-grow-mft]

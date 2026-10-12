@@ -1027,15 +1027,16 @@ const PATH_WRITES: [(&str, PathWrite); 3] = [
 
 #[test]
 fn every_write_without_a_read_write_mount_replays_the_log_first_or_writes_nothing() {
-    // `mount_rw` replays the log before anything is written (#137). These
-    // write over an image path with no read-write mount, and skipped that
-    // check: on snapshot 6 each put its file in MFT record 1069 and left
-    // the log holding work, where a write after `mount_rw` takes 1277.
-    // Windows' restart, run on that volume later, gives 1069 to a file of
-    // its own, and one of the two is lost. So each must refuse with
-    // nothing written, or replay first: the log holding no work, every
-    // file Windows recovered in place, and the new file in the record a
-    // write after `mount_rw` takes.
+    // A read-write mount refuses a log holding work, or replays it when
+    // asked to, before anything is written (#137). These write over an
+    // image path with no read-write mount, and skipped that check: on
+    // snapshot 6 each put its file in MFT record 1069 and left the log
+    // holding work, where a write after the replay takes 1277. Windows'
+    // restart, run on that volume later, gives 1069 to a file of its own,
+    // and one of the two is lost. So each must refuse with nothing
+    // written, or replay first: the log holding no work, every file
+    // Windows recovered in place, and the new file in the record a write
+    // after `mount_rw_replaying_log` takes.
     for (k, _) in LOG_END {
         let want = manifest(k);
         let after_mount_rw = {
