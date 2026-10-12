@@ -4354,6 +4354,28 @@ pub fn list_named_streams_io<T: BlockIo + ?Sized>(
 ) -> Result<Vec<String>, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
+    // A FILE WITH AN $ATTRIBUTE_LIST KEEPS STREAMS OUTSIDE ITS BASE RECORD.
+    //
+    // The list names every attribute instance the file has, wherever it
+    // sits, so it is what this walks when there is one. Walking the base
+    // record alone gave a file whose streams spilled into extension
+    // records a short list and no error, while each stream still read by
+    // name (#472). A stream split across records appears once per piece.
+    if attr_io::find_attribute(&record, AttrType::AttributeList, None).is_some() {
+        let list = crate::read::read_attribute_value(io, rec, AttrType::AttributeList, None)?;
+        let mut names: Vec<String> = Vec::new();
+        for entry in crate::read::parse_attribute_list(&list)? {
+            if entry.type_code != AttrType::Data as u32 {
+                continue;
+            }
+            if let Some(name) = entry.name {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        return Ok(names);
+    }
     let mut names = Vec::new();
     for loc in attr_io::iter_attributes(&record) {
         if loc.type_code != AttrType::Data as u32 {

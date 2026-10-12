@@ -121,6 +121,10 @@
   clusters returned `Err` with the stream already gone. The stream is now
   replaced in place, and its old clusters are freed only after the new
   attribute is written.
+- **Listing a file's named streams follows its `$ATTRIBUTE_LIST`** (#472).
+  Only the base record was walked, so a file whose streams spilled into
+  extension records listed some of them, with no error. The listing now
+  names every stream the attribute list holds, each once.
 - **`chore test:scripts` passes under a developer's own `.test-env`.**
   chore exports that file into every task, and `run-matrix-test-env.sh`
   passed its `HOST_IMAGE_DIR` (the README suggests `/tmp`) on to the
