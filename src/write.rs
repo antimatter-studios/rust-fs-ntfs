@@ -1696,6 +1696,40 @@ fn rename_into_new_index_slot_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     let (old_entry, new_entry) =
         index_entry_bytes_renamed_io(io, parent_rec, file_rec, ir_flags, old, new, upcase)?;
+    move_index_entry_io(
+        io,
+        parent_rec,
+        file_rec,
+        old,
+        new,
+        &old_entry,
+        &new_entry,
+        |record| index_io::rename_filename_attribute_same_length(record, old, new),
+    )
+}
+
+/// Take `old_entry` -- the parent's entry for `old` -- out of the parent's
+/// index, insert `new_entry` for `new` wherever it sorts, then rename the
+/// file's own `$FILE_NAME` with `rename_file`. Shared by a same-length
+/// rename that moves to another slot and a rename to another length in a
+/// directory with INDX blocks (#466, #474).
+///
+/// Each step is undone when a later one fails, and when an undo fails too,
+/// the error names what the volume is left holding. Taking an entry out of
+/// an interior node would orphan the subtree it points to, so
+/// `remove_parent_index_entry_io` refuses that before anything is written
+/// (#495).
+#[allow(clippy::too_many_arguments)]
+fn move_index_entry_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    file_rec: u64,
+    old: &str,
+    new: &str,
+    old_entry: &[u8],
+    new_entry: &[u8],
+    rename_file: impl FnOnce(&mut [u8]) -> Result<(), Error>,
+) -> Result<(), Error> {
     remove_parent_index_entry_io(io, parent_rec, file_rec, old).map_err(|e| {
         e.map_message(|m| {
             format!(
@@ -1706,9 +1740,9 @@ fn rename_into_new_index_slot_io<T: BlockIo + ?Sized>(
     })?;
 
     let overflows = parent_index_overflows_io(io, parent_rec)?;
-    if let Err(e) = insert_entry_in_parent_io(io, parent_rec, overflows, &new_entry, new) {
+    if let Err(e) = insert_entry_in_parent_io(io, parent_rec, overflows, new_entry, new) {
         let undo = parent_index_overflows_io(io, parent_rec).and_then(|overflows| {
-            insert_entry_in_parent_io(io, parent_rec, overflows, &old_entry, old)
+            insert_entry_in_parent_io(io, parent_rec, overflows, old_entry, old)
         });
         return Err(match undo {
             Ok(()) => e.map_message(|m| {
@@ -1727,12 +1761,10 @@ fn rename_into_new_index_slot_io<T: BlockIo + ?Sized>(
         });
     }
 
-    if let Err(e) = update_mft_record_io(io, file_rec, |record| {
-        index_io::rename_filename_attribute_same_length(record, old, new)
-    }) {
+    if let Err(e) = update_mft_record_io(io, file_rec, rename_file) {
         let undo = remove_parent_index_entry_io(io, parent_rec, file_rec, new).and_then(|()| {
             let overflows = parent_index_overflows_io(io, parent_rec)?;
-            insert_entry_in_parent_io(io, parent_rec, overflows, &old_entry, old)
+            insert_entry_in_parent_io(io, parent_rec, overflows, old_entry, old)
         });
         return Err(match undo {
             Ok(()) => e.map_message(|m| {
@@ -1764,9 +1796,33 @@ fn index_entry_bytes_renamed_io<T: BlockIo + ?Sized>(
     new_name: &str,
     upcase: &crate::upcase::UpcaseTable,
 ) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    let (mut node, entry) = index_entry_io(io, parent_rec, Some(file_rec), ir_flags, name, upcase)?
+        .ok_or_else(|| {
+            Error::io(format!(
+                "no index entry for '{name}' in parent record {parent_rec}"
+            ))
+        })?;
+    let span = entry.record_offset..entry.record_offset + entry.length;
+    let as_is = node[span.clone()].to_vec();
+    index_io::rename_index_entry_same_length(&mut node, &entry, new_name)?;
+    Ok((as_is, node[span].to_vec()))
+}
+
+/// `name`'s entry in the parent's index, wherever in the tree it sits:
+/// the node holding it -- the parent's record or an INDX block -- and
+/// where in that node it is, or `None` when the index has no such name.
+/// With `file_rec`, an entry that points at another record is an error.
+fn index_entry_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    file_rec: Option<u64>,
+    ir_flags: u8,
+    name: &str,
+    upcase: &crate::upcase::UpcaseTable,
+) -> Result<Option<(Vec<u8>, index_io::IndexEntryLocation)>, Error> {
     let (_, record) = read_mft_record_io(io, parent_rec)?;
-    let (mut node, entry) = match index_io::find_index_entry(&record, name, Some(upcase))? {
-        Some(entry) => (record, entry),
+    let found = match index_io::find_index_entry(&record, name, Some(upcase))? {
+        Some(entry) => Some((record, entry)),
         None if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 => {
             let ia = idx_block::load_for_directory_io(io, parent_rec)?;
             let mut found = None;
@@ -1778,29 +1834,20 @@ fn index_entry_bytes_renamed_io<T: BlockIo + ?Sized>(
                     break;
                 }
             }
-            found.ok_or_else(|| {
-                Error::io(format!(
-                    "no index entry for '{name}' in parent record {parent_rec}"
-                ))
-            })?
+            found
         }
-        None => {
-            return Err(Error::io(format!(
-                "no entry for '{name}' in parent's $INDEX_ROOT"
-            )))
-        }
+        None => None,
     };
-    if entry.file_record_number != file_rec {
-        return Err(Error::io(format!(
-            "the parent's index entry for '{name}' points at record {} but the resolved path \
-             points at {file_rec}",
-            entry.file_record_number
-        )));
+    if let (Some(file_rec), Some((_, entry))) = (file_rec, &found) {
+        if entry.file_record_number != file_rec {
+            return Err(Error::io(format!(
+                "the parent's index entry for '{name}' points at record {} but the resolved \
+                 path points at {file_rec}",
+                entry.file_record_number
+            )));
+        }
     }
-    let span = entry.record_offset..entry.record_offset + entry.length;
-    let as_is = node[span.clone()].to_vec();
-    index_io::rename_index_entry_same_length(&mut node, &entry, new_name)?;
-    Ok((as_is, node[span].to_vec()))
+    Ok(found)
 }
 
 /// Whether the parent's index has spilled out of `$INDEX_ROOT` into
@@ -5563,10 +5610,18 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
         .ok_or_else(|| Error::io("parent has no $INDEX_ROOT"))?;
-    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
-        return Err(Error::io(
-            "variable-length rename MVP: parent has $INDEX_ALLOCATION overflow — not yet supported",
-        ));
+    // A PARENT WITH INDX BLOCKS takes the entry out and inserts the new one
+    // wherever it sorts, through the same index paths create and unlink
+    // use. It was refused outright, and the root of every new volume has
+    // INDX blocks, so no file there could be renamed to a name of another
+    // length (#474).
+    let indexed = ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0;
+    if indexed {
+        // A different length cannot collate equal to the old name, so any
+        // entry under the new name is another file's, or another link's.
+        if index_entry_io(io, parent_rec, None, ir_flags, new_basename, &upcase)?.is_some() {
+            return Err(Error::exists(format!("'{new_basename}' already exists")));
+        }
     }
     // As in rename_same_length_io: the file's own ENTRY is not a clash.
     // Identify it by its offset, not by the record number it references:
@@ -5575,13 +5630,16 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     // entry for `file_rec` as the source allowed a variable-length rename
     // onto the file's other hard link and inserted a duplicate collation
     // key into $I30.
-    let own_entry = index_io::find_index_entry(&parent_record_bytes, &old_basename, Some(&upcase))?
-        .ok_or_else(|| Error::not_found(format!("old entry '{old_basename}' not found")))?;
-    if let Some(clash) =
-        index_io::find_index_entry(&parent_record_bytes, new_basename, Some(&upcase))?
-    {
-        if clash.record_offset != own_entry.record_offset {
-            return Err(Error::exists(format!("'{new_basename}' already exists")));
+    if !indexed {
+        let own_entry =
+            index_io::find_index_entry(&parent_record_bytes, &old_basename, Some(&upcase))?
+                .ok_or_else(|| Error::not_found(format!("old entry '{old_basename}' not found")))?;
+        if let Some(clash) =
+            index_io::find_index_entry(&parent_record_bytes, new_basename, Some(&upcase))?
+        {
+            if clash.record_offset != own_entry.record_offset {
+                return Err(Error::exists(format!("'{new_basename}' already exists")));
+            }
         }
     }
 
@@ -5609,6 +5667,42 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
             &mut new_entry_bytes,
             crate::record_build::fn_namespace_after_rename(old, new_basename),
         )?;
+    }
+
+    if indexed {
+        let (node, entry) = index_entry_io(
+            io,
+            parent_rec,
+            Some(file_rec),
+            ir_flags,
+            &old_basename,
+            &upcase,
+        )?
+        .ok_or_else(|| {
+            Error::not_found(format!(
+                "no index entry for '{old_basename}' in parent record {parent_rec}"
+            ))
+        })?;
+        let old_entry = node[entry.record_offset..entry.record_offset + entry.length].to_vec();
+        return move_index_entry_io(
+            io,
+            parent_rec,
+            file_rec,
+            &old_basename,
+            new_basename,
+            &old_entry,
+            &new_entry_bytes,
+            |record| {
+                replace_file_name_with_new_name(
+                    record,
+                    &old_basename,
+                    new_basename,
+                    parent_reference,
+                    nt_time,
+                    is_dir,
+                )
+            },
+        );
     }
 
     // A rename is two record writes with no journal between them, and

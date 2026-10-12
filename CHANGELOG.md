@@ -175,6 +175,11 @@
   passed its `HOST_IMAGE_DIR` (the README suggests `/tmp`) on to the
   sandboxed run, which failed the case that names none. The test clears the
   developer's settings, and checks that nothing reaches them.
+- **A rename to another length works in a directory with INDX blocks**
+  (#474). It was refused whenever the parent had `$INDEX_ALLOCATION`, which
+  the root of every new volume has. The entry is now taken out of the index
+  and the new one inserted where it sorts, each step undone if a later one
+  fails.
 - **`set_security_id` refuses an id with no descriptor in `$Secure:$SII`**
   (#503). Any 32-bit value was written, and Windows applies no descriptor
   to a file whose id `$SII` does not hold. Such an id is now refused with
