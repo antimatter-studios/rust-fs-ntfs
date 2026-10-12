@@ -2015,7 +2015,22 @@ fn refuse_metafile_io<T: BlockIo + ?Sized>(
 }
 
 fn validate_basename(name: &str) -> Result<(), Error> {
-    validate_win32_name("basename", name)
+    validate_win32_name("basename", name)?;
+    // A RESERVED DEVICE NAME IS UNADDRESSABLE AS A FILE: Win32 path
+    // parsing opens the device instead (#498). Which names it turns into
+    // devices has changed between Windows releases, so this is the set
+    // Windows refuses today, as measured on the Windows CI runner by
+    // `test-disks/measure-win32-names.ps1` and graded by
+    // `tests/win32_reserved_names.rs`. On Windows 10.0.26100 that is `NUL`
+    // alone, in any case and with no extension: `CON`, `COM1`, `LPT1` and
+    // `nul.txt` all become files through a full path.
+    if name.eq_ignore_ascii_case("NUL") {
+        return Err(Error::invalid(format!(
+            "invalid basename '{name}': Windows opens its NUL device for this name, so a \
+             file by it could never be opened, renamed or deleted"
+        )));
+    }
+    Ok(())
 }
 
 /// A named stream's name, by the rules of a file name: Microsoft's
