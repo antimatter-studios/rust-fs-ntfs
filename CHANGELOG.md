@@ -80,6 +80,12 @@
   is refused, so `mkdir` no longer builds directories this crate cannot read
   back (#508). An INDX insert bounds every entry by the header's
   `index_length`, and refuses rather than slicing past it (#477).
+- **Named streams are inserted in collation order (#467).** Within a type, a
+  new attribute goes where its name sorts, case-insensitively under the
+  volume's `$UpCase` and then case-sensitively, rather than after every other
+  of its type. ntfs-3g and Windows stop looking once they pass an attribute's
+  slot, so a stream written after one that sorts later was one they could
+  not find.
 - **A transient HTTP 5xx from the chore release download no longer fails a CI
   job.** Every chore download in `ci.yml`, `fuzz.yml` and `release.yml`
   retries up to five times on any error.

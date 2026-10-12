@@ -4027,6 +4027,9 @@ fn write_named_stream_resident_attempt_io<T: BlockIo + ?Sized>(
         )));
     }
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    // Where the new stream sorts among the record's others is decided by
+    // the volume's own upcase table (#467).
+    let upcase = crate::upcase::UpcaseTable::load_io(io).ok();
     update_mft_record_io_typed(io, rec, |record| {
         // Existing stream?
         let existing = attr_io::find_attribute(record, AttrType::Data, Some(stream_name));
@@ -4045,7 +4048,7 @@ fn write_named_stream_resident_attempt_io<T: BlockIo + ?Sized>(
                 stream_name,
                 data,
             )?;
-            crate::attr_resize::insert_attribute_sorted_typed(record, &new_attr)
+            crate::attr_resize::insert_attribute_collated_typed(record, &new_attr, upcase.as_ref())
                 .map_err(ResidentWriteError::from)
         }
     })
@@ -4795,6 +4798,9 @@ fn promote_attribute_commit_io<T: BlockIo + ?Sized>(
     let clusters_covered: u64 = runs.iter().map(|r| r.length).sum();
     let last_vcn = clusters_covered as i64 - 1;
 
+    // As in the resident write: the volume's upcase table orders a named
+    // attribute among the others of its type (#467).
+    let upcase = crate::upcase::UpcaseTable::load_io(io).ok();
     let replace_res = update_mft_record_io(io, rec, |record| {
         let attr_id = match attr_io::find_attribute(record, attr_type, attr_name) {
             Some(loc) => loc.attribute_id,
@@ -4813,7 +4819,11 @@ fn promote_attribute_commit_io<T: BlockIo + ?Sized>(
         if let Some(loc) = attr_io::find_attribute(record, attr_type, attr_name) {
             crate::attr_resize::replace_attribute(record, loc.attr_offset, &new_attr_bytes)?;
         } else {
-            crate::attr_resize::insert_attribute_sorted(record, &new_attr_bytes)?;
+            crate::attr_resize::insert_attribute_collated(
+                record,
+                &new_attr_bytes,
+                upcase.as_ref(),
+            )?;
         }
         Ok(())
     });

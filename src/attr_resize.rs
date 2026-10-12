@@ -266,6 +266,52 @@ pub(crate) fn insert_attribute_sorted_typed(
     record: &mut [u8],
     new_attr: &[u8],
 ) -> Result<(), ResidentResizeError> {
+    insert_attribute_collated_typed(record, new_attr, None)
+}
+
+/// [`insert_attribute_sorted`], ordering a named attribute among the others
+/// of its type by `upcase`: the volume's `$UpCase`, or `None` for an
+/// ASCII-only fold. See [`insert_attribute_collated_typed`].
+pub(crate) fn insert_attribute_collated(
+    record: &mut [u8],
+    new_attr: &[u8],
+    upcase: Option<&crate::upcase::UpcaseTable>,
+) -> Result<(), Error> {
+    insert_attribute_collated_typed(record, new_attr, upcase).map_err(Error::from)
+}
+
+/// The UTF-16 name of the attribute at `at`: `name_length` units at
+/// `name_offset` from its start. Empty for an unnamed attribute, or one
+/// whose name would run past the record.
+fn attribute_name(record: &[u8], at: usize) -> Vec<u16> {
+    let (Some(&len), Some(off)) = (record.get(at + 9), record.get(at + 10..at + 12)) else {
+        return Vec::new();
+    };
+    let start = at + u16::from_le_bytes([off[0], off[1]]) as usize;
+    record
+        .get(start..start + 2 * len as usize)
+        .map(|b| {
+            b.chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Insert `new_attr` where NTFS order puts it: by type, and within a type
+/// by name, case-insensitively under `upcase` and then case-sensitively,
+/// an unnamed attribute first.
+///
+/// WITHIN A TYPE THE NAME DECIDES, NOT THE WRITE ORDER. ntfs-3g and Windows
+/// stop looking for an attribute once they pass the slot it would sort
+/// into, so a named stream appended after one that sorts later was one they
+/// could not find: `zz` written before `aa` left `ntfscat -n aa` saying
+/// "Cannot find attribute" (#467).
+pub(crate) fn insert_attribute_collated_typed(
+    record: &mut [u8],
+    new_attr: &[u8],
+    upcase: Option<&crate::upcase::UpcaseTable>,
+) -> Result<(), ResidentResizeError> {
     let new_len = new_attr.len();
     if new_len == 0 || !new_len.is_multiple_of(8) {
         return Err(ResidentResizeError::Other(Error::io(format!(
@@ -310,6 +356,7 @@ pub(crate) fn insert_attribute_sorted_typed(
     // the end as before, while a $FILE_NAME (0x30) or $OBJECT_ID (0x40) is
     // placed ahead of $DATA (0x80) instead of after it.
     let new_type = u32::from_le_bytes([new_attr[0], new_attr[1], new_attr[2], new_attr[3]]);
+    let new_name = attribute_name(new_attr, 0);
     let attrs_offset = u16::from_le_bytes([record[0x14], record[0x15]]) as usize;
     let mut end_marker_pos: Option<usize> = None;
     let mut insert_pos: Option<usize> = None;
@@ -329,7 +376,15 @@ pub(crate) fn insert_attribute_sorted_typed(
         if type_code == 0 {
             break; // hit zero padding before finding marker
         }
-        if insert_pos.is_none() && type_code > new_type {
+        if insert_pos.is_none()
+            && (type_code > new_type
+                || (type_code == new_type && {
+                    let existing = attribute_name(record, cursor);
+                    let ord = crate::index_io::compare_names(&new_name, &existing, upcase)
+                        .then_with(|| crate::index_io::compare_names_ordinal(&new_name, &existing));
+                    ord == std::cmp::Ordering::Less
+                }))
+        {
             insert_pos = Some(cursor);
         }
         // skip this attribute via its `length` field.
