@@ -51,10 +51,12 @@ fn fresh_file(tag: &str) -> (String, String) {
     (img, format!("/{name}"))
 }
 
-/// Find an EA by name in the list, returning its (flags, value).
+/// Find an EA by name in the list, returning its (flags, value). Names are
+/// matched case-insensitively, as Windows identifies an EA: the writer
+/// stores them upper-cased (#482).
 fn find_ea<'a>(eas: &'a [fs_ntfs::ea_io::Ea], name: &[u8]) -> Option<(u8, &'a [u8])> {
     eas.iter()
-        .find(|e| e.name == name)
+        .find(|e| e.name.eq_ignore_ascii_case(name))
         .map(|e| (e.flags, e.value.as_slice()))
 }
 
@@ -196,8 +198,11 @@ fn upsert_same_name_replaces_value() {
     write::write_ea(Path::new(&img), &path, b"key", b"old", 0).expect("first");
     write::write_ea(Path::new(&img), &path, b"key", b"newvalue", 0).expect("second");
     let eas = write::list_eas(Path::new(&img), &path).expect("list_eas");
-    // Exactly one entry named "key", carrying the new value.
-    let matches: Vec<_> = eas.iter().filter(|e| e.name == b"key").collect();
+    // Exactly one entry named "key", in any case, carrying the new value.
+    let matches: Vec<_> = eas
+        .iter()
+        .filter(|e| e.name.eq_ignore_ascii_case(b"key"))
+        .collect();
     assert_eq!(matches.len(), 1, "upsert must not duplicate the name");
     assert_eq!(matches[0].value, b"newvalue");
 }

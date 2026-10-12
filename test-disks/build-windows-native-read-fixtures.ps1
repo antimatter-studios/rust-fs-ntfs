@@ -5,6 +5,8 @@
 #     ntfs-symlink.targets.tsv, the target Windows itself reports for each
 #   * ntfs-cli-read.img: files Windows wrote, plus ntfs-cli-read.sha256.tsv,
 #     each file's path, size and the SHA-256 Windows itself computes
+#   * ntfs-ea.img: extended attributes Windows set through NtSetEaFile, plus
+#     ntfs-ea.names.tsv, each name and value as it was handed to Windows
 #
 # Run from the repository root on an elevated Windows host. rust-img-vhd must be
 # on PATH; CI installs the pinned rust-img-vhd release before invoking this.
@@ -142,5 +144,62 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-cli-read.img' -Label 'CLIREAD' -P
         (New-Object System.Text.UTF8Encoding($false)))
 }
 
-Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img |
+# Extended attributes Windows sets itself, so the bytes this crate stores for
+# an EA name are graded against what NTFS stores for the same call
+# (tests/ea_names_windows_oracle.rs, #482). Each is set with NtSetEaFile, the
+# call every Windows EA API reaches, in a different case.
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public static class WindowsEa {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct IoStatusBlock { public IntPtr Status; public IntPtr Information; }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern SafeFileHandle CreateFileW(
+        string name, uint access, uint share, IntPtr security,
+        uint disposition, uint flags, IntPtr template);
+
+    [DllImport("ntdll.dll")]
+    public static extern int NtSetEaFile(
+        SafeFileHandle handle, out IoStatusBlock status, byte[] buffer, uint length);
+}
+'@
+$eaReport = [System.IO.Path]::GetFullPath('test-disks/ntfs-ea.names.tsv')
+New-WindowsFixture -ImagePath 'test-disks/ntfs-ea.img' -Label 'EA' -Populate {
+    param($root)
+    $file = Join-Path $root 'ea.bin'
+    [System.IO.File]::WriteAllBytes($file, [byte[]](0x45))
+    $eas = [ordered]@{ 'user.a' = 'lower'; 'User.Mixed' = 'mixed'; 'UPPER.B' = 'upper' }
+    # FILE_READ_EA | FILE_WRITE_EA | SYNCHRONIZE, OPEN_EXISTING: a synchronous
+    # handle, which NtSetEaFile needs.
+    $handle = [WindowsEa]::CreateFileW($file, [uint32]0x100018, [uint32]7, [IntPtr]::Zero,
+        [uint32]3, [uint32]0x80, [IntPtr]::Zero)
+    if ($handle.IsInvalid) {
+        throw "open ea.bin for EAs: Win32 error $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
+    try {
+        foreach ($name in $eas.Keys) {
+            $n = [System.Text.Encoding]::ASCII.GetBytes($name)
+            $v = [System.Text.Encoding]::ASCII.GetBytes($eas[$name])
+            # FILE_FULL_EA_INFORMATION: next entry 0, flags 0, name length,
+            # value length, the name and its NUL, then the value.
+            $buf = New-Object byte[] (8 + $n.Length + 1 + $v.Length)
+            $buf[5] = [byte]$n.Length
+            [BitConverter]::GetBytes([uint16]$v.Length).CopyTo($buf, 6)
+            $n.CopyTo($buf, 8)
+            $v.CopyTo($buf, 8 + $n.Length + 1)
+            $status = New-Object WindowsEa+IoStatusBlock
+            $rc = [WindowsEa]::NtSetEaFile($handle, [ref]$status, $buf, [uint32]$buf.Length)
+            if ($rc -ne 0) { throw ("NtSetEaFile {0}: NTSTATUS 0x{1:X8}" -f $name, $rc) }
+        }
+    } finally { $handle.Dispose() }
+    $lines = foreach ($name in $eas.Keys) { "$name`t$($eas[$name])" }
+    [System.IO.File]::WriteAllText($eaReport, (($lines -join "`n") + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+
+Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img |
     Format-Table Name,Length

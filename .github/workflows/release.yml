@@ -77,6 +77,8 @@ jobs:
             test-disks/ntfs-symlink.targets.tsv
             test-disks/ntfs-cli-read.img
             test-disks/win32-name-verdicts.tsv
+            test-disks/ntfs-ea.img
+            test-disks/ntfs-ea.names.tsv
           if-no-files-found: error
           retention-days: 1
 

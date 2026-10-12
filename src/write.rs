@@ -3201,6 +3201,10 @@ fn mkdir_unstamped_io<T: BlockIo + ?Sized>(
 
 /// Upsert (add or replace by case-insensitive name) a single extended
 /// attribute. EAs are stored resident only in this MVP.
+///
+/// The name is stored upper-cased, as NTFS stores a name set through
+/// Windows' `NtSetEaFile`: `user.a` is kept as `USER.A` (#482, graded by
+/// `tests/ea_names_windows_oracle.rs`). Only ASCII letters are folded.
 pub fn write_ea(
     image: &Path,
     file_path: &str,
@@ -3233,7 +3237,7 @@ pub fn write_ea_io<T: BlockIo + ?Sized>(
             &mut eas,
             crate::ea_io::Ea {
                 flags,
-                name: ea_name.to_vec(),
+                name: ea_name.to_ascii_uppercase(),
                 value: ea_value.to_vec(),
             },
         );
@@ -7759,7 +7763,10 @@ mod tests {
         .unwrap();
         let eas = list_eas_io(&mut dev, "/ea.txt").unwrap();
         assert_eq!(eas.len(), 1);
-        assert_eq!(eas[0].name, b"TestKey");
+        assert_eq!(
+            eas[0].name, b"TESTKEY",
+            "stored upper-cased, as Windows does"
+        );
         assert_eq!(eas[0].value, &[0xDE, 0xAD, 0xBE, 0xEF]);
     }
 
@@ -7782,7 +7789,7 @@ mod tests {
         remove_ea_io(&mut dev, "/rmea.txt", b"Del").unwrap();
         let eas = list_eas_io(&mut dev, "/rmea.txt").unwrap();
         assert_eq!(eas.len(), 1);
-        assert_eq!(eas[0].name, b"Keep");
+        assert_eq!(eas[0].name, b"KEEP", "stored upper-cased, as Windows does");
     }
 
     // --- rename_same_length_io ------------------------------------------------
