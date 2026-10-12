@@ -64,6 +64,13 @@
   the volume wrongly, let `$MFT` hand out a record in use, or named the wrong
   record for a replayed block. Each overflow is now a refusal, and
   `$MFT:$Bitmap`'s length is first bounded by the clusters its runs hold.
+- **Header fields other fields depend on are checked before they are
+  trusted.** An MFT record whose `bytes_allocated` is not the record size is
+  refused, as ntfs-3g refuses it, rather than served (#509). A boot sector
+  whose index block size is not a power of two between one sector and 64 KiB
+  is refused, so `mkdir` no longer builds directories this crate cannot read
+  back (#508). An INDX insert bounds every entry by the header's
+  `index_length`, and refuses rather than slicing past it (#477).
 - **A transient HTTP 5xx from the chore release download no longer fails a CI
   job.** Every chore download in `ci.yml`, `fuzz.yml` and `release.yml`
   retries up to five times on any error.

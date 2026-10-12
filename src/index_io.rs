@@ -1912,12 +1912,21 @@ pub fn insert_entry_into_indx_block_with_collation(
     while cursor < end && cursor + IE_KEY_START <= block.len() {
         let length =
             u16::from_le_bytes([block[cursor + IE_LENGTH], block[cursor + IE_LENGTH + 1]]) as usize;
+        // BOUNDED BY THE ENTRIES, NOT BY THE BLOCK. Every entry, the LAST
+        // one included, ends at or before `end`: that is what
+        // `index_length` means. Checked against the block alone, an entry
+        // that started before `end` and ran past it carried the cursor
+        // past `end`, and the shift below was asked for a range running
+        // backwards -- "slice index starts at 368 but ends at 279" (#477).
+        if length == 0 || cursor + length > end {
+            return Err(Error::io(format!(
+                "an INDX entry at {cursor} is {length} bytes long, past the end of the \
+                 entries the index header claims, at {end}"
+            )));
+        }
         let flags = u16::from_le_bytes([block[cursor + IE_FLAGS], block[cursor + IE_FLAGS + 1]]);
         if flags & IE_FLAG_LAST != 0 {
             break;
-        }
-        if length == 0 || cursor + length > block.len() {
-            return Err(Error::io("malformed INDX entry during insert"));
         }
         let existing_utf16 = entry_name(block, cursor, length)?;
         if compare_names(&new_utf16, &existing_utf16, upcase) != std::cmp::Ordering::Greater {
@@ -1926,6 +1935,15 @@ pub fn insert_entry_into_indx_block_with_collation(
         cursor += length;
     }
     let insertion_point = cursor;
+    // A well-formed chain ends with its LAST entry inside `end`, so the
+    // walk always stops before `end`. Reaching it means the entries ran
+    // out without the entry that closes them.
+    if insertion_point >= end {
+        return Err(Error::io(format!(
+            "the INDX entries reach the end the index header claims, at {end}, without the \
+             entry that closes them"
+        )));
+    }
 
     // Shift [insertion_point .. end) forward by new_len; the LAST
     // sentinel (or end-of-entries) moves with it.
