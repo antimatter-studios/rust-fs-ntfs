@@ -908,6 +908,39 @@ pub fn rename_index_entry_same_length(
     Ok(())
 }
 
+/// Where a `$FILE_NAME` value -- and so an index entry's key -- holds
+/// the duplicated allocated size and data size, the two adjacent.
+const FN_ALLOCATED_SIZE_OFFSET: usize = 0x28;
+const FN_DATA_SIZE_OFFSET: usize = 0x30;
+
+/// Write `allocated` and `data_size` into the duplicated information of
+/// the `$FILE_NAME` key of the entry at `entry` in `buf` (#506). Returns
+/// whether that changed anything, so a caller can skip writing back an
+/// entry that already carries them.
+pub(crate) fn set_index_entry_file_sizes(
+    buf: &mut [u8],
+    entry: &IndexEntryLocation,
+    allocated: u64,
+    data_size: u64,
+) -> Result<bool, Error> {
+    let start = entry.record_offset + IE_KEY_START + FN_ALLOCATED_SIZE_OFFSET;
+    let end = entry.record_offset + IE_KEY_START + FN_DATA_SIZE_OFFSET + 8;
+    if entry.key_length < FN_DATA_SIZE_OFFSET + 8 || end > buf.len() {
+        return Err(Error::io(format!(
+            "index entry at {} has a {}-byte key, too short to hold a $FILE_NAME's sizes",
+            entry.record_offset, entry.key_length
+        )));
+    }
+    let mut sizes = [0u8; 16];
+    sizes[..8].copy_from_slice(&allocated.to_le_bytes());
+    sizes[8..].copy_from_slice(&data_size.to_le_bytes());
+    if buf[start..end] == sizes {
+        return Ok(false);
+    }
+    buf[start..end].copy_from_slice(&sizes);
+    Ok(true)
+}
+
 /// Remove an index entry from its containing block (either
 /// `$INDEX_ROOT`'s resident value or an INDX block). Shifts following
 /// entries back by `entry.length` bytes, updates the INDEX_HEADER's

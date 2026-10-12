@@ -471,6 +471,19 @@ pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
     offset: u64,
     data: &[u8],
 ) -> Result<u64, Error> {
+    let written = write_at_by_record_number_unrefreshed_io(io, record_number, offset, data)?;
+    refresh_duplicated_sizes_io(io, record_number)?;
+    Ok(written)
+}
+
+/// [`write_at_by_record_number_io`] without the refresh of the size the file's directory
+/// entries carry; see [`refresh_duplicated_sizes_io`].
+fn write_at_by_record_number_unrefreshed_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    offset: u64,
+    data: &[u8],
+) -> Result<u64, Error> {
     // THE GUARD THE OTHER TWO ENTRY POINTS HAVE, AND THIS ONE IS THE
     // DEEPEST OF THE FOUR.
     //
@@ -830,6 +843,18 @@ pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
     record_number: u64,
     new_size: u64,
 ) -> Result<u64, Error> {
+    let written = truncate_by_record_number_unrefreshed_io(io, record_number, new_size)?;
+    refresh_duplicated_sizes_io(io, record_number)?;
+    Ok(written)
+}
+
+/// [`truncate_by_record_number_io`] without the refresh of the size the file's directory
+/// entries carry; see [`refresh_duplicated_sizes_io`].
+fn truncate_by_record_number_unrefreshed_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    new_size: u64,
+) -> Result<u64, Error> {
     let (params, record) = read_mft_record_io(io, record_number)?;
     let cluster_size = params.cluster_size;
 
@@ -980,6 +1005,18 @@ pub fn grow_nonresident_by_record_number(
 }
 
 pub fn grow_nonresident_by_record_number_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    new_size: u64,
+) -> Result<u64, Error> {
+    let written = grow_nonresident_by_record_number_unrefreshed_io(io, record_number, new_size)?;
+    refresh_duplicated_sizes_io(io, record_number)?;
+    Ok(written)
+}
+
+/// [`grow_nonresident_by_record_number_io`] without the refresh of the size the file's directory
+/// entries carry; see [`refresh_duplicated_sizes_io`].
+fn grow_nonresident_by_record_number_unrefreshed_io<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
     new_size: u64,
@@ -3328,9 +3365,14 @@ pub fn read_file_names_io<T: BlockIo + ?Sized>(
 ) -> Result<Vec<FileNameRecord>, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
+    file_names_in_record(&record)
+}
 
+/// Every `$FILE_NAME` attribute in `record`, in record order; see
+/// [`read_file_names_io`].
+fn file_names_in_record(record: &[u8]) -> Result<Vec<FileNameRecord>, Error> {
     let mut out = Vec::new();
-    for loc in attr_io::iter_attributes(&record) {
+    for loc in attr_io::iter_attributes(record) {
         if loc.type_code != AttrType::FileName as u32 {
             continue;
         }
@@ -3394,6 +3436,131 @@ pub fn read_file_names_io<T: BlockIo + ?Sized>(
         });
     }
     Ok(out)
+}
+
+/// Refresh the data size and allocated size that the parent directory's
+/// entry for each of `rec`'s names duplicates from the file (#506).
+///
+/// Every `$I30` entry holds a copy of the file's `$FILE_NAME`, and Windows
+/// serves directory enumeration -- `dir`, Explorer, `FindFirstFile` --
+/// from that copy, refreshing it when the last handle to the file closes.
+/// Written once at create time and never again, it listed every file this
+/// crate wrote as 0 bytes until something on Windows opened and closed it.
+/// Windows refreshes the name it was opened by; this refreshes every name,
+/// since a write here is not made through any one of them.
+///
+/// A record with no unnamed `$DATA` in it -- a directory -- has nothing to
+/// copy, and a name whose parent has no entry for it pointing back at
+/// `rec` is left alone. Each entry is written only when it changes.
+fn refresh_duplicated_sizes_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<(), Error> {
+    let (_, record) = read_mft_record_io(io, rec)?;
+    let Some((allocated, size)) = duplicated_data_sizes(&record) else {
+        return Ok(());
+    };
+    let names = file_names_in_record(&record)?;
+    if names.is_empty() {
+        return Ok(());
+    }
+    let upcase = crate::upcase::UpcaseTable::load_io(io)?;
+    for name in names {
+        let parent_rec = name.parent_reference & 0x0000_FFFF_FFFF_FFFF;
+        refresh_entry_sizes_io(io, parent_rec, rec, &name.name, allocated, size, &upcase).map_err(
+            |e| {
+                e.map_message(|m| {
+                    format!(
+                        "the data was written, but refreshing the size that the directory \
+                         entry '{}' in record {parent_rec} carries failed: {m}",
+                        name.name
+                    )
+                })
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// The (allocated, data) sizes a `$FILE_NAME` duplicates from the
+/// record's unnamed `$DATA`, or `None` when the record holds none.
+///
+/// A resident value's allocation is its length rounded up to 8, as the
+/// attribute stores it. A compressed or sparse attribute's is the
+/// clusters it actually holds, its total-allocated field.
+fn duplicated_data_sizes(record: &[u8]) -> Option<(u64, u64)> {
+    let loc = attr_io::iter_attributes(record)
+        .find(|l| l.type_code == AttrType::Data as u32 && l.name_length == 0)?;
+    if loc.is_resident {
+        let len = loc.resident_value_length? as u64;
+        return Some((len.div_ceil(8) * 8, len));
+    }
+    let field = |off: usize| -> Option<u64> {
+        let at = loc.attr_offset.checked_add(off)?;
+        Some(u64::from_le_bytes(record.get(at..at + 8)?.try_into().ok()?))
+    };
+    let flags = u16::from_le_bytes(
+        record
+            .get(loc.attr_offset + 0x0C..loc.attr_offset + 0x0E)?
+            .try_into()
+            .ok()?,
+    );
+    const COMPRESSED_OR_SPARSE: u16 = 0x0001 | 0x8000;
+    let has_total = loc.non_resident_mapping_pairs_offset? >= 0x48;
+    let allocated = if flags & COMPRESSED_OR_SPARSE != 0 && has_total {
+        field(0x40)?
+    } else {
+        field(0x28)?
+    };
+    Some((allocated, field(0x30)?))
+}
+
+/// Write (`allocated`, `size`) into `parent_rec`'s index entry for `name`,
+/// in `$INDEX_ROOT` or in whichever INDX block holds it, when that entry
+/// points at `rec` and carries something else.
+#[allow(clippy::too_many_arguments)]
+fn refresh_entry_sizes_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    rec: u64,
+    name: &str,
+    allocated: u64,
+    size: u64,
+    upcase: &crate::upcase::UpcaseTable,
+) -> Result<(), Error> {
+    let (_, mut parent) = read_mft_record_io(io, parent_rec)?;
+    let Some(flags) = index_io::index_root_flags(&parent) else {
+        return Ok(());
+    };
+    if let Some(entry) = index_io::find_index_entry(&parent, name, Some(upcase))? {
+        if entry.file_record_number != rec
+            || !index_io::set_index_entry_file_sizes(&mut parent, &entry, allocated, size)?
+        {
+            return Ok(());
+        }
+        return update_mft_record_io(io, parent_rec, |record| {
+            let entry = index_io::find_index_entry(record, name, Some(upcase))?
+                .ok_or_else(|| Error::io("race: $INDEX_ROOT entry vanished"))?;
+            index_io::set_index_entry_file_sizes(record, &entry, allocated, size).map(|_| ())
+        });
+    }
+    if flags & index_io::IH_FLAG_HAS_SUBNODES == 0 {
+        return Ok(());
+    }
+    let ia = idx_block::load_for_directory_io(io, parent_rec)?;
+    for vcn in ia.allocated_block_vcns() {
+        let mut block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+        if let Some(entry) = index_io::find_entry_in_indx_block(&block, name, Some(upcase))? {
+            if entry.file_record_number != rec
+                || !index_io::set_index_entry_file_sizes(&mut block, &entry, allocated, size)?
+            {
+                return Ok(());
+            }
+            return idx_block::update_indx_block_io(io, &ia, vcn, |block| {
+                let entry = index_io::find_entry_in_indx_block(block, name, Some(upcase))?
+                    .ok_or_else(|| Error::io("race: INDX entry vanished"))?;
+                index_io::set_index_entry_file_sizes(block, &entry, allocated, size).map(|_| ())
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Maximum volume-label length per Microsoft tools convention: 32
@@ -4231,6 +4398,18 @@ pub fn promote_resident_data_to_nonresident_io<T: BlockIo + ?Sized>(
     file_path: &str,
     new_data: &[u8],
 ) -> Result<(), Error> {
+    promote_resident_data_to_nonresident_unrefreshed_io(io, file_path, new_data)?;
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refresh_duplicated_sizes_io(io, rec)
+}
+
+/// [`promote_resident_data_to_nonresident_io`] without the refresh of the size the file's directory
+/// entries carry; see [`refresh_duplicated_sizes_io`].
+fn promote_resident_data_to_nonresident_unrefreshed_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    new_data: &[u8],
+) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (params, record) = read_mft_record_io(io, rec)?;
     let cluster_size = params.cluster_size;
@@ -4388,6 +4567,18 @@ pub fn write_sparse_file(image: &Path, file_path: &str, data: &[u8]) -> Result<(
 }
 
 pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    data: &[u8],
+) -> Result<(), Error> {
+    write_sparse_file_unrefreshed_io(io, file_path, data)?;
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refresh_duplicated_sizes_io(io, rec)
+}
+
+/// [`write_sparse_file_io`] without the refresh of the size the file's directory
+/// entries carry; see [`refresh_duplicated_sizes_io`].
+fn write_sparse_file_unrefreshed_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     data: &[u8],
@@ -4657,6 +4848,19 @@ pub fn write_file_contents(image: &Path, file_path: &str, new_data: &[u8]) -> Re
 }
 
 pub fn write_file_contents_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    new_data: &[u8],
+) -> Result<u64, Error> {
+    let written = write_file_contents_unrefreshed_io(io, file_path, new_data)?;
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refresh_duplicated_sizes_io(io, rec)?;
+    Ok(written)
+}
+
+/// [`write_file_contents_io`] without the refresh of the size the file's directory
+/// entries carry; see [`refresh_duplicated_sizes_io`].
+fn write_file_contents_unrefreshed_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     new_data: &[u8],
@@ -4979,6 +5183,19 @@ pub fn write_resident_contents(
 }
 
 pub fn write_resident_contents_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    new_data: &[u8],
+) -> Result<u64, Error> {
+    let written = write_resident_contents_unrefreshed_io(io, file_path, new_data)?;
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refresh_duplicated_sizes_io(io, rec)?;
+    Ok(written)
+}
+
+/// [`write_resident_contents_io`] without the refresh of the size the file's directory
+/// entries carry; see [`refresh_duplicated_sizes_io`].
+fn write_resident_contents_unrefreshed_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     new_data: &[u8],
