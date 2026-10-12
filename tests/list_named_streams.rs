@@ -32,24 +32,17 @@ fn lists_one_named_stream() {
 }
 
 #[test]
-fn lists_multiple_named_streams_in_insertion_order() {
+fn lists_multiple_named_streams_in_collation_order() {
     let img = working_copy("many");
-    // Our writer appends in insertion order (the NTFS spec sorts by
-    // name; we don't enforce that here — list_named_streams returns
-    // the on-disk record order verbatim, and callers can sort).
+    // The writer keeps a record's attributes in NTFS order, by name
+    // within a type, whatever order they are written in (#467), and
+    // list_named_streams returns the on-disk record order verbatim.
     write::write_named_stream(Path::new(&img), "/Documents/readme.txt", "zeta", b"z").unwrap();
     write::write_named_stream(Path::new(&img), "/Documents/readme.txt", "alpha", b"a").unwrap();
     write::write_named_stream(Path::new(&img), "/Documents/readme.txt", "mu", b"m").unwrap();
     let names = write::list_named_streams(Path::new(&img), "/Documents/readme.txt").unwrap();
     assert_eq!(
         names,
-        vec!["zeta".to_string(), "alpha".to_string(), "mu".to_string()]
-    );
-    // And callers can produce a canonical ordering by sorting.
-    let mut sorted = names.clone();
-    sorted.sort();
-    assert_eq!(
-        sorted,
         vec!["alpha".to_string(), "mu".to_string(), "zeta".to_string()]
     );
 }
