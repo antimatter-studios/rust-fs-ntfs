@@ -86,6 +86,11 @@
   create or mkdir into `$Extend`. `$Volume` and `$BadClus` could be
   unlinked, `$UpCase` truncated and every metafile renamed, and an unlink
   of `$MFT` was refused only after the record and index had changed.
+- **A host's directory listing leaves the NTFS metafiles out** (#499).
+  `Filesystem::read_dir` and `fs_ntfs_dir_open` listed `$MFT`, `$LogFile`,
+  `$Volume` and the rest, which Windows does not enumerate and ntfs-3g
+  hides. Both now leave records 0 to 15 out, as the CLI's `ls` does; a
+  metafile is still found by name.
 - **A new file is never given one of the reserved records 16 to 23.** The
   search for a free record wrapped round to 0 once every record from 24 up
   was in use, so on a volume whose `$MFT:$Bitmap` leaves them clear, as

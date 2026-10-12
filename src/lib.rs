@@ -1395,7 +1395,8 @@ pub extern "C" fn fs_ntfs_dir_open(
             record_number: parent_record_number,
             is_dir: true,
         });
-        entries.extend(real);
+        // The metafiles stay out, as on Windows (#499).
+        entries.extend(real.into_iter().filter(read::listed_to_hosts));
 
         let iter = Box::new(FsNtfsDirIter {
             entries,

@@ -1677,6 +1677,18 @@ pub struct DirEntry {
     pub is_dir: bool,
 }
 
+/// The first MFT record a host's listing shows. Records 0 to 15 are the
+/// metafiles -- `$MFT`, `$LogFile`, `$Volume`, `$Bitmap`, `$UpCase`,
+/// `$Extend`, ... -- which Windows does not enumerate and ntfs-3g hides;
+/// the CLI's `ls` leaves them out unless `--all` asks.
+pub const FIRST_LISTED_RECORD: u64 = 16;
+
+/// Whether a host's directory listing shows `entry` (#499). The raw
+/// [`read_dir_entries`] keeps every entry, for callers that want them all.
+pub fn listed_to_hosts(entry: &DirEntry) -> bool {
+    entry.record_number >= FIRST_LISTED_RECORD
+}
+
 /// Enumerate a directory's entries natively (no upstream `ntfs` crate),
 /// merging the resident `$INDEX_ROOT` with any spilled `$INDEX_ALLOCATION`
 /// (INDX) blocks. DOS-namespace-only entries (the 8.3 shadow names) are
