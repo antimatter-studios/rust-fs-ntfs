@@ -596,7 +596,9 @@ fn make_dirent(file_record_number: u64, file_type: u8, name: &[u8]) -> FsNtfsDir
 /// replay.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle {
-    mount_path("fs_ntfs_mount", device_path, false)
+    ffi_guard("fs_ntfs_mount", std::ptr::null_mut(), move || {
+        mount_path(device_path, false)
+    })
 }
 
 /// [`fs_ntfs_mount`], replaying a `$LogFile` that holds work first, as
@@ -606,74 +608,76 @@ pub extern "C" fn fs_ntfs_mount(device_path: *const c_char) -> *mut FsNtfsHandle
 /// read or replayed in full, is refused with nothing written.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mount_replaying_log(device_path: *const c_char) -> *mut FsNtfsHandle {
-    mount_path("fs_ntfs_mount_replaying_log", device_path, true)
+    ffi_guard(
+        "fs_ntfs_mount_replaying_log",
+        std::ptr::null_mut(),
+        move || mount_path(device_path, true),
+    )
 }
 
-fn mount_path(name: &str, device_path: *const c_char, replay: bool) -> *mut FsNtfsHandle {
-    ffi_guard(name, std::ptr::null_mut(), move || {
-        if device_path.is_null() {
-            set_einval("null device path");
+fn mount_path(device_path: *const c_char, replay: bool) -> *mut FsNtfsHandle {
+    if device_path.is_null() {
+        set_einval("null device path");
+        return std::ptr::null_mut();
+    }
+
+    let path = match unsafe { CStr::from_ptr(device_path) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_einval(&format!("invalid path: {e}"));
             return std::ptr::null_mut();
         }
+    };
 
-        let path = match unsafe { CStr::from_ptr(device_path) }.to_str() {
-            Ok(s) => s,
+    // Validate it's a parseable NTFS volume via the native read layer (boot
+    // sector + OEM signature + `$Volume`), no upstream `Ntfs::new`.
+    {
+        let mut io = match RwPathIo::open_ro(std::path::Path::new(path)) {
+            Ok(io) => io,
             Err(e) => {
-                set_einval(&format!("invalid path: {e}"));
+                set_error(&Error::io(format!("open '{path}': {e}")));
                 return std::ptr::null_mut();
             }
         };
-
-        // Validate it's a parseable NTFS volume via the native read layer (boot
-        // sector + OEM signature + `$Volume`), no upstream `Ntfs::new`.
-        {
-            let mut io = match RwPathIo::open_ro(std::path::Path::new(path)) {
-                Ok(io) => io,
-                Err(e) => {
-                    set_error(&Error::io(format!("open '{path}': {e}")));
-                    return std::ptr::null_mut();
-                }
-            };
-            if let Err(e) = read::read_volume_info(&mut io) {
-                set_error(&e.context("ntfs init"));
-                return std::ptr::null_mut();
-            }
-        }
-        if let Err(e) = prepare_rw_mount_path(std::path::Path::new(path), replay) {
-            set_error(&e);
+        if let Err(e) = read::read_volume_info(&mut io) {
+            set_error(&e.context("ntfs init"));
             return std::ptr::null_mut();
         }
+    }
+    if let Err(e) = prepare_rw_mount_path(std::path::Path::new(path), replay) {
+        set_error(&e);
+        return std::ptr::null_mut();
+    }
 
-        // Mimic `ntfs.sys`'s "upgrade on mount". Path-based mount is
-        // RW-capable (the mutator API reopens RW per call), so apply the
-        // 1.2 -> 3.1 upgrade best-effort. Failure is logged at `warn` and
-        // does not fail the mount.
-        match crate::fsck::upgrade_volume_version(path) {
-            Ok(true) => {
-                log::info!(target: "fs_ntfs", "upgraded $VOLUME_INFORMATION 1.2 -> 3.1 on {path}")
-            }
-            Ok(false) => {
-                log::debug!(target: "fs_ntfs", "no $VOLUME_INFORMATION upgrade needed on {path}")
-            }
-            Err(e) => {
-                log::warn!(target: "fs_ntfs", "$VOLUME_INFORMATION upgrade skipped on {path}: {e}")
-            }
+    // Mimic `ntfs.sys`'s "upgrade on mount". Path-based mount is
+    // RW-capable (the mutator API reopens RW per call), so apply the
+    // 1.2 -> 3.1 upgrade best-effort. Failure is logged at `warn` and
+    // does not fail the mount.
+    match crate::fsck::upgrade_volume_version(path) {
+        Ok(true) => {
+            log::info!(target: "fs_ntfs", "upgraded $VOLUME_INFORMATION 1.2 -> 3.1 on {path}")
         }
+        Ok(false) => {
+            log::debug!(target: "fs_ntfs", "no $VOLUME_INFORMATION upgrade needed on {path}")
+        }
+        Err(e) => {
+            log::warn!(target: "fs_ntfs", "$VOLUME_INFORMATION upgrade skipped on {path}: {e}")
+        }
+    }
 
-        let mounted = match fs_core::FileDevice::open_best_effort(path) {
-            Ok(device) => cache_device(std::sync::Arc::new(device), true),
-            Err(e) => {
-                set_error(&Error::io(format!("open '{path}' for mounted cache: {e}")));
-                return std::ptr::null_mut();
-            }
-        };
-        let bridge = Box::new(FsNtfsHandle {
-            source: Some(MountSource::Path { device: mounted }),
-            writable: true,
-        });
-        log::info!(target: "fs_ntfs", "mount path={path}");
-        Box::into_raw(bridge)
-    })
+    let mounted = match fs_core::FileDevice::open_best_effort(path) {
+        Ok(device) => cache_device(std::sync::Arc::new(device), true),
+        Err(e) => {
+            set_error(&Error::io(format!("open '{path}' for mounted cache: {e}")));
+            return std::ptr::null_mut();
+        }
+    };
+    let bridge = Box::new(FsNtfsHandle {
+        source: Some(MountSource::Path { device: mounted }),
+        writable: true,
+    });
+    log::info!(target: "fs_ntfs", "mount path={path}");
+    Box::into_raw(bridge)
 }
 
 /// Mount an NTFS volume via caller-supplied read (and optionally write)
@@ -689,7 +693,11 @@ fn mount_path(name: &str, device_path: *const c_char, replay: bool) -> *mut FsNt
 /// replay.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) -> *mut FsNtfsHandle {
-    mount_with_callbacks("fs_ntfs_mount_with_callbacks", cfg, false)
+    ffi_guard(
+        "fs_ntfs_mount_with_callbacks",
+        std::ptr::null_mut(),
+        move || mount_with_callbacks(cfg, false),
+    )
 }
 
 /// [`fs_ntfs_mount_with_callbacks`], with a writable mount replaying a
@@ -702,86 +710,84 @@ pub extern "C" fn fs_ntfs_mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg) ->
 pub extern "C" fn fs_ntfs_mount_with_callbacks_replaying_log(
     cfg: *const FsNtfsBlockdevCfg,
 ) -> *mut FsNtfsHandle {
-    mount_with_callbacks("fs_ntfs_mount_with_callbacks_replaying_log", cfg, true)
+    ffi_guard(
+        "fs_ntfs_mount_with_callbacks_replaying_log",
+        std::ptr::null_mut(),
+        move || mount_with_callbacks(cfg, true),
+    )
 }
 
-fn mount_with_callbacks(
-    name: &str,
-    cfg: *const FsNtfsBlockdevCfg,
-    replay: bool,
-) -> *mut FsNtfsHandle {
-    ffi_guard(name, std::ptr::null_mut(), move || {
-        if cfg.is_null() {
-            set_einval("null config");
+fn mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg, replay: bool) -> *mut FsNtfsHandle {
+    if cfg.is_null() {
+        set_einval("null config");
+        return std::ptr::null_mut();
+    }
+
+    let cfg = unsafe { &*cfg };
+
+    // Validate it's a parseable NTFS volume via the native read layer over a
+    // read-only callback `BlockIo` (no upstream `Ntfs::new`).
+    {
+        let mut io = CallbackBlockIo {
+            read_fn: cfg.read,
+            write_fn: None,
+            context: cfg.context,
+            size: cfg.size_bytes,
+        };
+        if let Err(e) = read::read_volume_info(&mut io) {
+            set_error(&e.context("ntfs init"));
             return std::ptr::null_mut();
         }
+    }
+    if cfg.write.is_some() {
+        let mut io = CallbackBlockIo {
+            read_fn: cfg.read,
+            write_fn: cfg.write,
+            context: cfg.context,
+            size: cfg.size_bytes,
+        };
+        if let Err(e) = prepare_rw_mount(&mut io, replay) {
+            set_error(&e);
+            return std::ptr::null_mut();
+        }
+    }
 
-        let cfg = unsafe { &*cfg };
-
-        // Validate it's a parseable NTFS volume via the native read layer over a
-        // read-only callback `BlockIo` (no upstream `Ntfs::new`).
-        {
-            let mut io = CallbackBlockIo {
-                read_fn: cfg.read,
-                write_fn: None,
-                context: cfg.context,
-                size: cfg.size_bytes,
-            };
-            if let Err(e) = read::read_volume_info(&mut io) {
-                set_error(&e.context("ntfs init"));
-                return std::ptr::null_mut();
+    // Mimic `ntfs.sys`'s "upgrade on mount". Only fire when the
+    // caller supplied a write callback — otherwise the mount is
+    // effectively RO and the upgrade write would fail. Best-effort;
+    // failure logged at `warn` and does not fail the mount.
+    if cfg.write.is_some() {
+        let mut io = CallbackBlockIo {
+            read_fn: cfg.read,
+            write_fn: cfg.write,
+            context: cfg.context,
+            size: cfg.size_bytes,
+        };
+        match crate::fsck::upgrade_volume_version_io(&mut io) {
+            Ok(true) => {
+                log::info!(target: "fs_ntfs", "upgraded $VOLUME_INFORMATION 1.2 -> 3.1 (callback mount)")
+            }
+            Ok(false) => {
+                log::debug!(target: "fs_ntfs", "no $VOLUME_INFORMATION upgrade needed (callback mount)")
+            }
+            Err(e) => {
+                log::warn!(target: "fs_ntfs", "$VOLUME_INFORMATION upgrade skipped (callback mount): {e}")
             }
         }
-        if cfg.write.is_some() {
-            let mut io = CallbackBlockIo {
-                read_fn: cfg.read,
-                write_fn: cfg.write,
-                context: cfg.context,
-                size: cfg.size_bytes,
-            };
-            if let Err(e) = prepare_rw_mount(&mut io, replay) {
-                set_error(&e);
-                return std::ptr::null_mut();
-            }
-        }
+    }
 
-        // Mimic `ntfs.sys`'s "upgrade on mount". Only fire when the
-        // caller supplied a write callback — otherwise the mount is
-        // effectively RO and the upgrade write would fail. Best-effort;
-        // failure logged at `warn` and does not fail the mount.
-        if cfg.write.is_some() {
-            let mut io = CallbackBlockIo {
-                read_fn: cfg.read,
-                write_fn: cfg.write,
-                context: cfg.context,
-                size: cfg.size_bytes,
-            };
-            match crate::fsck::upgrade_volume_version_io(&mut io) {
-                Ok(true) => {
-                    log::info!(target: "fs_ntfs", "upgraded $VOLUME_INFORMATION 1.2 -> 3.1 (callback mount)")
-                }
-                Ok(false) => {
-                    log::debug!(target: "fs_ntfs", "no $VOLUME_INFORMATION upgrade needed (callback mount)")
-                }
-                Err(e) => {
-                    log::warn!(target: "fs_ntfs", "$VOLUME_INFORMATION upgrade skipped (callback mount): {e}")
-                }
-            }
-        }
-
-        let mounted = cache_device(
-            callback_device(cfg.read, cfg.write, cfg.context, cfg.size_bytes),
-            cfg.write.is_some(),
-        );
-        let bridge = Box::new(FsNtfsHandle {
-            source: Some(MountSource::Callbacks {
-                write_fn: cfg.write,
-                device: mounted,
-            }),
-            writable: cfg.write.is_some(),
-        });
-        Box::into_raw(bridge)
-    })
+    let mounted = cache_device(
+        callback_device(cfg.read, cfg.write, cfg.context, cfg.size_bytes),
+        cfg.write.is_some(),
+    );
+    let bridge = Box::new(FsNtfsHandle {
+        source: Some(MountSource::Callbacks {
+            write_fn: cfg.write,
+            device: mounted,
+        }),
+        writable: cfg.write.is_some(),
+    });
+    Box::into_raw(bridge)
 }
 
 /// Mount via an `FsCoreDevice` handle from a sister crate
@@ -880,7 +886,11 @@ pub extern "C" fn fs_ntfs_mount_with_fs_core_device(
 pub extern "C" fn fs_ntfs_mount_rw_with_fs_core_device(
     handle: *mut fs_core::ffi::FsCoreDevice,
 ) -> *mut FsNtfsHandle {
-    mount_rw_with_fs_core_device("fs_ntfs_mount_rw_with_fs_core_device", handle, false)
+    ffi_guard(
+        "fs_ntfs_mount_rw_with_fs_core_device",
+        std::ptr::null_mut(),
+        move || mount_rw_with_fs_core_device(handle, false),
+    )
 }
 
 /// [`fs_ntfs_mount_rw_with_fs_core_device`], replaying a `$LogFile` that
@@ -893,83 +903,80 @@ pub extern "C" fn fs_ntfs_mount_rw_with_fs_core_device(
 pub extern "C" fn fs_ntfs_mount_rw_with_fs_core_device_replaying_log(
     handle: *mut fs_core::ffi::FsCoreDevice,
 ) -> *mut FsNtfsHandle {
-    mount_rw_with_fs_core_device(
+    ffi_guard(
         "fs_ntfs_mount_rw_with_fs_core_device_replaying_log",
-        handle,
-        true,
+        std::ptr::null_mut(),
+        move || mount_rw_with_fs_core_device(handle, true),
     )
 }
 
 fn mount_rw_with_fs_core_device(
-    name: &str,
     handle: *mut fs_core::ffi::FsCoreDevice,
     replay: bool,
 ) -> *mut FsNtfsHandle {
-    ffi_guard(name, std::ptr::null_mut(), move || {
-        if handle.is_null() {
-            set_einval("null fs_core handle");
+    if handle.is_null() {
+        set_einval("null fs_core handle");
+        return std::ptr::null_mut();
+    }
+
+    // Safety: same contract as the RO sibling above. The Arc clone
+    // here is the source-of-truth reference recorded in MountSource;
+    // the second clone below is for the BufReader-backed reader used
+    // by the read path.
+    let device = unsafe { (*handle).inner().clone() };
+    let size = fs_core::BlockRead::size_bytes(&device);
+
+    // Validate via the native read layer over the fs-core `BlockIo`.
+    {
+        let mut io = FsCoreBlockIo {
+            device: device.clone(),
+            size,
+        };
+        if let Err(e) = read::read_volume_info(&mut io) {
+            set_error(&e.context("ntfs init"));
             return std::ptr::null_mut();
         }
+        if let Err(e) = prepare_rw_mount(&mut io, replay) {
+            set_error(&e);
+            return std::ptr::null_mut();
+        }
+    }
 
-        // Safety: same contract as the RO sibling above. The Arc clone
-        // here is the source-of-truth reference recorded in MountSource;
-        // the second clone below is for the BufReader-backed reader used
-        // by the read path.
-        let device = unsafe { (*handle).inner().clone() };
-        let size = fs_core::BlockRead::size_bytes(&device);
-
-        // Validate via the native read layer over the fs-core `BlockIo`.
-        {
-            let mut io = FsCoreBlockIo {
-                device: device.clone(),
-                size,
-            };
-            if let Err(e) = read::read_volume_info(&mut io) {
-                set_error(&e.context("ntfs init"));
-                return std::ptr::null_mut();
+    // Mimic `ntfs.sys`'s "upgrade on mount": if the volume was
+    // fresh-formatted (major=1, minor=2, UPGRADE_ON_MOUNT set —
+    // what Microsoft `format.com` and our `mkfs` produce), rewrite
+    // it to 3.1 with the flag cleared so volumes touched by our
+    // driver look "already upgraded" to Windows, parallel to what
+    // `ntfs.sys` would have done on first RW mount.
+    //
+    // Best-effort: log on failure but don't fail the mount. The
+    // volume is still usable in its pre-upgrade form.
+    if fs_core::BlockDevice::is_writable(&device) {
+        let mut fsck_io = FsCoreBlockIo {
+            device: device.clone(),
+            size,
+        };
+        match crate::fsck::upgrade_volume_version_io(&mut fsck_io) {
+            Ok(true) => {
+                log::info!(target: "fs_ntfs", "upgraded $VOLUME_INFORMATION 1.2 -> 3.1")
             }
-            if let Err(e) = prepare_rw_mount(&mut io, replay) {
-                set_error(&e);
-                return std::ptr::null_mut();
+            Ok(false) => {
+                log::debug!(target: "fs_ntfs", "no $VOLUME_INFORMATION upgrade needed")
+            }
+            Err(e) => {
+                log::warn!(target: "fs_ntfs", "$VOLUME_INFORMATION upgrade skipped: {e}")
             }
         }
+    }
 
-        // Mimic `ntfs.sys`'s "upgrade on mount": if the volume was
-        // fresh-formatted (major=1, minor=2, UPGRADE_ON_MOUNT set —
-        // what Microsoft `format.com` and our `mkfs` produce), rewrite
-        // it to 3.1 with the flag cleared so volumes touched by our
-        // driver look "already upgraded" to Windows, parallel to what
-        // `ntfs.sys` would have done on first RW mount.
-        //
-        // Best-effort: log on failure but don't fail the mount. The
-        // volume is still usable in its pre-upgrade form.
-        if fs_core::BlockDevice::is_writable(&device) {
-            let mut fsck_io = FsCoreBlockIo {
-                device: device.clone(),
-                size,
-            };
-            match crate::fsck::upgrade_volume_version_io(&mut fsck_io) {
-                Ok(true) => {
-                    log::info!(target: "fs_ntfs", "upgraded $VOLUME_INFORMATION 1.2 -> 3.1")
-                }
-                Ok(false) => {
-                    log::debug!(target: "fs_ntfs", "no $VOLUME_INFORMATION upgrade needed")
-                }
-                Err(e) => {
-                    log::warn!(target: "fs_ntfs", "$VOLUME_INFORMATION upgrade skipped: {e}")
-                }
-            }
-        }
-
-        let bridge = Box::new(FsNtfsHandle {
-            source: Some(MountSource::FsCore {
-                device: cache_device(device, true),
-            }),
-            writable: true,
-        });
-        log::info!(target: "fs_ntfs", "mount rw via fs_core handle (size={size})");
-        Box::into_raw(bridge)
-    })
+    let bridge = Box::new(FsNtfsHandle {
+        source: Some(MountSource::FsCore {
+            device: cache_device(device, true),
+        }),
+        writable: true,
+    });
+    log::info!(target: "fs_ntfs", "mount rw via fs_core handle (size={size})");
+    Box::into_raw(bridge)
 }
 
 /// Owned `BlockIo` constructed from a [`FsNtfsHandle`] for the
