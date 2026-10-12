@@ -185,6 +185,12 @@ written against 0.9.0, and `chore check:semver` refuses it otherwise.
   `unlink` and `remove` of the root said "cannot rename root", and
   unlinking a directory said rmdir was not implemented. Each now names its
   own operation, and the unlink refusal points at `rmdir` as it is.
+- **A directory past one index level can be emptied and removed** (#495).
+  An entry of an interior index node could not be unlinked, and rmdir
+  refused any directory with `$INDEX_ALLOCATION`, so such a directory could
+  never be emptied nor removed. An interior entry is now replaced by its
+  in-order neighbour, as a B-tree does, and rmdir removes a directory whose
+  every index block is empty and gives their clusters back.
 - **Header fields other fields depend on are checked before they are
   trusted.** An MFT record whose `bytes_allocated` is not the record size is
   refused, as ntfs-3g refuses it, rather than served (#509). A boot sector
