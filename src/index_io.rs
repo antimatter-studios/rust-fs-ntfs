@@ -905,6 +905,21 @@ pub fn rename_index_entry_same_length(
         let off = name_start + i * 2;
         record[off..off + 2].copy_from_slice(&c.to_le_bytes());
     }
+    // The key's namespace follows the new name, as the record's does (#492).
+    let ns_at = entry.record_offset + IE_KEY_START + FN_NAMESPACE_OFFSET;
+    record[ns_at] = crate::record_build::fn_namespace_after_rename(record[ns_at], new_name);
+    Ok(())
+}
+
+/// Set the namespace of the `$FILE_NAME` key in a built index entry, such
+/// as one [`build_file_name_index_entry`] returns, so that it agrees with
+/// the record's `$FILE_NAME` (#492).
+pub(crate) fn set_entry_namespace(entry: &mut [u8], namespace: u8) -> Result<(), Error> {
+    let at = IE_KEY_START + FN_NAMESPACE_OFFSET;
+    let byte = entry
+        .get_mut(at)
+        .ok_or_else(|| Error::io("index entry too short to hold a $FILE_NAME namespace"))?;
+    *byte = namespace;
     Ok(())
 }
 
@@ -2102,6 +2117,10 @@ pub fn rename_filename_attribute_same_length(
             let off = name_start + i * 2;
             record[off..off + 2].copy_from_slice(&c.to_le_bytes());
         }
+        // A rename kept the old name's namespace, so a long name stayed
+        // WIN32_AND_DOS, which chkdsk rejects (#492).
+        let ns_at = data_start + FN_NAMESPACE_OFFSET;
+        record[ns_at] = crate::record_build::fn_namespace_after_rename(record[ns_at], new_name);
         patched = true;
     }
     if !patched {

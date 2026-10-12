@@ -83,6 +83,12 @@
 - **A transient HTTP 5xx from the chore release download no longer fails a CI
   job.** Every chore download in `ci.yml`, `fuzz.yml` and `release.yml`
   retries up to five times on any error.
+- **A rename gives the new name the namespace create would** (#492). A
+  rename kept the old name's `$FILE_NAME` namespace, so `file.txt` renamed
+  to `longer_name.txt` stayed `WIN32_AND_DOS`, which chkdsk rejects on a
+  name that does not fit 8.3. The record and the index entry now both take
+  POSIX, or WIN32_AND_DOS for an 8.3 name; one half of a WIN32 + DOS pair
+  keeps its namespace.
 - **A `$LogFile` whose checkpoint names no start is replayed** (#137). The
   first checkpoint NTFS writes after its log was emptied (by `chkdsk /L`,
   say) has nothing before it to start from: its start of checkpoint is 0
