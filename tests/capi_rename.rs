@@ -88,9 +88,9 @@ fn capi_rename_same_length_rejects_length_change() {
 
 #[test]
 fn capi_rename_variable_length_happy() {
-    // Parent must be a freshly-created subdir; root of ntfs-basic
-    // has $INDEX_ALLOCATION overflow which variable-length rename
-    // doesn't yet support.
+    // In a freshly-created subdir, whose index fits in $INDEX_ROOT; a
+    // directory with INDX blocks is covered by
+    // rename_other_length_in_indexed_directory.rs.
     let img = working_copy("vl_happy");
     let img_c = CString::new(img.as_str()).unwrap();
     let root_c = CString::new("/").unwrap();
