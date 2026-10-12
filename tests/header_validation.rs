@@ -20,7 +20,7 @@ mod common;
 use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
-use fs_ntfs::{mft_io, read, write};
+use fs_ntfs::{idx_block, mft_io, read, write};
 use std::fs::File;
 use std::path::Path;
 
@@ -129,21 +129,19 @@ fn an_indx_block_whose_index_length_ends_inside_its_entries_is_refused_by_an_ins
 
     // The leaf an insert of a name sorting after all of them goes to is
     // the one holding the last name.
+    // Each block's place is found through the run list: $INDEX_ALLOCATION
+    // fragments whenever $MFT grows between two of the directory's blocks.
     let params = mft_io::read_boot_params_io(&mut io).expect("boot params");
-    let (start, length) = read::nonresident_contiguous_disk_range(
-        &mut io,
-        dir,
-        AttrType::IndexAllocation,
-        Some("$I30"),
-    )
-    .expect("/d has an $INDEX_ALLOCATION:$I30");
+    let ia = idx_block::load_for_directory_io(&mut io, dir).expect("/d's $INDEX_ALLOCATION:$I30");
+    let device = <PathIo as BlockIo>::size(&io);
     let size = params.index_block_size as usize;
     let last: Vec<u8> = format!("f{:03}", NAMES - 1)
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
         .collect();
     let mut target = None;
-    for at in (start..start + length).step_by(size) {
+    for vcn in ia.allocated_block_vcns() {
+        let at = idx_block::vcn_to_disk_offset(&ia, vcn, device).expect("place an INDX block");
         let mut block = vec![0u8; size];
         io.read_exact_at(at, &mut block)
             .expect("read an INDX block");
