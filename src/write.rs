@@ -4074,16 +4074,31 @@ pub fn write_named_stream_io<T: BlockIo + ?Sized>(
     match write_named_stream_resident_attempt_io(io, file_path, stream_name, data) {
         Ok(()) => Ok(()),
         Err(ResidentWriteError::NeedsPromotion(_)) => {
-            // If a resident version exists, remove it first so the
-            // non-resident replacement inserts cleanly.
-            let _ = delete_named_stream_io(io, file_path, stream_name);
+            // THE OLD STREAM GOES ONLY ONCE THE NEW ONE IS WRITTEN.
+            //
+            // This deleted the existing stream first, so that the
+            // non-resident replacement would insert cleanly. Whenever the
+            // promote then failed -- no room in the record for the new
+            // header, no free run of clusters -- the call returned `Err`
+            // with the stream already gone: a refused write that deleted
+            // the data it was only meant to replace (#469).
+            //
+            // The promote replaces an existing attribute in place, and its
+            // failures leave the record and the bitmap as they were. The
+            // old stream's runs are read first and freed only after the
+            // new attribute is written, as `delete_named_stream_io` does,
+            // so its clusters cannot be handed to the new contents either.
+            let rec = resolve_path_to_record_number_io(io, file_path)?;
+            let (_, record) = read_mft_record_io(io, rec)?;
+            let old_runs = named_stream_runs(&record, stream_name)?;
             promote_attribute_to_nonresident_io(
                 io,
                 file_path,
                 AttrType::Data,
                 Some(stream_name),
                 data,
-            )
+            )?;
+            free_named_stream_runs_io(io, stream_name, "rewritten", old_runs)
         }
         Err(ResidentWriteError::Other(error)) => Err(error),
     }
@@ -4157,30 +4172,7 @@ pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
     // clusters marked allocated that nothing owns, never a live
     // attribute pointing at free space.
     let (_params, record_bytes) = read_mft_record_io(io, rec)?;
-    let runs_to_free =
-        match attr_io::find_attribute(&record_bytes, AttrType::Data, Some(stream_name)) {
-            Some(loc) if !loc.is_resident => {
-                let mapping_offset = loc.non_resident_mapping_pairs_offset.ok_or(Error::io(
-                    "non-resident named stream has no mapping-pairs offset",
-                ))? as usize;
-                let start = loc.attr_offset + mapping_offset;
-                let end = loc.attr_offset + loc.attr_length;
-                if start >= end || end > record_bytes.len() {
-                    return Err(Error::io(format!(
-                        "named stream '{stream_name}' has a mapping-pair range outside its record"
-                    )));
-                }
-                data_runs::decode_runs(&record_bytes[start..end])?
-                    .into_iter()
-                    .filter_map(|run| {
-                        run.lcn
-                            .filter(|_| run.length > 0)
-                            .map(|lcn| (lcn, run.length))
-                    })
-                    .collect()
-            }
-            _ => Vec::new(),
-        };
+    let runs_to_free = named_stream_runs(&record_bytes, stream_name)?;
 
     update_mft_record_io(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, Some(stream_name))
@@ -4188,20 +4180,60 @@ pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
         remove_attribute_at(record, loc.attr_offset, loc.attr_length)
     })?;
 
-    if !runs_to_free.is_empty() {
-        let bm = bitmap::locate_bitmap_io(io)?;
-        for (lcn, n) in runs_to_free {
-            bitmap::free_io(io, &bm, lcn, n).map_err(|e| {
-                e.map_message(|m| {
-                    format!(
-                        "the named stream '{stream_name}' was removed, but freeing its clusters \
-                         [{lcn}..{}] failed ({m}): those clusters are still marked allocated \
-                         and nothing owns them now",
-                        lcn + n
-                    )
+    free_named_stream_runs_io(io, stream_name, "removed", runs_to_free)
+}
+
+/// The allocated runs of `stream_name`, as `(lcn, clusters)`: none for a
+/// resident stream or one that does not exist.
+fn named_stream_runs(record_bytes: &[u8], stream_name: &str) -> Result<Vec<(u64, u64)>, Error> {
+    match attr_io::find_attribute(record_bytes, AttrType::Data, Some(stream_name)) {
+        Some(loc) if !loc.is_resident => {
+            let mapping_offset = loc.non_resident_mapping_pairs_offset.ok_or(Error::io(
+                "non-resident named stream has no mapping-pairs offset",
+            ))? as usize;
+            let start = loc.attr_offset + mapping_offset;
+            let end = loc.attr_offset + loc.attr_length;
+            if start >= end || end > record_bytes.len() {
+                return Err(Error::io(format!(
+                    "named stream '{stream_name}' has a mapping-pair range outside its record"
+                )));
+            }
+            Ok(data_runs::decode_runs(&record_bytes[start..end])?
+                .into_iter()
+                .filter_map(|run| {
+                    run.lcn
+                        .filter(|_| run.length > 0)
+                        .map(|lcn| (lcn, run.length))
                 })
-            })?;
+                .collect())
         }
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// Give back the clusters a stream held before it was `done` --
+/// "removed" or "rewritten" -- once the record no longer names them.
+fn free_named_stream_runs_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    stream_name: &str,
+    done: &str,
+    runs: Vec<(u64, u64)>,
+) -> Result<(), Error> {
+    if runs.is_empty() {
+        return Ok(());
+    }
+    let bm = bitmap::locate_bitmap_io(io)?;
+    for (lcn, n) in runs {
+        bitmap::free_io(io, &bm, lcn, n).map_err(|e| {
+            e.map_message(|m| {
+                format!(
+                    "the named stream '{stream_name}' was {done}, but freeing its old clusters \
+                     [{lcn}..{}] failed ({m}): those clusters are still marked allocated \
+                     and nothing owns them now",
+                    lcn + n
+                )
+            })
+        })?;
     }
     Ok(())
 }
