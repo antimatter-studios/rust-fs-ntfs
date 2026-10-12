@@ -3110,6 +3110,7 @@ pub(crate) fn remove_attribute_at(
     attr_offset: usize,
     attr_length: usize,
 ) -> Result<(), Error> {
+    crate::attr_resize::refuse_if_attribute_list(record, "remove an attribute")?;
     let bytes_used =
         u32::from_le_bytes([record[0x18], record[0x19], record[0x1A], record[0x1B]]) as usize;
     if attr_length == 0
@@ -4443,6 +4444,9 @@ pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
     // clusters marked allocated that nothing owns, never a live
     // attribute pointing at free space.
     let (_params, record_bytes) = read_mft_record_io(io, rec)?;
+    // Before the lookup: on such a file the stream may live in an
+    // extension record, where the base record's walk would call it missing.
+    crate::attr_resize::refuse_if_attribute_list(&record_bytes, "delete a named stream")?;
     let runs_to_free = named_stream_runs(&record_bytes, stream_name)?;
 
     update_mft_record_io(io, rec, |record| {

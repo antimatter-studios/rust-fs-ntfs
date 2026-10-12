@@ -106,6 +106,13 @@
   of its type. ntfs-3g and Windows stop looking once they pass an attribute's
   slot, so a stream written after one that sorts later was one they could
   not find.
+- **A record with an `$ATTRIBUTE_LIST` gets no attribute added or removed**
+  (#468). The list names every attribute a file has and where, and this
+  driver does not maintain it: a stream added to such a file went into the
+  base record with no list entry, unreadable by ntfs-3g, while the write
+  returned `Ok`. Adding or removing an attribute on such a record is now
+  refused with `EPERM` before anything is written; a rewrite in place still
+  works.
 - **A symlink is written in Windows path syntax and read back in POSIX
   syntax** (#505). Targets were stored verbatim, with `/` separators and a
   POSIX absolute path marked absolute, which neither Windows nor ntfs-3g
