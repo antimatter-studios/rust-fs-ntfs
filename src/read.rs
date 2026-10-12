@@ -485,7 +485,55 @@ fn locate_attribute<T: BlockIo + ?Sized>(
         return Ok(Some((params, record_number, record, loc)));
     }
 
+    // A STREAM IS NAMED UNDER $UPCASE. Nothing matched the name as spelled;
+    // one that collates equal to it is the same stream to Windows (#494).
+    if let (AttrType::Data, Some(wanted)) = (attr_type, name) {
+        if let Some(stored) = stored_attribute_name_io(io, record_number, attr_type, wanted)? {
+            if stored != wanted {
+                return locate_attribute(io, record_number, attr_type, Some(&stored));
+            }
+        }
+    }
+
     Ok(None)
+}
+
+/// The stored spelling of the attribute of `attr_type` whose name collates
+/// equal to `name` under the volume's `$UpCase`, if the file has one: taken
+/// from its `$ATTRIBUTE_LIST` when it has one, else from its base record
+/// (#494). NTFS matches attribute names case-insensitively; this crate
+/// matched them code unit for code unit.
+pub(crate) fn stored_attribute_name_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    attr_type: AttrType,
+    name: &str,
+) -> Result<Option<String>, Error> {
+    let (_, record) = read_mft_record_io(io, record_number)?;
+    let mut names: Vec<String> = Vec::new();
+    if attr_io::find_attribute(&record, AttrType::AttributeList, None).is_some() {
+        let list = read_attribute_value(io, record_number, AttrType::AttributeList, None)?;
+        names.extend(
+            parse_attribute_list(&list)?
+                .into_iter()
+                .filter(|e| e.type_code == attr_type as u32)
+                .filter_map(|e| e.name),
+        );
+    }
+    names.extend(
+        attr_io::iter_attributes(&record)
+            .filter(|l| l.type_code == attr_type as u32 && l.name_length > 0)
+            .map(|l| attr_io::decode_attr_name(&record, &l)),
+    );
+    if let Some(exact) = names.iter().find(|n| n.as_str() == name) {
+        return Ok(Some(exact.clone()));
+    }
+    let upcase = UpcaseTable::load_io(io)?;
+    let wanted: Vec<u16> = name.encode_utf16().collect();
+    Ok(names.into_iter().find(|n| {
+        let units: Vec<u16> = n.encode_utf16().collect();
+        upcase.cmp_names(&units, &wanted) == std::cmp::Ordering::Equal
+    }))
 }
 
 /// One attribute whose run list `$ATTRIBUTE_LIST` splits across several

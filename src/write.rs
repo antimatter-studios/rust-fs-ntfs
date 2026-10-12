@@ -4386,8 +4386,32 @@ pub fn write_named_stream_resident_io<T: BlockIo + ?Sized>(
     stream_name: &str,
     data: &[u8],
 ) -> Result<(), Error> {
+    let stream_name = &stored_stream_name_io(io, file_path, stream_name)?;
     write_named_stream_resident_attempt_io(io, file_path, stream_name, data)
         .map_err(ResidentWriteError::into_error)
+}
+
+/// The spelling of the file's stream that `name` names: an existing named
+/// `$DATA` whose name collates equal to it under `$UpCase`, or `name`
+/// itself when there is none (#494).
+///
+/// Stream names were matched code unit for code unit, so `s1` written to
+/// a file holding `S1` made a second stream. Windows matches them
+/// case-insensitively for the case-insensitive open Win32 makes by
+/// default, so the two name one stream there, and it keeps the spelling
+/// it was created with. The names come from the file's `$ATTRIBUTE_LIST`
+/// when it has one, so a stream in an extension record is found too.
+fn stored_stream_name_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    name: &str,
+) -> Result<String, Error> {
+    if name.is_empty() {
+        return Ok(String::new());
+    }
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    crate::read::stored_attribute_name_io(io, rec, AttrType::Data, name)
+        .map(|stored| stored.unwrap_or_else(|| name.to_string()))
 }
 
 fn write_named_stream_resident_attempt_io<T: BlockIo + ?Sized>(
@@ -4452,6 +4476,7 @@ pub fn write_named_stream_io<T: BlockIo + ?Sized>(
     stream_name: &str,
     data: &[u8],
 ) -> Result<(), Error> {
+    let stream_name = &stored_stream_name_io(io, file_path, stream_name)?;
     match write_named_stream_resident_attempt_io(io, file_path, stream_name, data) {
         Ok(()) => Ok(()),
         Err(ResidentWriteError::NeedsPromotion(_)) => {
@@ -4558,6 +4583,7 @@ pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
     if stream_name.is_empty() {
         return Err(Error::invalid("stream_name must be non-empty"));
     }
+    let stream_name = &stored_stream_name_io(io, file_path, stream_name)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     refuse_metafile_io(io, rec, &format!("delete_named_stream {file_path}"))?;
 
