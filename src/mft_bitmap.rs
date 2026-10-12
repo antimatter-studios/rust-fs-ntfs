@@ -174,9 +174,30 @@ pub fn locate_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<MftBitmap, Error> {
         let data_length = bm
             .non_resident_value_length
             .ok_or(Error::io("no value_length"))?;
+        // The declared length is an on-disk field, and it was multiplied
+        // by eight raw: at 2^61 or more that panicked in a debug build and
+        // wrapped in release, to a small bit count under which records in
+        // use read as free and `find_free_record` handed one out (#476).
+        // A value cannot be longer than the clusters its runs hold, so it
+        // is bounded by those first, as the volume bitmap is.
+        let run_bytes = runs
+            .iter()
+            .try_fold(0u64, |sum, r| sum.checked_add(r.length))
+            .and_then(|clusters| clusters.checked_mul(params.cluster_size))
+            .ok_or_else(|| Error::io("$MFT:$Bitmap's runs hold more bytes than a u64 counts"))?;
+        if data_length > run_bytes {
+            return Err(Error::io(format!(
+                "$MFT:$Bitmap says its value is {data_length} bytes, and its runs hold \
+                 {run_bytes}"
+            )));
+        }
         MftBitmapLayout::NonResident {
             runs,
-            total_bits: data_length * 8,
+            total_bits: data_length.checked_mul(8).ok_or_else(|| {
+                Error::io(format!(
+                    "$MFT:$Bitmap's {data_length} bytes hold more bits than a u64 counts"
+                ))
+            })?,
         }
     };
 
