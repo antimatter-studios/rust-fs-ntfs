@@ -72,6 +72,7 @@ jobs:
             test-disks/ntfs-compressed.img
             test-disks/ntfs-symlink.img
             test-disks/ntfs-symlink.targets.tsv
+            test-disks/ntfs-cli-read.img
           if-no-files-found: error
           retention-days: 1
 
