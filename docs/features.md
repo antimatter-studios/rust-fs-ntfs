@@ -109,5 +109,6 @@ multi-VM test matrix (`test-matrix.json`) has Windows mount, write and
 | C ABI errno: 0 after success, decided where the error is raised | Supported | 0.7.0 | | `errno_companion.rs`, `errno_as_data.rs`, `errno_kinds.rs` |
 | Rust facade (`facade::Filesystem`), typed errors | Supported | 0.1.0; typed errors 0.7.0 | | `facade.rs`, `error_paths.rs` |
 | `fs.ntfs` `ls`, `read`, `get`/`info`, `write`, `mkdir`, `set label` (`--features cli`) | Supported | 0.6.0 | | `cli_verbs.rs`, `tests/cli/test-fs.sh`, `tests/cli/test-write.sh` |
+| `fs.ntfs` `rm`, `rmdir` (`--features cli`) | Supported | Unreleased | #550 | `tests/cli/test-rm.sh`, matrix `cli-empty-directory-win-verify-chkdsk` |
 | `fs.ntfs` writing verbs on a volume whose log holds work | Refused | 0.8.0 | | `tests/cli/test-write.sh` |
 | `rust-fs-ntfs doctor`, man pages, shell completions, one program on `PATH` | Supported | 0.6.0; one program Unreleased (#454) | | `cli_verbs.rs`, `one_binary_on_path.rs` |
