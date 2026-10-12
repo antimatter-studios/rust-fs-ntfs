@@ -26,6 +26,7 @@
 #   matrix      1,381 / 100,339 green (72 cases, 2026-10-10)       1,850 / 135,000
 #   cli         27 / 1,035 (estimate: CI's 5-file run + test-docs)  36 / 1,380
 #   cli-oracle  15 / 741 (CI Linux, 2026-09-29, 2 files, 3 tools) 20 / 990
+#   cli-host    21 / 1,569 (arm64 Pi, 2026-10-12, 20 scenarios)   28 / 2,100
 #
 # THE CLIPPY ROW MOVED ON 2026-09-19, from 150/5,000 to 260/11,500. Adding
 # tests/fuzz_decoders.rs gave `--all-targets` another target to lint, and a
@@ -105,3 +106,4 @@ semver         40    4000
 matrix       1850  135000
 cli            36    1380
 cli-oracle     20     990
+cli-host       28    2100

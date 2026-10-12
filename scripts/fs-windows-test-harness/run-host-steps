@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""run-host-steps -- the host half of a matrix group, without the VM.
+
+Runs every step a scenario in the group runs on this machine before its
+first Windows step (`ship-to-vm`, `ship-to-host`, or an op whose host is
+"vm"): the command the harness would run, built from the op in
+fs-windows-test-harness.toml and the step in test-matrix.json, from the
+repository root, held to the op's `expect_exit`. Windows still grades what
+those steps make, in the matrix job. This is our own half, which used to
+run only there: #513 broke a step of it, and the break first showed eleven
+minutes into the Windows job (#546).
+
+A host step after a Windows step needs what Windows did, so it is the
+matrix job's. It is named as such, never left out quietly.
+
+The substitution is the harness's (runner/src/substitution.rs): `{a.b}`
+and `{a.b?}` references into the scenario and the step, `{{` and `}}` for
+literal braces, a scenario or step string expanded in turn, `when`
+evaluated as JSON truthiness. `{image_dir}` is a directory under tmp/ and
+`{run_id}` this run's; anything else only the harness provides (`{vm.*}`,
+`{tools.*}`, `{binary}`) fails the step, naming it.
+
+Usage:
+  scripts/fs-windows-test-harness/run-host-steps [--group cli] [--floor N]
+
+--floor N fails a group of fewer than N scenarios: a group that shrank by
+accident reads as one that passed, so lowering it is a deliberate edit.
+
+Exit code:
+  0  every host step exited as its op expects
+  1  a step did not, or could not be built, or the group is under its floor
+  2  the matrix, the harness config or the group could not be read
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import sys
+import time
+import tomllib
+from pathlib import Path
+from typing import Any
+
+# Ops the harness binary runs itself; both move files to or from the VM.
+HARNESS_BUILTIN_OPS = {"ship-to-vm", "ship-to-host"}
+
+SEGMENT = r"[A-Za-z_][A-Za-z0-9_-]*"
+PLACEHOLDER = re.compile(rf"({SEGMENT}(?:\.{SEGMENT})*)(\?)?")
+NAMESPACES = ("scenario.", "step.", "tools.", "vm.")
+
+
+class Context:
+    """One step's references: the flat tokens, the scenario, the step."""
+
+    def __init__(self, flat: dict[str, str], scenario: Any, step: Any):
+        self.flat = flat
+        self.roots = {"scenario": scenario, "step": step}
+
+    def lookup(self, path: str) -> Any:
+        root, _, rest = path.partition(".")
+        if root not in self.roots:
+            return self.flat.get(path)
+        cursor = self.roots[root]
+        for seg in rest.split(".") if rest else []:
+            if not isinstance(cursor, dict) or seg not in cursor:
+                return None
+            cursor = cursor[seg]
+        return cursor
+
+    def expand(self, template: str, missing: list[str], chain: tuple[str, ...] = ()) -> str:
+        out: list[str] = []
+        i = 0
+        while i < len(template):
+            pair = template[i : i + 2]
+            if pair in ("{{", "}}"):
+                out.append(template[i])
+                i += 2
+                continue
+            if template[i] == "{":
+                end = template.find("}", i + 1)
+                m = PLACEHOLDER.fullmatch(template[i + 1 : end]) if end > i else None
+                if m:
+                    path, optional = m.group(1), bool(m.group(2))
+                    # Inside a scenario or step string, only the harness's
+                    # own names are references; `file_{N}.txt` is text.
+                    if chain and path not in self.flat and not path.startswith(NAMESPACES):
+                        out.append(template[i : end + 1])
+                    elif path in chain:
+                        missing.append(f"{path} (refers to itself)")
+                    else:
+                        value = self.lookup(path)
+                        if value is None:
+                            if not optional and path not in missing:
+                                missing.append(path)
+                        elif isinstance(value, str) and path.startswith(("scenario.", "step.")):
+                            out.append(self.expand(value, missing, chain + (path,)))
+                        else:
+                            out.append(render(value))
+                    i = end + 1
+                    continue
+            out.append(template[i])
+            i += 1
+        return "".join(out)
+
+
+def render(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, separators=(",", ":"))
+    return str(value)
+
+
+def truthy(value: Any) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    if isinstance(value, (str, list, dict)):
+        return len(value) > 0
+    return True
+
+
+def step_host(step: dict[str, Any], op_def: dict[str, Any] | None) -> str:
+    """Where the harness runs the step: the step's own `host` wins."""
+    if step.get("op") in HARNESS_BUILTIN_OPS:
+        return "vm"
+    if step.get("host") in ("host", "vm"):
+        return step["host"]
+    return (op_def or {}).get("host", "vm")
+
+
+def tail(text: str, n: int = 6) -> str:
+    lines = [l for l in text.strip().splitlines() if l.strip()]
+    return "\n".join("      " + l for l in lines[-n:])
+
+
+def main() -> int:
+    repo_root = Path(__file__).resolve().parents[2]
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--group", default="cli", help="the harness group to run (default: cli)")
+    parser.add_argument("--floor", type=int, default=0,
+                        help="fail a group of fewer scenarios than this")
+    parser.add_argument("--matrix", default=str(repo_root / "test-matrix.json"))
+    parser.add_argument("--harness", default=str(repo_root / "fs-windows-test-harness.toml"))
+    args = parser.parse_args()
+
+    try:
+        matrix = json.loads(Path(args.matrix).read_text())
+        config = tomllib.loads(Path(args.harness).read_text())
+    except (OSError, ValueError) as e:
+        print(f"run-host-steps: {e}; `chore matrix:check` names what is wrong", file=sys.stderr)
+        return 2
+    group = config.get("groups", {}).get(args.group)
+    if not group:
+        print(f"run-host-steps: no group '{args.group}' in {args.harness}", file=sys.stderr)
+        return 2
+    ops = config.get("ops", {})
+    scenarios = matrix.get("scenarios", {})
+    if len(group) < args.floor:
+        print(f"FAIL group '{args.group}' has {len(group)} scenarios, under its floor of "
+              f"{args.floor}: lower --floor if that is meant")
+        return 1
+
+    run_id = str(int(time.time() * 1000))
+    image_dir = repo_root / "tmp" / "host-steps"
+    flat = {"image_dir": str(image_dir), "run_id": run_id}
+
+    failed = 0
+    ran = 0
+    for name in group:
+        scenario = scenarios.get(name)
+        if scenario is None:
+            print(f"FAIL {name}: in group '{args.group}' but not in {args.matrix}")
+            failed += 1
+            continue
+        run_dir = image_dir / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        steps = 0
+        windows_from = None
+        problem = None
+        for idx, step in enumerate(scenario.get("recipe", [])):
+            op = step.get("op", "")
+            op_def = ops.get(op)
+            if step_host(step, op_def) == "vm":
+                if windows_from is None:
+                    windows_from = idx
+                continue
+            if windows_from is not None:
+                print(f"windows {name}: step {idx} ({op}) runs after the VM's step "
+                      f"{windows_from}, so the matrix job runs it")
+                continue
+            if op_def is None:
+                problem = f"step {idx}: op '{op}' is not in {args.harness} [ops]"
+                break
+            ctx = Context(flat, scenario, step)
+            when = op_def.get("when")
+            if when and not truthy(ctx.lookup(when)):
+                # The harness does not run it either.
+                continue
+            missing: list[str] = []
+            command = ctx.expand(op_def.get("command", ""), missing)
+            if missing:
+                problem = (f"step {idx} ({op}): needs {', '.join('{' + m + '}' for m in missing)}, "
+                           "which only the harness provides")
+                break
+            want = op_def.get("expect_exit", 0)
+            done = subprocess.run(["sh", "-c", command], cwd=repo_root,
+                                  capture_output=True, text=True)
+            steps += 1
+            if done.returncode != want:
+                problem = (f"step {idx} ({op}): exit {done.returncode}, expected {want}\n"
+                           f"    $ {command}\n{tail(done.stdout + done.stderr)}")
+                break
+        shutil.rmtree(run_dir, ignore_errors=True)
+        ran += steps
+        if problem:
+            print(f"FAIL {name}: {problem}")
+            failed += 1
+        else:
+            print(f"ok   {name}: {steps} host step{'s' if steps != 1 else ''}")
+    shutil.rmtree(image_dir, ignore_errors=True)
+
+    # In cargo's form, which scripts/test-verdict.sh adds up: a scenario is
+    # a test.
+    verdict = "ok" if not failed else "FAILED"
+    print(f"test result: {verdict}. {len(group) - failed} passed; {failed} failed "
+          f"({args.group}: {ran} host steps run; Windows grades the rest in the matrix job)")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
