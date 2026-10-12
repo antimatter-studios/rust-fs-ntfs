@@ -513,6 +513,9 @@ pub fn write_at_io<T: BlockIo + ?Sized>(
         return Ok(0);
     }
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    // Refused before the record's `$DATA` is looked at: a metafile such as
+    // `$Extend` has none, and would otherwise fail on that instead.
+    refuse_metafile_io(io, rec, "write_at")?;
     let end = offset
         .checked_add(data.len() as u64)
         .ok_or(Error::io("offset + len overflow"))?;
@@ -936,6 +939,7 @@ pub fn truncate_io<T: BlockIo + ?Sized>(
     new_size: u64,
 ) -> Result<u64, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, "truncate")?;
     // A resident value is resized and written back whole: cut short, or
     // extended with zeros, promoted if it outgrows the record (#500).
     if let Some(mut value) = resident_data_value_io(io, rec)? {
@@ -1108,6 +1112,7 @@ pub fn grow_nonresident_io<T: BlockIo + ?Sized>(
     new_size: u64,
 ) -> Result<u64, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, "grow")?;
     // A resident value grows the way truncate grows it (#500).
     if resident_data_value_io(io, rec)?.is_some() {
         return truncate_io(io, file_path, new_size);

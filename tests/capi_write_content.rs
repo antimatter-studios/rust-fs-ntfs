@@ -111,8 +111,10 @@ fn capi_write_file_rejects_null_buf_with_len() {
     assert!(last_error().contains("null") || last_error().contains("buffer"));
 }
 
+/// A write running past the end extends the file, as `pwrite` does (#500).
+/// It was refused as "past EOF".
 #[test]
-fn capi_write_file_rejects_past_eof() {
+fn capi_write_file_extends_past_eof() {
     let img = working_copy("past_eof");
     let img_c = CString::new(img.as_str()).unwrap();
     let p_c = CString::new("/big.bin").unwrap();
@@ -126,6 +128,9 @@ fn capi_write_file_rejects_past_eof() {
             payload.len() as u64,
         )
     };
-    assert_eq!(n, -1);
-    assert!(last_error().contains("EOF"));
+    assert_eq!(n, 3, "err={}", last_error());
+    assert_eq!(
+        read_range(&img, "/big.bin", 8 * 1024 * 1024 - 1, 3),
+        payload
+    );
 }

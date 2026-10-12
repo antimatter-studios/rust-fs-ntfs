@@ -104,29 +104,37 @@ fn rewrite_preserves_surrounding_bytes() {
     assert_eq!(after[7], 0);
 }
 
+/// A write running past the end extends the file, as `pwrite` does (#500).
+/// It was refused as "past EOF".
 #[test]
-fn rewrite_rejects_past_eof() {
+fn rewrite_past_eof_extends_the_file() {
     let img = working_copy(LARGE_IMG, "past_eof");
     let file_size = 8 * 1024 * 1024u64;
-    let err = write::write_at(
+    let n = write::write_at(
         std::path::Path::new(&img),
         "/big.bin",
         file_size - 2,
         b"overflow!",
     )
-    .unwrap_err();
-    assert!(err.contains("past EOF"), "{err:?}");
+    .expect("write past the end");
+    assert_eq!(n, 9);
+    let after = read_range_via_upstream(&img, "/big.bin", file_size - 2, 9);
+    assert_eq!(after, b"overflow!", "the write reads back past the old end");
 }
 
+/// A resident `$DATA` is written in place (#500). It was refused as
+/// "resident".
 #[test]
-fn rewrite_rejects_resident_data() {
+fn rewrite_of_resident_data_is_spliced_in() {
     // hello.txt is only 17 bytes — its $DATA is resident in basic.img.
     let img = working_copy(BASIC_IMG, "resident");
-    let err = write::write_at(std::path::Path::new(&img), "/hello.txt", 0, b"X").unwrap_err();
-    assert!(
-        err.contains("non-resident") || err.contains("resident"),
-        "{err:?}"
-    );
+    let before = read_range_via_upstream(&img, "/hello.txt", 0, 17);
+    let n = write::write_at(std::path::Path::new(&img), "/hello.txt", 0, b"X")
+        .expect("write a resident file");
+    assert_eq!(n, 1);
+    let after = read_range_via_upstream(&img, "/hello.txt", 0, 17);
+    assert_eq!(after[0], b'X');
+    assert_eq!(after[1..], before[1..], "the rest of the file is untouched");
 }
 
 #[test]
