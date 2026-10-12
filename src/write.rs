@@ -94,6 +94,7 @@ pub fn set_times_by_record_number_io<T: BlockIo + ?Sized>(
     record_number: u64,
     times: FileTimes,
 ) -> Result<(), Error> {
+    refuse_metafile_io(io, record_number, "set_times")?;
     update_mft_record_io(io, record_number, |record| {
         let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
             .ok_or_else(|| Error::io("$STANDARD_INFORMATION not found"))?;
@@ -337,6 +338,7 @@ pub fn set_security_id_io<T: BlockIo + ?Sized>(
     security_id: u32,
 ) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, &format!("set_security_id {file_path}"))?;
     let (_, record) = read_mft_record_io(io, rec)?;
     si_security_id_offset(&record)?;
     // AN ID IS ONLY AS GOOD AS THE DESCRIPTOR IT NAMES.
@@ -441,6 +443,7 @@ pub fn set_file_attributes_by_record_number_io<T: BlockIo + ?Sized>(
     record_number: u64,
     change: FileAttributesChange,
 ) -> Result<(), Error> {
+    refuse_metafile_io(io, record_number, "set_file_attributes")?;
     if change.add & change.remove != 0 {
         return Err(Error::io(format!(
             "add and remove overlap: add={:#x} remove={:#x}",
@@ -537,6 +540,7 @@ pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
     offset: u64,
     data: &[u8],
 ) -> Result<u64, Error> {
+    refuse_metafile_io(io, record_number, "write_at")?;
     // THE GUARD THE OTHER TWO ENTRY POINTS HAVE, AND THIS ONE IS THE
     // DEEPEST OF THE FOUR.
     //
@@ -898,6 +902,7 @@ pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
     record_number: u64,
     new_size: u64,
 ) -> Result<u64, Error> {
+    refuse_metafile_io(io, record_number, "truncate")?;
     let (params, record) = read_mft_record_io(io, record_number)?;
     let cluster_size = params.cluster_size;
 
@@ -1054,6 +1059,7 @@ pub fn grow_nonresident_by_record_number_io<T: BlockIo + ?Sized>(
     record_number: u64,
     new_size: u64,
 ) -> Result<u64, Error> {
+    refuse_metafile_io(io, record_number, "grow")?;
     let (params, record) = read_mft_record_io(io, record_number)?;
     let cluster_size = params.cluster_size;
 
@@ -1363,6 +1369,7 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
     let upcase = crate::upcase::UpcaseTable::load_io(io)?;
     validate_basename(new_name)?;
     let (parent_rec, file_rec, current_basename) = resolve_parent_and_child_io(io, old_path)?;
+    refuse_metafile_io(io, file_rec, &format!("rename {old_path}"))?;
 
     // Pre-check lengths (UTF-16 code units).
     let old_u16_len = current_basename.encode_utf16().count();
@@ -1838,6 +1845,54 @@ fn parent_index_overflows_io<T: BlockIo + ?Sized>(
 /// A host passing a name straight through from a POSIX API, where `:`
 /// and `\` are ordinary characters, produces these as a matter of
 /// course rather than as an edge case.
+/// THE METAFILES ARE NOT FILES TO WRITE (#499). Records 0 to 15 are the
+/// volume's own structures (`$MFT`, `$LogFile`, `$Volume`, `$Bitmap`,
+/// `$UpCase`, ...) and 16 to 23 are reserved; `$Extend`'s children
+/// (`$Quota`, `$ObjId`, `$Reparse`, `$UsnJrnl`, ...) are metafiles under
+/// ordinary record numbers. Every write path took them like user files, and
+/// the cluster guard in the free path, the only protection, fired after
+/// the record and the index had changed. Windows does not list them and
+/// ntfs-3g hides them, but a host listing the root through this crate shows
+/// them, so an `rm -rf` on the mount reaches every one.
+///
+/// Called as each mutating entry point resolves its target, or the
+/// directory it creates into, so a refusal leaves the volume untouched.
+/// The root is record 5 and is a directory like any other.
+/// `set_volume_label` and the repair paths keep their own entry points.
+const FIRST_USER_RECORD: u64 = 24;
+const ROOT_RECORD: u64 = 5;
+const EXTEND_RECORD: u64 = 11;
+
+fn refuse_metafile_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    what: &str,
+) -> Result<(), Error> {
+    if record_number < FIRST_USER_RECORD && record_number != ROOT_RECORD {
+        return Err(Error::refused(format!(
+            "{what}: MFT record {record_number} is one of the volume's own metafiles, \
+             records 0 to 23 other than the root, and they are not changed through the \
+             file API"
+        )));
+    }
+    let (_, record) = read_mft_record_io(io, record_number)?;
+    if let Some(loc) = attr_io::find_attribute(&record, AttrType::FileName, None) {
+        if let Some(start) = attr_io::resident_value_start(&loc) {
+            if let Some(parent) = record.get(start..start + 8) {
+                let parent =
+                    u64::from_le_bytes(parent.try_into().expect("8 bytes")) & 0x0000_FFFF_FFFF_FFFF;
+                if parent == EXTEND_RECORD {
+                    return Err(Error::refused(format!(
+                        "{what}: MFT record {record_number} is in $Extend, one of the \
+                         volume's own metafiles, which are not changed through the file API"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_basename(name: &str) -> Result<(), Error> {
     validate_win32_name("basename", name)
 }
@@ -2065,6 +2120,7 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
     validate_basename(basename)?;
 
     let parent_rec = resolve_path_to_record_number_io(io, parent_path)?;
+    refuse_metafile_io(io, parent_rec, &format!("create in {parent_path}"))?;
 
     // Read parent; check it's a directory and remember whether its index
     // has an $INDEX_ALLOCATION child tree.
@@ -2846,6 +2902,7 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
     validate_basename(basename)?;
 
     let parent_rec = resolve_path_to_record_number_io(io, parent_path)?;
+    refuse_metafile_io(io, parent_rec, &format!("mkdir in {parent_path}"))?;
 
     let (params, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let parent_flags = crate::mft_io::record_flags(&parent_record_bytes);
@@ -2991,6 +3048,7 @@ pub fn write_ea_io<T: BlockIo + ?Sized>(
         )));
     }
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, &format!("write_ea {file_path}"))?;
     update_mft_record_io(io, rec, |record| {
         let mut eas = crate::ea_io::read_from_record(record)?;
         crate::ea_io::upsert(
@@ -3017,6 +3075,7 @@ pub fn remove_ea_io<T: BlockIo + ?Sized>(
     ea_name: &[u8],
 ) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, &format!("remove_ea {file_path}"))?;
     update_mft_record_io(io, rec, |record| {
         let mut eas = crate::ea_io::read_from_record(record)?;
         if !crate::ea_io::remove_by_name(&mut eas, ea_name) {
@@ -3188,6 +3247,7 @@ pub fn write_reparse_point_io<T: BlockIo + ?Sized>(
     data: &[u8],
 ) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, &format!("write_reparse_point {file_path}"))?;
     update_mft_record_io(io, rec, |record| {
         let existing = attr_io::find_attribute(record, AttrType::ReparsePoint, None);
         if let Some(loc) = existing {
@@ -3224,6 +3284,7 @@ pub fn remove_reparse_point_io<T: BlockIo + ?Sized>(
     file_path: &str,
 ) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, &format!("remove_reparse_point {file_path}"))?;
     update_mft_record_io(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::ReparsePoint, None)
             .ok_or_else(|| Error::io("no $REPARSE_POINT to remove"))?;
@@ -3913,6 +3974,7 @@ fn write_object_id_inner<T: BlockIo + ?Sized>(
     birth_ids: Option<(&[u8; 16], &[u8; 16], &[u8; 16])>,
 ) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, &format!("write_object_id {file_path}"))?;
     update_mft_record_io(io, rec, |record| {
         if let Some(loc) = attr_io::find_attribute(record, AttrType::ObjectId, None) {
             let attr_id = loc.attribute_id;
@@ -3944,6 +4006,7 @@ pub fn remove_object_id_io<T: BlockIo + ?Sized>(
     file_path: &str,
 ) -> Result<bool, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, &format!("remove_object_id {file_path}"))?;
     let mut removed = false;
     update_mft_record_io(io, rec, |record| {
         let Some(loc) = attr_io::find_attribute(record, AttrType::ObjectId, None) else {
@@ -3985,6 +4048,7 @@ pub fn link_io<T: BlockIo + ?Sized>(
     let upcase = crate::upcase::UpcaseTable::load_io(io)?;
     validate_basename(new_basename)?;
     let target_rec = resolve_path_to_record_number_io(io, existing_path)?;
+    refuse_metafile_io(io, target_rec, &format!("link {existing_path}"))?;
     let (_, target_record_bytes) = read_mft_record_io(io, target_rec)?;
     let target_flags = crate::mft_io::record_flags(&target_record_bytes);
     if target_flags & crate::mft_io::MFT_FLAG_DIRECTORY != 0 {
@@ -3994,6 +4058,7 @@ pub fn link_io<T: BlockIo + ?Sized>(
     }
 
     let new_parent_rec = resolve_path_to_record_number_io(io, new_parent_path)?;
+    refuse_metafile_io(io, new_parent_rec, &format!("link into {new_parent_path}"))?;
     let (_, parent_record_bytes) = read_mft_record_io(io, new_parent_rec)?;
     let parent_flags = crate::mft_io::record_flags(&parent_record_bytes);
     if parent_flags & crate::mft_io::MFT_FLAG_DIRECTORY == 0 {
@@ -4252,6 +4317,8 @@ fn write_named_stream_resident_attempt_io<T: BlockIo + ?Sized>(
     }
     validate_stream_name(stream_name).map_err(ResidentWriteError::Other)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, &format!("write_named_stream {file_path}"))
+        .map_err(ResidentWriteError::Other)?;
     // Where the new stream sorts among the record's others is decided by
     // the volume's own upcase table (#467).
     let upcase = crate::upcase::UpcaseTable::load_io(io).ok();
@@ -4384,6 +4451,7 @@ pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
         return Err(Error::invalid("stream_name must be non-empty"));
     }
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, &format!("delete_named_stream {file_path}"))?;
 
     // A NON-RESIDENT STREAM OWNS CLUSTERS, and removing the attribute
     // was the whole of the delete -- so the last reference to those
@@ -4503,6 +4571,7 @@ fn promote_resident_data_to_nonresident_unrefreshed_io<T: BlockIo + ?Sized>(
     new_data: &[u8],
 ) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, &format!("write {file_path}"))?;
     let (params, record) = read_mft_record_io(io, rec)?;
     let cluster_size = params.cluster_size;
 
@@ -4676,6 +4745,7 @@ fn write_sparse_file_unrefreshed_io<T: BlockIo + ?Sized>(
     data: &[u8],
 ) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, &format!("write_sparse_file {file_path}"))?;
     let (params, record) = read_mft_record_io(io, rec)?;
     let cluster_size = params.cluster_size;
 
@@ -4889,6 +4959,7 @@ pub fn replace_file_contents_io<T: BlockIo + ?Sized>(
     new_data: &[u8],
 ) -> Result<u64, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, &format!("replace_file_contents {file_path}"))?;
     let (_, record) = crate::mft_io::read_mft_record_io(io, rec)?;
     let loc = attr_io::find_attribute(&record, AttrType::Data, None)
         .ok_or_else(|| Error::io(format!("{file_path} has no unnamed $DATA")))?;
@@ -4999,6 +5070,7 @@ pub fn promote_attribute_to_nonresident_io<T: BlockIo + ?Sized>(
         validate_stream_name(name)?;
     }
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, &format!("write {file_path}"))?;
     let (params, _) = read_mft_record_io(io, rec)?;
     let cluster_size = params.cluster_size;
 
@@ -5144,6 +5216,7 @@ pub fn rmdir(image: &Path, dir_path: &str) -> Result<(), Error> {
 
 pub fn rmdir_io<T: BlockIo + ?Sized>(io: &mut T, dir_path: &str) -> Result<(), Error> {
     let (parent_rec, dir_rec, basename) = resolve_parent_and_child_io(io, dir_path)?;
+    refuse_metafile_io(io, dir_rec, &format!("rmdir {dir_path}"))?;
     let (_, dir_record_bytes) = read_mft_record_io(io, dir_rec)?;
     let flags = crate::mft_io::record_flags(&dir_record_bytes);
     if flags & MFT_FLAG_DIRECTORY == 0 {
@@ -5314,6 +5387,7 @@ fn write_resident_contents_attempt_io<T: BlockIo + ?Sized>(
     new_data: &[u8],
 ) -> Result<u64, ResidentWriteError> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, &format!("write {file_path}"))?;
     update_mft_record_io_typed(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, None)
             .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
@@ -5380,6 +5454,7 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     let upcase = crate::upcase::UpcaseTable::load_io(io)?;
     validate_basename(new_basename)?;
     let (parent_rec, file_rec, old_basename) = resolve_parent_and_child_io(io, old_path)?;
+    refuse_metafile_io(io, file_rec, &format!("rename {old_path}"))?;
     if old_basename == new_basename {
         return Ok(());
     }
@@ -5583,6 +5658,7 @@ fn replace_existing_dest_io<T: BlockIo + ?Sized>(
         return Ok(ReplaceDisposition::NoopSameRecord);
     }
 
+    refuse_metafile_io(io, dest_rec, "rename over")?;
     let (_, src_bytes) = read_mft_record_io(io, src_rec)?;
     let src_is_dir = crate::mft_io::record_flags(&src_bytes) & MFT_FLAG_DIRECTORY != 0;
     let (_, dest_bytes) = read_mft_record_io(io, dest_rec)?;
@@ -5718,6 +5794,7 @@ pub fn unlink(image: &Path, file_path: &str) -> Result<(), Error> {
 
 pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(), Error> {
     let (parent_rec, file_rec, basename) = resolve_parent_and_child_io(io, file_path)?;
+    refuse_metafile_io(io, file_rec, &format!("unlink {file_path}"))?;
 
     // Refuse directory targets.
     let (_, file_record_bytes) = read_mft_record_io(io, file_rec)?;
@@ -5904,6 +5981,7 @@ pub fn remove(image: &Path, path: &str) -> Result<(), Error> {
 
 pub fn remove_io<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<(), Error> {
     let (_, rec, _) = resolve_parent_and_child_io(io, path)?;
+    refuse_metafile_io(io, rec, &format!("remove {path}"))?;
     let (_, record_bytes) = read_mft_record_io(io, rec)?;
     if crate::mft_io::record_flags(&record_bytes) & MFT_FLAG_DIRECTORY != 0 {
         rmdir_io(io, path)

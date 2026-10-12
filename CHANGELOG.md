@@ -100,6 +100,14 @@
   of its type. ntfs-3g and Windows stop looking once they pass an attribute's
   slot, so a stream written after one that sorts later was one they could
   not find.
+- **Every write to a metafile is refused before anything is touched (#499).**
+  Records 0 to 23 other than the root, and `$Extend`'s children, are refused
+  with `EPERM` by every mutating entry point: unlink, remove, rename (as
+  source or as the name replaced), truncate, grow, every content, stream,
+  EA, reparse, object id, attribute, time and security write, link, and a
+  create or mkdir into `$Extend`. `$Volume` and `$BadClus` could be
+  unlinked, `$UpCase` truncated and every metafile renamed, and an unlink
+  of `$MFT` was refused only after the record and index had changed.
 - **A transient HTTP 5xx from the chore release download no longer fails a CI
   job.** Every chore download in `ci.yml`, `fuzz.yml` and `release.yml`
   retries up to five times on any error.
