@@ -70,7 +70,7 @@ pub fn resolve_path<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<u64, 
             _ => {}
         }
 
-        let (_, dir_bytes) = read_mft_record_io(io, record_number)?;
+        let (_, dir_bytes) = read_directory_record_io(io, record_number)?;
         if record_flags(&dir_bytes) & MFT_FLAG_DIRECTORY == 0 {
             return Err(Error::not_directory(format!(
                 "resolve_path: '{component}' parent (record {record_number}) is not a directory"
@@ -82,6 +82,97 @@ pub fn resolve_path<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<u64, 
     }
 
     Ok(record_number)
+}
+
+/// A directory's MFT record as the index readers take it: with its
+/// `$INDEX_ROOT`, `$INDEX_ALLOCATION` and `$BITMAP` named `$I30` in it,
+/// wherever `$ATTRIBUTE_LIST` put them (#471).
+///
+/// When a directory's attributes outgrow its base record, NTFS moves some
+/// into extension records -- one long name, or many hard links, is enough
+/// -- and the readers, which take each of these from the record they are
+/// handed, answered "$INDEX_ROOT:$I30 not found" for the whole directory.
+/// Each one the list places in another record is copied from there onto
+/// the end of a copy of the base record, after its last attribute, so the
+/// readers find it as if it had never moved. The copy is never written
+/// back: a write into such a directory reads the base record itself, and
+/// is refused there.
+///
+/// An index attribute split across records is refused; nothing writes one
+/// and none has been seen.
+pub(crate) fn read_directory_record_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+) -> Result<(crate::mft_io::BootParams, Vec<u8>), Error> {
+    let (params, mut record) = read_mft_record_io(io, record_number)?;
+    if attr_io::find_attribute(&record, AttrType::AttributeList, None).is_none() {
+        return Ok((params, record));
+    }
+    let i30 = crate::mkfs::stream::I30;
+    let wanted = [
+        AttrType::IndexRoot,
+        AttrType::IndexAllocation,
+        AttrType::Bitmap,
+    ];
+    if wanted
+        .iter()
+        .all(|&ty| attr_io::find_attribute(&record, ty, Some(i30)).is_some())
+    {
+        return Ok((params, record));
+    }
+    let list = read_attribute_value(io, record_number, AttrType::AttributeList, None)?;
+    let entries = parse_attribute_list(&list)?;
+    for ty in wanted {
+        if attr_io::find_attribute(&record, ty, Some(i30)).is_some() {
+            continue;
+        }
+        let segments: Vec<&AttrListEntry> = entries
+            .iter()
+            .filter(|e| e.type_code == ty as u32 && e.name.as_deref() == Some(i30))
+            .collect();
+        let entry = match segments.as_slice() {
+            [] => continue,
+            [entry] if entry.record_number != record_number => *entry,
+            [_] => continue,
+            more => {
+                return Err(Error::io(format!(
+                    "directory record {record_number}: its {ty:?}:$I30 is split across {} \
+                     records, which is not read yet",
+                    more.len()
+                )))
+            }
+        };
+        let (_, holder) = read_mft_record_io(io, entry.record_number)?;
+        let loc = attr_io::iter_attributes(&holder)
+            .find(|l| l.type_code == ty as u32 && l.attribute_id == entry.attribute_id)
+            .ok_or_else(|| {
+                Error::io(format!(
+                    "directory record {record_number}: $ATTRIBUTE_LIST puts its {ty:?}:$I30 in \
+                     record {} as attribute {}, and it is not there",
+                    entry.record_number, entry.attribute_id
+                ))
+            })?;
+        let attribute = &holder[loc.attr_offset..loc.attr_offset + loc.attr_length];
+        let end = attr_io::iter_attributes(&record)
+            .map(|l| l.attr_offset + l.attr_length)
+            .max()
+            .ok_or_else(|| {
+                Error::io(format!(
+                    "directory record {record_number} has no attributes"
+                ))
+            })?;
+        let mut copy = record[..end].to_vec();
+        copy.extend_from_slice(attribute);
+        copy.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        copy.extend_from_slice(&[0u8; 4]);
+        let len = u32::try_from(copy.len()).map_err(|_| Error::io("directory record too large"))?;
+        // bytes_used and bytes_allocated, so the copy's attributes are all
+        // inside what it says it holds.
+        copy[0x18..0x1C].copy_from_slice(&len.to_le_bytes());
+        copy[0x1C..0x20].copy_from_slice(&len.to_le_bytes());
+        record = copy;
+    }
+    Ok((params, record))
 }
 
 /// A NAME RESOLVES TO A RECORD ONLY IF THE RECORD IS STILL THAT FILE.
@@ -1543,7 +1634,7 @@ pub fn read_dir_entries<T: BlockIo + ?Sized>(
     io: &mut T,
     dir_record: u64,
 ) -> Result<Vec<DirEntry>, Error> {
-    let (_, dir_bytes) = read_mft_record_io(io, dir_record)?;
+    let (_, dir_bytes) = read_directory_record_io(io, dir_record)?;
     if record_flags(&dir_bytes) & MFT_FLAG_DIRECTORY == 0 {
         return Err(Error::not_directory(format!(
             "read_dir_entries: record {dir_record} is not a directory"

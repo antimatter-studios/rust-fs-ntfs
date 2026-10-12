@@ -79,6 +79,12 @@
   the volume wrongly, let `$MFT` hand out a record in use, or named the wrong
   record for a replayed block. Each overflow is now a refusal, and
   `$MFT:$Bitmap`'s length is first bounded by the clusters its runs hold.
+- **A directory whose `$INDEX_ROOT` is in an extension record can be read**
+  (#471). The directory readers took `$INDEX_ROOT` from the base record
+  only, so a directory whose attributes outgrew it -- one long name, or
+  many hard links -- answered "$INDEX_ROOT:$I30 not found" to a listing and
+  to every lookup inside it. They now take the index attributes from
+  wherever `$ATTRIBUTE_LIST` puts them.
 - **A directory entry carries the size of the file it names** (#506). Every
   `$I30` entry duplicates the file's data size and allocated size, and
   Windows lists a directory from that copy. It was written at create time
