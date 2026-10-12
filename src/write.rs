@@ -513,9 +513,71 @@ pub fn write_at_io<T: BlockIo + ?Sized>(
         return Ok(0);
     }
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    let written = write_at_by_record_number_io(io, rec, offset, data)?;
+    // Refused before the record's `$DATA` is looked at: a metafile such as
+    // `$Extend` has none, and would otherwise fail on that instead.
+    refuse_metafile_io(io, rec, "write_at")?;
+    let end = offset
+        .checked_add(data.len() as u64)
+        .ok_or(Error::io("offset + len overflow"))?;
+    // POSITIONAL WRITES START AND EXTEND FILES (#500).
+    //
+    // This took only a non-resident `$DATA`, and only inside its current
+    // length: the first write to every new file, every write to a small
+    // one and every append were refused, which is how `cp`, editors and
+    // every FUSE or FSKit write path work. A resident value is spliced and
+    // written back whole -- staying resident while it fits, promoted when
+    // it outgrows the record -- and a non-resident one is grown to the
+    // write's end first, so the gap reads as zeros, as `pwrite` leaves it.
+    let written = match resident_data_value_io(io, rec)? {
+        Some(mut value) => {
+            let end = usize::try_from(end).map_err(|_| Error::io("offset + len overflow"))?;
+            if value.len() < end {
+                value.resize(end, 0);
+            }
+            value[end - data.len()..end].copy_from_slice(data);
+            write_file_contents_io(io, file_path, &value)?;
+            data.len() as u64
+        }
+        None => {
+            if end > nonresident_data_size_io(io, rec)? {
+                grow_nonresident_by_record_number_io(io, rec, end)?;
+            }
+            write_at_by_record_number_io(io, rec, offset, data)?
+        }
+    };
     refresh_directory_entry_sizes_io(io, rec)?;
     Ok(written)
+}
+
+/// The value of `rec`'s unnamed `$DATA` when it is resident, `None` when it
+/// is not.
+fn resident_data_value_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+) -> Result<Option<Vec<u8>>, Error> {
+    let (_, record) = read_mft_record_io(io, rec)?;
+    let loc = attr_io::find_attribute(&record, AttrType::Data, None)
+        .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
+    if !loc.is_resident {
+        return Ok(None);
+    }
+    let start = attr_io::resident_value_start(&loc)
+        .ok_or_else(|| Error::io("resident $DATA has no value offset"))?;
+    let len = loc
+        .resident_value_length
+        .ok_or(Error::io("resident $DATA has no value length"))? as usize;
+    record
+        .get(start..start + len)
+        .map(|v| Some(v.to_vec()))
+        .ok_or_else(|| Error::io("resident $DATA value runs past its record"))
+}
+
+/// The data size of `rec`'s non-resident unnamed `$DATA`.
+fn nonresident_data_size_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<u64, Error> {
+    let (_, record) = read_mft_record_io(io, rec)?;
+    attr_io::find_attribute(&record, AttrType::Data, None)
+        .and_then(|loc| loc.non_resident_value_length)
+        .ok_or_else(|| Error::io("unnamed $DATA has no non-resident data size"))
 }
 
 /// See [`write_at`]. Takes a record number instead of a path.
@@ -877,6 +939,16 @@ pub fn truncate_io<T: BlockIo + ?Sized>(
     new_size: u64,
 ) -> Result<u64, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, "truncate")?;
+    // A resident value is resized and written back whole: cut short, or
+    // extended with zeros, promoted if it outgrows the record (#500).
+    if let Some(mut value) = resident_data_value_io(io, rec)? {
+        let size = usize::try_from(new_size).map_err(|_| Error::io("size too large"))?;
+        value.resize(size, 0);
+        write_file_contents_io(io, file_path, &value)?;
+        refresh_directory_entry_sizes_io(io, rec)?;
+        return Ok(new_size);
+    }
     let size = truncate_by_record_number_io(io, rec, new_size)?;
     refresh_directory_entry_sizes_io(io, rec)?;
     Ok(size)
@@ -1040,6 +1112,11 @@ pub fn grow_nonresident_io<T: BlockIo + ?Sized>(
     new_size: u64,
 ) -> Result<u64, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, "grow")?;
+    // A resident value grows the way truncate grows it (#500).
+    if resident_data_value_io(io, rec)?.is_some() {
+        return truncate_io(io, file_path, new_size);
+    }
     let size = grow_nonresident_by_record_number_io(io, rec, new_size)?;
     refresh_directory_entry_sizes_io(io, rec)?;
     Ok(size)

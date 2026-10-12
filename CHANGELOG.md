@@ -187,6 +187,13 @@ written against 0.9.0, and `chore check:semver` refuses it otherwise.
   entry for every name the file has. A host writing by record number calls
   the new `refresh_directory_entry_sizes_io` when it is done with the file,
   as Windows refreshes on the last close.
+- **Positional writes start, grow and extend a file** (#500). `write_at`
+  and `fs_ntfs_write_file` took only a non-resident `$DATA` inside its
+  length, so the first write to every new file, every write to a small one
+  and every append failed, and `truncate` and `grow` refused resident
+  files. A resident value is now spliced and written back, promoted when it
+  outgrows the record, and a non-resident one grown to the write's end,
+  leaving any gap as zeros.
 - **A path that differs in case from the stored name renames the stored
   name** (#491). Rename looked the record's `$FILE_NAME` up by the caller's
   spelling, so renaming `FILE.TXT` through `/d/file.txt` left the record
