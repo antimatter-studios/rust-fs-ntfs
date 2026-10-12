@@ -198,8 +198,11 @@ fn upsert_same_name_replaces_value() {
     write::write_ea(Path::new(&img), &path, b"key", b"old", 0).expect("first");
     write::write_ea(Path::new(&img), &path, b"key", b"newvalue", 0).expect("second");
     let eas = write::list_eas(Path::new(&img), &path).expect("list_eas");
-    // Exactly one entry named "key", carrying the new value.
-    let matches: Vec<_> = eas.iter().filter(|e| e.name == b"key").collect();
+    // Exactly one entry named "key", in any case, carrying the new value.
+    let matches: Vec<_> = eas
+        .iter()
+        .filter(|e| e.name.eq_ignore_ascii_case(b"key"))
+        .collect();
     assert_eq!(matches.len(), 1, "upsert must not duplicate the name");
     assert_eq!(matches[0].value, b"newvalue");
 }
