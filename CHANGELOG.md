@@ -91,6 +91,10 @@
   was in use, so on a volume whose `$MFT:$Bitmap` leaves them clear, as
   Windows' does, a file landed in record 16. It now grows `$MFT` instead,
   as Windows and ntfs-3g do.
+- **Named streams are matched by name under `$UpCase`** (#494). Writing
+  `s1` to a file holding `S1` made a second stream, where Windows treats
+  the two as one. Writes, deletes and reads now address the stream whose
+  stored name collates equal, and keep its spelling.
 - **Every write to a metafile is refused before anything is touched (#499).**
   Records 0 to 23 other than the root, and `$Extend`'s children, are refused
   with `EPERM` by every mutating entry point: unlink, remove, rename (as
