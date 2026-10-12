@@ -800,6 +800,18 @@ fn check_record_header(record: &[u8], record_number: u64) -> Result<(), Error> {
              {bytes_used} bytes it says it uses"
         )));
     }
+    // A record allocates exactly the record size; ntfs-3g refuses any
+    // other value as "corrupt allocation size". Every other field of a
+    // record that says otherwise is suspect, and serving it meant
+    // following a run list in a record already known to be inconsistent
+    // (#509).
+    if bytes_allocated != record.len() {
+        return Err(Error::io(format!(
+            "MFT record {record_number} says it allocates {bytes_allocated} bytes, and a \
+             record is {}",
+            record.len()
+        )));
+    }
     Ok(())
 }
 
