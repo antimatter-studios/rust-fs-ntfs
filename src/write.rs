@@ -1859,7 +1859,7 @@ fn parent_index_overflows_io<T: BlockIo + ?Sized>(
 /// directory it creates into, so a refusal leaves the volume untouched.
 /// The root is record 5 and is a directory like any other.
 /// `set_volume_label` and the repair paths keep their own entry points.
-const FIRST_USER_RECORD: u64 = 24;
+use crate::mft_bitmap::FIRST_USER_RECORD;
 const ROOT_RECORD: u64 = 5;
 const EXTEND_RECORD: u64 = 11;
 
