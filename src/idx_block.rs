@@ -12,9 +12,7 @@ use crate::attr_io::{self, AttrType};
 use crate::block_io::{BlockIo, PathIo};
 use crate::data_runs::{self, DataRun};
 use crate::error::Error;
-use crate::mft_io::{
-    apply_fixup_on_read_magic, apply_fixup_on_write_magic, read_mft_record_io, BootParams,
-};
+use crate::mft_io::{apply_fixup_on_read_magic, apply_fixup_on_write_magic, BootParams};
 use crate::mkfs::stream;
 
 use std::path::Path;
@@ -86,7 +84,9 @@ pub(crate) fn load_index_io<T: BlockIo + ?Sized>(
     parent_record_number: u64,
     index_name: &str,
 ) -> Result<IndexAllocation, Error> {
-    let (params, record) = read_mft_record_io(io, parent_record_number)?;
+    // Where the index's attributes are, even when $ATTRIBUTE_LIST moved some
+    // of them into an extension record (#471).
+    let (params, record) = crate::read::read_directory_record_io(io, parent_record_number)?;
 
     // Get block_size from $INDEX_ROOT:$I30.
     let ir = attr_io::find_attribute(&record, AttrType::IndexRoot, Some(index_name))
