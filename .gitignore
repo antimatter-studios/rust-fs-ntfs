@@ -32,6 +32,8 @@ test-disks/*.targets.tsv
 test-disks/*.sha256.tsv
 # Which names Win32 creates as files, measured by measure-win32-names.ps1.
 test-disks/win32-name-verdicts.tsv
+# The EA names and values handed to Windows, beside ntfs-ea.img.
+test-disks/*.names.tsv
 !test-disks/.gitkeep
 
 # Local Windows-VM test pipeline outputs. The orchestrator
