@@ -68,15 +68,17 @@ fn write_then_read_roundtrips() {
     assert_eq!(id, 0x100);
 }
 
+/// 0x200 names no descriptor in the fixture's `$Secure:$SII`, so the
+/// second set is refused and the first id stands (#503).
 #[test]
-fn write_then_overwrite_keeps_latest() {
+fn an_overwrite_with_an_undefined_id_keeps_the_first() {
     let (img, path) = working_copy("overwrite");
     set_security_id(std::path::Path::new(&img), path, 0x100).unwrap();
-    set_security_id(std::path::Path::new(&img), path, 0x200).unwrap();
+    assert!(set_security_id(std::path::Path::new(&img), path, 0x200).is_err());
     let id = read_security_id(std::path::Path::new(&img), path)
         .unwrap()
         .unwrap();
-    assert_eq!(id, 0x200);
+    assert_eq!(id, 0x100);
 }
 
 #[test]
