@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# setup-windows-vm.sh -- one-time provisioning of a Windows ARM64 VM
-# for local test iteration. Mac-side wrapper around setup-windows-vm.ps1.
+# setup-windows-vm.sh -- one-time provisioning of the Windows ARM64 test VM
+# (fs-windows-test-harness's QEMU guest) for local test iteration. Host-side
+# wrapper around setup-windows-vm.ps1, run through the guest's ssh:
+#
+#     chore vm:setup        # scripts/vm.sh exec -- bash scripts/setup-windows-vm.sh
 #
 # What it does:
 #   1. SSH to the VM and copy setup-windows-vm.ps1 over.
 #   2. Execute it (idempotent -- safe to re-run).
 #   3. Verify the test pipeline can build at least once.
 #
-# After this completes, the matrix runner
-# (../fs-windows-test-harness/scripts/test-windows-matrix.sh) should work against
-# the VM.
+# After this completes, `chore matrix -- smoke` should work against the VM.
 #
 # Cost (one-time, on a fresh VM):
 #   * Rustup     ~50 MB  / ~30 s
@@ -20,19 +21,22 @@
 
 set -euo pipefail
 
-VM_HOST="${VM_HOST:-chris@192.168.213.145}"
-VM_WORKDIR="${VM_WORKDIR:-C:/Users/chris/dev/rust-fs-ntfs}"
+VM_HOST="${VM_HOST:-fswth-local}"
+VM_WORKDIR="${VM_WORKDIR:-C:/fswth/rust-fs-ntfs}"
 VM_WORKDIR_PS="${VM_WORKDIR//\//\\}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The rust-img-vhd tag CI builds the tool at, so the VM builds the same one.
+VHD_REF="$(sed -n 's/^ *IMG_VHD_REF: *//p' "$REPO_ROOT/chores.yml" | head -1)"
+[ -n "$VHD_REF" ] || { echo "[setup] chores.yml names no IMG_VHD_REF" >&2; exit 1; }
 
 echo "[setup] Pushing setup-windows-vm.ps1 to ${VM_HOST}"
 ssh "${VM_HOST}" "if (-not (Test-Path '${VM_WORKDIR_PS}\\scripts')) { New-Item -ItemType Directory -Path '${VM_WORKDIR_PS}\\scripts' -Force | Out-Null }"
 scp "${REPO_ROOT}/scripts/setup-windows-vm.ps1" "${VM_HOST}:${VM_WORKDIR}/scripts/setup-windows-vm.ps1"
 
 echo "[setup] Running setup-windows-vm.ps1 on ${VM_HOST}"
-ssh "${VM_HOST}" "powershell -ExecutionPolicy Bypass -File '${VM_WORKDIR_PS}\\scripts\\setup-windows-vm.ps1'"
+ssh "${VM_HOST}" "powershell -ExecutionPolicy Bypass -File '${VM_WORKDIR_PS}\\scripts\\setup-windows-vm.ps1' -VhdRef ${VHD_REF}"
 
 echo
 echo "[setup] Done. Try a real iteration:"
-echo "    bash ${REPO_ROOT}/../fs-windows-test-harness/scripts/test-windows-matrix.sh"
+echo "    chore matrix -- smoke"

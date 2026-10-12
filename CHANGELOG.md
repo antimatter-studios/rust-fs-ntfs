@@ -36,6 +36,35 @@ written against 0.9.0, and `chore check:semver` refuses it otherwise.
 
 ### Changed
 
+- **The Windows test VM is fs-windows-test-harness's QEMU guest, and the
+  VMware driver is gone.** `HARNESS_REF` moves to v4.4.0, whose persistent
+  Windows ARM64 guest runs under QEMU on Linux ARM64 (KVM, a Raspberry Pi 5
+  among them) and on Apple Silicon (HVF). `chore vm:up`, `vm:status` and
+  `vm:down` run the harness's `scripts/local-vm.py` in place, `chore
+  vm:setup` provisions the guest, and every task that reaches it runs inside
+  `scripts/vm.sh exec`, where `ssh` and `scp` are the guest's and no other
+  run can use it at the same time. `vmrun`, the trove password and SSH
+  agent, `VM_VMX`, `VM_STATIC_IP`, `vm:address` and `vm:network` are
+  removed. `.test-env` names `VM_HOST=fswth-local`, an empty `SSH_KEY`, and
+  `VM_STATE` for a guest outside the harness's default state directory.
+- **`chore vm:setup` provisions the QEMU guest end to end.** Measured on it,
+  `scripts/setup-windows-vm.ps1` needed five changes:
+  - The guest's Windows 11 IoT Enterprise LTSC has no Microsoft Store, so
+    no winget. It is installed from winget-cli v1.29.380's release, every
+    file pinned by SHA-256. winget's catalogue is provisioned the same way,
+    because over SSH winget's own per-user install of it fails with
+    `0x80073D19` ("a user was logged off").
+  - Git, which clones `rust-img-vhd`, comes through winget too.
+  - The test work paths are excluded from Defender's real-time scanning:
+    with them scanned, LLVM-MinGW's ~9,000 files unpacked at 1.6 a second,
+    against 18 a second without.
+  - `rust-img-vhd` is built at `IMG_VHD_REF`, as CI builds it, with
+    `--locked`, and with rustup's default host set to gnullvm, so its
+    `rust-toolchain.toml` does not pick MSVC. It used to build the default
+    branch, which needed a `rust-fs-core` checkout beside it that was never
+    there.
+  - A failed clone or `cargo install` stops the setup. It printed "Setup
+    complete" over both.
 - **`cargo install` puts only `rust-fs-ntfs` on PATH.** `rust-ntfs`, the
   Windows test matrix's driver, is built only with the test-only `harness`
   feature, so neither `cargo install rust-fs-ntfs` nor `--features cli`

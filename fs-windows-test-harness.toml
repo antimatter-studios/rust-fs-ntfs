@@ -77,15 +77,15 @@ matrix_path = "test-matrix.json"
 
 [vm]
 # Machine-local values (VM address, SSH key, workdir) are not committed
-# here — set them in the gitignored `.test-env` file instead:
+# here — set them in the gitignored `.test-env` file instead. For the
+# harness's QEMU guest, run through `scripts/vm.sh exec`:
 #
-#   VM_HOST        = user@host
-#   SSH_KEY        = /path/to/private/key
-#   VM_WORKDIR     = C:/path/on/windows/vm
+#   VM_HOST        = fswth-local           (the guest, as its ssh config names it)
+#   SSH_KEY        =                       (empty: that config names the key)
+#   VM_WORKDIR     = C:/fswth/rust-fs-ntfs
 #   HOST_IMAGE_DIR = /path/for/disk/images  (default: diskimages/)
 #
-# Run `bash ../fs-windows-test-harness/scripts/setup-local.sh` to generate
-# `.test-env` interactively.
+# The README's "Test matrix" section has the whole file.
 host           = "${VM_HOST}"
 ssh_key        = "${SSH_KEY}"
 workdir        = "${VM_WORKDIR}"

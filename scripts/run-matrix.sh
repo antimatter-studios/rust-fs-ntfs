@@ -80,8 +80,8 @@ fi
 # ── Reading .test-env ───────────────────────────────────────────────────────
 # test_env NAME -- NAME's value as .test-env leaves it, read the way the
 # harness reads it: by sourcing the file. The harness writes every line as
-# `export NAME="value"` (run-tests.sh, write_env_file); scripts/vm.sh and
-# people write bare `NAME=value`. Matching lines with `grep '^NAME='` missed
+# `export NAME="value"` (run-tests.sh, write_env_file); people write bare
+# `NAME=value`. Matching lines with `grep '^NAME='` missed
 # the first form entirely and kept the quotes of any quoted value, so the mux
 # below never started on a harness-written file (#411). Sourced in a subshell
 # so nothing the file sets leaks into this script, and with its output

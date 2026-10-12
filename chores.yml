@@ -61,10 +61,9 @@ vars:
   # repo's scripts invoke — so nothing but this pin governs which
   # version runs the matrix.
   #
-  # A BRANCH UNTIL v4.3.0 IS TAGGED: fs-windows-test-harness#40 bounds every
-  # VM command and names a timeout's command and scenario (#403). This moves
-  # to the v4.3.0 tag before merge, as #329 moved to v4.2.0.
-  HARNESS_REF: v4.3.0
+  # v4.4.0 is the release whose persistent QEMU guest (scripts/local-vm.py)
+  # is the local Windows VM; the vm:* tasks below run it in place.
+  HARNESS_REF: v4.4.0
 
   # The in-house VHD writer (rust-img-vhd) the Windows jobs build to wrap
   # a raw image for Windows. Not a cargo dependency, so this is the only
@@ -76,13 +75,15 @@ vars:
   # crates.io at the version its lockfile names (#462).
   IMG_VHD_REF: v0.6.1
 
-  # THE WINDOWS TEST VM is driven by scripts/vm.sh (vmrun, trove for the
-  # encryption password, the fixed host-only address). See that file and
-  # docs/vm-setup.md in fs-windows-test-harness.
+  # THE WINDOWS TEST VM is fs-windows-test-harness's persistent Windows ARM64
+  # guest under QEMU, driven by scripts/vm.sh through the harness's
+  # scripts/local-vm.py. See that file and docs/qemu-vm.md in the harness.
 
-# .test-env is this machine's VM config: VM_HOST, SSH_KEY, VM_WORKDIR,
-# HOST_IMAGE_DIR, and VM_VMX for the vm:* tasks. Gitignored and per machine;
-# the harness's run-tests.sh writes the first four on its first run.
+# .test-env is this machine's VM config: VM_HOST=fswth-local (the guest's name
+# inside `scripts/vm.sh exec`), an empty SSH_KEY (the guest's own ssh config
+# names its key), VM_WORKDIR=C:/fswth/rust-fs-ntfs, HOST_IMAGE_DIR, and
+# VM_STATE when the guest's state directory is not the harness's default.
+# Gitignored and per machine.
 #
 # THE `?` MAKES ITS ABSENCE NORMAL. chore treats a missing dotenv file as an
 # error, which is right for a file that decides which stack a command acts on
@@ -315,12 +316,12 @@ tasks:
     # never reaches its own cleanup, and its 30 GiB of leftovers are what
     # makes the NEXT run fail to ship a 4 GiB image. `after` runs on failure
     # as well as success, so the normal path leaves nothing either.
-    after: [bash scripts/vm-clean-images.sh]
+    after: [scripts/vm.sh exec -- bash scripts/vm-clean-images.sh]
     cmds:
       # After the run, pass or fail: bring the VM's per-scenario evidence
       # (chkdsk's report, what Windows enumerated) home and say what it shows.
-      - defer: scripts/matrix-fetch-diag.sh
-      - bash scripts/vm-clean-images.sh
+      - defer: scripts/vm.sh exec -- scripts/matrix-fetch-diag.sh
+      - scripts/vm.sh exec -- bash scripts/vm-clean-images.sh
       # THROUGH tier.sh, like every other tier: the scenarios' own output is
       # 1,500 lines of per-step progress that nobody reads when the run is
       # green, and an agent re-reads on every later step. What is left is one
@@ -332,25 +333,25 @@ tasks:
       # The filter is forwarded, so `chore matrix -- smoke --verbose` works:
       # tier.sh takes --verbose out of CLI_ARGS and run-matrix.sh never sees
       # it.
+      #
+      # THROUGH `scripts/vm.sh exec`: the runner shells out to ssh and scp,
+      # and only there do they reach the guest, with its key and known_hosts,
+      # and with no other run using it at the same time.
       - |
         set -eu
-        # The runner shells out to ssh and scp, so it needs the agent that
-        # holds the VM's key -- see scripts/vm-ssh-agent.sh for what happens
-        # when it inherits a shell's empty one instead.
-        SSH_AUTH_SOCK="$(scripts/vm-ssh-agent.sh)"; export SSH_AUTH_SOCK
         filter=""
         for arg in {{.CLI_ARGS}}; do
           case "$arg" in --verbose|-v) continue ;; esac
           filter="$filter $arg"
         done
         # shellcheck disable=SC2086  # the words are the point
-        bash ../rust-fs-core/scripts/tier.sh --refuse-skips matrix -- bash scripts/run-matrix.sh $filter
+        scripts/vm.sh exec -- bash ../rust-fs-core/scripts/tier.sh --refuse-skips matrix -- bash scripts/run-matrix.sh $filter
 
   # THE VM TASKS. The Windows VM is a thing a task depends on, not a thing a
   # person remembers to start: a matrix task declares `deps: [vm:up]`, and
-  # vm:up is idempotent. The work is in scripts/vm.sh; each task is one line
-  # so a failure prints the script's one-line reason, not a screen of shell.
-  # Opening the encrypted VM needs trove unlocked in the calling shell.
+  # vm:up is idempotent. The work is in scripts/vm.sh, which runs the
+  # harness's scripts/local-vm.py in place; each task is one line so a
+  # failure prints the script's one-line reason, not a screen of shell.
   matrix:check:
     desc: Lint test-matrix.json against fs-windows-test-harness.toml (no VM needed)
     silent: true
@@ -360,35 +361,34 @@ tasks:
     desc: Delete the disk images a matrix run left on the VM, and say how much space that gave back
     silent: true
     timeout: 5m
-    cmds: [bash scripts/vm-clean-images.sh]
+    deps: [siblings:gate]
+    cmds: [scripts/vm.sh exec -- bash scripts/vm-clean-images.sh]
 
   vm:status:
-    desc: Is the Windows test VM running, and does it answer SSH at VM_HOST? One line.
+    desc: What the Windows test VM (the harness's QEMU guest) is doing
     silent: true
+    deps: [siblings:gate]
     cmds: [scripts/vm.sh status]
 
   vm:up:
-    desc: Start the VM headless if needed, discover its address, write VM_HOST to .test-env, wait for SSH
+    desc: Start the Windows test VM if it is not running, and wait until it answers SSH
     silent: true
     timeout: 15m
+    deps: [siblings:gate]
     cmds: [scripts/vm.sh up]
 
-  vm:address:
-    desc: Discover the running VM's address (prefers its fixed host-only one) and print user@ip
+  vm:setup:
+    desc: Provision what this crate needs on the Windows test VM (scripts/setup-windows-vm.ps1)
     silent: true
-    timeout: 10m
-    cmds: [scripts/vm.sh address]
-
-  vm:network:
-    desc: Give the VM its fixed address (VM_STATIC_IP) inside Windows, or say what is missing
-    silent: true
-    timeout: 15m
-    cmds: [scripts/vm.sh network]
+    timeout: 30m
+    deps: [vm:up]
+    cmds: [scripts/vm.sh exec -- bash scripts/setup-windows-vm.sh]
 
   vm:down:
-    desc: Shut the Windows test VM down cleanly (a no-op if it is not running)
+    desc: Shut the Windows test VM down cleanly, and wait for QEMU to exit
     silent: true
     timeout: 5m
+    deps: [siblings:gate]
     cmds: [scripts/vm.sh down]
 
   lint:

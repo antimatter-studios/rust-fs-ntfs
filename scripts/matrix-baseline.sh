@@ -23,7 +23,8 @@
 # Tail that file in a second terminal to follow progress:
 #   tail -f /tmp/test-harness-full-matrix.log
 #
-# Reads .test-env for VM_HOST / SSH_KEY. Writes:
+# Reads .test-env for VM_HOST / VM_WORKDIR, and runs through
+# `scripts/vm.sh exec`, whose ssh reaches the guest. Writes:
 #   * test-diagnostics/matrix-results.json
 # Exit 0 iff every scenario passed AND the JSON was written.
 
@@ -45,7 +46,7 @@ case "${1:-}" in
 esac
 
 if [ ! -f .test-env ]; then
-    echo "[matrix-baseline] fatal: .test-env not found (need VM_HOST / SSH_KEY)" >&2
+    echo "[matrix-baseline] fatal: .test-env not found (need VM_HOST / VM_WORKDIR)" >&2
     exit 1
 fi
 # shellcheck disable=SC1091
