@@ -48,6 +48,15 @@
 
 ### Fixed
 
+- **A rename whose new name sorts into another slot of the directory index
+  moves the entry there** (#466). A same-length rename wrote the new name
+  over the old one in place, so `d` renamed to `a` beside `b` and `c` sat
+  after `c`, where no lookup -- this crate's, ntfs-3g's or the kernel's --
+  looks: the rename returned `Ok` and the file could no longer be found by
+  name. The entry is now taken out and inserted again, keeping its times,
+  sizes and flags, and each step is undone if a later one fails. An entry
+  in an interior node of the index is refused instead, as an unlink of one
+  is (#495), with nothing written.
 - **A write with no read-write mount before it replays the log first, or
   is refused** (#137). `Filesystem::mount` followed by a mutator,
   `write::create_file` and every other path-based mutator in `write`, and

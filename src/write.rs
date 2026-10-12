@@ -1378,6 +1378,36 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
         return Ok(());
     }
 
+    // A NEW NAME CAN BELONG IN A DIFFERENT SLOT.
+    //
+    // The index is ordered by COLLATION_FILE_NAME, and every lookup --
+    // this crate's, ntfs-3g's, the kernel's -- descends it by comparing
+    // names. Writing the new name over the old one in place is right only
+    // while the new name still sorts between the entry's neighbours. `d`
+    // renamed to `a` beside `b` and `c` stayed after `c`, where no lookup
+    // for `a` looks, so the rename returned Ok and the file could no
+    // longer be found by name (#466). Such a rename takes the entry out
+    // and inserts it again, the way a rename of another length does.
+    if !rename_keeps_index_slot_io(
+        io,
+        parent_rec,
+        &parent_record_bytes,
+        ir_flags,
+        &current_basename,
+        new_name,
+        &upcase,
+    )? {
+        return rename_into_new_index_slot_io(
+            io,
+            parent_rec,
+            file_rec,
+            ir_flags,
+            &current_basename,
+            new_name,
+            &upcase,
+        );
+    }
+
     let in_root =
         index_io::find_index_entry(&parent_record_bytes, &current_basename, Some(&upcase))?;
     if let Some(entry_found) = in_root {
@@ -1524,6 +1554,188 @@ fn undo_index_rename_same_length<T: BlockIo + ?Sized>(
     Err(Error::io(format!(
         "could not find the entry for '{from}' to put it back"
     )))
+}
+
+/// Whether `new` still sorts between `old`'s neighbours in the parent's
+/// index, so that writing it over `old` in place keeps the index in
+/// collation order.
+///
+/// The neighbours are found among every name in the index rather than
+/// by walking the tree in order: the blocks below are read in VCN order,
+/// which is not key order. `new` keeps the slot when every name that
+/// sorts before `old` also sorts before `new`, and every name after
+/// `old` after `new`. A case-only rename always does.
+fn rename_keeps_index_slot_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    parent_record_bytes: &[u8],
+    ir_flags: u8,
+    old: &str,
+    new: &str,
+    upcase: &crate::upcase::UpcaseTable,
+) -> Result<bool, Error> {
+    use std::cmp::Ordering;
+    let mut entries = Vec::new();
+    index_io::collect_index_root_entries(parent_record_bytes, &mut entries)?;
+    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
+        let ia = idx_block::load_for_directory_io(io, parent_rec)?;
+        for vcn in ia.allocated_block_vcns() {
+            let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+            index_io::collect_indx_block_entries(&block, &mut entries)?;
+        }
+    }
+    let old: Vec<u16> = old.encode_utf16().collect();
+    let new: Vec<u16> = new.encode_utf16().collect();
+    Ok(entries.iter().all(|e| {
+        let name: Vec<u16> = e.name.encode_utf16().collect();
+        match index_io::compare_names(&name, &old, Some(upcase)) {
+            // The entry being renamed: no other name collates equal to it.
+            Ordering::Equal => true,
+            side => index_io::compare_names(&name, &new, Some(upcase)) == side,
+        }
+    }))
+}
+
+/// A same-length rename whose new name sorts into another slot of the
+/// parent's index: the entry is taken out, inserted again under the new
+/// name, and then the file's own `$FILE_NAME` is renamed.
+///
+/// The entry keeps everything but its name -- the times, sizes and flags
+/// its `$FILE_NAME` key carries are copied, not rebuilt. Each step is
+/// undone when a later one fails, and when an undo fails too, the error
+/// names what the volume is left holding.
+///
+/// Taking an entry out of an interior node would orphan the subtree it
+/// points to, so `remove_parent_index_entry_io` refuses that before
+/// anything is written, and so does this rename.
+fn rename_into_new_index_slot_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    file_rec: u64,
+    ir_flags: u8,
+    old: &str,
+    new: &str,
+    upcase: &crate::upcase::UpcaseTable,
+) -> Result<(), Error> {
+    let (old_entry, new_entry) =
+        index_entry_bytes_renamed_io(io, parent_rec, file_rec, ir_flags, old, new, upcase)?;
+    remove_parent_index_entry_io(io, parent_rec, file_rec, old).map_err(|e| {
+        e.map_message(|m| {
+            format!(
+                "renaming '{old}' to '{new}' moves its entry to another place in the directory \
+                 index, and taking it out of its present place failed: {m}"
+            )
+        })
+    })?;
+
+    let overflows = parent_index_overflows_io(io, parent_rec)?;
+    if let Err(e) = insert_entry_in_parent_io(io, parent_rec, overflows, &new_entry, new) {
+        let undo = parent_index_overflows_io(io, parent_rec).and_then(|overflows| {
+            insert_entry_in_parent_io(io, parent_rec, overflows, &old_entry, old)
+        });
+        return Err(match undo {
+            Ok(()) => e.map_message(|m| {
+                format!(
+                    "inserting the entry under '{new}' failed ({m}); the entry was put back, so \
+                     the file is still '{old}'"
+                )
+            }),
+            Err(ue) => e.map_message(|m| {
+                format!(
+                    "inserting the entry under '{new}' failed ({m}), and putting the entry for \
+                     '{old}' back failed too ({ue}): the directory no longer lists the file, \
+                     record {file_rec} — run chkdsk"
+                )
+            }),
+        });
+    }
+
+    if let Err(e) = update_mft_record_io(io, file_rec, |record| {
+        index_io::rename_filename_attribute_same_length(record, old, new)
+    }) {
+        let undo = remove_parent_index_entry_io(io, parent_rec, file_rec, new).and_then(|()| {
+            let overflows = parent_index_overflows_io(io, parent_rec)?;
+            insert_entry_in_parent_io(io, parent_rec, overflows, &old_entry, old)
+        });
+        return Err(match undo {
+            Ok(()) => e.map_message(|m| {
+                format!(
+                    "renaming the file's own $FILE_NAME failed ({m}); the directory entry was put \
+                     back, so the file is still '{old}'"
+                )
+            }),
+            Err(ue) => e.map_message(|m| {
+                format!(
+                    "renaming the file's own $FILE_NAME failed ({m}), and putting the directory \
+                     entry back failed too ({ue}): the directory may list neither '{old}' nor \
+                     '{new}' for record {file_rec} — run chkdsk"
+                )
+            }),
+        });
+    }
+    Ok(())
+}
+
+/// The bytes of `name`'s entry in the parent's index, wherever in the
+/// tree it sits: as they are, and with the name rewritten to `new_name`.
+fn index_entry_bytes_renamed_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    file_rec: u64,
+    ir_flags: u8,
+    name: &str,
+    new_name: &str,
+    upcase: &crate::upcase::UpcaseTable,
+) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    let (_, record) = read_mft_record_io(io, parent_rec)?;
+    let (mut node, entry) = match index_io::find_index_entry(&record, name, Some(upcase))? {
+        Some(entry) => (record, entry),
+        None if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 => {
+            let ia = idx_block::load_for_directory_io(io, parent_rec)?;
+            let mut found = None;
+            for vcn in ia.allocated_block_vcns() {
+                let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+                if let Some(entry) = index_io::find_entry_in_indx_block(&block, name, Some(upcase))?
+                {
+                    found = Some((block, entry));
+                    break;
+                }
+            }
+            found.ok_or_else(|| {
+                Error::io(format!(
+                    "no index entry for '{name}' in parent record {parent_rec}"
+                ))
+            })?
+        }
+        None => {
+            return Err(Error::io(format!(
+                "no entry for '{name}' in parent's $INDEX_ROOT"
+            )))
+        }
+    };
+    if entry.file_record_number != file_rec {
+        return Err(Error::io(format!(
+            "the parent's index entry for '{name}' points at record {} but the resolved path \
+             points at {file_rec}",
+            entry.file_record_number
+        )));
+    }
+    let span = entry.record_offset..entry.record_offset + entry.length;
+    let as_is = node[span.clone()].to_vec();
+    index_io::rename_index_entry_same_length(&mut node, &entry, new_name)?;
+    Ok((as_is, node[span].to_vec()))
+}
+
+/// Whether the parent's index has spilled out of `$INDEX_ROOT` into
+/// INDX blocks, read fresh: an insert can promote it.
+fn parent_index_overflows_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+) -> Result<bool, Error> {
+    let (_, record) = read_mft_record_io(io, parent_rec)?;
+    let flags =
+        index_io::index_root_flags(&record).ok_or_else(|| Error::io("no $INDEX_ROOT on parent"))?;
+    Ok(flags & index_io::IH_FLAG_HAS_SUBNODES != 0)
 }
 
 // ---------------------------------------------------------------------------
