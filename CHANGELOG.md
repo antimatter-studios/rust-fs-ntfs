@@ -57,6 +57,13 @@
   gives to a file of its own, so when Windows later replayed its log one of
   the two was lost. Each now replays a log holding work first, and refuses
   a dirty volume or a log it cannot replay in full, with nothing written.
+- **Three on-disk fields are multiplied only by checked arithmetic.** A
+  boot sector's `total_sectors` (#475), `$MFT:$Bitmap`'s value length
+  (#476) and a log record's `target_vcn` in replay (#507) were multiplied
+  raw: a panic in a debug build, and in release a wrapped product that sized
+  the volume wrongly, let `$MFT` hand out a record in use, or named the wrong
+  record for a replayed block. Each overflow is now a refusal, and
+  `$MFT:$Bitmap`'s length is first bounded by the clusters its runs hold.
 - **A transient HTTP 5xx from the chore release download no longer fails a CI
   job.** Every chore download in `ci.yml`, `fuzz.yml` and `release.yml`
   retries up to five times on any error.
