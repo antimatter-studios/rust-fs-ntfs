@@ -6,8 +6,12 @@
 //! its `$DATA` mapping pairs split that way: the segment covering VCN 0
 //! stays in the base record and the continuations go elsewhere.
 //!
-//! `locate_attribute` documents that it refuses that shape rather than
-//! returning a truncated value. This builds one and checks.
+//! `locate_attribute` refused that shape rather than return a truncated
+//! value, so a fragmented file Windows wrote could not be read or even
+//! `stat`ed (#473). It now stitches the segments together in VCN order,
+//! and still refuses segments that leave a gap. This builds the shape and
+//! checks the read against the `ntfs` crate, a parser that is not this
+//! one.
 //!
 //! The fixture is assembled by hand because nothing in this crate writes
 //! an `$ATTRIBUTE_LIST` — only Windows does — so no self-generated
@@ -31,6 +35,15 @@ const CLUSTER: u32 = 4096;
 /// Two clusters: one segment each side of the split.
 const FILE_SIZE: usize = 8192;
 const CONTENT: u8 = 0x5A;
+/// The second cluster's byte, so a read that maps VCN 1 wrongly shows.
+const TAIL: u8 = 0xA5;
+
+/// The file's contents: the first cluster `CONTENT`, the second `TAIL`.
+fn contents() -> Vec<u8> {
+    let mut v = vec![CONTENT; FILE_SIZE / 2];
+    v.extend(vec![TAIL; FILE_SIZE / 2]);
+    v
+}
 
 // MFT record header fields this test writes by hand. Same layout the
 // crate's own `record_build` uses; it keeps its copies private.
@@ -68,6 +81,20 @@ fn attribute_list_entry(
     e
 }
 
+/// Take the attribute at `offset` out of `record`, as the driver's own
+/// unlink of an attribute does.
+fn remove_attribute(record: &mut [u8], offset: usize, length: usize) {
+    let used = u32::from_le_bytes(
+        record[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    record.copy_within(offset + length..used, offset);
+    record[used - length..used].fill(0);
+    record[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4]
+        .copy_from_slice(&((used - length) as u32).to_le_bytes());
+}
+
 /// A resident attribute blob with an arbitrary type code and value.
 /// `record_build` has builders for the specific resident attributes the
 /// driver writes; `$ATTRIBUTE_LIST` is not one of them, because the
@@ -98,6 +125,7 @@ fn extension_record(
     first_vcn: u64,
     lcn: u64,
     clusters: u64,
+    lengths: u64,
 ) -> Vec<u8> {
     let size = params.file_record_size as usize;
     let sectors = size / params.bytes_per_sector as usize;
@@ -135,9 +163,9 @@ fn extension_record(
     // continuations leave them zero.
     let mut data = record_build::build_nonresident_data_attribute(
         0,
-        0,
-        0,
-        0,
+        lengths,
+        lengths,
+        lengths,
         (first_vcn + clusters - 1) as i64,
         &pairs,
     )
@@ -159,6 +187,24 @@ fn extension_record(
 /// base record that says so. Returns the image path and the base record
 /// number.
 fn volume_with_a_split_file(tag: &str) -> (String, u64) {
+    volume_with_a_segment_at(tag, 1, false)
+}
+
+/// The same file with both segments in extension records and none in the
+/// base record, the way Windows lays a split attribute out.
+fn volume_split_across_extensions(tag: &str) -> (String, u64) {
+    volume_with_a_segment_at(tag, 1, true)
+}
+
+/// The split file, with the extension segment starting at
+/// `ext_first_vcn` -- 1 is the file above, and 2 leaves VCN 1 described
+/// nowhere -- and the VCN-0 segment in a second extension record when
+/// `all_in_extensions`.
+fn volume_with_a_segment_at(
+    tag: &str,
+    ext_first_vcn: u64,
+    all_in_extensions: bool,
+) -> (String, u64) {
     std::fs::create_dir_all("test-disks").expect("create test-disks dir");
     let dst = common::temp_image_path(format!("alsplit_{tag}"));
     let f = std::fs::File::create(&dst).expect("create image");
@@ -175,14 +221,21 @@ fn volume_with_a_split_file(tag: &str) -> (String, u64) {
     // extent, and unlinking it takes the name back out of the index.
     let fs = Filesystem::mount_rw(&dst).expect("mount_rw");
     fs.create_file("/", "split.bin").expect("create split.bin");
-    fs.write_file_contents("/split.bin", &vec![CONTENT; FILE_SIZE])
+    fs.write_file_contents("/split.bin", &contents())
         .expect("write split.bin");
     fs.create_file("/", "donor.tmp").expect("create donor.tmp");
     let ext_rec = {
         let mut probe = PathIo::open_ro(Path::new(&dst)).expect("open_ro");
         read::resolve_path(&mut probe, "/donor.tmp").expect("resolve donor")
     };
+    fs.create_file("/", "donor2.tmp")
+        .expect("create donor2.tmp");
+    let first_rec = {
+        let mut probe = PathIo::open_ro(Path::new(&dst)).expect("open_ro");
+        read::resolve_path(&mut probe, "/donor2.tmp").expect("resolve donor2")
+    };
     fs.unlink("/donor.tmp").expect("unlink donor.tmp");
+    fs.unlink("/donor2.tmp").expect("unlink donor2.tmp");
     drop(fs);
 
     let mut io = PathIo::open_rw(Path::new(&dst)).expect("open_rw");
@@ -221,13 +274,26 @@ fn volume_with_a_split_file(tag: &str) -> (String, u64) {
         .expect("$FILE_NAME");
 
     // The extension record: VCN 1, the file's second cluster.
-    let ext = extension_record(&params, ext_rec, base_ref, 1, lcn + 1, 1);
-    let mut on_disk = ext.clone();
-    mft_io::apply_fixup_on_write(&mut on_disk, params.bytes_per_sector).expect("fixup");
-    io.write_all_at(mft_io::mft_record_offset(&params, ext_rec), &on_disk)
-        .expect("write extension record");
+    let mut extensions = vec![(
+        ext_rec,
+        extension_record(&params, ext_rec, base_ref, ext_first_vcn, lcn + 1, 1, 0),
+    )];
+    // And for the Windows layout, VCN 0, the first cluster, with the
+    // value's lengths.
+    if all_in_extensions {
+        extensions.push((
+            first_rec,
+            extension_record(&params, first_rec, base_ref, 0, lcn, 1, FILE_SIZE as u64),
+        ));
+    }
     let bm = mft_bitmap::locate_io(&mut io).expect("locate $MFT:$Bitmap");
-    mft_bitmap::allocate_io(&mut io, &bm, ext_rec).expect("allocate the extension record");
+    for (rec, ext) in &extensions {
+        let mut on_disk = ext.clone();
+        mft_io::apply_fixup_on_write(&mut on_disk, params.bytes_per_sector).expect("fixup");
+        io.write_all_at(mft_io::mft_record_offset(&params, *rec), &on_disk)
+            .expect("write extension record");
+        mft_bitmap::allocate_io(&mut io, &bm, *rec).expect("allocate the extension record");
+    }
     <PathIo as BlockIo>::sync(&mut io).expect("sync");
 
     let ext_ref = record_build::encode_file_reference(ext_rec, 1);
@@ -236,26 +302,32 @@ fn volume_with_a_split_file(tag: &str) -> (String, u64) {
         // declared lengths — the file is still 8192 bytes, it is just
         // described in two places now.
         let loc = attr_io::find_attribute(record, AttrType::Data, None).expect("$DATA");
-        let pairs = data_runs::encode_runs(&[DataRun {
-            starting_vcn: 0,
-            length: 1,
-            lcn: Some(lcn),
-        }])?;
-        let shrunk = record_build::build_nonresident_data_attribute(
-            data_attr_id,
-            FILE_SIZE as u64,
-            FILE_SIZE as u64,
-            FILE_SIZE as u64,
-            0,
-            &pairs,
-        )?;
-        attr_resize::replace_attribute(record, loc.attr_offset, &shrunk)?;
-
         let mut value = Vec::new();
         value.extend_from_slice(&attribute_list_entry(0x10, 0, base_ref, si_id));
         value.extend_from_slice(&attribute_list_entry(0x30, 0, base_ref, fn_id));
-        value.extend_from_slice(&attribute_list_entry(0x80, 0, base_ref, data_attr_id));
-        value.extend_from_slice(&attribute_list_entry(0x80, 1, ext_ref, 0));
+        if all_in_extensions {
+            // The base record keeps no segment at all.
+            remove_attribute(record, loc.attr_offset, loc.attr_length);
+            let first_ref = record_build::encode_file_reference(first_rec, 1);
+            value.extend_from_slice(&attribute_list_entry(0x80, 0, first_ref, 0));
+        } else {
+            let pairs = data_runs::encode_runs(&[DataRun {
+                starting_vcn: 0,
+                length: 1,
+                lcn: Some(lcn),
+            }])?;
+            let shrunk = record_build::build_nonresident_data_attribute(
+                data_attr_id,
+                FILE_SIZE as u64,
+                FILE_SIZE as u64,
+                FILE_SIZE as u64,
+                0,
+                &pairs,
+            )?;
+            attr_resize::replace_attribute(record, loc.attr_offset, &shrunk)?;
+            value.extend_from_slice(&attribute_list_entry(0x80, 0, base_ref, data_attr_id));
+        }
+        value.extend_from_slice(&attribute_list_entry(0x80, ext_first_vcn, ext_ref, 0));
         let al = resident_attribute(AttrType::AttributeList as u32, 3, &value);
         attr_resize::insert_attribute_sorted(record, &al)
     })
@@ -274,7 +346,10 @@ fn volume_with_a_split_file(tag: &str) -> (String, u64) {
             .try_into()
             .unwrap(),
     );
-    assert_eq!(first_vcn, 1, "the extension segment must start at VCN 1");
+    assert_eq!(
+        first_vcn, ext_first_vcn,
+        "the extension segment must start at VCN {ext_first_vcn}"
+    );
     let (_, base_read) = mft_io::read_mft_record_io(&mut io, base_rec).expect("re-read base");
     let al_loc = attr_io::find_attribute(&base_read, AttrType::AttributeList, None)
         .expect("the base record holds an $ATTRIBUTE_LIST");
@@ -293,45 +368,64 @@ fn volume_with_a_split_file(tag: &str) -> (String, u64) {
 }
 
 #[test]
-fn a_split_run_list_is_refused_rather_than_read_short() {
+fn a_split_run_list_is_read_whole() {
     let (img, base_rec) = volume_with_a_split_file("read");
     let mut io = PathIo::open_ro(Path::new(&img)).expect("open_ro");
-
-    match read::read_attribute_value(&mut io, base_rec, AttrType::Data, None) {
-        Err(e) => assert!(
-            e.contains("split across"),
-            "the refusal should say why: {e}"
-        ),
-        Ok(bytes) => {
-            let missing = bytes.iter().filter(|&&b| b != CONTENT).count();
-            panic!(
-                "read_attribute_value returned Ok with {} bytes, of which {missing} are not \
-                 the {CONTENT:#04x} that was written -- the VCN-1 segment lives in an \
-                 extension record and was silently dropped",
-                bytes.len()
-            );
-        }
-    }
+    let bytes = read::read_attribute_value(&mut io, base_rec, AttrType::Data, None)
+        .expect("read a $DATA split across two records");
+    assert!(
+        bytes == contents(),
+        "read {} bytes that are not the file's {FILE_SIZE}",
+        bytes.len()
+    );
 }
 
 #[test]
-fn a_split_run_list_is_refused_by_the_ranged_read_too() {
+fn the_ranged_read_reaches_the_segment_in_the_extension_record() {
     let (img, base_rec) = volume_with_a_split_file("range");
     let mut io = PathIo::open_ro(Path::new(&img)).expect("open_ro");
+    let tail = read::read_attribute_range(&mut io, base_rec, AttrType::Data, None, 4096, 4096)
+        .expect("read the window the extension record holds");
+    assert_eq!(tail, vec![TAIL; 4096]);
+    let across = read::read_attribute_range(&mut io, base_rec, AttrType::Data, None, 4000, 200)
+        .expect("read a window across the split");
+    assert_eq!(across, contents()[4000..4200].to_vec());
+}
 
-    let tail = read::read_attribute_range(&mut io, base_rec, AttrType::Data, None, 4096, 4096);
-    match tail {
-        Err(e) => assert!(
-            e.contains("split across"),
-            "the refusal should say why: {e}"
-        ),
-        Ok(bytes) => panic!(
-            "read_attribute_range returned Ok with {} bytes for a window that lies \
-             entirely in the segment held by an extension record: {:02x?}...",
-            bytes.len(),
-            &bytes[..8.min(bytes.len())]
-        ),
-    }
+/// Graded by the `ntfs` crate: the whole file, read through the facade,
+/// is what that parser reads from the same image. That parser follows a
+/// split attribute only when every segment is in an extension record, as
+/// Windows lays one out, so this is that layout.
+#[test]
+fn the_stitched_read_matches_the_ntfs_crate() {
+    let (img, _) = volume_split_across_extensions("oracle");
+    let (ntfs, mut reader) = common::open(&img);
+    let theirs = common::read_file_all(&ntfs, &mut reader, "/split.bin");
+    let fs = Filesystem::mount(&img).expect("mount");
+    let mut ours = vec![0u8; FILE_SIZE + 1];
+    let n = fs
+        .read_file("/split.bin", 0, &mut ours)
+        .expect("read /split.bin");
+    ours.truncate(n);
+    assert!(theirs == contents(), "the ntfs crate read something else");
+    assert!(
+        ours == theirs,
+        "this crate read {n} bytes the ntfs crate does not"
+    );
+}
+
+/// Segments that leave a VCN described nowhere are refused, not read
+/// with a hole where the missing cluster was.
+#[test]
+fn segments_with_a_gap_between_them_are_refused() {
+    let (img, base_rec) = volume_with_a_segment_at("gap", 2, false);
+    let mut io = PathIo::open_ro(Path::new(&img)).expect("open_ro");
+    let got = read::read_attribute_value(&mut io, base_rec, AttrType::Data, None);
+    assert!(
+        got.as_ref().is_err_and(|e| e.contains("VCN")),
+        "a $DATA with no segment for VCN 1 was read: {:?}",
+        got.map(|b| b.len())
+    );
 }
 
 #[test]
