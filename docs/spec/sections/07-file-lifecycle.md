@@ -208,10 +208,15 @@ that happen to reference the same hard-linked record.
 [write_rename_varlen.rs](../../../tests/write_rename_varlen.rs).
 
 Equal-*UTF-16-unit* length is the in-place fast path, not equal UTF-8 byte length.
-It still must restore sorted index ordering after a key change. Variable-length
+NTFS requires the parent's keys to stay in collation order after a key change, but
+the fast path rewrites the name inside the existing entry and does not move it.
+A new name that sorts elsewhere leaves the index out of order, and a routed lookup
+can no longer find the file: **open defect #466**. Variable-length
 rename can resize the child's attribute and replace the resident root entry, but
-refuses a parent with `$INDEX_ALLOCATION` overflow. Supported same-length overflow
-cases do not establish unrestricted rename across all tree nodes.
+refuses a parent with `$INDEX_ALLOCATION` overflow (#474). That includes a new
+volume's root whenever the formatter had to give it an external index block.
+Supported same-length overflow cases do not establish unrestricted rename across
+all tree nodes.
 
 Replacement checks source/destination types and refuses a nonempty destination
 directory. A destination already referencing the source record is a terminal no-op.

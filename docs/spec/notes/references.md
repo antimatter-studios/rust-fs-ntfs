@@ -13,6 +13,7 @@ interfaces and layouts, not a complete version-independent NTFS disk specificati
 - [Change journals](https://learn.microsoft.com/en-us/windows/win32/fileio/change-journals): consumer notification history.
 - [USN_RECORD_V2](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-usn_record_v2): versioned consumer record fields and runtime record sizing.
 - [fsutil sparse](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/fsutil-sparse): sparse reads return zeros for unallocated content.
+- [fsutil dirty](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/fsutil-dirty): a set dirty bit marks a possibly inconsistent volume, and chkdsk runs on it at the next restart.
 - [[MS-FSCC]: File System Control Codes](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/): Windows filesystem protocol/control information. Cite an actual relevant type, not a blanket section number for disk internals.
 - [[MS-DTYP]: Windows Data Types](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/): FILETIME, SID, ACL, ACE, and self-relative security descriptor type family.
 

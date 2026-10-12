@@ -405,11 +405,25 @@ validates and resizes the resident attribute and synchronizes record 3's mirror.
 | `09` | 1 | NTFS minor version |
 | `0A` | 2 | Flags; low bit `0001` is dirty in source |
 
-The formatter emits 3.1 with a clear dirty flag. Dirty clearing/setting and a
-narrow version-upgrade helper operate here, not in the boot sector. Clearing the
-flag does not reconstruct lost indexes or allocation state. Other volume flags
-should not be assigned semantics merely because their bit values appear in an
-older draft. **IMPLEMENTED:** [fsck.rs](../../../src/fsck.rs).
+The formatter emits version 3.1 and flags `0080`: dirty clear, one other bit set.
+The source records that a fresh Windows format carries `0080`, and that with flags
+`0000` `ntfs.sys` queued a proactive scan on every mount and `chkdsk /scan` exited 13
+on otherwise clean metadata. It deliberately leaves upgrade-on-mount (`0004`) clear:
+a `/scan` snapshot mount is read-only, so the upgrade cannot complete there.
+**IMPLEMENTED / historical observation:** `mkfs::format_filesystem` and the
+volume-information notes in [fsck.rs](../../../src/fsck.rs).
+
+The name of `0080` is disputed. The source calls it `MODIFIED_BY_CHKDSK`, citing
+Tuxera's public documentation. The upstream `ntfs` crate gives that name to `8000`.
+Treat it as the bit a fresh Windows format sets, not as a statement that chkdsk ran.
+**OPEN.**
+
+Dirty clearing/setting and a narrow version-upgrade helper operate here, not in the
+boot sector. A set dirty bit means the volume may be inconsistent, and Windows
+runs chkdsk on it at the next restart. **DOCUMENTED:**
+[fsutil dirty](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/fsutil-dirty).
+Clearing the bit cancels that check (#519). It does not reconstruct lost indexes or
+allocation state. **IMPLEMENTED:** [fsck.rs](../../../src/fsck.rs).
 
 <a id="attrdef"></a>
 
@@ -428,8 +442,14 @@ The source emits fifteen 160-byte entries and one zero entry:
 | `90` | 8 | Minimum size |
 | `98` | 8 | Maximum size; all ones for the emitted unbounded convention |
 
-The implementation uses resident `40`, nonresident `80`, and indexed `02`
-definition flags for its table. These are not attribute transform bits. Table
+The table uses definition flags `40` (must be resident), `02` (indexable), and
+`80`. These are not attribute transform bits. The source names `80` `NONRES`, but
+that cannot be its meaning. `$DATA` lacks it and is routinely nonresident.
+`$BITMAP` and `$REPARSE_POINT` carry it and are commonly resident; this driver
+writes reparse points resident. `80` is usually described as "always log": changes
+to the attribute are logged even when it is nonresident. No Microsoft page documents
+these bits. **OPEN** for the name. The source records the table as one `chkdsk /scan`
+accepts, and notes a Windows reference carrying `80` on `$BITMAP`. Table
 constraints do not substitute for checking actual available record space.
 **IMPLEMENTED:** `mkfs::build_attrdef_table` (whose old comment incorrectly called
 the name area 64 *bytes* rather than 64 UTF-16 units).

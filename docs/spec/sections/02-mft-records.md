@@ -40,9 +40,9 @@ in the public declaration are not independently documented by that declaration.
 | `10` | 2 | Reuse sequence | Part of every nonzero-sequence file reference |
 | `12` | 2 | Hard-link count | Link accounting; not blindly the count of all namespace aliases |
 | `14` | 2 | First attribute offset | After header and USA, aligned to 8 |
-| `16` | 2 | Flags | `0001` in use, `0002` directory; formatter also uses view-index flag `0008` |
+| `16` | 2 | Flags | `0001` in use, `0002` directory index present, `0008` view index present; formatter pairs `0004` with `0008` on its view-index records (see below) |
 | `18` | 4 | Bytes used | Includes the attribute terminator reservation |
-| `1C` | 4 | Bytes allocated | Record buffer size |
+| `1C` | 4 | Bytes allocated | Record buffer size; not checked against boot geometry on read (#509) |
 | `20` | 8 | Base file reference | Zero in base; owner reference in extension |
 | `28` | 2 | Next attribute instance | Allocator cursor for new attributes |
 | `2A` | 2 | Reserved/alignment | Not interpreted as a checksum |
@@ -54,6 +54,14 @@ marker or the used-size boundary. Alignment and used-size errors have historical
 produced chkdsk corrections; unused tail bytes are not another attribute.
 **IMPLEMENTED / historical observation:** [attr_io.rs](../../../src/attr_io.rs),
 [mkfs bug catalog](../../mkfs-bug-catalog.md).
+
+Records hosting a view index (`$Secure`, `$ObjId`, `$Reparse`, `$Quota`) carry
+flags `000D` in this formatter: in use plus `0004` and `0008`. The public header
+page reserves `0004`, so its pairing comes from Windows behavior rather than
+documentation. The source records that `chkdsk /f` left `$Extend` children at
+`000D` after repairing them, and that chkdsk reported "Flags for file record
+segment 9 are incorrect" when `$Secure` lacked the view-index bit.
+**IMPLEMENTED / historical observation:** `mkfs::build_system_record_with_parent`.
 
 <a id="usa-fixup"></a>
 
@@ -109,6 +117,24 @@ statement that every NTFS reference should omit sequence checks.
 `mft_io::next_sequence_for_slot`, `read::refuse_if_stale`;
 [record_sequence_reuse.rs](../../../tests/record_sequence_reuse.rs),
 [stale_index_entry.rs](../../../tests/stale_index_entry.rs).
+
+*When* the sequence advances differs between the two writers this source models.
+This driver advances it when it allocates a slot (`next_sequence_for_slot`: stored
+value plus one), and frees a record by clearing the in-use flag alone
+(`write::remove_file_record_io`). The replay handler for Windows'
+`DeallocateFileRecordSegment` advances it at the moment of freeing ([§5](05-logfile-journal.md#opcodes)),
+so a record Windows frees already carries its next sequence. If Windows keeps that
+value when it reallocates, a slot freed here and then reused by Windows would keep
+the old reference: a stale index entry, catalog key, or change-journal record
+naming the deleted file would match the new one. **IMPLEMENTED / OPEN:** whether
+Windows advances the sequence again on allocation is unestablished; freeing a file
+here, creating one on Windows, and comparing both references would settle it.
+
+The formatter gives system records `max(1, record_number)` as their sequence, so the
+root is reference (5, 5), and every system file's parent reference must name it
+that way. The source records that a constant 1 produced chkdsk's "Incorrect
+information was detected in file record segment" on records 2–11.
+**IMPLEMENTED / historical observation:** [mkfs.rs](../../../src/mkfs.rs) `build_system_record_with_parent`.
 
 Listings read index metadata without following every child record. Consequently a
 stale name may be listed and then refused when opened. The public reader does not
@@ -242,14 +268,14 @@ Times use 100 ns intervals since 1601-01-01 UTC. `set_times` changes only standa
 information. Filename and directory-key copies are not automatically rewritten.
 The source's full reader returns version-specific fields only when they fit.
 
+The formatter gives system files hidden plus system (`0006`) without archive,
+matching the source's record of Microsoft format output; user files start with
+archive (`0020`). View-index hosts also carry `20000000` here.
 The writer exposes read-only `0001`, hidden `0002`, system `0004`, archive `0020`,
 normal `0080`, temporary `0100`, and not-content-indexed `2000` convenience flags.
 Sparse `0200`, reparse `0400`, compressed `0800`, and encrypted `4000` describe
 other file states. These file flags are distinct from attribute-header transform
-flags and FILE record flags. The formatter also emits header bit `0004` together with
-`0008` for its view-index records; its historical interpretation comes from
-Windows byte comparisons, not the public header page's reserved fields.
-NTFS filename directory/view-index bits are discussed
+flags and FILE record flags. NTFS filename directory/view-index bits are discussed
 in [chapter 4](04-indexes-directories.md#fn-directory-bit).
 **IMPLEMENTED:** `write::file_attr`, `record_build` constants.
 
@@ -311,8 +337,13 @@ A stricter fallible walk and distinguishing corruption from absence remain Q22.
 
 `resize_resident_value` and `replace_attribute` move following attributes and the
 terminator inside the fixed record, update lengths and `bytes_used`, and refuse a
-record overflow. `insert_attribute_sorted` maintains type/name ordering and places
-new data before the terminator. ID allocation advances the record's next-instance
+record overflow. NTFS orders a record's attributes by type code and then by name,
+and readers stop searching once they pass the place an attribute would sort to.
+`insert_attribute_sorted` honours the type order only: it places a new attribute
+before the first one of a greater type, after any of the same type. Named `$DATA`
+streams therefore land in write order. A stream that should sort before an existing
+one becomes invisible to such readers; ntfs-3g cannot find it: **open defect #467**.
+ID allocation advances the record's next-instance
 field; it does not create extra disk space. **IMPLEMENTED:**
 [attr_resize.rs](../../../src/attr_resize.rs);
 [attr_resize.rs tests](../../../tests/attr_resize.rs).

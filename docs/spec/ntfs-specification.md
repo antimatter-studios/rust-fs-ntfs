@@ -86,3 +86,4 @@ transfers; they are not general checksums of record contents.
 | 2026-05-03 | Initial six-chapter draft. |
 | 2026-05-25 | Earlier source-derived updates to security hashes, collation and namespaces. |
 | 2026-10-11 | Reconciled chapters with native read/write, MFT growth, index splitting, compression reads, and redo/undo replay; separated evidence types; added lifecycle explanations and a concrete question register. |
+| 2026-10-12 | Corrected the rename-ordering, attribute-ordering and `$AttrDef` flag descriptions; recorded the sequence-number timing and 4Kn stride divergences, system-record sequences and flags, and the formatter's volume flags; linked open questions to their issues. |

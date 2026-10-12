@@ -39,7 +39,7 @@ profile, not every historical NTFS boot record. **IMPLEMENTED.**
 | `1A` | 2 | Heads | 255 in this formatter, not used by addressing |
 | `1C` | 4 | Hidden sectors | Zero for this volume-relative formatter |
 | `20` | 4 | Legacy long sector count | Zero |
-| `24` | 4 | Drive/extended BPB bytes | `00800080` in this formatter |
+| `24` | 4 | Drive/extended BPB bytes | Bytes `80 00 80 00` in this formatter |
 | `28` | 8 | Total sectors | Formatter excludes the final backup sector |
 | `30` | 8 | MFT starting LCN | Bootstrap record 0 |
 | `38` | 8 | MFT mirror starting LCN | Backup of initial records |
@@ -123,7 +123,11 @@ volume can use 4096-byte logical sectors. The source supports geometry rather th
 a universal 512-byte-only rule. Its FILE and INDX fixup calls use the parsed
 logical-sector size; LFS log-page fixups use a fixed 512-byte stride. Microsoft's
 [multisector notes](https://learn.microsoft.com/en-us/windows/win32/devnotes/multi-sector-header)
-describe a 512-byte sequence stride. The relationship between those documented
+describe a 512-byte sequence stride, and so does the `ntfs` crate this repository
+uses as a test-side reader. On 512-byte-sector volumes the two rules agree. On a
+4Kn volume they do not: this driver expects a two-word USA on a 4096-byte record,
+while a 512-byte stride gives nine words, and its geometry check would refuse
+every record written the other way. The relationship between those documented
 strides and each Windows 4Kn structure needs fixture-specific validation; it must
 not be hidden by equating physical sectors and protection strides.
 **DOCUMENTED / IMPLEMENTED / OPEN:** Q01 in the question register.
@@ -139,7 +143,7 @@ reservation before placing later metadata. The writer's backup is at
 `floor(requested_format_bytes / cluster_size) * cluster_size - bytes_per_sector`; do not replace that with an off-by-one formula
 using the formatter's already-shortened `TotalSectors` field.
 **IMPLEMENTED:** [mkfs.rs](../../../src/mkfs.rs),
-[mft_geometry_layout.rs](../../../tests/boot_sector_geometry.rs).
+[boot_sector_geometry.rs](../../../tests/boot_sector_geometry.rs).
 
 The driver emits the backup but does not implement general bidirectional boot
 repair, partition resize reconciliation, or a mount fallback that arbitrates two

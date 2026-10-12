@@ -16,8 +16,14 @@ tier/matrix workflow and exclusive VM access; do not quietly skip missing tools.
 
 ### Q01 — USA strides on 4Kn and mixed geometry
 
-**Evidence gap.** FILE/INDX calls use logical-sector geometry; LFS uses 512-byte
-strides. Microsoft multisector notes discuss a 512-byte stride. Establish exact
+**Evidence and probable implementation gap.** FILE/INDX calls use logical-sector
+geometry; LFS uses 512-byte strides. Microsoft multisector notes discuss a 512-byte
+stride, and the repository's own test-side reader, the `ntfs` crate, applies a fixed
+512-byte stride to every record. `validate_usa_geometry` instead requires
+`usa_count - 1 == record_size / bytes_per_sector`. On a 4Kn volume a 4096-byte
+record with a 512-byte stride has a nine-word USA, which this driver would refuse
+on every record. The driver and its own oracle disagree here, and no 4Kn fixture
+has decided between them. Establish exact
 USA count, saved-tail positions, and read/write behavior for Windows-authored 4Kn
 FILE/INDX/RSTR/RCRD records, including records equal to one sector. Compare the
 same bytes before and after a real Windows metadata mutation. A synthetic record
@@ -53,6 +59,8 @@ Require either complete correctly assembled data or explicit refusal, never a
 successful VCN-zero-only prefix. Check entry-local name bounds, minimum entry size,
 ordering, duplicate/overlapping segments, and sparse/uninitialized list rejection.
 
+Tracking: #468, #471, #472, #473.
+
 ### Q05 — MFT records crossing extent boundaries
 
 **Implementation gap.** Record addressing follows `$MFT:$DATA`, but its current
@@ -71,6 +79,8 @@ coverage from stream size rather than folklore. Mutate each mirrored record,
 compare both copies, then test damaged primary/mirror combinations. Separate
 structural readability from semantic disagreement. Review every caller modifying
 records 0–3 for required mirror sync; generic RMW does not supply it automatically.
+
+Tracking: #481.
 
 ## Allocation and indexes
 
@@ -94,6 +104,8 @@ and extension-record owners. A scan must prove completeness before clearing any
 allocation bit. If a system metafile cannot be located, the protection helper's
 best-effort omission may weaken protection; test that case explicitly. No safe
 TRIM/discard or general repair policy follows from the present limited scan.
+
+Tracking: #515, #517.
 
 ### Q09 — Index VCN units when clusters exceed blocks
 
@@ -126,6 +138,8 @@ Windows enumeration as well as chkdsk. Test block reuse, resident bitmap exhaust
 nonresident bitmap transition, and failure at every publishing step. A 256-file
 insertion oracle is not evidence for all these cases.
 
+Tracking: #474, #495.
+
 ## Recovery and duplicated metadata
 
 ### Q12 — Additional LFS layouts and restart arbitration
@@ -156,6 +170,8 @@ link changes, sparse wrap, and deletion/recreation, and correlate returned API
 records with stream bytes. Keep metadata recovery evidence separate from change
 notification history.
 
+Tracking: #479.
+
 ### Q15 — Filename caches, aliases, and link counts
 
 **Evidence and compatibility gaps.** SI/stream metadata and FN/index copies can
@@ -165,6 +181,8 @@ set, chmod-style flag changes, case-only rename, short-alias creation/removal, a
 multiple hard links in one or several parents. Compare all filename attributes,
 index keys, link count, and authoritative stat/stream queries. Determine refresh
 rules and alias accounting rather than requiring every copy to match at all times.
+
+Tracking: #491, #493, #506.
 
 ## Payloads and extended metadata
 
@@ -188,6 +206,8 @@ Retain Windows-produced examples and API results for each tag/form. Reading a
 print name is not proof of resolving a target. Recognizing an encrypted bit does
 not decrypt EFS content.
 
+Tracking: #505.
+
 ### Q18 — Strict EA parsing and summaries
 
 **Integrity and implementation gaps.** Resident packing is implemented; the reader
@@ -197,6 +217,8 @@ name terminator, entry-local length, next offset, flags, and summary independent
 Require explicit malformed-input outcomes; determine which trailing padding is
 valid. Nonresident EA storage and Windows byte-name comparison beyond ASCII require
 additional examples. Do not claim a 65535-byte value fits a resident FILE record.
+
+Tracking: #482.
 
 ### Q19 — Security catalog scaling and ACL behavior
 
@@ -208,6 +230,8 @@ across mirror boundaries and duplicate descriptors, corrupt one index/header/has
 and correlate actual file security queries. Match descriptor bytes as well as hashes.
 Audit valid/null/absent ACLs and SID bounds before exposing a full ACL API.
 
+Tracking: #503.
+
 ### Q20 — Global object and reparse catalogs
 
 **Implementation gap.** Local setters do not maintain `$ObjId:$O` or `$Reparse:$R`.
@@ -215,6 +239,8 @@ Capture object/reparse create, overwrite, rename, unlink, and hard-link operatio
 Pin key/value structures, ordering, uniqueness, and update lifetime. Verify chkdsk
 with both local attributes and global catalog keys, not just payload round-trip.
 Track this separately from the already implemented setters.
+
+Tracking: #478.
 
 ### Q21 — Quotas, utility streams, and modern features
 
@@ -224,6 +250,8 @@ semantics, EFS metadata/crypto, TxF logged utility structures, and modern placeh
 systems remain outside the implemented model. Acquire primary format/API sources
 and Windows fixtures per feature; leave layouts unnamed where evidence is absent.
 The presence of `$Extend` children or type `100` is not a working subsystem.
+
+Tracking: #510.
 
 ### Q22 — Attribute iteration and diagnostic completeness
 
