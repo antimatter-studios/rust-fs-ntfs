@@ -1529,6 +1529,18 @@ pub(crate) fn promote_index_root_to_first_indx(
     Ok(block)
 }
 
+/// Whether the entry at `entry` in `buf` points down to a child node: an
+/// entry of an interior node.
+pub(crate) fn entry_has_subnode(buf: &[u8], entry: &IndexEntryLocation) -> bool {
+    buf.get(entry.record_offset + IE_FLAGS..entry.record_offset + IE_FLAGS + 2)
+        .is_some_and(|f| u16::from_le_bytes([f[0], f[1]]) & IE_FLAG_HAS_SUBNODE != 0)
+}
+
+/// The UTF-16 name a node entry's `$FILE_NAME` key carries.
+pub(crate) fn node_entry_name(entry: &NodeEntry) -> Result<Vec<u16>, Error> {
+    entry_name(&entry.key, 0, entry.key.len())
+}
+
 /// One entry of an `$I30` B-tree node, held apart from the node's bytes.
 #[derive(Clone, Debug)]
 pub(crate) struct NodeEntry {

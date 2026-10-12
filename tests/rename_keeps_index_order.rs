@@ -134,12 +134,12 @@ fn renames_across_a_directory_with_index_blocks_keep_it_in_order() {
     );
 }
 
-/// An entry in an interior node of the index cannot be taken out without
-/// orphaning the subtree it points to (#495), so a rename that would move
-/// one is refused and changes nothing, rather than leaving it in a slot
-/// no lookup reaches.
+/// An entry in an interior node of the index moves too: it is taken out
+/// as a B-tree takes one out, its place filled by its in-order neighbour,
+/// and inserted again under the new name (#495). This was refused, since
+/// shifting it away would have orphaned the subtree it points to.
 #[test]
-fn a_rename_that_would_move_an_interior_entry_is_refused() {
+fn a_rename_that_moves_an_interior_entry_works() {
     let mut io = fresh_volume("interior");
     write::mkdir_io(&mut io, "/", "d").expect("mkdir /d");
     for i in 0..120 {
@@ -157,18 +157,19 @@ fn a_rename_that_would_move_an_interior_entry_is_refused() {
         .clone();
     let moved = format!("z{}", &interior[1..]);
 
-    let got = write::rename_io(&mut io, &format!("/d/{interior}"), &moved);
+    write::rename_io(&mut io, &format!("/d/{interior}"), &moved)
+        .unwrap_or_else(|e| panic!("rename interior {interior} to {moved}: {e}"));
+    read::resolve_path(&mut io, &format!("/d/{moved}")).expect("the new name is found");
     assert!(
-        got.is_err(),
-        "renaming interior {interior} to {moved} was not refused"
-    );
-    read::resolve_path(&mut io, &format!("/d/{interior}"))
-        .expect("the refused rename's source is still found");
-    assert!(
-        read::resolve_path(&mut io, &format!("/d/{moved}")).is_err(),
-        "the refused rename's target is found"
+        read::resolve_path(&mut io, &format!("/d/{interior}")).is_err(),
+        "the old name is still found"
     );
     assert_every_name_is_found(&mut io, "/d", d);
+    assert_eq!(
+        listing(&mut io, d).len(),
+        120,
+        "a rename lost or added a name"
+    );
 }
 
 /// A rename that keeps its slot still works, and in place.

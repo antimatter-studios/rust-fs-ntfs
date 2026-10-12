@@ -5480,6 +5480,9 @@ fn remove_parent_index_entry_io<T: BlockIo + ?Sized>(
                 entry.file_record_number
             )));
         }
+        if index_io::entry_has_subnode(&parent_record_bytes, &entry) {
+            return remove_interior_index_entry_io(io, parent_rec, None, basename, &upcase);
+        }
         update_mft_record_io(io, parent_rec, |record| {
             let e = index_io::find_index_entry(record, basename, Some(&upcase))?
                 .ok_or_else(|| Error::io("race: $INDEX_ROOT entry vanished"))?;
@@ -5498,6 +5501,15 @@ fn remove_parent_index_entry_io<T: BlockIo + ?Sized>(
                         "INDX entry at VCN {vcn} points at {} but resolved {child_rec}",
                         entry.file_record_number
                     )));
+                }
+                if index_io::entry_has_subnode(&block, &entry) {
+                    return remove_interior_index_entry_io(
+                        io,
+                        parent_rec,
+                        Some(vcn),
+                        basename,
+                        &upcase,
+                    );
                 }
                 idx_block::update_indx_block_io(io, &ia, vcn, |block| {
                     let e = index_io::find_entry_in_indx_block(block, basename, Some(&upcase))?
@@ -5521,6 +5533,231 @@ fn remove_parent_index_entry_io<T: BlockIo + ?Sized>(
     Ok(())
 }
 
+/// Take an entry of an interior index node out of the parent's index
+/// (#495): the node at `node_vcn`, or `$INDEX_ROOT` when that is `None`.
+///
+/// The entry points down to the subtree of every name below it, so it
+/// cannot simply be shifted away -- that orphans the subtree, which is why
+/// this was refused, and why a directory whose index had grown a level
+/// could never be emptied. As a B-tree does, it is replaced by its in-order
+/// neighbour: the greatest name in the subtree below it or, when that
+/// subtree holds none, the least name in the subtree after it. The
+/// neighbour takes the entry's place, keeping the entry's child pointer.
+///
+/// Leaves emptied by unlinks stay in the tree, as Windows leaves them, so
+/// the neighbour is not always in a leaf. It is the last (or first) entry
+/// of the deepest node on the walk down that holds one, and every node
+/// below that one on the walk holds nothing. Those empty nodes go with the
+/// neighbour: its own child takes their place, and their blocks are freed in
+/// `$Bitmap:$I30`. When neither subtree holds a name, the entry goes, with
+/// the empty subtree below it.
+///
+/// The entry's node is written first, holding the neighbour twice for a
+/// moment, so every name is still found. The neighbour's node is written
+/// second, and if that fails the entry's node is put back as it was. The
+/// freed blocks are cleared last, after checking they can be.
+fn remove_interior_index_entry_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    node_vcn: Option<u64>,
+    basename: &str,
+    upcase: &crate::upcase::UpcaseTable,
+) -> Result<(), Error> {
+    let ia = idx_block::load_for_directory_io(io, parent_rec)?;
+    let (_, record) = read_mft_record_io(io, parent_rec)?;
+    let (mut node, block) = match node_vcn {
+        None => (index_io::parse_index_root_node(&record)?, None),
+        Some(vcn) => {
+            let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+            (index_io::parse_indx_node(&block)?, Some(block))
+        }
+    };
+    let wanted: Vec<u16> = basename.encode_utf16().collect();
+    let mut at = None;
+    for (i, entry) in node.entries.iter().enumerate() {
+        let name = index_io::node_entry_name(entry)?;
+        if index_io::compare_names(&name, &wanted, Some(upcase)) == std::cmp::Ordering::Equal {
+            at = Some(i);
+            break;
+        }
+    }
+    let at = at.ok_or_else(|| Error::io(format!("the entry for '{basename}' vanished")))?;
+    let left = node.entries[at]
+        .child
+        .ok_or_else(|| Error::io(format!("the entry for '{basename}' has no child")))?;
+    let right = node
+        .entries
+        .get(at + 1)
+        .and_then(|e| e.child)
+        .or(node.last_child)
+        .ok_or_else(|| Error::io(format!("the entry after '{basename}' has no child")))?;
+
+    // Every node from `start` down to a leaf, always taking the last child
+    // (`rightmost`) or the first.
+    type Walked = Vec<(u64, Vec<u8>, index_io::IndexNode)>;
+    let walk = |io: &mut T, start: u64, rightmost: bool| -> Result<Walked, Error> {
+        let mut path = Vec::new();
+        let mut vcn = start;
+        for _ in 0..64 {
+            let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+            let node = index_io::parse_indx_node(&block)?;
+            let next = if rightmost {
+                node.last_child
+            } else {
+                node.entries
+                    .first()
+                    .and_then(|e| e.child)
+                    .or(node.last_child)
+            };
+            path.push((vcn, block, node));
+            match next {
+                Some(next) => vcn = next,
+                None => return Ok(path),
+            }
+        }
+        Err(Error::io(format!(
+            "directory record {parent_rec}: its index is deeper than 64 levels, or has a cycle"
+        )))
+    };
+    let vcns = |path: &[(u64, Vec<u8>, index_io::IndexNode)]| -> Vec<u64> {
+        path.iter().map(|(vcn, _, _)| *vcn).collect()
+    };
+
+    // The node the neighbour leaves, as it will be written, and the empty
+    // nodes freed with it.
+    let mut holder: Option<(u64, Vec<u8>, index_io::IndexNode)> = None;
+    let freed: Vec<u64>;
+    let left_path = walk(io, left, true)?;
+    if let Some(k) = left_path
+        .iter()
+        .rposition(|(_, _, n)| !n.entries.is_empty())
+    {
+        freed = vcns(&left_path[k + 1..]);
+        let (vcn, bytes, mut n) = left_path.into_iter().nth(k).expect("k is on the path");
+        let predecessor = n.entries.pop().expect("the node holds an entry");
+        // The predecessor's own subtree takes the place of the empty nodes
+        // below it; in a leaf both are nothing.
+        n.last_child = predecessor.child;
+        node.entries[at].key = predecessor.key;
+        holder = Some((vcn, bytes, n));
+    } else {
+        let right_path = walk(io, right, false)?;
+        if let Some(k) = right_path
+            .iter()
+            .rposition(|(_, _, n)| !n.entries.is_empty())
+        {
+            freed = vcns(&right_path[k + 1..]);
+            let (vcn, bytes, mut n) = right_path.into_iter().nth(k).expect("k is on the path");
+            // The successor's child is the empty chain freed with it; the
+            // entry after it keeps its own.
+            let successor = n.entries.remove(0);
+            node.entries[at].key = successor.key;
+            holder = Some((vcn, bytes, n));
+        } else {
+            // Neither subtree holds a name, and a node holding no entry has
+            // only its last child, so the subtree below the entry is the
+            // walk itself. The entry goes with it; the entry after it keeps
+            // the subtree after.
+            freed = vcns(&left_path);
+            node.entries.remove(at);
+        }
+    }
+    // A bitmap this cannot clear refuses the removal before anything is
+    // written.
+    if !freed.is_empty() {
+        clear_index_block_bits(&mut record.to_vec(), &ia, &freed)?;
+    }
+
+    // 1) The entry's node, holding the neighbour in the entry's place.
+    match (node_vcn, &block) {
+        (None, _) => update_mft_record_io(io, parent_rec, |record| {
+            index_io::write_index_root_node(record, &node)
+        })?,
+        (Some(vcn), Some(original)) => {
+            let bytes = index_io::write_indx_node(original, &node, vcn)?;
+            idx_block::write_indx_block_io(io, &ia, vcn, &bytes)?;
+        }
+        (Some(_), None) => unreachable!("an INDX node is read with its block"),
+    }
+    // 2) The neighbour's node, without the neighbour. Put the entry's node
+    // back if it fails.
+    if let Some((vcn, bytes, n)) = &holder {
+        let written = index_io::write_indx_node(bytes, n, *vcn)
+            .and_then(|out| idx_block::write_indx_block_io(io, &ia, *vcn, &out));
+        if let Err(e) = written {
+            let undo = match (node_vcn, &block) {
+                (None, _) => crate::mft_io::restore_mft_record_io(io, parent_rec, &record),
+                (Some(vcn), Some(original)) => {
+                    idx_block::write_indx_block_io(io, &ia, vcn, original)
+                }
+                (Some(_), None) => unreachable!("an INDX node is read with its block"),
+            };
+            return Err(match undo {
+                Ok(()) => e.map_message(|m| {
+                    format!("taking the neighbour of '{basename}' out of its node failed ({m}); the index is as it was")
+                }),
+                Err(ue) => e.map_message(|m| {
+                    format!(
+                        "taking the neighbour of '{basename}' out of its node failed ({m}), and \
+                         putting the entry's node back failed too ({ue}): one name is in the \
+                         index twice -- run chkdsk"
+                    )
+                }),
+            });
+        }
+    }
+    // 3) The empty nodes no entry points to any more.
+    if !freed.is_empty() {
+        update_mft_record_io(io, parent_rec, |record| {
+            clear_index_block_bits(record, &ia, &freed)
+        })
+        .map_err(|e| {
+            e.map_message(|m| {
+                format!(
+                    "removing '{basename}': freeing {} empty index block(s) failed ({m}); they \
+                     stay allocated and unreferenced -- run chkdsk",
+                    freed.len()
+                )
+            })
+        })?;
+    }
+    Ok(())
+}
+
+/// Clear the bits of the index blocks at `vcns` in the resident
+/// `$Bitmap:$I30` of the directory `record`, so the blocks are free for the
+/// next split. Their clusters stay in `$INDEX_ALLOCATION`, as Windows
+/// leaves them.
+fn clear_index_block_bits(
+    record: &mut [u8],
+    ia: &idx_block::IndexAllocation,
+    vcns: &[u64],
+) -> Result<(), Error> {
+    let bitmap = attr_io::find_attribute(record, AttrType::Bitmap, Some(crate::mkfs::stream::I30))
+        .ok_or(Error::io("$Bitmap:$I30 missing"))?;
+    if !bitmap.is_resident {
+        return Err(Error::io(
+            "freeing an index block in a non-resident $Bitmap:$I30 is not supported",
+        ));
+    }
+    let value = bitmap.attr_offset
+        + bitmap
+            .resident_value_offset
+            .ok_or(Error::io("$Bitmap:$I30 has no value offset"))? as usize;
+    let length = bitmap.resident_value_length.unwrap_or(0) as usize;
+    for &vcn in vcns {
+        let block = vcn * ia.params.cluster_size / ia.block_size;
+        let byte = (block / 8) as usize;
+        if byte >= length {
+            return Err(Error::io(format!(
+                "index block {block} is past $Bitmap:$I30's {length} bytes"
+            )));
+        }
+        record[value + byte] &= !(1u8 << (block % 8));
+    }
+    Ok(())
+}
+
 /// Free an empty-directory MFT record and detach its name from
 /// `parent_rec`. Shared by [`rmdir_io`] and the rename-with-replace
 /// path. Emptiness (and a rejection of `$INDEX_ALLOCATION` overflow) is
@@ -5536,19 +5773,46 @@ fn remove_dir_record_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     let (_, dir_record_bytes) = read_mft_record_io(io, dir_rec)?;
 
-    // Emptiness check: walk $INDEX_ROOT entries, require only the LAST
-    // sentinel is present. Also reject $INDEX_ALLOCATION spillover — a
-    // non-empty overflowed dir is definitely non-empty; a claimed-empty
-    // but overflowed dir is suspicious anyway, refuse for MVP.
+    // Emptiness check: $INDEX_ROOT holds only its LAST sentinel, and so
+    // does every allocated INDX block.
+    //
+    // A DIRECTORY THAT GREW INDEX BLOCKS IS EMPTY WHEN EVERY BLOCK IS. Any
+    // directory with $INDEX_ALLOCATION was refused as "probably not
+    // empty", so one that had ever grown past $INDEX_ROOT could not be
+    // removed even once every name in it was gone (#495). Its blocks are
+    // read instead, and their clusters given back once the record is.
     let ir_flags =
         index_io::index_root_flags(&dir_record_bytes).ok_or(Error::io("dir has no $INDEX_ROOT"))?;
-    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
-        return Err(Error::not_empty(format!(
-            "rmdir: '{display}' has $INDEX_ALLOCATION overflow (probably not empty)"
-        )));
-    }
     if index_io::index_root_has_real_entries(&dir_record_bytes)? {
         return Err(Error::not_empty(format!("rmdir: '{display}' is not empty")));
+    }
+    let mut index_runs: Vec<(u64, u64)> = Vec::new();
+    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
+        let ia = idx_block::load_for_directory_io(io, dir_rec)?;
+        for vcn in ia.allocated_block_vcns() {
+            let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+            let mut entries = Vec::new();
+            index_io::collect_indx_block_entries(&block, &mut entries)?;
+            if !entries.is_empty() {
+                return Err(Error::not_empty(format!("rmdir: '{display}' is not empty")));
+            }
+        }
+        for loc in attr_io::iter_attributes(&dir_record_bytes) {
+            if loc.is_resident {
+                continue;
+            }
+            let mpo = loc.non_resident_mapping_pairs_offset.ok_or(Error::io(
+                "non-resident attribute has no mapping-pairs offset",
+            ))? as usize;
+            let pairs = dir_record_bytes
+                .get(loc.attr_offset + mpo..loc.attr_offset + loc.attr_length)
+                .ok_or_else(|| Error::io("mapping pairs run past the directory's record"))?;
+            index_runs.extend(
+                data_runs::decode_runs(pairs)?
+                    .into_iter()
+                    .filter_map(|r| r.lcn.filter(|_| r.length > 0).map(|lcn| (lcn, r.length))),
+            );
+        }
     }
 
     // Remove from parent's index. Parent's index may or may not be
@@ -5564,6 +5828,20 @@ fn remove_dir_record_io<T: BlockIo + ?Sized>(
     })?;
     let mbm = crate::mft_bitmap::locate_io(io)?;
     crate::mft_bitmap::free_io(io, &mbm, dir_rec)?;
+    if !index_runs.is_empty() {
+        let bm = bitmap::locate_bitmap_io(io)?;
+        for (lcn, n) in index_runs {
+            bitmap::free_io(io, &bm, lcn, n).map_err(|e| {
+                e.map_message(|m| {
+                    format!(
+                        "rmdir: '{display}' was removed, but freeing its index blocks' clusters \
+                         [{lcn}..{}] failed ({m}): they are still marked allocated",
+                        lcn + n
+                    )
+                })
+            })?;
+        }
+    }
 
     Ok(())
 }
