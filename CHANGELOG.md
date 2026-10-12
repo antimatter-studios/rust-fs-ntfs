@@ -88,6 +88,13 @@ written against 0.9.0, and `chore check:semver` refuses it otherwise.
 
 ### Fixed
 
+- **`check_io` finds a record whose attributes are malformed** (#515). It
+  read each in-use record's header and stopped there, so a resident value
+  past its attribute, attributes out of type order, an id the header never
+  handed out, a chain not ending where the header says, or a run list that
+  disagrees with its VCNs was reported clean while this crate's own reader
+  and ntfs-3g refused the file. It now walks each record's attributes and
+  reports a bad record; the volumes Windows wrote stay clean.
 - **A rename whose new name sorts into another slot of the directory index
   moves the entry there** (#466). A same-length rename wrote the new name
   over the old one in place, so `d` renamed to `a` beside `b` and `c` sat

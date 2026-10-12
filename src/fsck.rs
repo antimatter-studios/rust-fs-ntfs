@@ -676,8 +676,8 @@ pub enum CheckFinding {
     MirrorMismatch { record: u64 },
     /// `$MFT`'s bitmap says this record is in use, and it does not read as
     /// one: no `FILE` signature, update-sequence fixups that do not match
-    /// (a torn write), or a header describing more bytes than the record
-    /// has.
+    /// (a torn write), a header describing more bytes than the record
+    /// has, or attributes a reader cannot walk (#515).
     BadRecord { record: u64, reason: String },
     /// `$MFTMirr` itself could not be read, so nothing was compared.
     MirrorUnreadable { reason: String },
@@ -774,12 +774,12 @@ pub fn logfile_state_io<T: FsckIo>(io: &mut T) -> Result<LogfileState, Error> {
 }
 
 /// Check a volume WITHOUT WRITING ANYTHING: the dirty flag, whether
-/// `$LogFile` is empty, `$MFTMirr` against `$MFT`, the header of every MFT
-/// record `$MFT`'s bitmap marks in use, and `$Bitmap` against the clusters
-/// every run list in those records claims (#517).
+/// `$LogFile` is empty, `$MFTMirr` against `$MFT`, the header and attribute
+/// chain of every MFT record `$MFT`'s bitmap marks in use (#515), and
+/// `$Bitmap` against the clusters every run list in those records claims
+/// (#517).
 ///
-/// NOT A STRUCTURAL CHECKER. It does not follow indexes, or look at
-/// attributes beyond their run lists; a volume this calls clean is one on
+/// NOT A STRUCTURAL CHECKER. It does not follow indexes; a volume this calls clean is one on
 /// which none of THESE is wrong, and Windows' chkdsk remains the authority.
 /// An error is a volume too damaged to answer the questions at all (no boot
 /// sector, no `$MFT`, no `$Volume`).
@@ -906,9 +906,173 @@ fn read_in_use_record<T: FsckIo>(
         return Err("the bitmap marks it in use and its header does not".to_string());
     }
     // The header's own lengths, as every reader of the record checks them.
-    crate::mft_io::read_mft_record_io(io, record)
-        .map(|(_, rec)| rec)
-        .map_err(String::from)
+    let (_, rec) = crate::mft_io::read_mft_record_io(io, record).map_err(String::from)?;
+    match attribute_structure_reason(&rec, params.cluster_size) {
+        Some(reason) => Err(reason),
+        None => Ok(rec),
+    }
+}
+
+/// Record-header and attribute-header offsets the walk below reads.
+const REC_ATTRS_OFFSET: usize = 0x14;
+const REC_BYTES_IN_USE: usize = 0x18;
+const REC_BASE_REFERENCE: usize = 0x20;
+const REC_NEXT_ATTRIBUTE_ID: usize = 0x28;
+const ATTR_END: u32 = 0xFFFF_FFFF;
+const RESIDENT_HEADER: usize = 0x18;
+const NON_RESIDENT_HEADER: usize = 0x40;
+
+/// What a reader walking `record`'s attributes would find wrong with them,
+/// or `None` (#515). `record` is fixed up, and its header's lengths are
+/// already known to fit it.
+///
+/// Each attribute is checked as Windows writes one, and as ntfs-3g
+/// refuses one that is not: a length that holds its own header and stays
+/// inside the bytes in use; a non-resident flag of 0 or 1; a type NTFS
+/// defines, in non-descending order; a name inside the attribute; an id
+/// below the header's next id and shared with no other attribute; a
+/// resident value 8-aligned and inside the attribute; a run list that
+/// decodes and holds exactly the clusters from the lowest VCN to the
+/// highest, and, in a base record with no `$ATTRIBUTE_LIST` (where an
+/// attribute is never split), the allocated size those clusters make.
+/// The chain must end with the end marker, and the bytes in use eight
+/// bytes after it.
+///
+/// Attributes of one type are not checked for name order: that order is
+/// a collation this check does not hold the volume's `$UpCase` for.
+fn attribute_structure_reason(record: &[u8], cluster_size: u64) -> Option<String> {
+    let u16_at = |at: usize| u16::from_le_bytes([record[at], record[at + 1]]);
+    let u32_at = |at: usize| u32::from_le_bytes(record[at..at + 4].try_into().expect("4 bytes"));
+    let u64_at = |at: usize| u64::from_le_bytes(record[at..at + 8].try_into().expect("8 bytes"));
+    let bytes_in_use = u32_at(REC_BYTES_IN_USE) as usize;
+    let next_id = u16_at(REC_NEXT_ATTRIBUTE_ID);
+    let base_record = u64_at(REC_BASE_REFERENCE) == 0;
+    let mut at = u16_at(REC_ATTRS_OFFSET) as usize;
+    let mut previous = 0u32;
+    let mut ids = Vec::new();
+    let mut has_list = false;
+    loop {
+        if at + 4 > bytes_in_use {
+            return Some(format!(
+                "its attributes reach the {bytes_in_use} bytes in use with no end marker"
+            ));
+        }
+        let ty = u32_at(at);
+        if ty == ATTR_END {
+            if at + 8 != bytes_in_use {
+                return Some(format!(
+                    "its end marker is at {at}, so {} bytes are in use, and its header says \
+                     {bytes_in_use}",
+                    at + 8
+                ));
+            }
+            return None;
+        }
+        if at + RESIDENT_HEADER > bytes_in_use {
+            return Some(format!(
+                "attribute {ty:#x} at {at} runs past the {bytes_in_use} bytes in use"
+            ));
+        }
+        let len = u32_at(at + 4) as usize;
+        let non_resident = record[at + 8];
+        if non_resident > 1 {
+            return Some(format!(
+                "attribute {ty:#x} at {at} has non-resident flag {non_resident}, not 0 or 1"
+            ));
+        }
+        let header = if non_resident == 1 {
+            NON_RESIDENT_HEADER
+        } else {
+            RESIDENT_HEADER
+        };
+        if len < header || !len.is_multiple_of(8) || at + len > bytes_in_use {
+            return Some(format!(
+                "attribute {ty:#x} at {at} has length {len}, which is not a multiple of 8 of at \
+                 least {header} inside the {bytes_in_use} bytes in use"
+            ));
+        }
+        if !ty.is_multiple_of(0x10) || !(0x10..=0x100).contains(&ty) {
+            return Some(format!(
+                "attribute {ty:#x} at {at} is of a type NTFS does not define"
+            ));
+        }
+        if ty < previous {
+            return Some(format!(
+                "attribute {ty:#x} at {at} follows attribute {previous:#x}, out of type order"
+            ));
+        }
+        previous = ty;
+        has_list |= ty == AttrType::AttributeList as u32;
+        let name_length = record[at + 9] as usize;
+        let name_offset = u16_at(at + 0x0A) as usize;
+        if name_length > 0 && name_offset + 2 * name_length > len {
+            return Some(format!(
+                "attribute {ty:#x} at {at} has a name of {name_length} characters at \
+                 {name_offset}, past its {len} bytes"
+            ));
+        }
+        let id = u16_at(at + 0x0E);
+        if id >= next_id {
+            return Some(format!(
+                "attribute {ty:#x} at {at} has id {id}, and the header's next id is {next_id}"
+            ));
+        }
+        if ids.contains(&id) {
+            return Some(format!(
+                "attribute {ty:#x} at {at} has id {id}, which another attribute has"
+            ));
+        }
+        ids.push(id);
+        if non_resident == 0 {
+            let value_length = u32_at(at + 0x10) as usize;
+            let value_offset = u16_at(at + 0x14) as usize;
+            if !value_offset.is_multiple_of(8)
+                || value_offset < RESIDENT_HEADER
+                || value_offset + value_length > len
+            {
+                return Some(format!(
+                    "attribute {ty:#x} at {at} has a {value_length}-byte value at \
+                     {value_offset}, which is not 8-aligned inside its {len} bytes"
+                ));
+            }
+        } else {
+            let lowest = u64_at(at + 0x10);
+            let highest = u64_at(at + 0x18) as i64;
+            let pairs = u16_at(at + 0x20) as usize;
+            if pairs < NON_RESIDENT_HEADER || pairs > len {
+                return Some(format!(
+                    "attribute {ty:#x} at {at} has its run list at {pairs}, outside its \
+                     {len} bytes"
+                ));
+            }
+            // A run list that does not decode is [`CheckFinding::BadRunList`],
+            // which the cluster accounting reports with the attribute.
+            let Ok(runs) = crate::data_runs::decode_runs(&record[at + pairs..at + len]) else {
+                at += len;
+                continue;
+            };
+            let clusters: u64 = runs.iter().map(|r| r.length).sum();
+            let span = highest as i128 + 1 - lowest as i128;
+            if span != clusters as i128 {
+                return Some(format!(
+                    "attribute {ty:#x} at {at} covers VCNs {lowest} to {highest}, and its run \
+                     list holds {clusters} clusters"
+                ));
+            }
+            let allocated = u64_at(at + 0x28);
+            if lowest == 0
+                && base_record
+                && !has_list
+                && Some(allocated) != clusters.checked_mul(cluster_size)
+            {
+                return Some(format!(
+                    "attribute {ty:#x} at {at} says {allocated} bytes are allocated, and its \
+                     run list holds {clusters} clusters of {cluster_size}"
+                ));
+            }
+        }
+        at += len;
+    }
 }
 
 /// Clusters [`account_clusters`] reads of `$Bitmap` at a time: 32 KiB.
