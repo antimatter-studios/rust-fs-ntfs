@@ -681,6 +681,35 @@ pub enum CheckFinding {
     BadRecord { record: u64, reason: String },
     /// `$MFTMirr` itself could not be read, so nothing was compared.
     MirrorUnreadable { reason: String },
+    /// A non-resident attribute's run list does not decode, so which
+    /// clusters it claims is not known.
+    BadRunList {
+        record: u64,
+        type_code: u32,
+        reason: String,
+    },
+    /// A run claims clusters past the volume's last: storage there is none
+    /// of, which every read and write through it runs off the end of.
+    RunOutsideVolume {
+        record: u64,
+        lcn: u64,
+        clusters: u64,
+    },
+    /// Two run lists claim the same clusters, so a write through either
+    /// corrupts the other.
+    CrossLinkedClusters {
+        lcn: u64,
+        clusters: u64,
+        records: (u64, u64),
+    },
+    /// `$Bitmap` marks clusters in use that no run list claims. Nothing can
+    /// allocate them again until a checker frees them.
+    LeakedClusters { clusters: u64, first_lcn: u64 },
+    /// A run list claims clusters `$Bitmap` marks free, so the next
+    /// allocation hands them out again.
+    ClustersInUseMarkedFree { clusters: u64, first_lcn: u64 },
+    /// `$Bitmap` could not be read, so no cluster was accounted for.
+    BitmapUnreadable { reason: String },
 }
 
 /// What [`check_io`] read, and what it found.
@@ -699,6 +728,11 @@ pub struct CheckReport {
     pub logfile: LogfileState,
     /// How many MFT records the bitmap marks in use, each of which was read.
     pub records_scanned: u64,
+    /// How many clusters were compared with `$Bitmap`: every cluster of
+    /// the volume, or none when `$LogFile` holds work. Mid-transaction,
+    /// `$Bitmap` and the run lists disagree until the log is replayed, so
+    /// they are compared after the replay, not before.
+    pub clusters_scanned: u64,
     pub findings: Vec<CheckFinding>,
 }
 
@@ -740,14 +774,15 @@ pub fn logfile_state_io<T: FsckIo>(io: &mut T) -> Result<LogfileState, Error> {
 }
 
 /// Check a volume WITHOUT WRITING ANYTHING: the dirty flag, whether
-/// `$LogFile` is empty, `$MFTMirr` against `$MFT`, and the header of every
-/// MFT record `$MFT`'s bitmap marks in use.
+/// `$LogFile` is empty, `$MFTMirr` against `$MFT`, the header of every MFT
+/// record `$MFT`'s bitmap marks in use, and `$Bitmap` against the clusters
+/// every run list in those records claims (#517).
 ///
-/// NOT A STRUCTURAL CHECKER. It does not follow attributes, indexes, runs
-/// or the cluster bitmap; a volume this calls clean is one on which none of
-/// THESE is wrong, and Windows' chkdsk remains the authority. An error is a
-/// volume too damaged to answer the questions at all (no boot sector, no
-/// `$MFT`, no `$Volume`).
+/// NOT A STRUCTURAL CHECKER. It does not follow indexes, or look at
+/// attributes beyond their run lists; a volume this calls clean is one on
+/// which none of THESE is wrong, and Windows' chkdsk remains the authority.
+/// An error is a volume too damaged to answer the questions at all (no boot
+/// sector, no `$MFT`, no `$Volume`).
 pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
     let dirty = is_dirty_io(io)?;
     let logfile = logfile_state_io(io)?;
@@ -755,6 +790,16 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
     let params = crate::mft_io::read_boot_params_io(io)?;
     let record_size = params.file_record_size;
     let mut findings = Vec::new();
+
+    // Clusters are counted only over a log with no work in it: see
+    // `CheckReport::clusters_scanned`. The volume's clusters are the whole
+    // ones total_sectors covers; NTFS's total_sectors leaves out the last
+    // sector, the backup boot sector, so the last cluster may be partial,
+    // and it is not the volume's.
+    let account = !logfile.needs_replay();
+    let volume_clusters = params.total_sectors / params.sectors_per_cluster.max(1);
+    let mut claims = Vec::new();
+    let mut every_claim_known = true;
 
     // Every in-use record reads as a record.
     let bitmap = crate::mft_bitmap::locate_io(io)?;
@@ -769,8 +814,16 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
             continue;
         }
         records_scanned += 1;
-        if let Some(reason) = bad_record_reason(io, &params, record, &mut raw) {
-            findings.push(CheckFinding::BadRecord { record, reason });
+        match read_in_use_record(io, &params, record, &mut raw) {
+            Err(reason) => {
+                findings.push(CheckFinding::BadRecord { record, reason });
+                every_claim_known = false;
+            }
+            Ok(rec) if account => {
+                every_claim_known &=
+                    claims_of(record, &rec, volume_clusters, &mut claims, &mut findings);
+            }
+            Ok(_) => {}
         }
     }
 
@@ -794,11 +847,24 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
         }
     }
 
+    let clusters_scanned = if account {
+        account_clusters(
+            io,
+            volume_clusters,
+            claims,
+            every_claim_known,
+            &mut findings,
+        )
+    } else {
+        0
+    };
+
     Ok(CheckReport {
         dirty,
         logfile_empty,
         logfile,
         records_scanned,
+        clusters_scanned,
         findings,
     })
 }
@@ -817,38 +883,200 @@ fn read_mirror<T: FsckIo>(io: &mut T, record_size: u64) -> Result<Vec<u8>, Error
     )
 }
 
-/// Why an in-use record does not read as one, or `None` when it does.
-fn bad_record_reason<T: FsckIo>(
+/// An in-use record, fixups applied, or why it does not read as one.
+fn read_in_use_record<T: FsckIo>(
     io: &mut T,
     params: &crate::mft_io::BootParams,
     record: u64,
     raw: &mut [u8],
-) -> Option<String> {
-    let at = match crate::mft_io::mft_record_offset_io(io, params, record) {
-        Ok(at) => at,
-        Err(e) => return Some(e.into()),
-    };
-    if let Err(e) = io.read_exact_at(at, raw) {
-        return Some(format!("unreadable: {e}"));
-    }
+) -> Result<Vec<u8>, String> {
+    let at = crate::mft_io::mft_record_offset_io(io, params, record).map_err(String::from)?;
+    io.read_exact_at(at, raw)
+        .map_err(|e| format!("unreadable: {e}"))?;
     if &raw[0..4] != b"FILE" {
-        return Some(format!(
+        return Err(format!(
             "no FILE signature (found {:02x} {:02x} {:02x} {:02x})",
             raw[0], raw[1], raw[2], raw[3]
         ));
     }
     let mut fixed = raw.to_vec();
-    if let Err(e) = crate::mft_io::apply_fixup_on_read(&mut fixed, params.bytes_per_sector) {
-        return Some(format!("update sequence: {e}"));
-    }
+    crate::mft_io::apply_fixup_on_read(&mut fixed, params.bytes_per_sector)
+        .map_err(|e| format!("update sequence: {e}"))?;
     if crate::mft_io::record_flags(&fixed) & crate::mft_io::MFT_FLAG_IN_USE == 0 {
-        return Some("the bitmap marks it in use and its header does not".to_string());
+        return Err("the bitmap marks it in use and its header does not".to_string());
     }
     // The header's own lengths, as every reader of the record checks them.
-    if let Err(e) = crate::mft_io::read_mft_record_io(io, record) {
-        return Some(e.into());
+    crate::mft_io::read_mft_record_io(io, record)
+        .map(|(_, rec)| rec)
+        .map_err(String::from)
+}
+
+/// Clusters [`account_clusters`] reads of `$Bitmap` at a time: 32 KiB.
+const BITMAP_CHUNK_BITS: u64 = 1 << 18;
+
+/// A run of clusters an attribute's run list claims, and the record whose
+/// attribute claims it.
+#[derive(Debug, Clone, Copy)]
+struct Claim {
+    lcn: u64,
+    clusters: u64,
+    record: u64,
+}
+
+/// Every cluster the run lists in `rec` claim, into `claims`. A run past
+/// the volume's last cluster, or a run list that does not decode, is a
+/// finding instead. `false` when not every claim the record makes is known.
+fn claims_of(
+    record: u64,
+    rec: &[u8],
+    volume_clusters: u64,
+    claims: &mut Vec<Claim>,
+    findings: &mut Vec<CheckFinding>,
+) -> bool {
+    let mut every_claim_known = true;
+    for loc in crate::attr_io::iter_attributes(rec) {
+        let Some(mapping_pairs) = loc.non_resident_mapping_pairs_offset else {
+            continue;
+        };
+        let start = loc.attr_offset + usize::from(mapping_pairs);
+        let end = loc.attr_offset + loc.attr_length;
+        let decoded = match rec.get(start..end) {
+            Some(bytes) => crate::data_runs::decode_runs(bytes).map_err(String::from),
+            None => Err(format!(
+                "its mapping pairs start at {start}, past the attribute's end at {end}"
+            )),
+        };
+        let runs = match decoded {
+            Ok(runs) => runs,
+            Err(reason) => {
+                findings.push(CheckFinding::BadRunList {
+                    record,
+                    type_code: loc.type_code,
+                    reason,
+                });
+                every_claim_known = false;
+                continue;
+            }
+        };
+        for run in runs {
+            let Some(lcn) = run.lcn else { continue };
+            match lcn.checked_add(run.length) {
+                Some(end) if end <= volume_clusters => claims.push(Claim {
+                    lcn,
+                    clusters: run.length,
+                    record,
+                }),
+                _ => findings.push(CheckFinding::RunOutsideVolume {
+                    record,
+                    lcn,
+                    clusters: run.length,
+                }),
+            }
+        }
     }
-    None
+    every_claim_known
+}
+
+/// `$Bitmap` against `claims`: two claims on one cluster, a claimed cluster
+/// marked free, and -- when `every_claim_known` -- a cluster marked in use
+/// that nothing claims. A record that could not be read claims clusters no
+/// one can see, which would all look leaked; that record is the finding.
+/// Returns how many clusters were compared.
+///
+/// What this holds is the claims, which the records' run lists already
+/// bound, and one chunk of `$Bitmap`: nothing is sized by a count read off
+/// the disk.
+fn account_clusters<T: FsckIo>(
+    io: &mut T,
+    volume_clusters: u64,
+    mut claims: Vec<Claim>,
+    every_claim_known: bool,
+    findings: &mut Vec<CheckFinding>,
+) -> u64 {
+    claims.sort_unstable_by_key(|c| (c.lcn, c.record));
+
+    // Cross-links, against the claim reaching furthest so far. Every claim
+    // ends inside the volume, so `lcn + clusters` cannot overflow.
+    let mut reach: Option<(u64, u64)> = None;
+    for claim in &claims {
+        let end = claim.lcn + claim.clusters;
+        if let Some((reach_end, owner)) = reach {
+            if claim.lcn < reach_end {
+                findings.push(CheckFinding::CrossLinkedClusters {
+                    lcn: claim.lcn,
+                    clusters: reach_end.min(end) - claim.lcn,
+                    records: (owner, claim.record),
+                });
+            }
+        }
+        if reach.is_none_or(|(reach_end, _)| end > reach_end) {
+            reach = Some((end, claim.record));
+        }
+    }
+
+    // The claimed clusters as disjoint ranges, in order.
+    let mut claimed: Vec<(u64, u64)> = Vec::new();
+    for claim in &claims {
+        let end = claim.lcn + claim.clusters;
+        match claimed.last_mut() {
+            Some((_, last_end)) if claim.lcn <= *last_end => *last_end = (*last_end).max(end),
+            _ => claimed.push((claim.lcn, end)),
+        }
+    }
+
+    let bitmap = match crate::bitmap::locate_bitmap_io(io) {
+        Ok(bitmap) => bitmap,
+        Err(e) => {
+            findings.push(CheckFinding::BitmapUnreadable { reason: e.into() });
+            return 0;
+        }
+    };
+    // Bits past the volume's last whole cluster are padding: NTFS sets
+    // them so no search runs off the end, and nothing claims them.
+    let compared = volume_clusters.min(bitmap.total_bits);
+    let mut leaked = (0u64, None);
+    let mut marked_free = (0u64, None);
+    let mut next = 0;
+    let mut start = 0;
+    while start < compared {
+        let n = BITMAP_CHUNK_BITS.min(compared - start);
+        let bits = match crate::bitmap::read_range_io(io, &bitmap, start, n) {
+            Ok(bits) => bits,
+            Err(e) => {
+                findings.push(CheckFinding::BitmapUnreadable { reason: e.into() });
+                return start;
+            }
+        };
+        for i in 0..n {
+            let lcn = start + i;
+            while next < claimed.len() && claimed[next].1 <= lcn {
+                next += 1;
+            }
+            let is_claimed = next < claimed.len() && claimed[next].0 <= lcn;
+            let in_use = bits[(i / 8) as usize] & (1 << (i % 8)) != 0;
+            let tally = match (in_use, is_claimed) {
+                (true, false) => &mut leaked,
+                (false, true) => &mut marked_free,
+                _ => continue,
+            };
+            tally.0 += 1;
+            tally.1.get_or_insert(lcn);
+        }
+        start += n;
+    }
+    if let (true, (clusters, Some(first_lcn))) = (every_claim_known, leaked) {
+        findings.push(CheckFinding::LeakedClusters {
+            clusters,
+            first_lcn,
+        });
+    }
+    if let (clusters, Some(first_lcn)) = marked_free {
+        findings.push(CheckFinding::ClustersInUseMarkedFree {
+            clusters,
+            first_lcn,
+        });
+    }
+    compared
 }
 
 /// Clear the dirty flag when that is all that is wrong and it is safe:

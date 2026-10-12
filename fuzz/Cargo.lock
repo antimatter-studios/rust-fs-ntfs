@@ -98,7 +98,7 @@ checksum = "8ba29ee00fcf32311393b3a791a0a0b4802374f2ce1951f01487fa853755dc7f"
 
 [[package]]
 name = "rust-fs-ntfs"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "libc",
  "log",

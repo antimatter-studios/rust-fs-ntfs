@@ -3,9 +3,11 @@
 # fs.ntfs set dirty, and damaged by hand (a mirror that disagrees with $MFT,
 # an in-use record with its FILE signature destroyed).
 #
-# WHAT IT CHECKS is the dirty flag, $LogFile, $MFTMirr against $MFT, and the
-# header of every in-use MFT record. It is not chkdsk, and the report says
-# so: exit 0 means none of THESE is wrong.
+# WHAT IT CHECKS is the dirty flag, $LogFile, $MFTMirr against $MFT, the
+# header of every in-use MFT record, and $Bitmap against every run list
+# (#517; the cluster corruptions are in tests/check_io_cluster_accounting.rs).
+# It is not chkdsk, and the report says so: exit 0 means none of THESE is
+# wrong.
 source "$(dirname "$0")/lib.sh"
 source "$(dirname "$0")/lib-ntfs.sh"
 
@@ -23,10 +25,11 @@ for flags in "" "-n" "-fn" "-y" "-p"; do
         '.fs == "ntfs" and .clean == true and .dirty == false and .exit == 0 and .found == 0 and (.findings | length) == 0' \
         "$SANDBOX/fsck.json"
 done
-jq_check "the report names the four things it checks" \
-    '.checks == ["dirty_flag", "logfile", "mft_mirror", "mft_records"]' "$SANDBOX/fsck.json"
+jq_check "the report names the five things it checks" \
+    '.checks == ["dirty_flag", "logfile", "mft_mirror", "mft_records", "cluster_allocation"]' "$SANDBOX/fsck.json"
 jq_check "the report says it is not chkdsk" '.scope | test("not a full structural check") and test("chkdsk")' "$SANDBOX/fsck.json"
 jq_check "the report counts the MFT records it read" '.scanned.mft_records >= 16' "$SANDBOX/fsck.json"
+jq_check "the report counts the clusters it accounted for" '.scanned.clusters >= 16000' "$SANDBOX/fsck.json"
 check "fsck.ntfs --text says clean" grep -q ': clean' <<<"$(fsck.ntfs --text "$img")"
 check "rust-fs-ntfs fsck is the same program" test "$(rust-fs-ntfs fsck --text "$img")" = "$(fsck.ntfs --text "$img")"
 

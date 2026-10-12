@@ -3,10 +3,12 @@
 //!
 //! WHAT IT CHECKS is `fs_ntfs::fsck::check_io`: the dirty flag, whether
 //! `$LogFile` records anything to replay (empty, clean, or records),
-//! `$MFTMirr` against `$MFT`, and the header of every MFT record the bitmap
-//! marks in use. It does not follow attributes, indexes or runs. The report
-//! says so in `checks` and `scope`, so nobody reads exit 0 as "chkdsk would
-//! agree": Windows' chkdsk is the authority.
+//! `$MFTMirr` against `$MFT`, the header of every MFT record the bitmap
+//! marks in use, and `$Bitmap` against the clusters every run list in those
+//! records claims (#517). It does not follow indexes, or look at attributes
+//! beyond their run lists. The report says so in `checks` and `scope`, so
+//! nobody reads exit 0 as "chkdsk would agree": Windows' chkdsk is the
+//! authority.
 //!
 //! WHAT IT REPAIRS, with `-y` (or `-p`): a `$LogFile` that holds work, by
 //! replaying it (#137), and the dirty flag, once the log records nothing to
@@ -43,32 +45,38 @@ pub const OPERATIONAL: u8 = 8;
 pub const USAGE: u8 = 16;
 
 /// What the check covers, in the order it reports them.
-const CHECKS: &[&str] = &["dirty_flag", "logfile", "mft_mirror", "mft_records"];
+const CHECKS: &[&str] = &[
+    "dirty_flag",
+    "logfile",
+    "mft_mirror",
+    "mft_records",
+    "cluster_allocation",
+];
 
 /// The sentence that stops exit 0 being read as more than it is.
-const SCOPE: &str = "the dirty flag, whether $LogFile is empty, $MFTMirr against $MFT, and the \
-                     header of every in-use MFT record; not a full structural check (attributes, \
-                     indexes and cluster allocation are not examined): Windows' chkdsk is the \
-                     authority";
+const SCOPE: &str = "the dirty flag, whether $LogFile is empty, $MFTMirr against $MFT, the \
+                     header of every in-use MFT record, and $Bitmap against every run list; not \
+                     a full structural check (indexes, and attributes beyond their run lists, \
+                     are not examined): Windows' chkdsk is the authority";
 
 pub const TOOL: Tool = Tool {
     name: "fsck.ntfs",
     verb: "fsck",
     section: 8,
     usage_exit: USAGE,
-    about: "Check an NTFS volume's dirty flag, log, MFT mirror and MFT records",
+    about: "Check an NTFS volume's dirty flag, log, MFT mirror, MFT records and clusters",
     command,
     run,
 };
 
 fn command() -> Cmd {
     Cmd::new("fsck.ntfs")
-        .about("Check an NTFS volume's dirty flag, log, MFT mirror and MFT records")
+        .about("Check an NTFS volume's dirty flag, log, MFT mirror, MFT records and clusters")
         .long_about(
             "Check an NTFS image or device: the dirty flag, whether $LogFile is empty, \
-             $MFTMirr against $MFT, and the header of every in-use MFT record. This is not \
-             a full structural check, and the report says so: Windows' chkdsk is the \
-             authority.\n\n\
+             $MFTMirr against $MFT, the header of every in-use MFT record, and $Bitmap \
+             against the clusters every run list claims. This is not a full structural \
+             check, and the report says so: Windows' chkdsk is the authority.\n\n\
              Nothing is written unless -y (or -p) is given. Then a $LogFile that holds \
              work is replayed, and the dirty flag is cleared once the log holds nothing to \
              redo or undo. A log that cannot be replayed in full is left as it is, with \
@@ -230,7 +238,20 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
             ("why", Json::from(why)),
         ]));
     }
-    findings.extend(before.findings.iter().map(finding));
+    // What the check found, and anything the check after a repair found
+    // that it did not: a replay is what lets clusters be counted at all.
+    findings.extend(
+        before
+            .findings
+            .iter()
+            .chain(
+                after
+                    .findings
+                    .iter()
+                    .filter(|f| !before.findings.contains(f)),
+            )
+            .map(finding),
+    );
 
     let report = Json::object([
         ("fs", Json::from("ntfs")),
@@ -257,15 +278,19 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         ("remaining", Json::from(remaining)),
         (
             "scanned",
-            Json::object([("mft_records", Json::from(before.records_scanned))]),
+            Json::object([
+                ("mft_records", Json::from(before.records_scanned)),
+                ("clusters", Json::from(after.clusters_scanned)),
+            ]),
         ),
         ("findings", Json::Arr(findings.clone())),
     ]);
 
     let mut text = vec![match code {
         CLEAN => format!(
-            "fsck.ntfs: {name}: clean ({} MFT records; checked {})",
+            "fsck.ntfs: {name}: clean ({} MFT records, {} clusters; checked {})",
             before.records_scanned,
+            after.clusters_scanned,
             CHECKS.join(", ")
         ),
         CORRECTED => format!("fsck.ntfs: {name}: {found} problems found, all corrected"),
@@ -305,6 +330,65 @@ fn finding(f: &CheckFinding) -> Json {
         CheckFinding::BadRecord { record, reason } => Json::object([
             ("kind", Json::from("bad_mft_record")),
             ("record", Json::from(*record)),
+            ("why", Json::from(reason.as_str())),
+            ("repairable", Json::from(false)),
+        ]),
+        CheckFinding::BadRunList {
+            record,
+            type_code,
+            reason,
+        } => Json::object([
+            ("kind", Json::from("bad_run_list")),
+            ("record", Json::from(*record)),
+            ("attribute_type", Json::from(u64::from(*type_code))),
+            ("why", Json::from(reason.as_str())),
+            ("repairable", Json::from(false)),
+        ]),
+        CheckFinding::RunOutsideVolume {
+            record,
+            lcn,
+            clusters,
+        } => Json::object([
+            ("kind", Json::from("run_outside_volume")),
+            ("record", Json::from(*record)),
+            ("lcn", Json::from(*lcn)),
+            ("clusters", Json::from(*clusters)),
+            ("repairable", Json::from(false)),
+        ]),
+        CheckFinding::CrossLinkedClusters {
+            lcn,
+            clusters,
+            records: (first, second),
+        } => Json::object([
+            ("kind", Json::from("cross_linked_clusters")),
+            ("lcn", Json::from(*lcn)),
+            ("clusters", Json::from(*clusters)),
+            (
+                "records",
+                Json::Arr(vec![Json::from(*first), Json::from(*second)]),
+            ),
+            ("repairable", Json::from(false)),
+        ]),
+        CheckFinding::LeakedClusters {
+            clusters,
+            first_lcn,
+        } => Json::object([
+            ("kind", Json::from("leaked_clusters")),
+            ("clusters", Json::from(*clusters)),
+            ("first_lcn", Json::from(*first_lcn)),
+            ("repairable", Json::from(false)),
+        ]),
+        CheckFinding::ClustersInUseMarkedFree {
+            clusters,
+            first_lcn,
+        } => Json::object([
+            ("kind", Json::from("clusters_in_use_marked_free")),
+            ("clusters", Json::from(*clusters)),
+            ("first_lcn", Json::from(*first_lcn)),
+            ("repairable", Json::from(false)),
+        ]),
+        CheckFinding::BitmapUnreadable { reason } => Json::object([
+            ("kind", Json::from("bitmap_unreadable")),
             ("why", Json::from(reason.as_str())),
             ("repairable", Json::from(false)),
         ]),

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Breaking
+
+The next release is **0.10.0**, not 0.9.1: the change below breaks code
+written against 0.9.0, and `chore check:semver` refuses it otherwise.
+
+- **`fsck::CheckFinding` has six new variants, and `fsck::CheckReport` a
+  new public field, `clusters_scanned`** (#517): what `check_io` finds when
+  it accounts for every cluster against `$Bitmap`. A `match` on
+  `CheckFinding` without a wildcard arm, or a `CheckReport` literal naming
+  every field, no longer compiles.
+
 ### Added
 
 - **`docs/features.md`, a features page kept current by every pull request.**
@@ -69,6 +80,17 @@
   read and by `stat`. Its segments are now stitched together in VCN order,
   and segments that leave a gap or end short of the allocated size are
   still refused.
+- **`fsck.ntfs` accounts for every cluster** (#517). `check_io` never
+  compared `$Bitmap` with the clusters files use, so a volume with leaked
+  clusters, clusters a file holds marked free, two files sharing a run, or a
+  run past the volume's end was reported clean. It now collects the run
+  list of every non-resident attribute in every in-use MFT record and
+  reports each of the four by kind, with `cluster_allocation` among the
+  report's `checks` and the clusters compared under `scanned`. Over a log
+  that holds work the comparison waits for the replay, since `$Bitmap` and
+  the run lists disagree until then. The features page no longer says
+  `check_io` checks every index: it checks none (#515). `CheckFinding` has
+  six new variants and `CheckReport` a `clusters_scanned` field.
 - **A write with no read-write mount before it replays the log first, or
   is refused** (#137). `Filesystem::mount` followed by a mutator,
   `write::create_file` and every other path-based mutator in `write`, and
