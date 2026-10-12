@@ -79,6 +79,14 @@
   the volume wrongly, let `$MFT` hand out a record in use, or named the wrong
   record for a replayed block. Each overflow is now a refusal, and
   `$MFT:$Bitmap`'s length is first bounded by the clusters its runs hold.
+- **A directory entry carries the size of the file it names** (#506). Every
+  `$I30` entry duplicates the file's data size and allocated size, and
+  Windows lists a directory from that copy. It was written at create time
+  and never again, so every file this crate wrote listed on Windows as 0
+  bytes. Each path-based write that changes a file's size now refreshes the
+  entry for every name the file has. A host writing by record number calls
+  the new `refresh_directory_entry_sizes_io` when it is done with the file,
+  as Windows refreshes on the last close.
 - **Header fields other fields depend on are checked before they are
   trusted.** An MFT record whose `bytes_allocated` is not the record size is
   refused, as ntfs-3g refuses it, rather than served (#509). A boot sector
