@@ -51,10 +51,12 @@ fn fresh_file(tag: &str) -> (String, String) {
     (img, format!("/{name}"))
 }
 
-/// Find an EA by name in the list, returning its (flags, value).
+/// Find an EA by name in the list, returning its (flags, value). Names are
+/// matched case-insensitively, as Windows identifies an EA: the writer
+/// stores them upper-cased (#482).
 fn find_ea<'a>(eas: &'a [fs_ntfs::ea_io::Ea], name: &[u8]) -> Option<(u8, &'a [u8])> {
     eas.iter()
-        .find(|e| e.name == name)
+        .find(|e| e.name.eq_ignore_ascii_case(name))
         .map(|e| (e.flags, e.value.as_slice()))
 }
 

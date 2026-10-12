@@ -107,6 +107,12 @@ written against 0.9.0, and `chore check:semver` refuses it otherwise.
   page: measured on Windows 10.0.26100, `CON`, `COM1`, `LPT1` and `nul.txt`
   become files through a full path, so they stay allowed. CI measures the
   running Windows' verdicts and grades the crate against them.
+- **An EA name is stored as Windows stores it** (#482). `write_ea` kept the
+  caller's case, and NTFS stores a name set through Windows' `NtSetEaFile`
+  upper-cased: Windows, given `user.a`, stores `USER.A`. Names are now
+  stored upper-cased, so `list_eas` and `fs_ntfs_list_ea_keys` report
+  `USER.A` for an EA written as `user.a`; lookups were and stay
+  case-insensitive. A Windows-authored fixture grades it.
 - **A rename whose new name sorts into another slot of the directory index
   moves the entry there** (#466). A same-length rename wrote the new name
   over the old one in place, so `d` renamed to `a` beside `b` and `c` sat
