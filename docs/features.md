@@ -100,8 +100,8 @@ multi-VM test matrix (`test-matrix.json`) has Windows mount, write and
 |---|---|---|---|---|
 | `mkfs.ntfs` / `format_filesystem`: volumes Windows mounts and writes, and `chkdsk /scan` accepts | Supported | 0.1.3 | | `mkfs_roundtrip.rs`, `format_populate_remount.rs`, `cluster_size_matrix.rs`, `test-matrix.json` |
 | Volumes ntfs-3g mounts read-write | Supported | 0.6.0 | | |
-| What this crate writes, read back identically by Linux's ntfs3: nested and INDX-sized directories, resident, non-resident and sparse files, renames, hard links, unlinks, relative symlinks, at 512-byte and 4 KiB clusters | Supported | Unreleased (#486) | | `kernel_ntfs3.rs` |
-| Volumes Linux's ntfs3 wrote, read back byte for byte | Supported | Unreleased (#486) | | `kernel_ntfs3.rs` |
+| What this crate writes, read back identically by Linux's ntfs3: nested and INDX-sized directories, resident, non-resident and sparse files, renames, hard links, unlinks, relative symlinks, at 512-byte and 4 KiB clusters | Supported | Unreleased (#542) | | `kernel_ntfs3.rs` |
+| Volumes Linux's ntfs3 wrote, read back byte for byte | Supported | Unreleased (#542) | | `kernel_ntfs3.rs` |
 | 1024-byte MFT records | Supported | 0.8.0 | | `large_directory.rs` |
 
 ## Interfaces
