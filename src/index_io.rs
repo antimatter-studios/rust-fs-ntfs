@@ -824,6 +824,91 @@ fn collect_entries(
     Ok(())
 }
 
+/// The key of every entry in one node of a view index -- a resident
+/// `$INDEX_ROOT` value or an INDX block -- such as the security ids that
+/// `$Secure:$SII` is keyed by. A view index's entries carry data where a
+/// directory's carry a file reference, but the header that bounds an
+/// entry and its key is the same.
+fn collect_view_keys(
+    buf: &[u8],
+    ih_start: usize,
+    limit: usize,
+    out: &mut Vec<Vec<u8>>,
+) -> Result<(), Error> {
+    if ih_start.saturating_add(INDEX_HEADER_SIZE) > limit {
+        return Err(Error::io(format!(
+            "index node is too short for an index header: header at {ih_start}, \
+             node ends at {limit}"
+        )));
+    }
+    let first_entry_rel = read_u32_le(buf, ih_start + IH_FIRST_ENTRY_OFFSET)
+        .ok_or(Error::io("index node too short to read first_entry_offset"))?
+        as usize;
+    let total_size = read_u32_le(buf, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
+        .ok_or(Error::io("index node too short to read total_size"))? as usize;
+    let mut cursor = ih_start.saturating_add(first_entry_rel);
+    let end = ih_start.saturating_add(total_size).min(limit);
+    while cursor < end && cursor + IE_KEY_START <= limit {
+        let length =
+            u16::from_le_bytes([buf[cursor + IE_LENGTH], buf[cursor + IE_LENGTH + 1]]) as usize;
+        let key_length =
+            u16::from_le_bytes([buf[cursor + IE_KEY_LENGTH], buf[cursor + IE_KEY_LENGTH + 1]])
+                as usize;
+        let flags = u16::from_le_bytes([buf[cursor + IE_FLAGS], buf[cursor + IE_FLAGS + 1]]);
+        if flags & IE_FLAG_LAST != 0 {
+            break;
+        }
+        if length == 0 || cursor + length > limit || IE_KEY_START + key_length > length {
+            return Err(Error::io(format!("malformed view index entry at {cursor}")));
+        }
+        let key_start = cursor + IE_KEY_START;
+        out.push(buf[key_start..key_start + key_length].to_vec());
+        cursor += length;
+    }
+    Ok(())
+}
+
+/// The keys in the resident `$INDEX_ROOT` of the view index `index_name`,
+/// appended to `out`; returns whether the index also has INDX blocks.
+pub(crate) fn collect_view_index_root_keys(
+    record: &[u8],
+    index_name: &str,
+    out: &mut Vec<Vec<u8>>,
+) -> Result<bool, Error> {
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(index_name))
+        .ok_or_else(|| Error::io(format!("$INDEX_ROOT:{index_name} not found")))?;
+    if !ir.is_resident {
+        return Err(Error::io(format!(
+            "$INDEX_ROOT:{index_name} is non-resident (impossible per spec)"
+        )));
+    }
+    let start = ih_start(&ir).ok_or(Error::io("no value_offset"))?;
+    let value_end = index_root_value_end(record, &ir)?;
+    collect_view_keys(record, start, value_end, out)?;
+    let flags = record
+        .get(start + IH_FLAGS_OFFSET)
+        .copied()
+        .ok_or(Error::io("index header too short to read its flags"))?;
+    Ok(flags & IH_FLAG_HAS_SUBNODES != 0)
+}
+
+/// The keys in one INDX block of a view index (already read and
+/// USA-fixed), appended to `out`.
+pub(crate) fn collect_view_indx_block_keys(
+    block: &[u8],
+    out: &mut Vec<Vec<u8>>,
+) -> Result<(), Error> {
+    if block.len() < 4 || &block[0..4] != b"INDX" {
+        return Err(Error::io("not an INDX block (fixup missing?)"));
+    }
+    collect_view_keys(
+        block,
+        crate::idx_block::INDX_INDEX_HEADER_OFFSET,
+        block.len(),
+        out,
+    )
+}
+
 /// Enumerate the `$FILE_NAME` entries in a directory's resident `$INDEX_ROOT`.
 pub fn collect_index_root_entries(record: &[u8], out: &mut Vec<DirEntryRaw>) -> Result<(), Error> {
     let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))

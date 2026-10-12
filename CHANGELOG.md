@@ -112,6 +112,10 @@
   passed its `HOST_IMAGE_DIR` (the README suggests `/tmp`) on to the
   sandboxed run, which failed the case that names none. The test clears the
   developer's settings, and checks that nothing reaches them.
+- **`set_security_id` refuses an id with no descriptor in `$Secure:$SII`**
+  (#503). Any 32-bit value was written, and Windows applies no descriptor
+  to a file whose id `$SII` does not hold. Such an id is now refused with
+  `InvalidInput`, before anything is written.
 
 ## [0.9.0] — 2026-10-06
 

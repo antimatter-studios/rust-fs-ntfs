@@ -372,15 +372,20 @@ fn security_id_roundtrip_via_set_security_id() {
     assert_eq!(v3.security_id, 0x100, "security_id round-trip");
 }
 
+/// `format_filesystem` writes one descriptor, 0x100, so a second set to
+/// 0x200 names none and is refused, and the first id stands (#503).
 #[test]
-fn security_id_can_be_changed_twice() {
+fn security_id_keeps_its_value_when_a_second_set_is_refused() {
     let (img, path) = fresh_file("secid2");
     write::set_security_id(Path::new(&img), &path, 0x100).expect("first set");
-    write::set_security_id(Path::new(&img), &path, 0x200).expect("second set");
+    assert!(
+        write::set_security_id(Path::new(&img), &path, 0x200).is_err(),
+        "0x200 names no descriptor, and was set"
+    );
 
     let si = read_si_full(Path::new(&img), &path).expect("read_si_full");
     let v3 = si.v3.expect("v3");
-    assert_eq!(v3.security_id, 0x200, "security_id reflects second write");
+    assert_eq!(v3.security_id, 0x100, "security_id keeps the first write");
 }
 
 // ---------------------------------------------------------------------------

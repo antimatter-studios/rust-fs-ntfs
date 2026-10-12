@@ -76,11 +76,21 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
     io: &mut T,
     parent_record_number: u64,
 ) -> Result<IndexAllocation, Error> {
+    load_index_io(io, parent_record_number, stream::I30)
+}
+
+/// [`load_for_directory_io`] for the index named `index_name` -- `$I30`
+/// for a directory, or a view index such as `$Secure`'s `$SII`.
+pub(crate) fn load_index_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_record_number: u64,
+    index_name: &str,
+) -> Result<IndexAllocation, Error> {
     let (params, record) = read_mft_record_io(io, parent_record_number)?;
 
     // Get block_size from $INDEX_ROOT:$I30.
-    let ir = attr_io::find_attribute(&record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or_else(|| Error::io("$INDEX_ROOT:$I30 not found on parent"))?;
+    let ir = attr_io::find_attribute(&record, AttrType::IndexRoot, Some(index_name))
+        .ok_or_else(|| Error::io(format!("$INDEX_ROOT:{index_name} not found on parent")))?;
     let ir_val_off = ir
         .resident_value_offset
         .ok_or(Error::io("no value_offset"))? as usize;
@@ -91,7 +101,7 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
     // there has to be that much value to read it from.
     if ir_val_len < 0x10 {
         return Err(Error::io(format!(
-            "$INDEX_ROOT:$I30 value is {ir_val_len} bytes, too short to hold an index header"
+            "$INDEX_ROOT:{index_name} value is {ir_val_len} bytes, too short to hold an index header"
         )));
     }
     let ir_data_start = ir.attr_offset + ir_val_off;
@@ -110,14 +120,14 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
         || !block_size.is_power_of_two()
     {
         return Err(Error::io(format!(
-            "$INDEX_ROOT:$I30 says its blocks are {block_size} bytes, which is not an \
+            "$INDEX_ROOT:{index_name} says its blocks are {block_size} bytes, which is not an \
              index block size"
         )));
     }
 
     // Get $INDEX_ALLOCATION:$I30 data runs.
-    let ia = attr_io::find_attribute(&record, AttrType::IndexAllocation, Some(stream::I30))
-        .ok_or_else(|| Error::io("$INDEX_ALLOCATION:$I30 not found"))?;
+    let ia = attr_io::find_attribute(&record, AttrType::IndexAllocation, Some(index_name))
+        .ok_or_else(|| Error::io(format!("$INDEX_ALLOCATION:{index_name} not found")))?;
     if ia.is_resident {
         return Err(Error::io("$INDEX_ALLOCATION unexpectedly resident"));
     }
@@ -131,8 +141,8 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
         .ok_or(Error::io("no value_length"))?;
 
     // Get $Bitmap:$I30.
-    let bm_attr = attr_io::find_attribute(&record, AttrType::Bitmap, Some(stream::I30))
-        .ok_or_else(|| Error::io("$Bitmap:$I30 not found"))?;
+    let bm_attr = attr_io::find_attribute(&record, AttrType::Bitmap, Some(index_name))
+        .ok_or_else(|| Error::io(format!("$Bitmap:{index_name} not found")))?;
     // A DIRECTORY BIG ENOUGH PUSHES ITS OWN BITMAP OUT OF THE RECORD, and
     // this used to refuse it: "non-resident $Bitmap:$I30 unsupported in
     // this MVP". `load_for_directory_io` is the single door to
@@ -158,9 +168,9 @@ pub fn load_for_directory_io<T: BlockIo + ?Sized>(
             io,
             parent_record_number,
             AttrType::Bitmap,
-            Some(stream::I30),
+            Some(index_name),
         )
-        .map_err(|e| e.context("reading a non-resident $Bitmap:$I30"))?
+        .map_err(|e| e.context(format!("reading a non-resident $Bitmap:{index_name}")))?
     };
 
     Ok(IndexAllocation {

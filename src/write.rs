@@ -321,11 +321,11 @@ pub fn read_si_full_io<T: BlockIo + ?Sized>(
 /// this API (`security_id` field is absent). Returns
 /// `Err(Error::io("STANDARD_INFORMATION too small …"))` in that case.
 ///
-/// NOTE: this writer assumes the new `security_id` already has a
-/// corresponding entry in `$Secure:$SDS` / `$SDH` / `$SII`. Adding
-/// new SD entries is a larger piece of work (§3.4 "full ACL
-/// support") — this API is the minimal "point a file at the
-/// existing catalog entry" surface.
+/// The id must already name a descriptor in `$Secure:$SII`, and any other
+/// is refused with `InvalidInput` before anything is written (#503).
+/// Adding new descriptors is a larger piece of work (§3.4 "full ACL
+/// support") -- this API is the minimal "point a file at an existing
+/// catalog entry" surface.
 pub fn set_security_id(path: &Path, file_path: &str, security_id: u32) -> Result<(), Error> {
     let mut io = open_for_write(path)?;
     set_security_id_io(&mut io, file_path, security_id)
@@ -337,24 +337,71 @@ pub fn set_security_id_io<T: BlockIo + ?Sized>(
     security_id: u32,
 ) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let (_, record) = read_mft_record_io(io, rec)?;
+    si_security_id_offset(&record)?;
+    // AN ID IS ONLY AS GOOD AS THE DESCRIPTOR IT NAMES.
+    //
+    // Windows finds a file's ACL by looking its security id up in
+    // `$Secure:$SII`. This wrote any 32-bit value -- 0, 9999,
+    // 0xFFFFFFFF -- and a file whose id has no `$SII` entry has no
+    // descriptor Windows can apply: access checks behave as though it were
+    // missing, and chkdsk replaces the id, a repair this call caused.
+    if !security_id_is_defined_io(io, security_id)? {
+        return Err(Error::invalid(format!(
+            "security id {security_id:#x} names no descriptor in $Secure:$SII"
+        )));
+    }
     update_mft_record_io(io, rec, |record| {
-        let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
-            .ok_or_else(|| Error::io("$STANDARD_INFORMATION not found"))?;
-        let data_start = attr_io::resident_value_start(&loc)
-            .ok_or_else(|| Error::io("$STANDARD_INFORMATION not resident"))?;
-        let value_length = loc
-            .resident_value_length
-            .ok_or(Error::io("no value length"))? as usize;
-        if value_length < SI_SECURITY_ID + 4 {
-            return Err(Error::io(format!(
-                "$STANDARD_INFORMATION too small for security_id: {value_length} bytes (need ≥ {})",
-                SI_SECURITY_ID + 4
-            )));
-        }
-        let off = data_start + SI_SECURITY_ID;
+        let off = si_security_id_offset(record)?;
         record[off..off + 4].copy_from_slice(&security_id.to_le_bytes());
         Ok(())
     })
+}
+
+/// Where `record`'s `$STANDARD_INFORMATION` holds its security id, or an
+/// error when it is the NTFS 1.x form that has none.
+fn si_security_id_offset(record: &[u8]) -> Result<usize, Error> {
+    let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
+        .ok_or_else(|| Error::io("$STANDARD_INFORMATION not found"))?;
+    let data_start = attr_io::resident_value_start(&loc)
+        .ok_or_else(|| Error::io("$STANDARD_INFORMATION not resident"))?;
+    let value_length = loc
+        .resident_value_length
+        .ok_or(Error::io("no value length"))? as usize;
+    if value_length < SI_SECURITY_ID + 4 {
+        return Err(Error::io(format!(
+            "$STANDARD_INFORMATION too small for security_id: {value_length} bytes (need ≥ {})",
+            SI_SECURITY_ID + 4
+        )));
+    }
+    Ok(data_start + SI_SECURITY_ID)
+}
+
+/// `$Secure` is MFT record 9 on every NTFS 3.x volume.
+const SECURE_RECORD: u64 = 9;
+
+/// Whether `$Secure:$SII` -- the view index Windows resolves a security
+/// id through -- holds an entry keyed by `security_id`. Every entry is
+/// read, in `$INDEX_ROOT` and in each allocated INDX block, as the
+/// directory reader does.
+fn security_id_is_defined_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    security_id: u32,
+) -> Result<bool, Error> {
+    let (_, record) = read_mft_record_io(io, SECURE_RECORD)?;
+    let mut keys = Vec::new();
+    let has_blocks =
+        index_io::collect_view_index_root_keys(&record, crate::mkfs::stream::SII, &mut keys)
+            .map_err(|e| e.context("reading $Secure:$SII"))?;
+    if has_blocks {
+        let ia = idx_block::load_index_io(io, SECURE_RECORD, crate::mkfs::stream::SII)?;
+        for vcn in ia.allocated_block_vcns() {
+            let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+            index_io::collect_view_indx_block_keys(&block, &mut keys)?;
+        }
+    }
+    let wanted = security_id.to_le_bytes();
+    Ok(keys.iter().any(|key| key[..] == wanted))
 }
 
 /// Modify the `file_attributes` field in `$STANDARD_INFORMATION`. Bits in
@@ -6557,9 +6604,10 @@ mod tests {
     fn set_and_read_security_id_roundtrip() {
         let mut dev = fresh_vol();
         let rec = create_file_io(&mut dev, "/", "sec.txt").unwrap();
-        set_security_id_io(&mut dev, "/sec.txt", 0x1234).unwrap();
+        // 0x100 is the id format_filesystem gives its one descriptor.
+        set_security_id_io(&mut dev, "/sec.txt", 0x100).unwrap();
         let id = read_security_id_io(&mut dev, "/sec.txt").unwrap();
-        assert_eq!(id, Some(0x1234));
+        assert_eq!(id, Some(0x100));
         let _ = rec; // ensure rec is used
     }
 
