@@ -1337,8 +1337,8 @@ fn write_u64_at(record: &mut [u8], off: usize, v: Option<u64>) {
 
 /// Rename a file in place. `old_path` is the current absolute path;
 /// `new_name` is the new basename (no `/`). The new name must have the
-/// **same UTF-16 length** as the current name — full-length-change
-/// rename requires index-entry resize (future work).
+/// **same UTF-16 length** as the current name; [`rename`] takes any
+/// length.
 ///
 /// Patches both:
 ///   1. the parent directory's `$INDEX_ROOT` entry for the file (the
@@ -1346,13 +1346,9 @@ fn write_u64_at(record: &mut [u8], off: usize, v: Option<u64>) {
 ///   2. each matching `$FILE_NAME` attribute in the file's own MFT
 ///      record
 ///
-/// **Limitation (MVP):** the parent directory's index must fit
-/// entirely in resident `$INDEX_ROOT` (no `$INDEX_ALLOCATION`
-/// spillover). For a fresh NTFS formatter volume this holds for small
-/// subdirectories (e.g. `/Documents`) but NOT for the root directory
-/// — NTFS formatter lays out `/` with `$INDEX_ALLOCATION` even when small.
-/// Walking + patching `$INDEX_ALLOCATION` blocks is a separate
-/// primitive (index_io::find_in_index_allocation, future work).
+/// The entry is found in `$INDEX_ROOT` or in any of the directory's INDX
+/// blocks, and moved to the slot the new name sorts into when it no
+/// longer sorts where it is (#466).
 pub fn rename_same_length(image: &Path, old_path: &str, new_name: &str) -> Result<(), Error> {
     let mut io = open_for_write(image)?;
     rename_same_length_io(&mut io, old_path, new_name)
@@ -1368,7 +1364,8 @@ pub fn rename_same_length_io<T: BlockIo + ?Sized>(
     // see `index_io::find_index_entry`.
     let upcase = crate::upcase::UpcaseTable::load_io(io)?;
     validate_basename(new_name)?;
-    let (parent_rec, file_rec, current_basename) = resolve_parent_and_child_io(io, old_path)?;
+    let (parent_rec, file_rec, current_basename) =
+        resolve_parent_and_child_io(io, old_path, "rename")?;
     refuse_metafile_io(io, file_rec, &format!("rename {old_path}"))?;
 
     // Pre-check lengths (UTF-16 code units).
@@ -1992,8 +1989,6 @@ fn validate_win32_name(what: &str, name: &str) -> Result<(), Error> {
 ///   directory grows. Growth stops when the directory's resident
 ///   `$Bitmap:$I30` has no bit left for another index block; that is
 ///   refused before the new record is allocated.
-/// * Filename collation is case-insensitive ASCII-only (proper
-///   NTFS upcase-table collation is future work).
 pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Error> {
     let mut io = open_for_write(image)?;
     create_file_io(&mut io, parent_path, basename)
@@ -5341,7 +5336,7 @@ pub fn rmdir(image: &Path, dir_path: &str) -> Result<(), Error> {
 }
 
 pub fn rmdir_io<T: BlockIo + ?Sized>(io: &mut T, dir_path: &str) -> Result<(), Error> {
-    let (parent_rec, dir_rec, basename) = resolve_parent_and_child_io(io, dir_path)?;
+    let (parent_rec, dir_rec, basename) = resolve_parent_and_child_io(io, dir_path, "rmdir")?;
     refuse_metafile_io(io, dir_rec, &format!("rmdir {dir_path}"))?;
     let (_, dir_record_bytes) = read_mft_record_io(io, dir_rec)?;
     let flags = crate::mft_io::record_flags(&dir_record_bytes);
@@ -5579,7 +5574,7 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     // see `index_io::find_index_entry`.
     let upcase = crate::upcase::UpcaseTable::load_io(io)?;
     validate_basename(new_basename)?;
-    let (parent_rec, file_rec, old_basename) = resolve_parent_and_child_io(io, old_path)?;
+    let (parent_rec, file_rec, old_basename) = resolve_parent_and_child_io(io, old_path, "rename")?;
     refuse_metafile_io(io, file_rec, &format!("rename {old_path}"))?;
     if old_basename == new_basename {
         return Ok(());
@@ -5986,7 +5981,7 @@ fn build_file_name_value(
 /// 3. Clear the IN_USE flag in the file's MFT record.
 /// 4. Flip the file's bit in `$MFT:$Bitmap` to free.
 ///
-/// Refuses directories (use `rmdir` — not implemented yet).
+/// Refuses directories: those are removed with [`rmdir`].
 ///
 /// Order matters: step 1 makes the file unreachable by name, then
 /// steps 2-4 free the backing storage. A crash between 1 and 4 leaks
@@ -5998,7 +5993,7 @@ pub fn unlink(image: &Path, file_path: &str) -> Result<(), Error> {
 }
 
 pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(), Error> {
-    let (parent_rec, file_rec, basename) = resolve_parent_and_child_io(io, file_path)?;
+    let (parent_rec, file_rec, basename) = resolve_parent_and_child_io(io, file_path, "unlink")?;
     refuse_metafile_io(io, file_rec, &format!("unlink {file_path}"))?;
 
     // Refuse directory targets.
@@ -6006,7 +6001,7 @@ pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(),
     let flags = crate::mft_io::record_flags(&file_record_bytes);
     if flags & MFT_FLAG_DIRECTORY != 0 {
         return Err(Error::is_directory(format!(
-            "unlink: '{file_path}' is a directory — use rmdir (not implemented)"
+            "unlink: '{file_path}' is a directory — use rmdir"
         )));
     }
 
@@ -6185,7 +6180,7 @@ pub fn remove(image: &Path, path: &str) -> Result<(), Error> {
 }
 
 pub fn remove_io<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<(), Error> {
-    let (_, rec, _) = resolve_parent_and_child_io(io, path)?;
+    let (_, rec, _) = resolve_parent_and_child_io(io, path, "remove")?;
     refuse_metafile_io(io, rec, &format!("remove {path}"))?;
     let (_, record_bytes) = read_mft_record_io(io, rec)?;
     if crate::mft_io::record_flags(&record_bytes) & MFT_FLAG_DIRECTORY != 0 {
@@ -6199,16 +6194,23 @@ pub fn remove_io<T: BlockIo + ?Sized>(io: &mut T, path: &str) -> Result<(), Erro
 #[allow(dead_code)]
 fn resolve_parent_and_child(image: &Path, old_path: &str) -> Result<(u64, u64, String), Error> {
     let mut io = PathIo::open_ro(image)?;
-    resolve_parent_and_child_io(&mut io, old_path)
+    resolve_parent_and_child_io(&mut io, old_path, "rename")
 }
 
+///
+/// `what` names the operation, for the refusal of the root: it has no
+/// entry in a parent to rename or remove, and the message used to say
+/// "cannot rename root" whichever operation it was (#501).
 fn resolve_parent_and_child_io<T: BlockIo + ?Sized>(
     io: &mut T,
     old_path: &str,
+    what: &str,
 ) -> Result<(u64, u64, String), Error> {
     let p = old_path.trim_start_matches('/');
     if p.is_empty() {
-        return Err(Error::refused("cannot rename root"));
+        return Err(Error::refused(format!(
+            "{what}: '/' is the root directory, which has no entry in a parent directory"
+        )));
     }
     let (parent_path, basename) = match p.rsplit_once('/') {
         Some((par, base)) => (par, base),

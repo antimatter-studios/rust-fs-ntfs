@@ -148,6 +148,10 @@ written against 0.9.0, and `chore check:semver` refuses it otherwise.
   saying `FILE.TXT` under a renamed index entry, a file the Linux kernel
   cannot open. A case-only rename spelled like its target did nothing. The
   name as stored is used throughout.
+- **A refusal names the operation that was refused** (#501). `rmdir`,
+  `unlink` and `remove` of the root said "cannot rename root", and
+  unlinking a directory said rmdir was not implemented. Each now names its
+  own operation, and the unlink refusal points at `rmdir` as it is.
 - **Header fields other fields depend on are checked before they are
   trusted.** An MFT record whose `bytes_allocated` is not the record size is
   refused, as ntfs-3g refuses it, rather than served (#509). A boot sector
