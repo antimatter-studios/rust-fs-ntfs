@@ -180,6 +180,9 @@ fn restart_page(read: &mut ReadLog<'_>, off: u64, page_size: usize) -> Result<Re
     })
 }
 
+/// Restart pages to write back: byte offset in the log, bytes.
+type RestartPages = Vec<(u64, Vec<u8>)>;
+
 /// The log's readable restart pages with `RESTART_VOLUME_IS_CLEAN` set,
 /// each ready to be written back over itself (fixups applied), and the
 /// system page size, which is where the second one starts.
@@ -192,7 +195,7 @@ fn restart_page(read: &mut ReadLog<'_>, off: u64, page_size: usize) -> Result<Re
 /// read it as clean too.
 pub(crate) fn restart_pages_marked_clean(
     read: &mut ReadLog<'_>,
-) -> Result<(usize, Vec<(u64, Vec<u8>)>), Error> {
+) -> Result<(usize, RestartPages), Error> {
     let header = read(0, 0x18).ok_or(Error::io("the log is shorter than a restart page header"))?;
     let system_page_size =
         u32_at(&header, 0x10).ok_or(Error::io("the log is shorter than a restart page header"))?;
