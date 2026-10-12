@@ -95,6 +95,13 @@ written against 0.9.0, and `chore check:semver` refuses it otherwise.
   disagrees with its VCNs was reported clean while this crate's own reader
   and ntfs-3g refused the file. It now walks each record's attributes and
   reports a bad record; the volumes Windows wrote stay clean.
+- **A name is created exactly when Windows would create it** (#498).
+  `NUL`, in any case, was created as a file, and a Win32 program then opens
+  the NUL device under that name. Create, mkdir and rename now refuse it
+  with `EINVAL`. The rule follows Windows rather than Microsoft's naming
+  page: measured on Windows 10.0.26100, `CON`, `COM1`, `LPT1` and `nul.txt`
+  become files through a full path, so they stay allowed. CI measures the
+  running Windows' verdicts and grades the crate against them.
 - **A rename whose new name sorts into another slot of the directory index
   moves the entry there** (#466). A same-length rename wrote the new name
   over the old one in place, so `d` renamed to `a` beside `b` and `c` sat
