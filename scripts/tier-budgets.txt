@@ -20,6 +20,8 @@
 #   unit-debug  723 / 46,497 cold (Mac), 674 / 46,723 (CI Linux)  1,000 / 64,000
 #   mkfs        115 / 3,858 cold (Mac), 24 / 1,022 warm           160 / 5,200
 #   suite       2,143 / 108,930 (CI Linux, fixtures built)        2,900 / 150,000
+#   kernel      12 / 508 warm (arm64 Pi, 4 tests); cold estimate:  160 / 6,000
+#               +106 crates compiled, one line each (2026-10-12)
 #   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
 #   scripts     101 / 2,669 (11 shell tests, rebased 2026-09-26)  135 / 3,500
 #   matrix      1,381 / 100,339 green (72 cases, 2026-10-10)       1,850 / 135,000
@@ -90,6 +92,7 @@ unit         1000   64000
 unit-debug   1000   64000
 mkfs          160    5200
 suite        2900  150000
+kernel        160    6000
 asan         1100   72000
 scripts       135    3500
 semver         40    4000
