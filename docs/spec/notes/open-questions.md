@@ -8,7 +8,7 @@ current code. None is filled by treating our formatter and reader agreeing as an
 independent oracle.
 
 The source review below is at `ee4f530628f507976ddac261906f389823b99c26`,
-2026-10-11. New experiments should retain image hashes, producing Windows version,
+2026-10-11, updated to `c4b32996b52c295786deb5081a6171eeb35ca5c7` on 2026-10-12. New experiments should retain image hashes, producing Windows version,
 geometry, pre/post bytes, operation sequence, and chkdsk verdicts. Reuse the normal
 tier/matrix workflow and exclusive VM access; do not quietly skip missing tools.
 
@@ -50,16 +50,17 @@ The writable mount's version-field update does not establish a complete upgrade.
 
 ### Q04 — Attribute-list identity and segment validation
 
-**Implementation and integrity gaps.** Single VCN-zero extension lookup works;
-nonzero-VCN segments are refused. The parsed instance is not used as a strict
-identity key and the extension's sequence/back-reference is not fully checked.
+**Implementation and integrity gaps.** Single VCN-zero extension lookup works,
+and a run list split into segments is stitched or refused, never read short.
+Stitching matches each segment by instance; the single-segment path does not,
+and neither checks the extension's base reference or the entry's sequence.
 Create Windows files with many ADS and fragmented multi-record runs. Corrupt one
 sequence, instance, base reference, name offset, and entry length at a time.
 Require either complete correctly assembled data or explicit refusal, never a
 successful VCN-zero-only prefix. Check entry-local name bounds, minimum entry size,
 ordering, duplicate/overlapping segments, and sparse/uninitialized list rejection.
 
-Tracking: #468, #471, #472, #473.
+Tracking: #468, #471, #472; stitching landed with #473.
 
 ### Q05 — MFT records crossing extent boundaries
 
@@ -175,14 +176,15 @@ Tracking: #479.
 ### Q15 — Filename caches, aliases, and link counts
 
 **Evidence and compatibility gaps.** SI/stream metadata and FN/index copies can
-diverge. Source setters often leave caches unchanged. Hard-link paths assume their
+diverge. Path-based writes now refresh the sizes in each name's index entry, but
+times and the record's own filename copies are left unchanged. Hard-link paths assume their
 supported namespace relationships. Capture Windows after content changes, timestamp
 set, chmod-style flag changes, case-only rename, short-alias creation/removal, and
 multiple hard links in one or several parents. Compare all filename attributes,
 index keys, link count, and authoritative stat/stream queries. Determine refresh
 rules and alias accounting rather than requiring every copy to match at all times.
 
-Tracking: #491, #493, #506.
+Tracking: #493; index-entry sizes landed with #506, case-differing paths with #491.
 
 ## Payloads and extended metadata
 
@@ -206,7 +208,7 @@ Retain Windows-produced examples and API results for each tag/form. Reading a
 print name is not proof of resolving a target. Recognizing an encrypted bit does
 not decrypt EFS content.
 
-Tracking: #505.
+Tracking: Windows-syntax symlink targets landed with #505.
 
 ### Q18 — Strict EA parsing and summaries
 
@@ -230,7 +232,7 @@ across mirror boundaries and duplicate descriptors, corrupt one index/header/has
 and correlate actual file security queries. Match descriptor bytes as well as hashes.
 Audit valid/null/absent ACLs and SID bounds before exposing a full ACL API.
 
-Tracking: #503.
+Tracking: the security-ID existence check landed with #503.
 
 ### Q20 — Global object and reparse catalogs
 

@@ -69,9 +69,12 @@ raw < 0: size_bytes = 1 << (-raw)
 Examples: `F6` is -10 and means 1024 bytes; `F4` is -12 and means
 4096 bytes. At 512-byte clusters, an index-size byte of `08` means 4096 bytes.
 At 4096-byte clusters, `01` means the same block size. The FILE-size parser
-rejects zero and out-of-range sizes. The index-size parser instead falls back to
-one cluster for zero or a negative exponent of 32 or greater; that permissive
-fallback is an implementation choice, not evidence that the boot field is valid.
+rejects zero and out-of-range sizes. The index-size parser falls back to one cluster
+for zero or a negative exponent of 32 or greater, then requires the result to be a
+power of two from one sector to 64 KiB, the same rule the index reader applies to
+every directory. Before that check, `mkdir` could build 69 KiB or 1 GiB blocks the
+reader then refused (#508). The fallback is an implementation choice, not evidence
+that the boot field is valid.
 **IMPLEMENTED:** `parse_boot_params_from_bytes`, `build_boot_sector`.
 
 The sectors-per-cluster byte at `0D` has a different boundary. The parser accepts

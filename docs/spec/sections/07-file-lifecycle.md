@@ -121,9 +121,18 @@ The basename validator refuses empty names, `.`/`..`, path separators, colon,
 `* ? " < > |`, control characters below `20`, and trailing spaces or periods.
 Builders cap filename lengths at 255 UTF-16 code units. These API restrictions
 are narrower than every name historically storable on disk and do not implement
-all Win32 reserved-device-name rules. Avoid conflating the disk namespace with
-Win32 normalization or with our Rust string interface.
+all Win32 reserved-device-name rules (#498). Avoid conflating the disk namespace with
+Win32 normalization or with our Rust string interface. Stream names share these
+checks through `validate_win32_name`.
 **Source:** `validate_basename`, [record_build.rs](../../../src/record_build.rs).
+
+Records below 24, except the root, and every child of `$Extend` are metafiles.
+Each mutating entry point refuses them with `EPERM` as it resolves its target,
+or the directory it creates into, before anything is written (#499). Before that
+check, unlink, rename, truncate and stream writes reached them, and the only
+protection was a cluster guard that fired after the record and index had changed.
+Label setting and the repair paths keep their own entry points.
+**Source:** `write::refuse_metafile_io`.
 
 <a id="write-and-vdl"></a>
 
@@ -145,9 +154,13 @@ logical zeros. Merely increasing initialized length would expose unwritten bytes
 
 A resident whole-value rewrite resizes within its FILE record. When it returns a
 specific capacity outcome, `write_file_contents_io` promotes to nonresident data.
-An unrelated I/O or format error is not treated as a capacity signal and retried
-through destructive fallback. This dispatcher is distinct from an in-place write
-against an already nonresident stream.
+Contents already nonresident go to `replace_file_contents_io`, which resizes the
+stream in place and writes over it (#470). An unrelated I/O or format error is not
+treated as a capacity signal and retried through destructive fallback. This
+dispatcher is distinct from an in-place write against an already nonresident stream.
+
+After each path-based write, the sizes duplicated in the parent's index entries
+are refreshed ([chapter 4](04-indexes-directories.md#file-name-attr)).
 
 <a id="resize"></a>
 
@@ -203,15 +216,24 @@ and user-visible links; exhaustive foreign alias behavior remains Q15.
 The rename API takes a new basename in the same parent. It does not implement a
 cross-directory move. Both the parent key and the child's filename attribute must
 change. Duplicate checks use upcase collation, and distinguish separate entries
-that happen to reference the same hard-linked record.
+that happen to reference the same hard-linked record. The source name is the one
+the record stores under that parent, matched under `$UpCase`, not the caller's
+spelling, so renaming `FILE.TXT` through `/d/file.txt` renames the stored name, and
+a case-only rename changes its case (#491). Unlink and `rmdir` resolve names the
+same way. The new name takes the namespace create would give it: a long name
+becomes POSIX, and an 8.3 name `WIN32_AND_DOS`. A Win32 or DOS half of a pair keeps
+its namespace, since its partner is still on the record (#492).
 **Source:** `rename_same_length_io`, `rename_replace_io`;
 [write_rename_varlen.rs](../../../tests/write_rename_varlen.rs).
 
 Equal-*UTF-16-unit* length is the in-place fast path, not equal UTF-8 byte length.
-NTFS requires the parent's keys to stay in collation order after a key change, but
-the fast path rewrites the name inside the existing entry and does not move it.
-A new name that sorts elsewhere leaves the index out of order, and a routed lookup
-can no longer find the file: **open defect #466**. Variable-length
+NTFS requires the parent's keys to stay in collation order after a key change.
+The fast path rewrites the name inside the existing entry only when the new name
+still sorts between that entry's neighbours. Otherwise the entry is taken out of
+the index and inserted again under the new name, keeping the times, sizes and
+flags its key carries (#466). The decision is made against every name in the
+index, because INDX blocks are read in VCN order, not key order. Each step is
+undone if a later one fails. Variable-length
 rename can resize the child's attribute and replace the resident root entry, but
 refuses a parent with `$INDEX_ALLOCATION` overflow (#474). That includes a new
 volume's root whenever the formatter had to give it an external index block.
@@ -255,9 +277,11 @@ between file and directory behavior; it is not recursive deletion.
 ## Metadata updates and catalogs
 
 Timestamp setters operate on standard information. Attribute-flag setters alter
-its mask and reject overlapping add/remove requests. Neither operation maintains
-every cached filename-key copy. Setting a security ID assumes the catalog entry
-exists. Object/reparse attribute setters do not maintain their `$Extend` indexes.
+its mask, reject overlapping add/remove requests, and refuse structural bits
+([chapter 2](02-mft-records.md#std-info)). Neither operation refreshes the times
+copied into filename keys (#493). Setting a security ID requires the ID to exist in
+`$Secure:$SII`. Object/reparse attribute setters do not maintain their `$Extend`
+indexes (#478).
 EA setters rebuild the local summary and payload together in the record buffer.
 Label updates additionally synchronize the mirrored volume record.
 **Source:** [write.rs](../../../src/write.rs).
@@ -288,8 +312,14 @@ Reset discards log contents and does not replay them.
 The writable mount also attempts the source's narrow 1.2-to-3.1 volume-version
 field upgrade, clearing its upgrade-on-mount flag. Failure is logged as a warning.
 Writing version bytes is not evidence that every historical metadata structure has
-been converted or that old-volume compatibility is complete. Low-level write
-helpers called directly do not all pass through mount preparation.
+been converted or that old-volume compatibility is complete.
+
+Every path-based mutator opens the image through `open_for_write`, which runs the
+same preparation as a writable mount before anything is written (#465). Before
+that, a write without a read-write mount landed on metadata whose committed
+changes were still in the log, in a record Windows' restart would later give to
+another file. The `_io` and by-record-number primitives over a caller's device do
+not prepare the mount themselves; a host composing them must mount read-write first.
 
 <a id="durability"></a>
 

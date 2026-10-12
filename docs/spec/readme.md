@@ -15,7 +15,8 @@ missing knowledge.
 ## Evidence and scope
 
 The source audit is against revision `ee4f530628f507976ddac261906f389823b99c26`
-on 2026-10-11. Paths refer to this repository. Function names are preferred over
+on 2026-10-11, updated on 2026-10-12 for the fixes merged through
+`c4b32996b52c295786deb5081a6171eeb35ca5c7`. Paths refer to this repository. Function names are preferred over
 line numbers, which drift after edits. A source link establishes what the code
 reads, writes, accepts, or refuses; it does not establish all Windows behavior.
 

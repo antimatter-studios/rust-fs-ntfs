@@ -39,8 +39,11 @@ proof that all Windows writers omit the terminator.
 The encoder chooses minimal *positive signed* count width and minimal signed delta
 width. Counts with the top bit set acquire a leading zero byte; it refuses counts
 above the positive `i64` range even though the decoder accumulates a `u64`.
-It requires VCN-contiguous runs beginning at zero; continuation segments require
-an external lowest-VCN adjustment which the current reader does not stitch.
+It requires VCN-contiguous runs beginning at zero. A continuation segment in an
+extension record restarts its LCN deltas from zero and maps from its own lowest
+VCN; the reader decodes it alone and shifts it into place
+([attribute lists](02-mft-records.md#attribute-list)). The encoder does not write
+continuation segments.
 Microsoft's [attribute header notes](https://learn.microsoft.com/en-us/windows/win32/devnotes/attribute-record-header)
 describe mapping pairs, but differ in wording about count sign and unallocated LCN.
 The executable representation here uses a missing LCN field for holes. **OPEN:**

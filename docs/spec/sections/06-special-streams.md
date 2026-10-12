@@ -54,10 +54,23 @@ Directory ADS coexist with `$I30` metadata and are not directory entries.
 [write_ads_promote.rs](../../../tests/write_ads_promote.rs),
 [ads_comprehensive.rs](../../../tests/ads_comprehensive.rs).
 
-Deleting a nonresident named stream removes its attribute before releasing its
-clusters. Listings report the streams available through the implemented walker;
-complete extension-record enumeration needs separate review. No guarantee that
-all named streams are resident should be inferred from small examples.
+A stream name passes the same checks a filename does: no `\ / : * ? " < > |`,
+no character below `20`, and no trailing space or period, since Windows strips
+those when it parses a path. A name like `x:$DATA` or `a:b` is refused because
+Windows could never address it (#497). Deletion takes any name, so a stream
+written under a bad name earlier can still be removed. Windows compares stream
+names case-insensitively; this writer still creates two streams for names that
+differ only in case (#494). New streams are placed in name order among the
+record's `$DATA` attributes ([chapter 2](02-mft-records.md#attr-compaction)).
+
+A rewrite refused for lack of record space or clusters leaves the existing stream
+as it was. A nonresident rewrite reads the old runs first and frees them only after
+the new attribute is written, so the old clusters cannot be handed to the new
+contents (#469). Deleting a nonresident named stream removes its attribute before
+releasing its clusters. Listings report the streams in the base record only (#472).
+No guarantee that all named streams are resident should be inferred from small
+examples. **IMPLEMENTED:** `write::validate_win32_name`, `write_named_stream_io`,
+`delete_named_stream_io`.
 
 <a id="lznt1"></a>
 
@@ -254,7 +267,16 @@ Offsets are relative to tag-specific data at common-prefix offset `08`:
 | `0C` | variable | PathBuffer, UTF-16LE |
 
 The builder concatenates substitute and print names, uses explicit lengths, and
-does not require NUL between them. The print name defaults to the supplied target.
+does not require NUL between them. It writes the target in Windows syntax, chosen
+by the target's form: `\??\X:\…` for a drive path, `\??\UNC\…` for a UNC path, an
+NT path as given, and anything else as a relative link with `\` separators and
+flag 1. A POSIX absolute target such as `/d/small` names no drive, so it is
+stored as the rooted relative path `\d\small`, resolved from the root of the link's
+own volume. Reading turns `\` back into `/` in a relative target; an absolute
+target keeps its Windows form. A relative link this builder writes carries the
+same flags and names as one Windows wrote in the symlink fixture (#505).
+**IMPLEMENTED / Windows fixture check:** `write::create_symlink_io`,
+`lib::reparse_link_target`; [readlink_windows_oracle.rs](../../../tests/readlink_windows_oracle.rs).
 
 <a id="reparse-payload-mount"></a>
 
@@ -358,9 +380,11 @@ The formatter supplies a canonical catalog entry at ID `100`. Its system records
 reference that entry through the security ID in 72-byte standard information;
 `build_system_record` does not emit a per-record `$SECURITY_DESCRIPTOR` attribute.
 Runtime records also use 72-byte standard information, initially zeroed extended
-fields; callers can point a file at an existing catalog ID. `set_security_id` does not insert a new SDS entry
-or validate the caller's ID against a fully maintained catalog. ACL inheritance,
-access enforcement, descriptor insertion/deduplication, and index growth are gaps.
+fields; callers can point a file at an existing catalog ID. `set_security_id`
+reads every `$SII` key, in the root and each allocated index block, and refuses an
+ID none of them holds before writing anything (#503). It does not insert a new SDS
+entry. ACL inheritance, access enforcement, descriptor insertion/deduplication,
+and index growth are gaps.
 **IMPLEMENTED / OPEN:** `write::set_security_id_io`, Q19.
 
 <a id="upcase"></a>

@@ -42,7 +42,7 @@ in the public declaration are not independently documented by that declaration.
 | `14` | 2 | First attribute offset | After header and USA, aligned to 8 |
 | `16` | 2 | Flags | `0001` in use, `0002` directory index present, `0008` view index present; formatter pairs `0004` with `0008` on its view-index records (see below) |
 | `18` | 4 | Bytes used | Includes the attribute terminator reservation |
-| `1C` | 4 | Bytes allocated | Record buffer size; not checked against boot geometry on read (#509) |
+| `1C` | 4 | Bytes allocated | Record size; a read refuses any other value (#509) |
 | `20` | 8 | Base file reference | Zero in base; owner reference in extension |
 | `28` | 2 | Next attribute instance | Allocator cursor for new attributes |
 | `2A` | 2 | Reserved/alignment | Not interpreted as a checksum |
@@ -271,10 +271,12 @@ The source's full reader returns version-specific fields only when they fit.
 The formatter gives system files hidden plus system (`0006`) without archive,
 matching the source's record of Microsoft format output; user files start with
 archive (`0020`). View-index hosts also carry `20000000` here.
-The writer exposes read-only `0001`, hidden `0002`, system `0004`, archive `0020`,
-normal `0080`, temporary `0100`, and not-content-indexed `2000` convenience flags.
-Sparse `0200`, reparse `0400`, compressed `0800`, and encrypted `4000` describe
-other file states. These file flags are distinct from attribute-header transform
+The flag setter accepts read-only `0001`, hidden `0002`, system `0004`, archive
+`0020`, normal `0080`, temporary `0100`, offline `1000`, and not-content-indexed
+`2000`, and refuses any other bit in either its add or remove mask (#502).
+Directory `0010`, device `0040`, sparse `0200`, reparse `0400`, compressed `0800`,
+and encrypted `4000` describe structure the file must actually have, so a caller
+cannot set them alone. These file flags are distinct from attribute-header transform
 flags and FILE record flags. NTFS filename directory/view-index bits are discussed
 in [chapter 4](04-indexes-directories.md#fn-directory-bit).
 **IMPLEMENTED:** `write::file_attr`, `record_build` constants.
@@ -298,21 +300,30 @@ its first VCN, and the record holding it. **IMPLEMENTED:** `read::parse_attribut
 | variable | variable | Optional UTF-16 name |
 
 The current reader consults the list before returning a base-record attribute.
-It can follow a single VCN-zero entry to an extension record. If the requested
-attribute has an entry with nonzero starting VCN, it refuses the read because
-multi-record mapping-pair stitching is not implemented. This prevents successful
-short reads of only the first extent. Nonresident attribute lists must be fully
-mapped and initialized: zero-filling a hole would manufacture a false terminator.
-**IMPLEMENTED:** `read::locate_attribute`;
+A single VCN-zero entry is followed to its record. When an attribute's run list is
+split into several segments, each in its own record, the reader stitches them
+(#473). It finds each segment by type, name, and instance, refuses a resident
+segment, and decodes each segment's mapping pairs on their own: every segment
+restarts its LCN deltas. It shifts them to the segment's lowest VCN, then appends
+them in VCN order. The segments must tile the stream: each starts where the
+previous one ended, its header's VCN range matches what its runs map, and the last
+ends at the allocated size the VCN-zero segment declares. A gap, overlap, or
+missing segment is refused, naming the VCN. A stream is read whole or not at all;
+returning the VCN-zero segment alone would be a short read reported as a complete
+one. Lengths, flags, and compression unit come from the VCN-zero segment's header.
+Nonresident attribute lists must be fully mapped and initialized: zero-filling a
+hole would manufacture a false terminator.
+**IMPLEMENTED:** `read::locate_attribute`, `read::stitch_segments`;
 [attribute_list_split.rs](../../../tests/attribute_list_split.rs),
 [native_read_fixtures.rs](../../../tests/native_read_fixtures.rs).
 
-The parser retains the instance but the current locator searches by type/name;
-it does not fully validate the extension reference's sequence, instance, and
-back-reference. List name validation also needs entry-local bounds review.
+The single-segment path still matches by type and name alone, and neither path
+checks the extension record's base reference or the list entry's sequence.
+List name validation also needs entry-local bounds review.
 These are **OPEN** integrity gaps, not guarantees of the current implementation.
 Runtime writers generally operate on base-record attributes and do not emit
-extension records when a base record fills.
+extension records when a base record fills (#480). Writes that add streams ignore
+an existing list (#468).
 
 <a id="attribute-validation"></a>
 
@@ -339,10 +350,14 @@ A stricter fallible walk and distinguishing corruption from absence remain Q22.
 terminator inside the fixed record, update lengths and `bytes_used`, and refuse a
 record overflow. NTFS orders a record's attributes by type code and then by name,
 and readers stop searching once they pass the place an attribute would sort to.
-`insert_attribute_sorted` honours the type order only: it places a new attribute
-before the first one of a greater type, after any of the same type. Named `$DATA`
-streams therefore land in write order. A stream that should sort before an existing
-one becomes invisible to such readers; ntfs-3g cannot find it: **open defect #467**.
+Within a type, the name decides, not the write order: if `aa` lands after `zz`
+because it was written later, ntfs-3g cannot find `aa` (#467).
+`insert_attribute_collated` orders a new attribute among those of its type by name:
+case-insensitively under the volume's `$UpCase`, then case-sensitively, with an
+unnamed attribute first. The named-stream writers use it. Other inserts use
+`insert_attribute_sorted`, which honours type order only and appends after
+attributes of the same type. Whether several unnamed attributes of one type, such
+as a hard link's second `$FILE_NAME`, need a further order is not established.
 ID allocation advances the record's next-instance
 field; it does not create extra disk space. **IMPLEMENTED:**
 [attr_resize.rs](../../../src/attr_resize.rs);

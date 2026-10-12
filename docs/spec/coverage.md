@@ -1,6 +1,6 @@
 # Source and evidence coverage
 
-Audit: 2026-10-11, source `ee4f530628f507976ddac261906f389823b99c26`.
+Audit: 2026-10-11, source `ee4f530628f507976ddac261906f389823b99c26`; updated 2026-10-12 to `c4b32996b52c295786deb5081a6171eeb35ca5c7`.
 This map indexes the production modules, their format/behavior coverage, and
 regression evidence. A named test is not a claim that it passed in this session.
 A formatter, reader, mutator, and independent oracle are separate evidence types.
@@ -50,7 +50,7 @@ not a byte-identical declaration of the log it currently writes.
 | LZNT1 | Unit decoding | No compression encoder | Malformed unit topology needs broader oracle checks |
 | WOF/EFS | Metadata accessible as supported | No transformed content writes | WOF unnamed data and EFS content refused |
 | ADS | Named values, supported extensions | Resident/nonresident | No automatic attribute overflow emission |
-| Attribute lists | Single VCN-zero extension | No overflow writer | Multi-segment streams refused; identity checks incomplete |
+| Attribute lists | VCN-zero extension; split run lists stitched | No overflow writer | Base-reference and sequence checks incomplete |
 | MFT growth | Run-based records | Batch growth, bitmap and mirror updates | Record crossing extent boundary; base-record capacity |
 | Large directories | Routed lookup, allocated-block listing | Promotion, bounded recursive splits/insertion | Bitmap growth, interior deletion, rebalancing |
 | EAs | Resident | Resident payload and summary | Nonresident and full corruption validation |

@@ -39,9 +39,18 @@ The same value layout forms the filename key in `$I30` entries.
 
 Filename timestamps and sizes are duplicated metadata, not the stream's allocation
 map or EOF authority. `read_stat` gets primary size from `$DATA` and timestamps
-from standard information. A mutation can leave filename copies stale; the exact
-Windows refresh rules remain an explicit question. **IMPLEMENTED / OPEN:**
-[read.rs](../../../src/read.rs) `read_stat`, Q15.
+from standard information. **IMPLEMENTED:** [read.rs](../../../src/read.rs) `read_stat`.
+
+The copy in the parent's index entry still matters: the source records that Windows
+serves directory enumeration (`dir`, Explorer, `FindFirstFile`) from it, and
+refreshes it when the last handle to the file closes. A writer that never refreshes
+it shows every file it wrote as 0 bytes in Windows listings. Every path-based write
+here refreshes the data size and allocated size in the entry for each of the file's
+names. The record-number primitives leave that to the host, through
+`refresh_directory_entry_sizes_io`, as Windows leaves it to the last close (#506).
+The duplicated times are not refreshed (#493), and the record's own `$FILE_NAME`
+copies are not rewritten. Windows' exact refresh rules for those remain Q15.
+**IMPLEMENTED / historical observation:** `write::refresh_directory_entry_sizes_io`.
 
 <a id="fn-directory-bit"></a>
 
