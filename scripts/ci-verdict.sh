@@ -30,7 +30,7 @@ case "${1:-}" in
             ([.test.result, .["windows-native-read-fixtures"].result,
               .integration.result, .changes.result,
               .["validate-mkfs-windows"].result, .cli.result,
-              .semver.result] | all(ok))'
+              .kernel.result, .semver.result] | all(ok))'
         ;;
     *)
         echo 'usage: ci-verdict.sh windows|aggregate' >&2
