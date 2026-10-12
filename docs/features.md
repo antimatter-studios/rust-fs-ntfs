@@ -50,8 +50,9 @@ States:
 | Feature | State | Since | Tracking | Checked by |
 |---|---|---|---|---|
 | `fsck.ntfs` / `fsck::check_io`: dirty flag, `$LogFile`, `$MFTMirr`, the header of every in-use MFT record | Supported | 0.6.0 | | `cli_fsck.rs`, `tests/cli/test-fsck.sh` |
+| `fsck.ntfs` / `fsck::check_io`: each in-use record's attribute chain: lengths, types and their order, names, ids, resident values, run lists against their VCNs and allocated size, the end marker | Supported | Unreleased (#515) | | `check_io_reads_attribute_structure.rs` |
 | `fsck.ntfs` / `fsck::check_io`: `$Bitmap` against every run list: leaked, cross-linked and in-use-but-free clusters, runs past the volume | Supported | Unreleased (#528) | | `check_io_cluster_accounting.rs`, `tests/cli/test-fsck.sh` |
-| `fsck.ntfs` / `fsck::check_io`: indexes, and attributes beyond their run lists | Not supported | | #515 | |
+| `fsck.ntfs` / `fsck::check_io`: indexes | Not supported | | | |
 | `$LogFile` state, read from every record page | Supported | 0.6.0 | | `logfile_state.rs` |
 | `$LogFile` replay on `fsck`, on a read-write mount, and before a path-based write, as Windows' restart does, for every operation captured Windows logs hold; open transactions rolled back; wrapped logs; small clusters | Supported | 0.8.0 (#137); path-based writes Unreleased (#465) | | `windows_interrupted_fixture.rs` |
 | `UpdateRecordDataRoot` redo; a checkpoint that names no start | Supported | Unreleased (#456, #457) | | `windows_interrupted_fixture.rs` |
