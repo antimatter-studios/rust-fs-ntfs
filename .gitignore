@@ -30,6 +30,8 @@ test-disks/*.img
 test-disks/*.targets.tsv
 # The files Windows wrote and the SHA-256 it computed, beside ntfs-cli-read.img.
 test-disks/*.sha256.tsv
+# Which names Win32 creates as files, measured by measure-win32-names.ps1.
+test-disks/win32-name-verdicts.tsv
 !test-disks/.gitkeep
 
 # Local Windows-VM test pipeline outputs. The orchestrator
