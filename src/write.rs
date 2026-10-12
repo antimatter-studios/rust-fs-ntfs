@@ -143,6 +143,15 @@ pub mod file_attr {
     pub const NORMAL: u32 = 0x0000_0080;
     pub const TEMPORARY: u32 = 0x0000_0100;
     pub const NOT_CONTENT_INDEXED: u32 = 0x0000_2000;
+    pub const OFFLINE: u32 = 0x0000_1000;
+
+    /// The bits `SetFileAttributes` sets. Every other defined bit
+    /// describes the file's structure -- DIRECTORY, SPARSE_FILE,
+    /// REPARSE_POINT, COMPRESSED, ENCRYPTED -- and is the business of
+    /// the operation that builds that structure, and DEVICE and the
+    /// undefined bits are reserved (#502).
+    pub const SETTABLE: u32 =
+        READONLY | HIDDEN | SYSTEM | ARCHIVE | NORMAL | TEMPORARY | OFFLINE | NOT_CONTENT_INDEXED;
 }
 
 /// Read the `security_id` field from a file's `$STANDARD_INFORMATION`.
@@ -389,6 +398,14 @@ pub fn set_file_attributes_by_record_number_io<T: BlockIo + ?Sized>(
         return Err(Error::io(format!(
             "add and remove overlap: add={:#x} remove={:#x}",
             change.add, change.remove
+        )));
+    }
+    let structural = (change.add | change.remove) & !file_attr::SETTABLE;
+    if structural != 0 {
+        return Err(Error::invalid(format!(
+            "file attributes {structural:#x} describe the file's structure or are reserved, \
+             and are not set or cleared on their own: only {:#x} are (#502)",
+            file_attr::SETTABLE
         )));
     }
     update_mft_record_io(io, record_number, |record| {
@@ -1769,8 +1786,24 @@ fn parent_index_overflows_io<T: BlockIo + ?Sized>(
 /// and `\` are ordinary characters, produces these as a matter of
 /// course rather than as an edge case.
 fn validate_basename(name: &str) -> Result<(), Error> {
+    validate_win32_name("basename", name)
+}
+
+/// A named stream's name, by the rules of a file name: Microsoft's
+/// "Naming Files, Paths, and Namespaces" allows in a stream name exactly
+/// the characters a file name allows. A stream called `a:b` or `x:$DATA`
+/// can never be opened, because the colon is the stream delimiter, and a
+/// NUL inside a counted name cuts it short differently for each reader
+/// (#497).
+fn validate_stream_name(name: &str) -> Result<(), Error> {
+    validate_win32_name("stream name", name)
+}
+
+/// The checks a name Windows can address passes; `what` names it in the
+/// error.
+fn validate_win32_name(what: &str, name: &str) -> Result<(), Error> {
     if name.is_empty() || name == "." || name == ".." {
-        return Err(Error::invalid(format!("invalid basename: '{name}'")));
+        return Err(Error::invalid(format!("invalid {what}: '{name}'")));
     }
     // The Win32 reserved set, and the control range. `/` is here as well
     // as in the check above, because it is both "not a component" and a
@@ -1779,7 +1812,7 @@ fn validate_basename(name: &str) -> Result<(), Error> {
         matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (*c as u32) < 0x20
     }) {
         return Err(Error::invalid(format!(
-            "invalid basename '{name}': Windows cannot address a name containing {bad:?}. \
+            "invalid {what} '{name}': Windows cannot address a name containing {bad:?}. \
              Reserved: \\ / : * ? \" < > | and the control characters"
         )));
     }
@@ -1788,7 +1821,7 @@ fn validate_basename(name: &str) -> Result<(), Error> {
     // file "report" and can never reach the one actually on the volume.
     if name.ends_with(' ') || name.ends_with('.') {
         return Err(Error::invalid(format!(
-            "invalid basename '{name}': Windows strips a trailing space or period when it \
+            "invalid {what} '{name}': Windows strips a trailing space or period when it \
              parses a path, so this name could never be opened by the name it has"
         )));
     }
@@ -4026,6 +4059,7 @@ fn write_named_stream_resident_attempt_io<T: BlockIo + ?Sized>(
             "stream_name must be non-empty",
         )));
     }
+    validate_stream_name(stream_name).map_err(ResidentWriteError::Other)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     update_mft_record_io_typed(io, rec, |record| {
         // Existing stream?
@@ -4697,6 +4731,11 @@ pub fn promote_attribute_to_nonresident_io<T: BlockIo + ?Sized>(
     attr_name: Option<&str>,
     new_data: &[u8],
 ) -> Result<(), Error> {
+    // A named $DATA stream is a stream the caller named; any other
+    // attribute's name is the crate's own ($I30 and the like).
+    if let (AttrType::Data, Some(name)) = (attr_type, attr_name) {
+        validate_stream_name(name)?;
+    }
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (params, _) = read_mft_record_io(io, rec)?;
     let cluster_size = params.cluster_size;
