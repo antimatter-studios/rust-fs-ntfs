@@ -308,11 +308,10 @@ fn refuse_wof_compressed<T: BlockIo + ?Sized>(
 /// Returns `None` if the attribute is absent. Shared by `read_attribute_value`
 /// and `read_stat` so both handle overflowed (`$ATTRIBUTE_LIST`) files.
 ///
-/// **Limitation (fails loud, never truncates):** a single non-resident
-/// attribute whose run list is split across *multiple* records (i.e.
-/// `$ATTRIBUTE_LIST` carries entries for the same type+name with
-/// `starting_vcn > 0`) is not yet stitched — this returns `Err` rather than
-/// silently reading only the VCN-0 segment.
+/// A non-resident attribute whose run list is split across several
+/// records -- `$ATTRIBUTE_LIST` names more than one segment of it -- is
+/// stitched: see [`stitch_segments`]. It used to be refused, so a
+/// fragmented file Windows wrote could not be read or even `stat`ed (#473).
 ///
 /// That guarantee needs `$ATTRIBUTE_LIST` to be consulted *first*, and it
 /// used to be consulted second: the base record was searched, the
@@ -359,18 +358,11 @@ fn locate_attribute<T: BlockIo + ?Sized>(
             .collect();
 
         if !matching.is_empty() {
-            // Refuse a run list split across records rather than
-            // returning the VCN-0 segment and calling it the value.
-            // Stitching the segments is the real answer; a refusal is
-            // the half of it that must not wait, because the other
-            // behaviour is a short read reported as a complete one.
-            if matching.iter().any(|e| e.starting_vcn != 0) {
-                return Err(Error::io(format!(
-                    "locate_attribute: {attr_type:?} (name {name:?}) in record {record_number} is \
-                     split across {} records ($ATTRIBUTE_LIST multi-extent stitching not yet \
-                     supported)",
-                    matching.len()
-                )));
+            // A run list split across records is read whole or not at
+            // all: returning the VCN-0 segment as the value would be a
+            // short read reported as a complete one.
+            if matching.len() > 1 || matching.iter().any(|e| e.starting_vcn != 0) {
+                return stitch_segments(io, record_number, attr_type, name, &matching).map(Some);
             }
             let entry = matching
                 .iter()
@@ -403,6 +395,168 @@ fn locate_attribute<T: BlockIo + ?Sized>(
     }
 
     Ok(None)
+}
+
+/// One attribute whose run list `$ATTRIBUTE_LIST` splits across several
+/// records, as one: the VCN-0 segment's record, with a copy of that
+/// segment appended past the record's end whose mapping pairs are every
+/// segment's runs in VCN order, and the location of that copy (#473).
+///
+/// Every reader takes an attribute's lengths, flags and compression unit
+/// from the VCN-0 segment's header and its runs from the mapping pairs
+/// after it, so the copy is read like any other attribute and none of them
+/// has to know the value was split. It is never written back: nothing that
+/// writes locates attributes this way.
+///
+/// Each segment's runs are decoded on their own, since each starts its
+/// LCN deltas afresh, and moved to the segment's first VCN. A segment
+/// must start where the one before it ended, and the last must end where
+/// the VCN-0 segment's allocated size does; anything else -- a gap, an
+/// overlap, a segment missing from the list -- is refused rather than
+/// read with a hole in it.
+#[allow(clippy::type_complexity)]
+fn stitch_segments<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    attr_type: AttrType,
+    name: Option<&str>,
+    segments: &[&AttrListEntry],
+) -> Result<
+    (
+        crate::mft_io::BootParams,
+        u64,
+        Vec<u8>,
+        attr_io::AttrLocation,
+    ),
+    Error,
+> {
+    let what = format!("{attr_type:?} (name {name:?}) of record {record_number}");
+    let mut segments = segments.to_vec();
+    segments.sort_by_key(|e| e.starting_vcn);
+    let vcn_field =
+        |record: &[u8], loc: &attr_io::AttrLocation, off: usize| -> Result<u64, Error> {
+            record
+                .get(loc.attr_offset + off..loc.attr_offset + off + 8)
+                .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+                .ok_or_else(|| Error::io(format!("{what}: a segment's header is cut short")))
+        };
+    let segment =
+        |io: &mut T,
+         entry: &AttrListEntry|
+         -> Result<(crate::mft_io::BootParams, Vec<u8>, attr_io::AttrLocation), Error> {
+            let (params, record) = read_mft_record_io(io, entry.record_number)?;
+            let loc = attr_io::iter_attributes(&record)
+                .find(|l| {
+                    l.type_code == attr_type as u32
+                        && l.attribute_id == entry.attribute_id
+                        && match name {
+                            None => l.name_length == 0,
+                            Some(n) => attr_io::decode_attr_name(&record, l) == n,
+                        }
+                })
+                .ok_or_else(|| {
+                    Error::io(format!(
+                        "{what}: $ATTRIBUTE_LIST puts the segment at VCN {} in record {} as \
+                     attribute {}, and it is not there",
+                        entry.starting_vcn, entry.record_number, entry.attribute_id
+                    ))
+                })?;
+            if loc.is_resident {
+                return Err(Error::io(format!(
+                    "{what}: the segment at VCN {} is resident, and a resident value has no runs \
+                 to split",
+                    entry.starting_vcn
+                )));
+            }
+            Ok((params, record, loc))
+        };
+    let runs_of =
+        |record: &[u8], loc: &attr_io::AttrLocation| -> Result<Vec<data_runs::DataRun>, Error> {
+            let mpo = loc
+                .non_resident_mapping_pairs_offset
+                .ok_or(Error::io("non-resident attr has no mapping-pairs offset"))?
+                as usize;
+            let pairs = record
+                .get(loc.attr_offset + mpo..loc.attr_offset + loc.attr_length)
+                .ok_or_else(|| {
+                    Error::io(format!(
+                        "{what}: a segment's mapping pairs run past its record"
+                    ))
+                })?;
+            data_runs::decode_runs(pairs)
+        };
+
+    let first = segments[0];
+    if first.starting_vcn != 0 {
+        return Err(Error::io(format!(
+            "locate_attribute: $ATTRIBUTE_LIST lists {attr_type:?} (name {name:?}) for record \
+             {record_number} with no VCN-0 segment"
+        )));
+    }
+    let (params, mut record, loc) = segment(io, first)?;
+    let mut runs = runs_of(&record, &loc)?;
+    let mut next_vcn = vcn_field(&record, &loc, attr_off::NONRES_LAST_VCN)?.wrapping_add(1);
+    for entry in &segments[1..] {
+        if entry.starting_vcn != next_vcn {
+            return Err(Error::io(format!(
+                "{what}: a segment starts at VCN {} where VCN {next_vcn} was expected",
+                entry.starting_vcn
+            )));
+        }
+        let (_, ext, ext_loc) = segment(io, entry)?;
+        let ext_first = vcn_field(&ext, &ext_loc, attr_off::NONRES_FIRST_VCN)?;
+        let ext_last = vcn_field(&ext, &ext_loc, attr_off::NONRES_LAST_VCN)?;
+        if ext_first != entry.starting_vcn || ext_last < ext_first {
+            return Err(Error::io(format!(
+                "{what}: the segment $ATTRIBUTE_LIST puts at VCN {} covers VCNs \
+                 {ext_first}..={ext_last}",
+                entry.starting_vcn
+            )));
+        }
+        let mut covered = 0u64;
+        for mut run in runs_of(&ext, &ext_loc)? {
+            run.starting_vcn = run
+                .starting_vcn
+                .checked_add(ext_first)
+                .ok_or_else(|| Error::io(format!("{what}: a segment's VCNs overflow")))?;
+            covered = covered.saturating_add(run.length);
+            runs.push(run);
+        }
+        if covered != ext_last - ext_first + 1 {
+            return Err(Error::io(format!(
+                "{what}: the segment at VCN {ext_first} maps {covered} clusters where its header \
+                 says VCNs {ext_first}..={ext_last}"
+            )));
+        }
+        next_vcn = ext_last + 1;
+    }
+    let allocated = vcn_field(&record, &loc, attr_off::NONRES_ALLOCATED_LENGTH)?;
+    let cluster_size = params.cluster_size.max(1);
+    if next_vcn.checked_mul(cluster_size) != Some(allocated) {
+        return Err(Error::io(format!(
+            "{what}: the segments end at VCN {next_vcn}, and the allocated size of {allocated} \
+             bytes ends at VCN {}",
+            allocated / cluster_size
+        )));
+    }
+
+    // The copy: the VCN-0 segment's header and name, then every run.
+    let mpo = loc
+        .non_resident_mapping_pairs_offset
+        .ok_or(Error::io("non-resident attr has no mapping-pairs offset"))? as usize;
+    let mut stitched = record[loc.attr_offset..loc.attr_offset + mpo].to_vec();
+    stitched.extend(data_runs::encode_runs(&runs)?);
+    stitched.resize(stitched.len().div_ceil(8) * 8, 0);
+    let length = u32::try_from(stitched.len())
+        .map_err(|_| Error::io(format!("{what}: the stitched run list is too long")))?;
+    stitched[attr_off::LENGTH..attr_off::LENGTH + 4].copy_from_slice(&length.to_le_bytes());
+    stitched[attr_off::NONRES_LAST_VCN..attr_off::NONRES_LAST_VCN + 8]
+        .copy_from_slice(&(next_vcn - 1).to_le_bytes());
+    let mut stitched_loc = loc;
+    stitched_loc.attr_offset = record.len();
+    stitched_loc.attr_length = stitched.len();
+    record.extend(stitched);
+    Ok((params, first.record_number, record, stitched_loc))
 }
 
 /// Read one attribute's value from the record + location that holds it
