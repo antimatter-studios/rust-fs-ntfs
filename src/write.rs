@@ -5440,13 +5440,22 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     let nt_time = crate::record_build::nt_time_now();
     let is_dir = crate::mft_io::record_flags(&file_record_bytes) & MFT_FLAG_DIRECTORY != 0;
 
-    let new_entry_bytes = index_io::build_file_name_index_entry(
+    let mut new_entry_bytes = index_io::build_file_name_index_entry(
         file_reference,
         parent_reference,
         new_basename,
         nt_time,
         is_dir,
     )?;
+    // The entry carries the namespace the record's renamed $FILE_NAME
+    // takes. The builder derives one from the name alone, which disagrees
+    // with the record for one half of a WIN32 + DOS pair (#492).
+    if let Some(old) = file_name_namespace(&file_record_bytes, &old_basename) {
+        index_io::set_entry_namespace(
+            &mut new_entry_bytes,
+            crate::record_build::fn_namespace_after_rename(old, new_basename),
+        )?;
+    }
 
     // A rename is two record writes with no journal between them, and
     // each one is durable on its own. So step 1 has to be undoable:
@@ -5622,6 +5631,27 @@ fn replace_existing_dest_io<T: BlockIo + ?Sized>(
     Ok(ReplaceDisposition::RemovedDestination)
 }
 
+/// The namespace of `record`'s `$FILE_NAME` called `name`, if it has one.
+fn file_name_namespace(record: &[u8], name: &str) -> Option<u8> {
+    let wanted: Vec<u16> = name.encode_utf16().collect();
+    attr_io::iter_attributes(record)
+        .filter(|loc| loc.type_code == AttrType::FileName as u32)
+        .find_map(|loc| {
+            let value = loc.attr_offset + loc.resident_value_offset? as usize;
+            let len = loc.resident_value_length? as usize;
+            let name_length = *record.get(value + 0x40)? as usize;
+            if len < 0x42 + name_length * 2 || name_length != wanted.len() {
+                return None;
+            }
+            let cur: Vec<u16> = record
+                .get(value + 0x42..value + 0x42 + name_length * 2)?
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            (cur == wanted).then(|| record[value + 0x41])
+        })
+}
+
 fn replace_file_name_with_new_name(
     record: &mut [u8],
     old_name: &str,
@@ -5665,6 +5695,8 @@ fn replace_file_name_with_new_name(
         let Some((attr_offset, namespace)) = target else {
             break;
         };
+        // The new name's namespace, not the old one's (#492).
+        let namespace = crate::record_build::fn_namespace_after_rename(namespace, new_name);
         let value = build_file_name_value(parent_reference, &new_utf16, nt_time, is_dir, namespace);
         crate::attr_resize::set_resident_value(record, attr_offset, &value)?;
     }

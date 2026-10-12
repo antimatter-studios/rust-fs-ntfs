@@ -111,6 +111,8 @@ pub(crate) const FA_NTFS_VIEW_INDEX: u32 = 0x2000_0000;
 ///   chars valid in DOS short names. chkdsk rejects this namespace
 ///   on names that don't fit (e.g. "persistent.txt" — 10-char stem).
 const FILE_NAME_NAMESPACE_POSIX: u8 = 0;
+const FILE_NAME_NAMESPACE_WIN32: u8 = 1;
+const FILE_NAME_NAMESPACE_DOS: u8 = 2;
 const FILE_NAME_NAMESPACE_WIN32_AND_DOS: u8 = 3;
 
 /// Permitted DOS 8.3 short-name characters (the canonical FAT/NTFS
@@ -139,6 +141,22 @@ fn is_dos83_char(c: char) -> bool {
                 | '#'
                 | '&'
         )
+}
+
+/// The namespace a `$FILE_NAME` in namespace `old` takes when it is
+/// renamed to `new_name` (#492).
+///
+/// A rename kept the old namespace, so `file.txt` renamed to
+/// `longer_name.txt` stayed `WIN32_AND_DOS`, which chkdsk rejects on a name
+/// that does not fit 8.3. A `POSIX` or `WIN32_AND_DOS` name stands alone
+/// and is re-derived as create derives it. A `WIN32` or `DOS` name is one
+/// half of a pair whose other half is still on the record, so it keeps
+/// its namespace.
+pub(crate) fn fn_namespace_after_rename(old: u8, new_name: &str) -> u8 {
+    match old {
+        FILE_NAME_NAMESPACE_WIN32 | FILE_NAME_NAMESPACE_DOS => old,
+        _ => fn_namespace_for(new_name),
+    }
 }
 
 /// Pick a `$FILE_NAME.namespace` for a user-supplied basename.
