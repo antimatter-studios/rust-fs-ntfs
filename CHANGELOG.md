@@ -78,6 +78,27 @@
   gives to a file of its own, so when Windows later replayed its log one of
   the two was lost. Each now replays a log holding work first, and refuses
   a dirty volume or a log it cannot replay in full, with nothing written.
+- **Every write to a metafile is refused before anything is touched (#499).**
+  Records 0 to 23 other than the root, and `$Extend`'s children, are refused
+  with `EPERM` by every mutating entry point: unlink, remove, rename (as
+  source or as the name replaced), truncate, grow, every content, stream,
+  EA, reparse, object id, attribute, time and security write, link, and a
+  create or mkdir into `$Extend`. `$Volume` and `$BadClus` could be
+  unlinked, `$UpCase` truncated and every metafile renamed, and an unlink
+  of `$MFT` was refused only after the record and index had changed.
+- **A new file is never given one of the reserved records 16 to 23.** The
+  search for a free record wrapped round to 0 once every record from 24 up
+  was in use, so on a volume whose `$MFT:$Bitmap` leaves them clear, as
+  Windows' does, a file landed in record 16. It now grows `$MFT` instead,
+  as Windows and ntfs-3g do.
+- **Every write to a metafile is refused before anything is touched (#499).**
+  Records 0 to 23 other than the root, and `$Extend`'s children, are refused
+  with `EPERM` by every mutating entry point: unlink, remove, rename (as
+  source or as the name replaced), truncate, grow, every content, stream,
+  EA, reparse, object id, attribute, time and security write, link, and a
+  create or mkdir into `$Extend`. `$Volume` and `$BadClus` could be
+  unlinked, `$UpCase` truncated and every metafile renamed, and an unlink
+  of `$MFT` was refused only after the record and index had changed.
 - **Three on-disk fields are multiplied only by checked arithmetic.** A
   boot sector's `total_sectors` (#475), `$MFT:$Bitmap`'s value length
   (#476) and a log record's `target_vcn` in replay (#507) were multiplied

@@ -225,10 +225,20 @@ pub fn is_allocated_io<T: BlockIo + ?Sized>(
     Ok((byte >> bit) & 1 != 0)
 }
 
+/// The first record a file may be given. Records 0 to 15 are the
+/// metafiles and 16 to 23 are reserved: Windows keeps them for `$MFT`'s
+/// own extension records and gives a file a record from 24 up, as
+/// ntfs-3g does.
+pub const FIRST_USER_RECORD: u64 = 24;
+
 /// Find the first free MFT record number at or after `hint`, wrapping
 /// round to the start. Returns `None` when every record `$MFT` holds is
 /// in use -- see [`MftBitmap::record_limit`]; growing `$MFT` is
 /// [`find_or_grow_free_record_io`]'s job.
+///
+/// This is a search of the bitmap, and record numbers below
+/// [`FIRST_USER_RECORD`] are bits like any other. A record for a file
+/// comes from [`find_or_grow_free_record_io`], which never returns one.
 pub fn find_free_record(image: &Path, bm: &MftBitmap, hint: u64) -> Result<Option<u64>, Error> {
     let mut io = PathIo::open_ro(image)?;
     find_free_record_io(&mut io, bm, hint)
@@ -239,9 +249,21 @@ pub fn find_free_record_io<T: BlockIo + ?Sized>(
     bm: &MftBitmap,
     hint: u64,
 ) -> Result<Option<u64>, Error> {
+    find_free_record_from_io(io, bm, hint, 0)
+}
+
+/// [`find_free_record_io`] over records from `floor` up: the wrap goes
+/// round to `floor`, not to 0.
+fn find_free_record_from_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    bm: &MftBitmap,
+    hint: u64,
+    floor: u64,
+) -> Result<Option<u64>, Error> {
     let total = bm.record_limit();
-    // Two passes: [hint..total), then [0..hint).
-    for (begin, finish) in [(hint, total), (0, hint.min(total))] {
+    let hint = hint.max(floor);
+    // Two passes: [hint..total), then [floor..hint).
+    for (begin, finish) in [(hint, total), (floor, hint.min(total))] {
         let mut n = begin;
         while n < finish {
             let byte_idx = n / 8;
@@ -256,18 +278,23 @@ pub fn find_free_record_io<T: BlockIo + ?Sized>(
     Ok(None)
 }
 
-/// Return a free record, extending `$MFT` when its current record range is full.
+/// Return a free record for a file, from [`FIRST_USER_RECORD`] up,
+/// extending `$MFT` when its current record range is full.
+///
+/// The search used to wrap round to 0, so with every record from 24 up
+/// in use, a volume whose bitmap leaves 16 to 23 clear -- as Windows'
+/// does -- had them handed to user files.
 pub fn find_or_grow_free_record_io<T: BlockIo + ?Sized>(
     io: &mut T,
     hint: u64,
 ) -> Result<(MftBitmap, u64), Error> {
     let current = locate_io(io)?;
-    if let Some(record) = find_free_record_io(io, &current, hint)? {
+    if let Some(record) = find_free_record_from_io(io, &current, hint, FIRST_USER_RECORD)? {
         return Ok((current, record));
     }
     grow_io(io, &current)?;
     let grown = locate_io(io)?;
-    let record = find_free_record_io(io, &grown, current.record_limit())?
+    let record = find_free_record_from_io(io, &grown, current.record_limit(), FIRST_USER_RECORD)?
         .ok_or(Error::io("$MFT growth exposed no free records"))?;
     Ok((grown, record))
 }
