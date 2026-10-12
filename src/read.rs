@@ -957,8 +957,21 @@ pub fn read_volume_info<T: BlockIo + ?Sized>(io: &mut T) -> Result<VolumeInfo, E
     // always seen) — one sector short of the raw device, since NTFS reserves
     // the final sector for the backup boot sector. Fall back to the device
     // length only if a malformed boot sector reports zero total_sectors.
+    //
+    // Checked: both factors are boot-sector fields nothing has bounded, and
+    // in release, where overflow checks are off, the product wrapped to a
+    // wrong size for the volume (#475).
     let total_size = if params.total_sectors > 0 {
-        params.total_sectors * params.bytes_per_sector as u64
+        params
+            .total_sectors
+            .checked_mul(u64::from(params.bytes_per_sector))
+            .ok_or_else(|| {
+                Error::io(format!(
+                    "the boot sector says the volume is {} sectors of {} bytes, more bytes \
+                     than a u64 counts",
+                    params.total_sectors, params.bytes_per_sector
+                ))
+            })?
     } else {
         io.size()
     };

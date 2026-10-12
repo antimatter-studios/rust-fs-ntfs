@@ -1078,9 +1078,18 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
                 read(base, &mut bytes)?;
                 let mut fixed = bytes.clone();
                 let valid = apply_fixup_on_read_magic(&mut fixed, bps, magic).is_ok();
-                let record = (magic == b"FILE").then(|| {
-                    (vcn * params.cluster_size + in_page as u64) / params.file_record_size
-                });
+                // Checked, as `base` is above: `vcn` is the log record's
+                // own `target_vcn`, and the product wrapped in release to
+                // name the wrong record for the block replay writes (#507).
+                let record = if magic == b"FILE" {
+                    let at = vcn
+                        .checked_mul(params.cluster_size)
+                        .and_then(|b| b.checked_add(in_page as u64))
+                        .ok_or_else(|| refuse(format!("LSN {lsn:#x} names VCN {vcn:#x}")))?;
+                    Some(at / params.file_record_size)
+                } else {
+                    None
+                };
                 e.insert(Block {
                     magic,
                     bytes: if valid { fixed } else { bytes },
