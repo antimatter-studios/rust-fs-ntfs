@@ -291,6 +291,23 @@ fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, Error> {
         // cluster, which is what a volume with a small cluster uses.
         cluster_size as u32
     };
+    // The rule the reader applies to every directory's index blocks
+    // (`idx_block`): a power of two, at least a sector, at most 64 KiB.
+    // Without it here, `mkdir` built directories from whatever the boot
+    // sector said -- 69 KiB, 1 GiB -- that this crate's own reader then
+    // refused (#508).
+    if !(u64::from(bytes_per_sector)..=crate::idx_block::MAX_INDEX_BLOCK_SIZE)
+        .contains(&u64::from(index_block_size))
+        || !index_block_size.is_power_of_two()
+    {
+        return Err(Error::io(format!(
+            "the boot sector says index blocks are {index_block_size} bytes (byte {:#04x} at \
+             {BOOT_OFF_CLUSTERS_PER_INDEX_BLOCK:#x}), and an index block is a power of two \
+             between one {bytes_per_sector}-byte sector and {} bytes",
+            boot[BOOT_OFF_CLUSTERS_PER_INDEX_BLOCK],
+            crate::idx_block::MAX_INDEX_BLOCK_SIZE
+        )));
+    }
 
     let total_sectors = u64::from_le_bytes(
         boot[BOOT_OFF_TOTAL_SECTORS..BOOT_OFF_TOTAL_SECTORS + 8]
