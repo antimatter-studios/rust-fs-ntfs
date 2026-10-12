@@ -141,10 +141,18 @@ fn a_log_record_whose_target_vcn_overflows_is_refused_by_replay() {
     }
     <PathIo as BlockIo>::sync(&mut io).expect("sync");
 
-    let replayed = fsck::replay_logfile_io(&mut io);
+    // Refused, and refused for this: in release, where the multiply
+    // wrapped instead of panicking, replay went on with the wrong record
+    // number and failed later for some other reason, which a bare
+    // `is_err` cannot tell from the refusal.
+    let replayed = fsck::replay_logfile_io(&mut io).map(|_| ());
+    let refused_for_the_vcn = replayed
+        .as_ref()
+        .err()
+        .is_some_and(|e| e.to_string().contains("names VCN"));
     assert!(
-        replayed.is_err(),
-        "replay accepted a log record whose target_vcn overflows the cluster size: {:?}",
-        replayed.map(|_| ())
+        refused_for_the_vcn,
+        "replay did not refuse a log record whose target_vcn overflows the cluster size: \
+         {replayed:?}"
     );
 }
