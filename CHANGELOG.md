@@ -109,6 +109,11 @@
   name that does not fit 8.3. The record and the index entry now both take
   POSIX, or WIN32_AND_DOS for an 8.3 name; one half of a WIN32 + DOS pair
   keeps its namespace.
+- **A file's contents can be replaced again once they are non-resident**
+  (#470). `write_file_contents` promoted a file that outgrew its record,
+  and then refused every later rewrite of it with "$DATA is already
+  non-resident": the second save of any file over about 700 bytes failed.
+  A non-resident file is now resized in place and written over.
 - **A `$LogFile` whose checkpoint names no start is replayed** (#137). The
   first checkpoint NTFS writes after its log was emptied (by `chkdsk /L`,
   say) has nothing before it to start from: its start of checkpoint is 0
