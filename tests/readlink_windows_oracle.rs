@@ -9,6 +9,10 @@
 //!
 //! CI builds the fixture in its Windows job and hands it to the Linux
 //! integration job. Without it these tests fail, naming the builder.
+//!
+//! A relative link's target is a path the host walks, so readlink gives
+//! it with `/` where Windows reports `\` (#505). The builder names its
+//! relative links `rel-*`; `abs-dir` names a drive and keeps Windows' form.
 
 #![allow(unused_unsafe)]
 
@@ -49,7 +53,12 @@ fn readlink_matches_the_target_windows_reports() {
     let fs = unsafe { fs_ntfs_mount(img.as_ptr()) };
     assert!(!fs.is_null(), "mount {IMG}");
     let mut mismatches = Vec::new();
-    for (name, want) in &rows {
+    for (name, windows) in &rows {
+        let want = &if name.starts_with("rel-") {
+            windows.replace('\\', "/")
+        } else {
+            windows.clone()
+        };
         let path = CString::new(format!("/{name}")).unwrap();
         // Exactly large enough: the contract's tightest successful fit.
         let mut buf = vec![0xA5u8; want.len() + 1];

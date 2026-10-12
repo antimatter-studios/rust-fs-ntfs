@@ -3304,6 +3304,49 @@ pub fn read_reparse_point_io<T: BlockIo + ?Sized>(
     Ok(Some(ReparsePoint { reparse_tag, data }))
 }
 
+/// The substitute name, print name and relative flag a symlink to
+/// `target` is written with, in Windows path syntax (#505).
+///
+/// The target used to be stored verbatim: `/` separators, and a POSIX
+/// absolute target with the relative flag clear, which neither Windows nor
+/// ntfs-3g can resolve. Windows decides from the target's form, and so
+/// does this, whatever `relative` says:
+///
+/// * a drive path `X:\…` is absolute, `\??\X:\…` in the substitute name
+///   and `X:\…` in the print name; an NT path `\??\…` is kept as it is,
+///   and a UNC path `\\server\share` becomes `\??\UNC\server\share`;
+/// * anything else is relative to the link's directory;
+/// * a POSIX absolute target `/d/small` names no drive, and is written as
+///   Windows writes a rooted path without one: `\d\small`, relative, from
+///   the root of the link's own volume.
+///
+/// `/` becomes `\` throughout.
+fn symlink_names(target: &str, _relative: bool) -> Result<(String, String, bool), Error> {
+    if target.is_empty() {
+        return Err(Error::invalid("a symlink target must not be empty"));
+    }
+    let t = target.replace('/', "\\");
+    if let Some(rest) = t.strip_prefix(r"\??\") {
+        let print = match rest.strip_prefix(r"UNC\") {
+            Some(unc) => format!(r"\\{unc}"),
+            None => rest.to_string(),
+        };
+        return Ok((t.clone(), print, false));
+    }
+    let b = t.as_bytes();
+    if b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && b.get(2).is_none_or(|&c| c == b'\\')
+    {
+        return Ok((format!(r"\??\{t}"), t, false));
+    }
+    if let Some(unc) = t.strip_prefix(r"\\") {
+        return Ok((format!(r"\??\UNC\{unc}"), t, false));
+    }
+    Ok((t.clone(), t, true))
+}
+
 /// Convenience: create a symbolic link at `parent/basename` pointing
 /// to `target`.
 pub fn create_symlink(
@@ -3324,8 +3367,9 @@ pub fn create_symlink_io<T: BlockIo + ?Sized>(
     target: &str,
     relative: bool,
 ) -> Result<u64, Error> {
+    let (substitute, print, relative) = symlink_names(target, relative)?;
     let rec = create_file_io(io, parent_path, basename)?;
-    let data = crate::record_build::build_symlink_reparse_data(target, None, relative);
+    let data = crate::record_build::build_symlink_reparse_data(&substitute, Some(&print), relative);
     let child_path = if parent_path == "/" {
         format!("/{basename}")
     } else {
