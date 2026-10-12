@@ -428,6 +428,8 @@ fs.ntfs disk.img read /notes.txt > notes.txt
 fs.ntfs disk.img get label --text
 fs.ntfs disk.img write /notes.txt < notes.txt
 fs.ntfs disk.img mkdir /backup
+fs.ntfs disk.img rm /notes.txt
+fs.ntfs disk.img rmdir /backup     # an empty directory
 fs.ntfs disk.img set label "Backup Volume"
 fs.ntfs --offset 1048576 whole-disk.img info
 fsck.ntfs disk.img                 # dirty flag, $LogFile, $MFTMirr, MFT records; exit 0/1/4/8

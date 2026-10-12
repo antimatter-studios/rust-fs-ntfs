@@ -152,6 +152,34 @@ fn command() -> Cmd {
                      fs.ntfs disk.img mkdir /backup/2026",
                 ),
         )
+        .subcommand(
+            Cmd::new("rm")
+                .about("Remove a file (a directory is removed with rmdir)")
+                .arg(
+                    Arg::new("path")
+                        .value_name("PATH")
+                        .required(true)
+                        .value_parser(value_parser!(OsString)),
+                )
+                .after_help(
+                    "Examples:\n  fs.ntfs disk.img rm /notes.txt\n  \
+                     fs.ntfs disk.img rm /backup/2026/old.tar",
+                ),
+        )
+        .subcommand(
+            Cmd::new("rmdir")
+                .about("Remove an empty directory")
+                .arg(
+                    Arg::new("path")
+                        .value_name("PATH")
+                        .required(true)
+                        .value_parser(value_parser!(OsString)),
+                )
+                .after_help(
+                    "Examples:\n  fs.ntfs disk.img rmdir /backup/2026\n\n\
+                     The directory must be empty.",
+                ),
+        )
         .subcommand(key_command(
             "get",
             "Report the filesystem's properties, or one of them",
@@ -248,6 +276,8 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         "set" => set(target, offset, sub),
         "write" => write(target, offset, path_arg(sub)?),
         "mkdir" => mkdir(target, offset, path_arg(sub)?),
+        "rm" => remove(target, offset, path_arg(sub)?, false),
+        "rmdir" => remove(target, offset, path_arg(sub)?, true),
         "resize" => Err(CliError::not_implemented(
             "resize: this library cannot resize an NTFS volume",
         )),
@@ -604,6 +634,27 @@ fn mkdir(target: &OsString, offset: u64, path: &str) -> Result<Outcome, CliError
     })?;
     let report = Json::object([("path", Json::from(path)), ("record", Json::from(record))]);
     Ok(Outcome::report(report).with_text(format!("created {path}")))
+}
+
+/// Remove a file (`rm`) or an empty directory (`rmdir`). Each refuses the
+/// other's kind of entry, as `unlink` and `rmdir` do, and everything that
+/// can be refused is refused before anything is written.
+fn remove(
+    target: &OsString,
+    offset: u64,
+    path: &str,
+    directory: bool,
+) -> Result<Outcome, CliError> {
+    split_path(path)?;
+    edit(target, offset, path, |dev| {
+        if directory {
+            fs_ntfs::write::rmdir_io(dev, path)
+        } else {
+            fs_ntfs::write::unlink_io(dev, path)
+        }
+    })?;
+    let report = Json::object([("path", Json::from(path))]);
+    Ok(Outcome::report(report).with_text(format!("removed {path}")))
 }
 
 /// Whether `$Volume` carries the dirty flag: the volume was not cleanly

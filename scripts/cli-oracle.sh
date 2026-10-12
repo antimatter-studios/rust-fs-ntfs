@@ -32,6 +32,11 @@
 #                                    does, and fsck.ntfs after finds nothing.
 #                                    IMAGE.manifest is Windows' listing of its own
 #                                    recovery plus what fs.ntfs wrote
+#   empty-directory IMAGE            fs.ntfs fills /kept and /gone past one index
+#                                    level, rm removes half of /kept and all of
+#                                    /gone in shuffled order, and rmdir removes
+#                                    /gone; IMAGE.manifest lists /kept's survivors
+#                                    for win-cli-verify.ps1
 #   grow-mft IMAGE SNAPSHOT          IMAGE is what Windows recovered from
 #                                    test-disks/windows-interrupted-SNAPSHOT, whose
 #                                    $MFT:$Bitmap outruns $MFT; fs.ntfs writes files
@@ -182,6 +187,50 @@ case "$step" in
         printf 'label\t%s\n' "$1" >>"$manifest"
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the writes exited $status: $out"
+        ;;
+    empty-directory)
+        [ $# -eq 0 ] || die "empty-directory IMAGE"
+        manifest="$image.manifest"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        : >"$manifest"
+        for dir in /kept /gone; do
+            run fs "$image" mkdir "$dir"
+            [ "$status" -eq 0 ] || die "fs.ntfs mkdir $dir exited $status: $(cat "$image.cli-err")"
+        done
+        printf 'dir\t/kept\n' >>"$manifest"
+        # 300 names of varying length in each: past one index level.
+        for i in $(seq 1 300); do
+            printf 'name-%03d-%s\n' "$i" "$(printf '%*s' $((i % 23)) '' | tr ' ' x)"
+        done >"$work/names"
+        while read -r name; do
+            random "$work/$name" 64
+            for dir in /kept /gone; do
+                set +e
+                "$BIN" fs "$image" write "$dir/$name" <"$work/$name" >/dev/null 2>"$image.cli-err"
+                status=$?
+                set -e
+                [ "$status" -eq 0 ] || die "fs.ntfs write $dir/$name exited $status: $(cat "$image.cli-err")"
+            done
+        done <"$work/names"
+        # A seeded shuffle: interior index entries go as well as leaf ones.
+        awk 'BEGIN { srand(495) } { print rand() "\t" $0 }' "$work/names" | sort | cut -f2 >"$work/order"
+        n=0
+        while read -r name; do
+            n=$((n + 1))
+            if [ $((n % 2)) -eq 0 ]; then
+                run fs "$image" rm "/kept/$name"
+                [ "$status" -eq 0 ] || die "fs.ntfs rm /kept/$name exited $status: $(cat "$image.cli-err")"
+            else
+                printf 'file\t%s\t%s\t%s\n' "/kept/$name" 64 "$(sha "$work/$name")" >>"$manifest"
+            fi
+            run fs "$image" rm "/gone/$name"
+            [ "$status" -eq 0 ] || die "fs.ntfs rm /gone/$name exited $status: $(cat "$image.cli-err")"
+        done <"$work/order"
+        run fs "$image" rmdir /gone
+        [ "$status" -eq 0 ] || die "fs.ntfs rmdir /gone exited $status: $(cat "$image.cli-err")"
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the removals exited $status: $out"
         ;;
     replay)
         [ $# -eq 1 ] || die "replay IMAGE SNAPSHOT"

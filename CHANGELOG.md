@@ -15,6 +15,11 @@ written against 0.9.0, and `chore check:semver` refuses it otherwise.
 
 ### Added
 
+- **`fs.ntfs rm` and `fs.ntfs rmdir`** (#550). The namespace verbs the CLI
+  design names, removing a file and an empty directory. A matrix scenario
+  in CI's Windows job fills two directories past one index level, empties
+  them with these verbs, and has Windows read the survivors back and
+  `chkdsk` find the volume clean.
 - **`docs/features.md`, a features page kept current by every pull request.**
   Each feature's state, the release it shipped in, its tracking issue and the
   test that checks it. The README's status, feature, "What works", "What

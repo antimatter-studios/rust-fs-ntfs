@@ -53,6 +53,7 @@ cli = [
   "cli-corrupt-mirror-fsck-win-chkdsk",
   "cli-corrupt-signature-fsck-win-chkdsk",
   "cli-populate-win-verify-chkdsk",
+  "cli-empty-directory-win-verify-chkdsk",
   "cli-windows-interrupted-1-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-6-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-1-mount-replay-write-win-verify-chkdsk",
@@ -283,6 +284,15 @@ expect_exit = 0
 # fsck.ntfs. Writes <image>.manifest, which win-cli-verify checks.
 host = "host"
 command = "bash scripts/cli-oracle.sh populate {image_dir}/{run_id}/{scenario.image} '{scenario.volume_params.label}'"
+expect_exit = 0
+
+[ops.cli-empty-directory]
+# fs.ntfs fills /kept and /gone past one index level, rm removes half of
+# /kept and all of /gone in a seeded shuffle -- entries of interior index
+# nodes as well as leaves -- and rmdir removes /gone; then a clean
+# fsck.ntfs. Writes <image>.manifest: /kept's survivors, for win-cli-verify.
+host = "host"
+command = "bash scripts/cli-oracle.sh empty-directory {image_dir}/{run_id}/{scenario.image}"
 expect_exit = 0
 
 [ops.cli-replay]
