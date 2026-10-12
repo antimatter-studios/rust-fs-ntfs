@@ -2266,6 +2266,37 @@
       "image": "nfs-cli-populate-win-verify-chkdsk.img",
       "_notes": "fs.ntfs mkdir, write and set label, graded by Windows: every file reads back with the SHA-256 fs.ntfs wrote (Get-FileHash), the directories exist, the label is the one set, and chkdsk finds the volume clean."
     },
+    "cli-empty-directory-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "CLI EMPTY",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        { "op": "cli-mkfs" },
+        { "op": "cli-empty-directory" },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        { "op": "win-cli-verify", "keep_image": "true" },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-empty-directory-win-verify-chkdsk.img",
+      "_notes": "fs.ntfs fills two directories past one index level, rm empties one and half of the other in a seeded shuffle -- entries of interior index nodes as well as leaves (#495) -- and rmdir removes the emptied one. Windows reads every survivor back by its SHA-256 and chkdsk finds the volume clean (#550)."
+    },
     "cli-windows-interrupted-1-fsck-replay-win-verify-chkdsk": {
       "status": "pending",
       "volume_params": {
