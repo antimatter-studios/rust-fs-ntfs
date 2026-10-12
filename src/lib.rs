@@ -1637,11 +1637,9 @@ pub extern "C" fn fs_ntfs_readlink(
                 return -1;
             }
         };
-        // Strip NT-path prefix "\\??\\" so POSIX callers see a sensible path.
-        let cleaned = target
-            .strip_prefix(r"\??\")
-            .map(String::from)
-            .unwrap_or(target);
+        // The answer a listing gives through `reparse_link_target`: no
+        // `\??\` NT prefix, and `/` in a relative link's target (#505).
+        let cleaned = reparse_link_target(&reparse).unwrap_or(target);
         let bytes = cleaned.as_bytes();
         let Ok(len) = c_int::try_from(bytes.len()) else {
             set_error(&Error::io(

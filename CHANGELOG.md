@@ -100,6 +100,13 @@
   of its type. ntfs-3g and Windows stop looking once they pass an attribute's
   slot, so a stream written after one that sorts later was one they could
   not find.
+- **A symlink is written in Windows path syntax and read back in POSIX
+  syntax** (#505). Targets were stored verbatim, with `/` separators and a
+  POSIX absolute path marked absolute, which neither Windows nor ntfs-3g
+  can resolve; and a Windows link's relative target came back with `\`
+  separators. Targets are written as Windows writes them -- `\??\X:\…`
+  for a drive, relative otherwise, a `/`-rooted target as a path from the
+  link's volume root -- and a relative target reads back with `/`.
 - **A transient HTTP 5xx from the chore release download no longer fails a CI
   job.** Every chore download in `ci.yml`, `fuzz.yml` and `release.yml`
   retries up to five times on any error.
@@ -124,13 +131,6 @@
   (#503). Any 32-bit value was written, and Windows applies no descriptor
   to a file whose id `$SII` does not hold. Such an id is now refused with
   `InvalidInput`, before anything is written.
-- **A symlink is written in Windows path syntax and read back in POSIX
-  syntax** (#505). Targets were stored verbatim, with `/` separators and a
-  POSIX absolute path marked absolute, which neither Windows nor ntfs-3g
-  can resolve; and a Windows link's relative target came back with `\`
-  separators. Targets are written as Windows writes them -- `\??\X:\…`
-  for a drive, relative otherwise, a `/`-rooted target as a path from the
-  link's volume root -- and a relative target reads back with `/`.
 
 ## [0.9.0] — 2026-10-06
 
