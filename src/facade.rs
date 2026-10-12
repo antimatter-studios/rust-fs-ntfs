@@ -314,7 +314,12 @@ impl Filesystem {
         ];
         // read_dir_entries already merges $INDEX_ROOT + INDX blocks, skips the
         // DOS 8.3 shadow names, and sets is_dir from each entry's $FILE_NAME bit.
-        for e in read::read_dir_entries(&mut io, current_rn).map_err(Error::from)? {
+        // The metafiles stay out, as on Windows (#499).
+        for e in read::read_dir_entries(&mut io, current_rn)
+            .map_err(Error::from)?
+            .into_iter()
+            .filter(read::listed_to_hosts)
+        {
             out.push(DirEntry {
                 file_record_number: e.record_number,
                 file_type: if e.is_dir {
