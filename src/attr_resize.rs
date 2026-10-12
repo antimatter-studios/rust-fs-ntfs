@@ -298,6 +298,27 @@ fn attribute_name(record: &[u8], at: usize) -> Vec<u16> {
         .unwrap_or_default()
 }
 
+/// Refuse to add an attribute to, or remove one from, a record that
+/// carries an `$ATTRIBUTE_LIST` (#468).
+///
+/// The list names every attribute the file has and the record it lives
+/// in, and this driver does not maintain it. An attribute added to the
+/// base record had no list entry, so ntfs-3g could not find it and the
+/// file was internally inconsistent, while the write returned `Ok`. A
+/// rewrite in place keeps an attribute's place and id, so it leaves the
+/// list as true as it was and is not refused here.
+pub(crate) fn refuse_if_attribute_list(record: &[u8], what: &str) -> Result<(), Error> {
+    if crate::attr_io::find_attribute(record, crate::attr_io::AttrType::AttributeList, None)
+        .is_some()
+    {
+        return Err(Error::refused(format!(
+            "{what}: the record carries an $ATTRIBUTE_LIST, which this driver does not \
+             maintain, and the list would no longer say where the file's attributes are"
+        )));
+    }
+    Ok(())
+}
+
 /// Insert `new_attr` where NTFS order puts it: by type, and within a type
 /// by name, case-insensitively under `upcase` and then case-sensitively,
 /// an unnamed attribute first.
@@ -312,6 +333,7 @@ pub(crate) fn insert_attribute_collated_typed(
     new_attr: &[u8],
     upcase: Option<&crate::upcase::UpcaseTable>,
 ) -> Result<(), ResidentResizeError> {
+    refuse_if_attribute_list(record, "insert an attribute").map_err(ResidentResizeError::Other)?;
     let new_len = new_attr.len();
     if new_len == 0 || !new_len.is_multiple_of(8) {
         return Err(ResidentResizeError::Other(Error::io(format!(
