@@ -57,12 +57,14 @@ check "read /comp.txt of Windows' compressed volume is the pattern it wrote" \
     cmp -s <(fs.ntfs "$fixtures/ntfs-compressed.img" read /comp.txt) <(yes ABC | tr -d '\n' | head -c 200000)
 
 # Symlinks Windows made: ls shows each as a symlink whose target is the one
-# Windows reported.
+# Windows reported -- with `/` for the relative ones, which the builder names
+# rel-*, since a POSIX host walks that path (#505).
 fs.ntfs "$fixtures/ntfs-symlink.img" ls / >"$SANDBOX/links.json" 2>/dev/null
 links=0
 while IFS="$(printf '\t')" read -r name target; do
     [ -n "$name" ] || continue
     links=$((links + 1))
+    case "$name" in rel-*) target="$(printf '%s' "$target" | tr '\\' '/')" ;; esac
     jq_check "ls shows $name as a symlink to Windows' target" \
         "any(.[]; .name == \"$name\" and .type == \"symlink\" and .target == $(jq -Rn --arg t "$target" '$t'))" \
         "$SANDBOX/links.json"

@@ -1637,11 +1637,9 @@ pub extern "C" fn fs_ntfs_readlink(
                 return -1;
             }
         };
-        // Strip NT-path prefix "\\??\\" so POSIX callers see a sensible path.
-        let cleaned = target
-            .strip_prefix(r"\??\")
-            .map(String::from)
-            .unwrap_or(target);
+        // The answer a listing gives through `reparse_link_target`: no
+        // `\??\` NT prefix, and `/` in a relative link's target (#505).
+        let cleaned = reparse_link_target(&reparse).unwrap_or(target);
         let bytes = cleaned.as_bytes();
         let Ok(len) = c_int::try_from(bytes.len()) else {
             set_error(&Error::io(
@@ -1702,7 +1700,9 @@ fn decode_mount_point_print_name(data: &[u8]) -> Option<String> {
 
 /// The target a `$REPARSE_POINT` value names, when it is a link: a
 /// symbolic link's or a mount point's print name, with any `\??\` NT
-/// prefix removed -- what `fs_ntfs_readlink` returns. `None` for another
+/// prefix removed -- what `fs_ntfs_readlink` returns. A relative symbolic
+/// link's target has its `\` separators turned into `/`, so a POSIX host
+/// can walk it; an absolute one keeps its Windows form. `None` for another
 /// reparse tag, a value too short to hold its header, or a link with no
 /// print name. For callers that already hold the value (a listing, which
 /// reads each entry's reparse point anyway).
@@ -1718,6 +1718,19 @@ pub fn reparse_link_target(reparse: &[u8]) -> Option<String> {
         0xA000_0003 /* MOUNT_POINT */ => decode_mount_point_print_name(data),
         _ => None,
     }?;
+    // A RELATIVE TARGET IS A PATH THE HOST WALKS, so it gets the host's
+    // separator. `mklink link ..\d\small` came back as one component full
+    // of backslashes, which resolves to nothing on a POSIX host (#505). An
+    // absolute target names a drive no POSIX host has, and keeps its
+    // Windows form.
+    const SYMLINK_FLAG_RELATIVE: u32 = 1;
+    let relative = tag == 0xA000_000C
+        && data.get(8..12).is_some_and(|f| {
+            u32::from_le_bytes([f[0], f[1], f[2], f[3]]) & SYMLINK_FLAG_RELATIVE != 0
+        });
+    if relative {
+        return Some(target.replace('\\', "/"));
+    }
     Some(
         target
             .strip_prefix(r"\??\")
