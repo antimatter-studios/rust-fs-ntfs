@@ -5072,6 +5072,19 @@ fn write_file_contents_unrefreshed_io<T: BlockIo + ?Sized>(
     file_path: &str,
     new_data: &[u8],
 ) -> Result<u64, Error> {
+    // A $DATA THAT IS ALREADY NON-RESIDENT IS REPLACED IN PLACE.
+    //
+    // The resident attempt reports `NeedsPromotion` for it, and the
+    // promotion refuses an attribute that is not resident: every save
+    // after the first one that promoted the file failed with "$DATA is
+    // already non-resident" (#470). `replace_file_contents_io` resizes it
+    // and writes the new bytes over it, and never calls back here for a
+    // non-resident `$DATA`.
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    let (_, record) = read_mft_record_io(io, rec)?;
+    if attr_io::find_attribute(&record, AttrType::Data, None).is_some_and(|loc| !loc.is_resident) {
+        return replace_file_contents_io(io, file_path, new_data);
+    }
     match write_resident_contents_attempt_io(io, file_path, new_data) {
         Ok(n) => Ok(n),
         Err(ResidentWriteError::NeedsPromotion(_)) => {
