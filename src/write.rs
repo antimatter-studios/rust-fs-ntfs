@@ -446,7 +446,9 @@ pub fn write_at_io<T: BlockIo + ?Sized>(
         return Ok(0);
     }
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    write_at_by_record_number_io(io, rec, offset, data)
+    let written = write_at_by_record_number_io(io, rec, offset, data)?;
+    refresh_directory_entry_sizes_io(io, rec)?;
+    Ok(written)
 }
 
 /// See [`write_at`]. Takes a record number instead of a path.
@@ -466,19 +468,6 @@ pub fn write_at_by_record_number(
 }
 
 pub fn write_at_by_record_number_io<T: BlockIo + ?Sized>(
-    io: &mut T,
-    record_number: u64,
-    offset: u64,
-    data: &[u8],
-) -> Result<u64, Error> {
-    let written = write_at_by_record_number_unrefreshed_io(io, record_number, offset, data)?;
-    refresh_duplicated_sizes_io(io, record_number)?;
-    Ok(written)
-}
-
-/// [`write_at_by_record_number_io`] without the refresh of the size the file's directory
-/// entries carry; see [`refresh_duplicated_sizes_io`].
-fn write_at_by_record_number_unrefreshed_io<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
     offset: u64,
@@ -820,7 +809,9 @@ pub fn truncate_io<T: BlockIo + ?Sized>(
     new_size: u64,
 ) -> Result<u64, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    truncate_by_record_number_io(io, rec, new_size)
+    let size = truncate_by_record_number_io(io, rec, new_size)?;
+    refresh_directory_entry_sizes_io(io, rec)?;
+    Ok(size)
 }
 
 /// Attribute-header offsets for non-resident lengths (per Windows Internals 7th ed.).
@@ -839,18 +830,6 @@ pub fn truncate_by_record_number(
 }
 
 pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
-    io: &mut T,
-    record_number: u64,
-    new_size: u64,
-) -> Result<u64, Error> {
-    let written = truncate_by_record_number_unrefreshed_io(io, record_number, new_size)?;
-    refresh_duplicated_sizes_io(io, record_number)?;
-    Ok(written)
-}
-
-/// [`truncate_by_record_number_io`] without the refresh of the size the file's directory
-/// entries carry; see [`refresh_duplicated_sizes_io`].
-fn truncate_by_record_number_unrefreshed_io<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
     new_size: u64,
@@ -992,7 +971,9 @@ pub fn grow_nonresident_io<T: BlockIo + ?Sized>(
     new_size: u64,
 ) -> Result<u64, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    grow_nonresident_by_record_number_io(io, rec, new_size)
+    let size = grow_nonresident_by_record_number_io(io, rec, new_size)?;
+    refresh_directory_entry_sizes_io(io, rec)?;
+    Ok(size)
 }
 
 pub fn grow_nonresident_by_record_number(
@@ -1005,18 +986,6 @@ pub fn grow_nonresident_by_record_number(
 }
 
 pub fn grow_nonresident_by_record_number_io<T: BlockIo + ?Sized>(
-    io: &mut T,
-    record_number: u64,
-    new_size: u64,
-) -> Result<u64, Error> {
-    let written = grow_nonresident_by_record_number_unrefreshed_io(io, record_number, new_size)?;
-    refresh_duplicated_sizes_io(io, record_number)?;
-    Ok(written)
-}
-
-/// [`grow_nonresident_by_record_number_io`] without the refresh of the size the file's directory
-/// entries carry; see [`refresh_duplicated_sizes_io`].
-fn grow_nonresident_by_record_number_unrefreshed_io<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
     new_size: u64,
@@ -3449,10 +3418,18 @@ fn file_names_in_record(record: &[u8]) -> Result<Vec<FileNameRecord>, Error> {
 /// Windows refreshes the name it was opened by; this refreshes every name,
 /// since a write here is not made through any one of them.
 ///
+/// Every path-based write calls it once the write is done. The
+/// `*_by_record_number_io` primitives do not: they are the single steps a
+/// host composes, and one that writes by record number calls this when it
+/// is done with the file, as Windows does when the last handle closes.
+///
 /// A record with no unnamed `$DATA` in it -- a directory -- has nothing to
 /// copy, and a name whose parent has no entry for it pointing back at
 /// `rec` is left alone. Each entry is written only when it changes.
-fn refresh_duplicated_sizes_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<(), Error> {
+pub fn refresh_directory_entry_sizes_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+) -> Result<(), Error> {
     let (_, record) = read_mft_record_io(io, rec)?;
     let Some((allocated, size)) = duplicated_data_sizes(&record) else {
         return Ok(());
@@ -4400,11 +4377,11 @@ pub fn promote_resident_data_to_nonresident_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     promote_resident_data_to_nonresident_unrefreshed_io(io, file_path, new_data)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    refresh_duplicated_sizes_io(io, rec)
+    refresh_directory_entry_sizes_io(io, rec)
 }
 
 /// [`promote_resident_data_to_nonresident_io`] without the refresh of the size the file's directory
-/// entries carry; see [`refresh_duplicated_sizes_io`].
+/// entries carry; see [`refresh_directory_entry_sizes_io`].
 fn promote_resident_data_to_nonresident_unrefreshed_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
@@ -4573,11 +4550,11 @@ pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     write_sparse_file_unrefreshed_io(io, file_path, data)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    refresh_duplicated_sizes_io(io, rec)
+    refresh_directory_entry_sizes_io(io, rec)
 }
 
 /// [`write_sparse_file_io`] without the refresh of the size the file's directory
-/// entries carry; see [`refresh_duplicated_sizes_io`].
+/// entries carry; see [`refresh_directory_entry_sizes_io`].
 fn write_sparse_file_unrefreshed_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
@@ -4854,12 +4831,12 @@ pub fn write_file_contents_io<T: BlockIo + ?Sized>(
 ) -> Result<u64, Error> {
     let written = write_file_contents_unrefreshed_io(io, file_path, new_data)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    refresh_duplicated_sizes_io(io, rec)?;
+    refresh_directory_entry_sizes_io(io, rec)?;
     Ok(written)
 }
 
 /// [`write_file_contents_io`] without the refresh of the size the file's directory
-/// entries carry; see [`refresh_duplicated_sizes_io`].
+/// entries carry; see [`refresh_directory_entry_sizes_io`].
 fn write_file_contents_unrefreshed_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
@@ -5189,12 +5166,12 @@ pub fn write_resident_contents_io<T: BlockIo + ?Sized>(
 ) -> Result<u64, Error> {
     let written = write_resident_contents_unrefreshed_io(io, file_path, new_data)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    refresh_duplicated_sizes_io(io, rec)?;
+    refresh_directory_entry_sizes_io(io, rec)?;
     Ok(written)
 }
 
 /// [`write_resident_contents_io`] without the refresh of the size the file's directory
-/// entries carry; see [`refresh_duplicated_sizes_io`].
+/// entries carry; see [`refresh_directory_entry_sizes_io`].
 fn write_resident_contents_unrefreshed_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
