@@ -791,8 +791,9 @@ fn prepare_rw_mount_as<T: FsckIo>(io: &mut T, replay: bool) -> Result<Option<Rep
              crash, which replaying it recovers, and after a Fast Startup shutdown or a \
              hibernation, which replaying it corrupts: Windows resumes from what it cached \
              and does not see the replay. Once Windows is known to have shut down fully, \
-             replay the log with `fsck.ntfs -y` (fs_ntfs::fsck::fsck), or mount asking for \
-             the replay"
+             replay the log with `fsck.ntfs -y` (fs_ntfs::fsck::fsck), or, through the \
+             library, with a mount that asks for it (Filesystem::mount_rw_replaying_log, the \
+             _replaying_log C ABI mounts)"
         )));
     }
     let report = replay_logfile_io(io)
