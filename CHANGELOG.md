@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Breaking
+
+The next release is **0.10.0**, not 0.9.1: the change below breaks code
+written against 0.9.0, and `chore check:semver` refuses it otherwise.
+
+- **`fsck::CheckFinding` has six new variants, and `fsck::CheckReport` a
+  new public field, `clusters_scanned`** (#517): what `check_io` finds when
+  it accounts for every cluster against `$Bitmap`. A `match` on
+  `CheckFinding` without a wildcard arm, or a `CheckReport` literal naming
+  every field, no longer compiles.
+
 ### Added
 
 - **`docs/features.md`, a features page kept current by every pull request.**
