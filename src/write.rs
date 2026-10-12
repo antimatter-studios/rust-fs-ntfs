@@ -143,6 +143,15 @@ pub mod file_attr {
     pub const NORMAL: u32 = 0x0000_0080;
     pub const TEMPORARY: u32 = 0x0000_0100;
     pub const NOT_CONTENT_INDEXED: u32 = 0x0000_2000;
+    pub const OFFLINE: u32 = 0x0000_1000;
+
+    /// The bits `SetFileAttributes` sets. Every other defined bit
+    /// describes the file's structure -- DIRECTORY, SPARSE_FILE,
+    /// REPARSE_POINT, COMPRESSED, ENCRYPTED -- and is the business of
+    /// the operation that builds that structure, and DEVICE and the
+    /// undefined bits are reserved (#502).
+    pub const SETTABLE: u32 =
+        READONLY | HIDDEN | SYSTEM | ARCHIVE | NORMAL | TEMPORARY | OFFLINE | NOT_CONTENT_INDEXED;
 }
 
 /// Read the `security_id` field from a file's `$STANDARD_INFORMATION`.
@@ -389,6 +398,14 @@ pub fn set_file_attributes_by_record_number_io<T: BlockIo + ?Sized>(
         return Err(Error::io(format!(
             "add and remove overlap: add={:#x} remove={:#x}",
             change.add, change.remove
+        )));
+    }
+    let structural = (change.add | change.remove) & !file_attr::SETTABLE;
+    if structural != 0 {
+        return Err(Error::invalid(format!(
+            "file attributes {structural:#x} describe the file's structure or are reserved, \
+             and are not set or cleared on their own: only {:#x} are (#502)",
+            file_attr::SETTABLE
         )));
     }
     update_mft_record_io(io, record_number, |record| {

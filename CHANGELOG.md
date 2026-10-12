@@ -57,6 +57,12 @@
   sizes and flags, and each step is undone if a later one fails. An entry
   in an interior node of the index is refused instead, as an unlink of one
   is (#495), with nothing written.
+- **Stream names and file attributes Windows refuses are refused.** A named
+  stream's name passes the same checks as a file name, so `a:b`, `x:$DATA`, a
+  NUL inside, or a trailing space or period is refused rather than written
+  where no Windows API can reach it (#497). `set_file_attributes` changes
+  only the bits `SetFileAttributes` can, and refuses DIRECTORY, SPARSE_FILE,
+  REPARSE_POINT, COMPRESSED, ENCRYPTED and the reserved bits (#502).
 - **A write with no read-write mount before it replays the log first, or
   is refused** (#137). `Filesystem::mount` followed by a mutator,
   `write::create_file` and every other path-based mutator in `write`, and
