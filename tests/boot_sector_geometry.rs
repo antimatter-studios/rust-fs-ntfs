@@ -44,6 +44,13 @@ fn boot_image(tag: &str, bytes_per_sector: u16, spc_raw: u8) -> String {
     } else {
         (-10i8) as u8 // 1024-byte records
     };
+    // AND AN INDEX BLOCK SIZE, AS EVERY BOOT SECTOR WINDOWS WRITES HAS ONE.
+    // 0xF4 is -12: 4096-byte index blocks, what Windows and mkntfs write
+    // whatever the cluster size. Left at zero, the parser's fallback made
+    // the index block the cluster, and at 128 KiB and up that is past the
+    // 64 KiB an index block can be -- refused since #508, though this test
+    // is about clusters, not index blocks.
+    b[0x44] = (-12i8) as u8;
     std::fs::write(&path, &b).expect("write boot image");
     path
 }
