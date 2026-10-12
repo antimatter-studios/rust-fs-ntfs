@@ -166,6 +166,12 @@ written against 0.9.0, and `chore check:semver` refuses it otherwise.
   create or mkdir into `$Extend`. `$Volume` and `$BadClus` could be
   unlinked, `$UpCase` truncated and every metafile renamed, and an unlink
   of `$MFT` was refused only after the record and index had changed.
+- **Writes advance the times of what they change** (#493). No write
+  touched `$STANDARD_INFORMATION`'s times, so a rewritten file, or a
+  directory a file was created in, looked unchanged to backup and sync
+  tools. Path-based writes now stamp the file's modified and change times,
+  entry changes stamp the directory's, and a rename or link stamps the
+  file's change time; the record-number primitives leave times to the host.
 - **Three on-disk fields are multiplied only by checked arithmetic.** A
   boot sector's `total_sectors` (#475), `$MFT:$Bitmap`'s value length
   (#476) and a log record's `target_vcn` in replay (#507) were multiplied

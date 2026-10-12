@@ -545,7 +545,7 @@ pub fn write_at_io<T: BlockIo + ?Sized>(
             write_at_by_record_number_io(io, rec, offset, data)?
         }
     };
-    refresh_directory_entry_sizes_io(io, rec)?;
+    finish_data_write_io(io, rec)?;
     Ok(written)
 }
 
@@ -950,7 +950,7 @@ pub fn truncate_io<T: BlockIo + ?Sized>(
         return Ok(new_size);
     }
     let size = truncate_by_record_number_io(io, rec, new_size)?;
-    refresh_directory_entry_sizes_io(io, rec)?;
+    finish_data_write_io(io, rec)?;
     Ok(size)
 }
 
@@ -1118,7 +1118,7 @@ pub fn grow_nonresident_io<T: BlockIo + ?Sized>(
         return truncate_io(io, file_path, new_size);
     }
     let size = grow_nonresident_by_record_number_io(io, rec, new_size)?;
-    refresh_directory_entry_sizes_io(io, rec)?;
+    finish_data_write_io(io, rec)?;
     Ok(size)
 }
 
@@ -1432,6 +1432,24 @@ pub fn rename_same_length(image: &Path, old_path: &str, new_name: &str) -> Resul
 }
 
 pub fn rename_same_length_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    old_path: &str,
+    new_name: &str,
+) -> Result<(), Error> {
+    let parent_path = parent_path_of(old_path);
+    rename_same_length_unstamped_io(io, old_path, new_name)?;
+    let parent = resolve_path_to_record_number_io(io, &parent_path)?;
+    stamp_written_io(io, parent)?;
+    let file = resolve_path_to_record_number_io(
+        io,
+        &format!("{}/{new_name}", parent_path.trim_end_matches('/')),
+    )?;
+    stamp_changed_io(io, file)
+}
+
+/// [`rename_same_length_io`] without advancing the times of what it
+/// changed; see [`stamp_written_io`].
+fn rename_same_length_unstamped_io<T: BlockIo + ?Sized>(
     io: &mut T,
     old_path: &str,
     new_name: &str,
@@ -2232,6 +2250,19 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
     parent_path: &str,
     basename: &str,
 ) -> Result<u64, Error> {
+    let rec = create_file_unstamped_io(io, parent_path, basename)?;
+    let parent = resolve_path_to_record_number_io(io, parent_path)?;
+    stamp_written_io(io, parent)?;
+    Ok(rec)
+}
+
+/// [`create_file_io`] without advancing the times of what it changed; see
+/// [`stamp_written_io`].
+fn create_file_unstamped_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_path: &str,
+    basename: &str,
+) -> Result<u64, Error> {
     // The directory index is ordered by COLLATION_FILE_NAME, so a
     // lookup in it has to fold case the same way the insert did;
     // see `index_io::find_index_entry`.
@@ -3014,6 +3045,19 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
     parent_path: &str,
     basename: &str,
 ) -> Result<u64, Error> {
+    let rec = mkdir_unstamped_io(io, parent_path, basename)?;
+    let parent = resolve_path_to_record_number_io(io, parent_path)?;
+    stamp_written_io(io, parent)?;
+    Ok(rec)
+}
+
+/// [`mkdir_io`] without advancing the times of what it changed; see
+/// [`stamp_written_io`].
+fn mkdir_unstamped_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_path: &str,
+    basename: &str,
+) -> Result<u64, Error> {
     // The directory index is ordered by COLLATION_FILE_NAME, so a
     // lookup in it has to fold case the same way the insert did;
     // see `index_io::find_index_entry`.
@@ -3712,6 +3756,59 @@ fn file_names_in_record(record: &[u8]) -> Result<Vec<FileNameRecord>, Error> {
     Ok(out)
 }
 
+/// Advance a file's or directory's last-write and change times to now, as
+/// Windows does when its data or its entries change (#493).
+///
+/// No write path touched `$STANDARD_INFORMATION`'s times, so a file this
+/// crate rewrote, or a directory it created a file in, kept the times it
+/// had: backup tools, `rsync`, `make`, sync clients and Explorer's "date
+/// modified" all took it as unchanged. Every path-based write that changes
+/// a file's data stamps the file, and every one that adds, removes or
+/// renames an entry stamps the directory. The `*_by_record_number_io`
+/// primitives leave the times to the host, which sets its own, as they
+/// leave the directory entry's copy of the size (#506).
+fn stamp_written_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<(), Error> {
+    let now = crate::record_build::nt_time_now();
+    set_times_by_record_number_io(
+        io,
+        rec,
+        FileTimes {
+            modification: Some(now),
+            mft_record_modification: Some(now),
+            ..FileTimes::default()
+        },
+    )
+}
+
+/// Advance only a file's change time: its record changed -- a new name, a
+/// new link -- and its data did not.
+fn stamp_changed_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<(), Error> {
+    set_times_by_record_number_io(
+        io,
+        rec,
+        FileTimes {
+            mft_record_modification: Some(crate::record_build::nt_time_now()),
+            ..FileTimes::default()
+        },
+    )
+}
+
+/// The end of a path-based write to a file's data: its times advance and
+/// its directory entries carry its new size.
+fn finish_data_write_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<(), Error> {
+    stamp_written_io(io, rec)?;
+    refresh_directory_entry_sizes_io(io, rec)
+}
+
+/// The directory `path` names its last component in.
+fn parent_path_of(path: &str) -> String {
+    let p = path.trim_end_matches('/');
+    match p.rfind('/') {
+        Some(0) | None => "/".to_string(),
+        Some(i) => p[..i].to_string(),
+    }
+}
+
 /// Refresh the data size and allocated size that the parent directory's
 /// entry for each of `rec`'s names duplicates from the file (#506).
 ///
@@ -4206,6 +4303,21 @@ pub fn link_io<T: BlockIo + ?Sized>(
     new_parent_path: &str,
     new_basename: &str,
 ) -> Result<(), Error> {
+    link_unstamped_io(io, existing_path, new_parent_path, new_basename)?;
+    let parent = resolve_path_to_record_number_io(io, new_parent_path)?;
+    stamp_written_io(io, parent)?;
+    let file = resolve_path_to_record_number_io(io, existing_path)?;
+    stamp_changed_io(io, file)
+}
+
+/// [`link_io`] without advancing the times of what it changed; see
+/// [`stamp_written_io`].
+fn link_unstamped_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    existing_path: &str,
+    new_parent_path: &str,
+    new_basename: &str,
+) -> Result<(), Error> {
     // The directory index is ordered by COLLATION_FILE_NAME, so a
     // lookup in it has to fold case the same way the insert did;
     // see `index_io::find_index_entry`.
@@ -4464,6 +4576,19 @@ pub fn write_named_stream_resident_io<T: BlockIo + ?Sized>(
     stream_name: &str,
     data: &[u8],
 ) -> Result<(), Error> {
+    write_named_stream_resident_unstamped_io(io, file_path, stream_name, data)?;
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    stamp_written_io(io, rec)
+}
+
+/// [`write_named_stream_resident_io`] without advancing the file's times; see
+/// [`stamp_written_io`].
+fn write_named_stream_resident_unstamped_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    stream_name: &str,
+    data: &[u8],
+) -> Result<(), Error> {
     let stream_name = &stored_stream_name_io(io, file_path, stream_name)?;
     write_named_stream_resident_attempt_io(io, file_path, stream_name, data)
         .map_err(ResidentWriteError::into_error)
@@ -4549,6 +4674,19 @@ pub fn write_named_stream(
 }
 
 pub fn write_named_stream_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    stream_name: &str,
+    data: &[u8],
+) -> Result<(), Error> {
+    write_named_stream_unstamped_io(io, file_path, stream_name, data)?;
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    stamp_written_io(io, rec)
+}
+
+/// [`write_named_stream_io`] without advancing the file's times; see
+/// [`stamp_written_io`].
+fn write_named_stream_unstamped_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     stream_name: &str,
@@ -4654,6 +4792,18 @@ pub fn delete_named_stream(image: &Path, file_path: &str, stream_name: &str) -> 
 }
 
 pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    stream_name: &str,
+) -> Result<(), Error> {
+    delete_named_stream_unstamped_io(io, file_path, stream_name)?;
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    stamp_written_io(io, rec)
+}
+
+/// [`delete_named_stream_io`] without advancing the file's times; see
+/// [`stamp_written_io`].
+fn delete_named_stream_unstamped_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file_path: &str,
     stream_name: &str,
@@ -4775,7 +4925,7 @@ pub fn promote_resident_data_to_nonresident_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     promote_resident_data_to_nonresident_unrefreshed_io(io, file_path, new_data)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    refresh_directory_entry_sizes_io(io, rec)
+    finish_data_write_io(io, rec)
 }
 
 /// [`promote_resident_data_to_nonresident_io`] without the refresh of the size the file's directory
@@ -4949,7 +5099,7 @@ pub fn write_sparse_file_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     write_sparse_file_unrefreshed_io(io, file_path, data)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    refresh_directory_entry_sizes_io(io, rec)
+    finish_data_write_io(io, rec)
 }
 
 /// [`write_sparse_file_io`] without the refresh of the size the file's directory
@@ -5232,7 +5382,7 @@ pub fn write_file_contents_io<T: BlockIo + ?Sized>(
 ) -> Result<u64, Error> {
     let written = write_file_contents_unrefreshed_io(io, file_path, new_data)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    refresh_directory_entry_sizes_io(io, rec)?;
+    finish_data_write_io(io, rec)?;
     Ok(written)
 }
 
@@ -5443,6 +5593,15 @@ pub fn rmdir(image: &Path, dir_path: &str) -> Result<(), Error> {
 }
 
 pub fn rmdir_io<T: BlockIo + ?Sized>(io: &mut T, dir_path: &str) -> Result<(), Error> {
+    let parent_path = parent_path_of(dir_path);
+    rmdir_unstamped_io(io, dir_path)?;
+    let parent = resolve_path_to_record_number_io(io, &parent_path)?;
+    stamp_written_io(io, parent)
+}
+
+/// [`rmdir_io`] without advancing the parent's times; see
+/// [`stamp_written_io`].
+fn rmdir_unstamped_io<T: BlockIo + ?Sized>(io: &mut T, dir_path: &str) -> Result<(), Error> {
     let (parent_rec, dir_rec, basename) = resolve_parent_and_child_io(io, dir_path, "rmdir")?;
     refuse_metafile_io(io, dir_rec, &format!("rmdir {dir_path}"))?;
     let (_, dir_record_bytes) = read_mft_record_io(io, dir_rec)?;
@@ -5594,7 +5753,7 @@ pub fn write_resident_contents_io<T: BlockIo + ?Sized>(
 ) -> Result<u64, Error> {
     let written = write_resident_contents_unrefreshed_io(io, file_path, new_data)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    refresh_directory_entry_sizes_io(io, rec)?;
+    finish_data_write_io(io, rec)?;
     Ok(written)
 }
 
@@ -5676,6 +5835,25 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     new_basename: &str,
     replace: bool,
 ) -> Result<(), Error> {
+    let parent_path = parent_path_of(old_path);
+    rename_replace_unstamped_io(io, old_path, new_basename, replace)?;
+    let parent = resolve_path_to_record_number_io(io, &parent_path)?;
+    stamp_written_io(io, parent)?;
+    let file = resolve_path_to_record_number_io(
+        io,
+        &format!("{}/{new_basename}", parent_path.trim_end_matches('/')),
+    )?;
+    stamp_changed_io(io, file)
+}
+
+/// [`rename_replace_io`] without advancing the times of what it changed; see
+/// [`stamp_written_io`].
+fn rename_replace_unstamped_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    old_path: &str,
+    new_basename: &str,
+    replace: bool,
+) -> Result<(), Error> {
     // The directory index is ordered by COLLATION_FILE_NAME, so a
     // lookup in it has to fold case the same way the insert did;
     // see `index_io::find_index_entry`.
@@ -5706,7 +5884,7 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     }
 
     if same_length {
-        return rename_same_length_io(io, old_path, new_basename);
+        return rename_same_length_unstamped_io(io, old_path, new_basename);
     }
 
     let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
@@ -6100,6 +6278,15 @@ pub fn unlink(image: &Path, file_path: &str) -> Result<(), Error> {
 }
 
 pub fn unlink_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(), Error> {
+    let parent_path = parent_path_of(file_path);
+    unlink_unstamped_io(io, file_path)?;
+    let parent = resolve_path_to_record_number_io(io, &parent_path)?;
+    stamp_written_io(io, parent)
+}
+
+/// [`unlink_io`] without advancing the parent's times; see
+/// [`stamp_written_io`].
+fn unlink_unstamped_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Result<(), Error> {
     let (parent_rec, file_rec, basename) = resolve_parent_and_child_io(io, file_path, "unlink")?;
     refuse_metafile_io(io, file_rec, &format!("unlink {file_path}"))?;
 
