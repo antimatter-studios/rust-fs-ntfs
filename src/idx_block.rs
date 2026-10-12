@@ -22,7 +22,7 @@ use std::path::Path;
 /// The largest index block NTFS defines.
 ///
 /// 64 KiB. The field is a `u32` and was checked only against zero.
-const MAX_INDEX_BLOCK_SIZE: u64 = 65536;
+pub(crate) const MAX_INDEX_BLOCK_SIZE: u64 = 65536;
 
 /// Info required to locate + traverse `$INDEX_ALLOCATION` for a parent
 /// directory.
