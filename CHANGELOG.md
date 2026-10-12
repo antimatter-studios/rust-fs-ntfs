@@ -95,6 +95,12 @@
   and it dumps no tables. Replay read that 0 as an LSN and refused the log;
   analysis now starts at the checkpoint itself, as Windows' restart does on
   the volume new in `test-disks/`.
+- **A refused named-stream rewrite leaves the stream as it was** (#469).
+  When the new contents had to go non-resident, the existing stream was
+  deleted first, so a rewrite refused for want of record space or of free
+  clusters returned `Err` with the stream already gone. The stream is now
+  replaced in place, and its old clusters are freed only after the new
+  attribute is written.
 - **`chore test:scripts` passes under a developer's own `.test-env`.**
   chore exports that file into every task, and `run-matrix-test-env.sh`
   passed its `HOST_IMAGE_DIR` (the README suggests `/tmp`) on to the
