@@ -114,6 +114,12 @@
   entry for every name the file has. A host writing by record number calls
   the new `refresh_directory_entry_sizes_io` when it is done with the file,
   as Windows refreshes on the last close.
+- **A path that differs in case from the stored name renames the stored
+  name** (#491). Rename looked the record's `$FILE_NAME` up by the caller's
+  spelling, so renaming `FILE.TXT` through `/d/file.txt` left the record
+  saying `FILE.TXT` under a renamed index entry, a file the Linux kernel
+  cannot open. A case-only rename spelled like its target did nothing. The
+  name as stored is used throughout.
 - **Header fields other fields depend on are checked before they are
   trusted.** An MFT record whose `bytes_allocated` is not the record size is
   refused, as ntfs-3g refuses it, rather than served (#509). A boot sector
