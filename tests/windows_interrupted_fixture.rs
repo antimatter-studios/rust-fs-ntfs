@@ -1705,3 +1705,205 @@ fn creating_files_on_a_volume_windows_wrote_grows_its_mft_once_its_records_run_o
     assert!(report.findings.is_empty(), "{:?}", report.findings);
     std::fs::remove_file(&img).unwrap();
 }
+
+/// A volume image under a copy-on-write overlay, so a run can be stopped
+/// and run again without copying the image: what a run writes lands in
+/// `written`, sector by sector, and `base` is never changed. Once
+/// `stop_after` writes have landed, every later write is dropped and
+/// fails, as a power cut leaves them. Each write lands whole or not at
+/// all.
+struct Overlay<'a> {
+    base: &'a [u8],
+    written: BTreeMap<u64, Vec<u8>>,
+    writes: usize,
+    stop_after: Option<usize>,
+}
+
+impl<'a> Overlay<'a> {
+    fn new(base: &'a [u8], stop_after: Option<usize>) -> Self {
+        Overlay {
+            base,
+            written: BTreeMap::new(),
+            writes: 0,
+            stop_after,
+        }
+    }
+
+    fn sector(&self, n: u64) -> &[u8] {
+        self.written.get(&n).map_or_else(
+            || &self.base[(n * 512) as usize..(n * 512 + 512) as usize],
+            |s| s.as_slice(),
+        )
+    }
+
+    fn bytes(&self, at: u64, len: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(len);
+        for n in at / 512..(at + len as u64).div_ceil(512) {
+            out.extend_from_slice(self.sector(n));
+        }
+        let skip = (at % 512) as usize;
+        out[skip..skip + len].to_vec()
+    }
+}
+
+impl fs_ntfs::block_io::BlockIo for Overlay<'_> {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        if offset + buf.len() as u64 > self.base.len() as u64 {
+            return Err(format!("read past the end at {offset:#x}"));
+        }
+        buf.copy_from_slice(&self.bytes(offset, buf.len()));
+        Ok(())
+    }
+
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        if self.stop_after.is_some_and(|n| self.writes >= n) {
+            return Err("the power was cut".into());
+        }
+        assert!(
+            offset.is_multiple_of(512) && buf.len().is_multiple_of(512),
+            "a write of {} bytes at {offset:#x} is not whole sectors",
+            buf.len()
+        );
+        for (i, s) in buf.chunks(512).enumerate() {
+            self.written.insert(offset / 512 + i as u64, s.to_vec());
+        }
+        self.writes += 1;
+        Ok(())
+    }
+
+    fn size(&self) -> u64 {
+        self.base.len() as u64
+    }
+}
+
+/// The volumes whose logs need undo, the part of a replay that a second
+/// run could repeat.
+const RERUN: [&str; 2] = ["undo", "open-at-checkpoint"];
+
+#[test]
+fn a_replay_stopped_after_any_write_reaches_the_same_volume_when_run_again() {
+    // A replay writes the blocks its log changes, then empties the log. A
+    // power cut can stop it after any of those writes, and the volume must
+    // then come back right when `fsck` runs again: every block holding
+    // what an uninterrupted replay leaves there, and the log holding
+    // nothing to replay. Nothing else can be expected of the user (#137).
+    //
+    // An undo applied twice is not undone once: on `open-at-checkpoint`,
+    // a stop from the 70th write of 101 on left index block 0x511f000 with
+    // two entries for record 2559's name, where Windows' restart left one.
+    // And a stop while the log is being emptied left no restart page in
+    // it: no replay could read it, so the volume could no longer be
+    // written.
+    let mut failed = Vec::new();
+    for k in RERUN {
+        let img = unpack(&format!("windows-interrupted-{k}"));
+        let base = std::fs::read(&img).unwrap();
+        std::fs::remove_file(&img).unwrap();
+
+        let mut whole = Overlay::new(&base, None);
+        fsck::fsck_io(&mut whole, None).unwrap_or_else(|e| panic!("{k}: fsck: {e}"));
+        let writes = whole.writes;
+
+        // Where the replay writes: the blocks its plan names, $MFTMirr's
+        // copies of the records among them, and the log.
+        let mut io = Overlay::new(&base, None);
+        let params = fs_ntfs::mft_io::read_boot_params_io(&mut io).unwrap();
+        let (log_at, log_len) = fs_ntfs::read::nonresident_contiguous_disk_range(
+            &mut io,
+            2,
+            fs_ntfs::attr_io::AttrType::Data,
+            None,
+        )
+        .unwrap();
+        let log = io.bytes(log_at, log_len as usize);
+        let plan = fs_ntfs::logfile_replay::plan(&log, &params, &mut |at, buf| {
+            buf.copy_from_slice(&io.bytes(at, buf.len()));
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let in_log = |s: &u64| (log_at / 512..(log_at + log_len) / 512).contains(s);
+
+        let mut bad = Vec::new();
+        for stop in 0..writes {
+            let mut cut = Overlay::new(&base, Some(stop));
+            if fsck::fsck_io(&mut cut, None).is_ok() {
+                bad.push(format!("stop after {stop}: the cut run reported success"));
+                continue;
+            }
+            cut.stop_after = None;
+            if let Err(e) = fsck::fsck_io(&mut cut, None) {
+                bad.push(format!("stop after {stop}: fsck again refused: {e}"));
+                continue;
+            }
+
+            // Every block the plan writes holds what it holds after an
+            // uninterrupted replay: fixups undone and the update sequence
+            // number blanked, which a block written once more moves.
+            let as_content = |raw: &[u8]| {
+                let magic: [u8; 4] = raw[..4].try_into().unwrap();
+                if &magic != b"FILE" && &magic != b"INDX" {
+                    return raw.to_vec();
+                }
+                let Some(mut b) = fixed(raw, &magic) else {
+                    return raw.to_vec();
+                };
+                let uo = le(&b, 4, 2) as usize;
+                b[uo..uo + 2].fill(0);
+                b
+            };
+            let differ: Vec<String> = plan
+                .writes
+                .iter()
+                .filter(|(&at, b)| {
+                    as_content(&cut.bytes(at, b.len())) != as_content(&whole.bytes(at, b.len()))
+                })
+                .map(|(&at, _)| format!("{at:#x}"))
+                .collect();
+            // Anything else either run wrote outside the log: $MFTMirr's
+            // copies, compared the same way, record by record.
+            let rs = params.file_record_size;
+            let elsewhere: std::collections::BTreeSet<u64> = cut
+                .written
+                .keys()
+                .chain(whole.written.keys())
+                .filter(|&&s| !in_log(&s))
+                .filter(|&&s| {
+                    !plan
+                        .writes
+                        .iter()
+                        .any(|(&at, b)| (at / 512..(at + b.len() as u64) / 512).contains(&s))
+                })
+                .map(|&s| s * 512 / rs * rs)
+                .collect();
+            let stray: Vec<String> = elsewhere
+                .iter()
+                .filter(|&&at| {
+                    as_content(&cut.bytes(at, rs as usize))
+                        != as_content(&whole.bytes(at, rs as usize))
+                })
+                .map(|at| format!("{at:#x}"))
+                .collect();
+            if !differ.is_empty() || !stray.is_empty() {
+                bad.push(format!(
+                    "stop after {stop}: blocks {differ:?} and records {stray:?} differ from an \
+                     uninterrupted replay"
+                ));
+                continue;
+            }
+            let state = fsck::logfile_state_io(&mut cut).expect("read $LogFile");
+            if state.needs_replay() {
+                bad.push(format!(
+                    "stop after {stop}: the log still holds work: {state:?}"
+                ));
+            }
+        }
+        if !bad.is_empty() {
+            failed.push(format!(
+                "{k}: of {writes} stops, {} did not come back to the uninterrupted replay:\n{}",
+                bad.len(),
+                bad.iter().take(6).cloned().collect::<Vec<_>>().join("\n")
+            ));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}

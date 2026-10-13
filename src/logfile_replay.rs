@@ -481,6 +481,9 @@ struct Block {
     /// Whether it read as one (a torn or never-written block does not).
     valid: bool,
     changed: bool,
+    /// Rolled back already, by a replay that stopped before it emptied the
+    /// log: it carries [`undone_lsn`]'s stamp.
+    undone: bool,
     /// The MFT record number, for a `FILE` block.
     record: Option<u64>,
 }
@@ -540,6 +543,15 @@ pub struct Plan {
     /// The checkpoint the analysis started from, and the last LSN.
     pub checkpoint: u64,
     pub last_lsn: u64,
+}
+
+/// The LSN a block carries once undo has rolled it back: one past the
+/// log's last. No record has it, since a record's LSN counts 8-byte units
+/// and every record is longer, so a rerun of a replay that stopped part-way
+/// can tell a block it already rolled back from one it has not (#137). It
+/// is also past every redo record, so redo leaves the block alone too.
+fn undone_lsn(last_lsn: u64) -> u64 {
+    last_lsn + 1
 }
 
 /// Plan the replay of `log` -- the whole of `$LogFile`'s `$DATA` -- over
@@ -1090,11 +1102,13 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
                 } else {
                     None
                 };
+                let undone = valid && u64_at(&fixed, 0x08)? == undone_lsn(l.newest);
                 e.insert(Block {
                     magic,
                     bytes: if valid { fixed } else { bytes },
                     valid,
                     changed: false,
+                    undone,
                     record,
                 })
             }
@@ -1105,6 +1119,12 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
                 && redo.get(..4) == Some(b"INDX"));
         if block.valid {
             if !undoing && u64_at(&block.bytes, 0x08)? >= lsn {
+                continue;
+            }
+            // An undo is not idempotent: applied twice, a deleted index
+            // entry is put back twice. A block this replay already rolled
+            // back, before a stop, is left as it is.
+            if undoing && block.undone {
                 continue;
             }
         } else if !initialises {
@@ -1131,7 +1151,11 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
         // than every UpdateRecordDataRoot it holds, on the pre-image and
         // after Windows' restart (`test-disks/windows-interrupted-quota`).
         if op != UPDATE_RECORD_DATA_ROOT {
-            put_u64(&mut block.bytes, 0x08, lsn)?;
+            put_u64(
+                &mut block.bytes,
+                0x08,
+                if undoing { undone_lsn(l.newest) } else { lsn },
+            )?;
         }
         block.valid = true;
         block.changed = true;
