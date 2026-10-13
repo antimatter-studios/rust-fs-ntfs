@@ -23,6 +23,7 @@ use ntfs::{KnownNtfsFileRecordNumber, Ntfs, NtfsAttributeType};
 use fs_core::ffi::{fs_core_device_close, fs_core_file_open, FsCoreDevice};
 use fs_ntfs::{
     fs_ntfs_fsck_with_fs_core_device, fs_ntfs_is_dirty_with_fs_core_device, fs_ntfs_last_error,
+    FS_NTFS_FSCK_CLEAR_DIRTY,
 };
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
@@ -196,8 +197,15 @@ fn fsck_with_fs_core_device_clears_dirty() {
     let h = open_dev(&img, true); // writable
 
     let mut cleared: u8 = 0;
-    let rc =
-        unsafe { fs_ntfs_fsck_with_fs_core_device(h, None, std::ptr::null_mut(), &mut cleared) };
+    let rc = unsafe {
+        fs_ntfs_fsck_with_fs_core_device(
+            h,
+            None,
+            std::ptr::null_mut(),
+            &mut cleared,
+            FS_NTFS_FSCK_CLEAR_DIRTY,
+        )
+    };
     unsafe { fs_core_device_close(h) };
 
     assert_eq!(rc, 0, "expected success; last_error={}", last_error());
@@ -216,7 +224,13 @@ fn fsck_with_fs_core_device_refuses_dirty_nonempty_log_without_writes() {
     let img = dirty_copy("refuse_pending", true, true);
     let before = std::fs::read(&img).expect("snapshot image");
     let h = open_dev(&img, true);
-    let rc = fs_ntfs_fsck_with_fs_core_device(h, None, std::ptr::null_mut(), std::ptr::null_mut());
+    let rc = fs_ntfs_fsck_with_fs_core_device(
+        h,
+        None,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        FS_NTFS_FSCK_CLEAR_DIRTY,
+    );
     unsafe { fs_core_device_close(h) };
     assert_eq!(rc, -1);
     assert!(last_error().contains("$LogFile"));
@@ -229,8 +243,15 @@ fn fsck_with_fs_core_device_no_op_on_clean() {
     let h = open_dev(&img, true);
 
     let mut cleared: u8 = 0;
-    let rc =
-        unsafe { fs_ntfs_fsck_with_fs_core_device(h, None, std::ptr::null_mut(), &mut cleared) };
+    let rc = unsafe {
+        fs_ntfs_fsck_with_fs_core_device(
+            h,
+            None,
+            std::ptr::null_mut(),
+            &mut cleared,
+            FS_NTFS_FSCK_CLEAR_DIRTY,
+        )
+    };
     unsafe { fs_core_device_close(h) };
 
     assert_eq!(
@@ -249,8 +270,15 @@ fn fsck_with_fs_core_device_rejects_ro_handle() {
     let h = open_dev(&img, false);
 
     let mut cleared: u8 = 0;
-    let rc =
-        unsafe { fs_ntfs_fsck_with_fs_core_device(h, None, std::ptr::null_mut(), &mut cleared) };
+    let rc = unsafe {
+        fs_ntfs_fsck_with_fs_core_device(
+            h,
+            None,
+            std::ptr::null_mut(),
+            &mut cleared,
+            FS_NTFS_FSCK_CLEAR_DIRTY,
+        )
+    };
     unsafe { fs_core_device_close(h) };
 
     assert_eq!(rc, -1, "expected -1 on RO device");
@@ -270,6 +298,7 @@ fn fsck_with_fs_core_device_neg1_on_null() {
             None,
             std::ptr::null_mut(),
             &mut cleared,
+            FS_NTFS_FSCK_CLEAR_DIRTY,
         )
     };
     assert_eq!(rc, -1);
@@ -300,7 +329,13 @@ fn fsck_with_fs_core_device_progress_callback_fires() {
 
     let mut cleared: u8 = 0;
     let rc = unsafe {
-        fs_ntfs_fsck_with_fs_core_device(h, Some(on_progress), std::ptr::null_mut(), &mut cleared)
+        fs_ntfs_fsck_with_fs_core_device(
+            h,
+            Some(on_progress),
+            std::ptr::null_mut(),
+            &mut cleared,
+            FS_NTFS_FSCK_CLEAR_DIRTY,
+        )
     };
     unsafe { fs_core_device_close(h) };
 

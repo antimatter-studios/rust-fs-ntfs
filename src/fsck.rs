@@ -17,13 +17,18 @@
 //!
 //! Neither operation replays transactions; [`replay_logfile`] does. `fsck`
 //! reads `$LogFile`'s restart area ([`crate::logfile`]) on every volume.
-//! When the log is empty or records nothing to redo or undo, it clears the
-//! dirty flag and keeps the log. When the log holds work, it replays it
-//! ([`crate::logfile_replay`]): every committed change is redone from the
-//! log, the now-consistent volume's log is emptied, and the flag cleared. A
-//! log that cannot be replayed in full -- unread, torn, holding an
-//! operation replay does not perform, or a transaction that would need
-//! undoing -- is refused before anything is written (#375, #376, #137).
+//! When the log is empty or records nothing to redo or undo, it keeps the
+//! log. When the log holds work, it replays it ([`crate::logfile_replay`]):
+//! every committed change is redone from the log, and the now-consistent
+//! volume's log is emptied. A log that cannot be replayed in full -- unread,
+//! torn, holding an operation replay does not perform, or a transaction
+//! that would need undoing -- is refused before anything is written (#375,
+//! #376, #137).
+//!
+//! The dirty flag is left set unless the caller asks for it to be cleared
+//! ([`FsckOptions::clear_dirty`], #519). It asks for a check of the whole
+//! volume, which Windows' chkdsk makes and this crate does not; clearing it
+//! here would tell Windows a check it was asked to run had been done.
 //! A read-write mount runs the same replay first only when asked
 //! ([`prepare_rw_mount_replaying_io`]); otherwise it refuses a log holding
 //! work ([`prepare_rw_mount_io`]): Windows leaves one after a Fast Startup
@@ -280,21 +285,41 @@ pub fn reset_logfile(path: impl AsRef<Path>) -> Result<u64, Error> {
     reset_logfile_io(&mut io, None)
 }
 
-/// Bring a volume to a clean state: replay `$LogFile` when it holds work
-/// ([`replay_logfile_io`]), then clear the dirty flag. A log that is empty
-/// or records nothing to redo or undo is kept as it is. A log that cannot
-/// be replayed in full is refused before anything is written, whether or
-/// not the volume is marked dirty (#376, #137).
+/// Replay `$LogFile` when it holds work ([`replay_logfile_io`]), and leave
+/// the dirty flag as it is: [`fsck_with`] with the default options. A log
+/// that is empty or records nothing to redo or undo is kept as it is. A log
+/// that cannot be replayed in full is refused before anything is written,
+/// whether or not the volume is marked dirty (#376, #137).
 pub fn fsck(path: impl AsRef<Path>) -> Result<FsckReport, Error> {
+    fsck_with(path, FsckOptions::default())
+}
+
+/// What [`fsck_with`] and [`fsck_io_with`] do beyond replaying the log.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FsckOptions {
+    /// Clear the dirty flag once the log holds nothing to redo or undo.
+    ///
+    /// Off by default (#519). The flag asks for a check of the whole volume:
+    /// Windows runs chkdsk on a volume that carries it. This crate's check
+    /// is not that check, so clearing the flag tells Windows that a check it
+    /// was asked to run has been done when it has not, and whatever set the
+    /// flag is never looked at. ntfs-3g's `ntfsfix` leaves it set too,
+    /// unless asked with `-d`. Set this only when the volume is known to be
+    /// consistent by some other means.
+    pub clear_dirty: bool,
+}
+
+/// [`fsck`], with `options`.
+pub fn fsck_with(path: impl AsRef<Path>, options: FsckOptions) -> Result<FsckReport, Error> {
     let p = path.as_ref();
-    log::info!(target: "fs_ntfs::fsck", "fsck path={}", p.display());
+    log::info!(target: "fs_ntfs::fsck", "fsck path={} {options:?}", p.display());
     let mut io = PathIo::open(p)?;
-    let report = fsck_io(&mut io, None);
+    let report = fsck_io_with(&mut io, options, None);
     if let Ok(r) = &report {
         log::info!(
             target: "fs_ntfs::fsck",
-            "fsck done dirty_cleared={} logfile={:?}",
-            r.dirty_cleared, r.logfile,
+            "fsck done dirty_cleared={} dirty={} logfile={:?}",
+            r.dirty_cleared, r.dirty, r.logfile,
         );
     }
     report
@@ -306,7 +331,11 @@ pub struct FsckReport {
     /// What `$LogFile` holds now: [`LogfileState::Empty`] after a replay,
     /// or the empty or clean log fsck found and kept (#376).
     pub logfile: LogfileState,
+    /// Whether this fsck cleared the dirty flag, which it does only when
+    /// asked ([`FsckOptions::clear_dirty`]).
     pub dirty_cleared: bool,
+    /// Whether the dirty flag is set now: left for Windows' chkdsk (#519).
+    pub dirty: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -442,10 +471,21 @@ pub fn reset_logfile_io<'cb, T: FsckIo>(
     Ok(logfile_size)
 }
 
-/// `fsck` over an arbitrary `FsckIo`, with optional progress emission.
+/// `fsck` over an arbitrary `FsckIo`, with optional progress emission: the
+/// dirty flag is left as it is ([`fsck_io_with`] with the default options).
 #[allow(clippy::type_complexity)]
 pub fn fsck_io<'cb, T: FsckIo>(
     io: &mut T,
+    progress: Option<&mut (dyn FnMut(&str, u64, u64) + 'cb)>,
+) -> Result<FsckReport, Error> {
+    fsck_io_with(io, FsckOptions::default(), progress)
+}
+
+/// [`fsck_io`], with `options`.
+#[allow(clippy::type_complexity)]
+pub fn fsck_io_with<'cb, T: FsckIo>(
+    io: &mut T,
+    options: FsckOptions,
     mut progress: Option<&mut (dyn FnMut(&str, u64, u64) + 'cb)>,
 ) -> Result<FsckReport, Error> {
     // THE LOG DECIDES, WHATEVER THE DIRTY FLAG SAYS (#375, #376). The flag
@@ -459,7 +499,7 @@ pub fn fsck_io<'cb, T: FsckIo>(
     // * anything else is replayed in full (#137) -- or, when that cannot be
     //   done completely, refused before a byte is written.
     //
-    // Then the dirty flag, if set, is cleared.
+    // Then the dirty flag, if set and the caller asked (#519), is cleared.
     //
     // NOTHING AT ALL ON A VOLUME WINDOWS IS HIBERNATED ON. It resumes from
     // what it cached, and would not see the replay or the cleared flag.
@@ -483,13 +523,19 @@ pub fn fsck_io<'cb, T: FsckIo>(
         logfile = logfile_state_io(io)?;
     }
 
-    emit("clear_dirty", 0, 1);
-    let dirty_cleared = clear_dirty_io(io)?;
-    emit("clear_dirty", 1, 1);
+    let dirty_cleared = if options.clear_dirty {
+        emit("clear_dirty", 0, 1);
+        let cleared = clear_dirty_io(io)?;
+        emit("clear_dirty", 1, 1);
+        cleared
+    } else {
+        false
+    };
 
     Ok(FsckReport {
         logfile,
         dirty_cleared,
+        dirty: is_dirty_io(io)?,
     })
 }
 
@@ -1396,7 +1442,9 @@ fn account_clusters<T: FsckIo>(
 
 /// Clear the dirty flag when that is all that is wrong and it is safe:
 /// when `$LogFile` is empty, or its restart area records nothing to redo
-/// or undo (#375), through [`fsck_io`]. Any other log may hold
+/// or undo (#375), through [`fsck_io_with`] asking for the flag to be
+/// cleared. For a caller that knows the volume is consistent by some other
+/// means; see [`FsckOptions::clear_dirty`]. Any other log may hold
 /// transactions this crate cannot replay (#137), and clearing the flag
 /// over them would discard them; that is refused, with the reason, and
 /// nothing is written.
@@ -1406,7 +1454,7 @@ pub fn repair_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, Error> {
     if !is_dirty_io(io)? {
         return Ok(false);
     }
-    Ok(fsck_io(io, None)?.dirty_cleared)
+    Ok(fsck_io_with(io, FsckOptions { clear_dirty: true }, None)?.dirty_cleared)
 }
 
 // ---------------------------------------------------------------------------
@@ -2001,26 +2049,46 @@ mod tests {
     }
 
     #[test]
-    fn fsck_io_clears_dirty_flag_when_set() {
+    fn fsck_io_clears_dirty_flag_when_asked() {
         let mut dev = fresh_dev();
         // The formatter's canonical log has restart/record pages. Make the
         // log empty before simulating a dirty flag with no pending records.
         reset_logfile_io(&mut dev, None::<&mut dyn FnMut(&str, u64, u64)>).unwrap();
         set_dirty_io(&mut dev).unwrap();
-        let report = fsck_io(&mut dev, None::<&mut dyn FnMut(&str, u64, u64)>).unwrap();
+        let report = fsck_io_with(
+            &mut dev,
+            FsckOptions { clear_dirty: true },
+            None::<&mut dyn FnMut(&str, u64, u64)>,
+        )
+        .unwrap();
         assert!(report.dirty_cleared, "fsck should clear the dirty flag");
+        assert!(!report.dirty);
         assert!(
             !is_dirty_io(&mut dev).unwrap(),
             "volume should be clean after fsck"
         );
     }
 
+    /// The flag asks for chkdsk, which fsck is not, so it is left set
+    /// unless the caller asks (#519).
+    #[test]
+    fn fsck_io_leaves_dirty_flag_by_default() {
+        let mut dev = fresh_dev();
+        reset_logfile_io(&mut dev, None::<&mut dyn FnMut(&str, u64, u64)>).unwrap();
+        set_dirty_io(&mut dev).unwrap();
+        let report = fsck_io(&mut dev, None::<&mut dyn FnMut(&str, u64, u64)>).unwrap();
+        assert!(!report.dirty_cleared);
+        assert!(report.dirty, "the report says the flag is still set");
+        assert!(is_dirty_io(&mut dev).unwrap());
+    }
+
     #[test]
     fn fsck_io_with_progress_callback_fires() {
         let mut dev = fresh_dev();
         let mut events: Vec<String> = Vec::new();
-        fsck_io(
+        fsck_io_with(
             &mut dev,
+            FsckOptions { clear_dirty: true },
             Some(&mut |label: &str, _done: u64, _total: u64| {
                 events.push(label.to_string());
             }),

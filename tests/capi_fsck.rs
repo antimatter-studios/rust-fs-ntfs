@@ -23,7 +23,10 @@ use ntfs::{KnownNtfsFileRecordNumber, Ntfs, NtfsAttributeType};
 // the symbol-lookup mechanism differs. Downstream consumers that link
 // `libfs_ntfs.a` cover the actual link-time symbol path.
 // See also: rust-fs-ext4 `tests/capi_basic.rs` for the same convention.
-use fs_ntfs::{fs_ntfs_clear_dirty, fs_ntfs_fsck, fs_ntfs_last_error, fs_ntfs_reset_logfile};
+use fs_ntfs::{
+    fs_ntfs_clear_dirty, fs_ntfs_fsck, fs_ntfs_last_error, fs_ntfs_reset_logfile,
+    FS_NTFS_FSCK_CLEAR_DIRTY,
+};
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
 
@@ -223,12 +226,42 @@ fn fsck_fills_out_params() {
     empty_logfile(&img);
     let c = CString::new(img.as_str()).unwrap();
     let mut cleared: u8 = 0;
-    let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), &mut cleared) };
+    let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), &mut cleared, FS_NTFS_FSCK_CLEAR_DIRTY) };
     assert_eq!(rc, 0, "expected success; last_error={}", last_error());
     assert_eq!(cleared, 1);
 
     assert!(!read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
     assert!(read_logfile_first_page(&img).iter().all(|&b| b == 0xFF));
+}
+
+/// Without FS_NTFS_FSCK_CLEAR_DIRTY the dirty flag is left set: it asks for
+/// a check of the whole volume, which is Windows' chkdsk's to make (#519).
+#[test]
+fn fsck_leaves_the_dirty_flag_unless_asked() {
+    let img = dirty_copy("fsck_leaves_dirty", true, false);
+    empty_logfile(&img);
+    let c = CString::new(img.as_str()).unwrap();
+    let mut cleared: u8 = 9;
+    let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), &mut cleared, 0) };
+    assert_eq!(rc, 0, "expected success; last_error={}", last_error());
+    assert_eq!(
+        cleared, 0,
+        "the flag was reported cleared without being asked"
+    );
+    assert!(read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
+}
+
+/// A flag bit no fsck function knows is EINVAL, with nothing written.
+#[test]
+fn fsck_refuses_an_unknown_flag() {
+    let img = dirty_copy("fsck_unknown_flag", true, false);
+    empty_logfile(&img);
+    let before = std::fs::read(&img).expect("snapshot image");
+    let c = CString::new(img.as_str()).unwrap();
+    let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), std::ptr::null_mut(), 0x80) };
+    assert_eq!(rc, -1);
+    assert!(last_error().contains("unknown flags"), "{}", last_error());
+    assert_eq!(std::fs::read(&img).expect("read image"), before);
 }
 
 #[test]
@@ -237,7 +270,7 @@ fn fsck_rejects_dirty_nonempty_log_without_writing_or_out_params() {
     let before = std::fs::read(&img).expect("snapshot image");
     let c = CString::new(img.as_str()).expect("CString");
     let mut cleared = 9_u8;
-    let rc = fs_ntfs_fsck(c.as_ptr(), &mut cleared);
+    let rc = fs_ntfs_fsck(c.as_ptr(), &mut cleared, FS_NTFS_FSCK_CLEAR_DIRTY);
     assert_eq!(rc, -1);
     assert!(last_error().contains("$LogFile"));
     assert_eq!(cleared, 9);
@@ -251,7 +284,7 @@ fn fsck_accepts_null_out_params() {
     let img = dirty_copy("fsck_null_out", true, false);
     empty_logfile(&img);
     let c = CString::new(img.as_str()).unwrap();
-    let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), std::ptr::null_mut()) };
+    let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), std::ptr::null_mut(), FS_NTFS_FSCK_CLEAR_DIRTY) };
     assert_eq!(rc, 0);
     assert!(!read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
 }
@@ -263,7 +296,7 @@ fn fsck_end_to_end_with_upstream_mount() {
     let img = dirty_copy("fsck_e2e", true, false);
     empty_logfile(&img);
     let c = CString::new(img.as_str()).unwrap();
-    let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), std::ptr::null_mut()) };
+    let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), std::ptr::null_mut(), FS_NTFS_FSCK_CLEAR_DIRTY) };
     assert_eq!(rc, 0);
 
     let (ntfs, mut reader) = common::open(&img);

@@ -19,7 +19,7 @@ use ntfs::{KnownNtfsFileRecordNumber, Ntfs, NtfsAttributeType};
 
 use fs_ntfs::{
     fs_ntfs_fsck_with_callbacks, fs_ntfs_is_dirty_with_callbacks, fs_ntfs_last_error,
-    FsNtfsBlockdevCfg,
+    FsNtfsBlockdevCfg, FS_NTFS_FSCK_CLEAR_DIRTY,
 };
 
 const BASIC_IMG: &str = "test-disks/ntfs-basic.img";
@@ -276,7 +276,15 @@ fn fsck_with_callbacks_clears_dirty_and_resets_log() {
     };
 
     let mut cleared: u8 = 0;
-    let rc = unsafe { fs_ntfs_fsck_with_callbacks(&cfg, None, std::ptr::null_mut(), &mut cleared) };
+    let rc = unsafe {
+        fs_ntfs_fsck_with_callbacks(
+            &cfg,
+            None,
+            std::ptr::null_mut(),
+            &mut cleared,
+            FS_NTFS_FSCK_CLEAR_DIRTY,
+        )
+    };
     assert_eq!(rc, 0, "expected success; last_error={}", last_error());
     assert_eq!(cleared, 1);
 
@@ -298,7 +306,13 @@ fn fsck_with_callbacks_refuses_dirty_nonempty_log_without_writes() {
         size_bytes: size,
         write: Some(write_cb),
     };
-    let rc = fs_ntfs_fsck_with_callbacks(&cfg, None, std::ptr::null_mut(), std::ptr::null_mut());
+    let rc = fs_ntfs_fsck_with_callbacks(
+        &cfg,
+        None,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        FS_NTFS_FSCK_CLEAR_DIRTY,
+    );
     assert_eq!(rc, -1);
     assert!(last_error().contains("$LogFile"));
     drop(ctx);
@@ -316,7 +330,13 @@ fn fsck_with_callbacks_errors_without_write_cb() {
         write: None, // no write callback → fsck must refuse
     };
     let rc = unsafe {
-        fs_ntfs_fsck_with_callbacks(&cfg, None, std::ptr::null_mut(), std::ptr::null_mut())
+        fs_ntfs_fsck_with_callbacks(
+            &cfg,
+            None,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            FS_NTFS_FSCK_CLEAR_DIRTY,
+        )
     };
     assert_eq!(rc, -1);
     let err = last_error();
@@ -365,6 +385,7 @@ fn fsck_with_callbacks_emits_progress() {
             Some(progress_cb),
             &mut log as *mut ProgressLog as *mut c_void,
             std::ptr::null_mut(),
+            FS_NTFS_FSCK_CLEAR_DIRTY,
         )
     };
     assert_eq!(rc, 0, "last_error={}", last_error());
