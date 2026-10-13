@@ -6677,6 +6677,13 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
     // orphaned, chkdsk-flagged inconsistency). On the happy path this is a
     // pure read; on-disk behaviour is unchanged.
     let hard_link_count = u16::from_le_bytes([file_record_bytes[0x12], file_record_bytes[0x13]]);
+    // Dropping one of several names removes its $FILE_NAME attribute, and
+    // on a record that carries an $ATTRIBUTE_LIST the list would go on
+    // naming the attribute removed (#468), so that is refused before the
+    // parent's index entry goes.
+    if hard_link_count > 1 {
+        crate::attr_resize::refuse_if_attribute_list(&file_record_bytes, "unlink a hard link")?;
+    }
     let parent_seq = crate::mft_io::record_sequence(&parent_record_bytes);
     let parent_reference = crate::record_build::encode_file_reference(parent_rec, parent_seq);
     if hard_link_count > 1
