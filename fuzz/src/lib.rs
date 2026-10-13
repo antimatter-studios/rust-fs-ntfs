@@ -5,3 +5,9 @@
 //! shared textually rather than as a dependency.
 
 include!("../shared/walk.rs");
+
+/// The structure-aware explorer, in a module of its own because it
+/// imports what `walk.rs` does.
+pub mod structured {
+    include!("../shared/structured.rs");
+}

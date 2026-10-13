@@ -23,7 +23,7 @@ command -v mkntfs >/dev/null || {
 }
 
 rm -rf "$here/fuzz/corpus"
-mkdir -p "$here/fuzz/corpus"/{image,boot_sector,mft_record,index_block}
+mkdir -p "$here/fuzz/corpus"/{image,boot_sector,mft_record,index_block,structured}
 
 # -F to skip the "this is not a partition" question, -Q for a quick
 # format: a full format zeroes the whole volume, which makes a much
@@ -105,6 +105,15 @@ assert indexes, "no INDX block found -- did mkntfs leave the root directory resi
 # identical directories would make the corpus look four times the size
 # it is, and would need updating four times. scripts/fuzz-all.sh names
 # the mapping.
+
+# The structure-aware explorer's corpus is recipes rather than volumes
+# (fuzz/shared/structured.rs): bytes that choose a seed volume, the
+# mutations and the writes. Any bytes are a valid recipe, so these are
+# random, from a fixed seed so a rebuild writes the same ones.
+import random
+rng = random.Random(483)
+for n in range(6):
+    write('structured', f'recipe{n}.bin', bytes(rng.randrange(256) for _ in range(96)))
 
 print(f"{records} MFT records, {indexes} index blocks")
 PY
