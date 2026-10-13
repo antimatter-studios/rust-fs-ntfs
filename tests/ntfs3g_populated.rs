@@ -17,13 +17,14 @@
 //! - the sixty names of one file resolve to one record;
 //! - the named streams list and read back;
 //! - `check_io` finds nothing;
-//! - and after this crate writes to a copy (a stream rewritten and
-//!   removed, a file created with a stream added and one rewritten, a name
-//!   unlinked from the sixty and from the wide directory), ntfs-3g's own
-//!   tools read back what was written and still mount the volume
-//!   read-write. A stream that would grow in the extension record ntfs-3g
-//!   filled is refused, because this crate writes no `$ATTRIBUTE_LIST`
-//!   (#480).
+//! - and after this crate writes to a copy (a stream rewritten in place, a
+//!   file created with a stream added and one rewritten, a name unlinked
+//!   from the wide directory), ntfs-3g's own tools read back what was
+//!   written and still mount the volume read-write. What would add,
+//!   remove or grow an attribute of a record ntfs-3g gave an
+//!   `$ATTRIBUTE_LIST` -- growing a stream, deleting one, unlinking one of
+//!   the sixty names -- is refused, because this crate does not maintain
+//!   the list (#468, #480), and ntfs-3g reads it all as it was.
 //!
 //! A missing image or manifest fails, naming the builder: nothing skips.
 
@@ -249,6 +250,21 @@ fn ntfscat(img: &Path, path: &str, stream: Option<&str>) -> Option<Vec<u8>> {
     out.status.success().then_some(out.stdout)
 }
 
+/// A change refused because the record carries an `$ATTRIBUTE_LIST` this
+/// crate does not maintain.
+fn refused_for_the_list(cluster: u32, what: &str, result: Result<(), fs_ntfs::facade::Error>) {
+    match result {
+        Err(e) => assert!(
+            e.to_string().contains("$ATTRIBUTE_LIST"),
+            "{cluster}: {what} was refused, but not for the attribute list: {e}"
+        ),
+        Ok(()) => panic!(
+            "{cluster}: {what} went through on a record with an $ATTRIBUTE_LIST, which this \
+             crate does not maintain"
+        ),
+    }
+}
+
 fn written_on(cluster: u32) {
     let m = manifest(cluster);
     let img = PathBuf::from(common::temp_image_path(format!("ntfs3g_written_{cluster}")));
@@ -275,8 +291,14 @@ fn written_on(cluster: u32) {
              ntfs-3g reads instead"
         ),
     }
-    fs.delete_named_stream("/streams.txt", "s6")
-        .unwrap_or_else(|e| panic!("{cluster}: delete s6: {e}"));
+    // Removing an attribute from a record ntfs-3g gave an $ATTRIBUTE_LIST
+    // would leave the list naming one that is gone, and this crate does
+    // not maintain the list (#468, #480), so the removal is refused.
+    refused_for_the_list(
+        cluster,
+        "delete s6",
+        fs.delete_named_stream("/streams.txt", "s6"),
+    );
     fs.create_file("/", "made-here.txt")
         .unwrap_or_else(|e| panic!("{cluster}: create: {e}"));
     let made = b"written by this crate onto a volume ntfs-3g filled\n".repeat(300);
@@ -295,8 +317,13 @@ fn written_on(cluster: u32) {
         .find(|p| p.starts_with("/links/l"))
         .unwrap()
         .clone();
-    fs.unlink(&gone_link)
-        .unwrap_or_else(|e| panic!("{cluster}: unlink {gone_link}: {e}"));
+    // The sixty names fill an $ATTRIBUTE_LIST too, and one name is one
+    // $FILE_NAME attribute, so dropping it is refused for the same reason.
+    refused_for_the_list(
+        cluster,
+        &format!("unlink {gone_link}"),
+        fs.unlink(&gone_link),
+    );
     let gone_wide = m
         .files
         .keys()
@@ -318,18 +345,15 @@ fn written_on(cluster: u32) {
         Some(&added[..]),
         "{cluster}: ntfs-3g's /made-here.txt:added"
     );
-    assert_eq!(
-        ntfscat(&img, "/streams.txt", Some("s6")),
-        None,
-        "{cluster}: ntfs-3g still reads the deleted s6"
-    );
-    assert_eq!(
-        ntfscat(&img, "/streams.txt", Some("s7")).map(|d| sha(&d)),
-        m.streams
-            .get(&("/streams.txt".to_string(), "s7".to_string()))
-            .map(|(_, d)| d.clone()),
-        "{cluster}: ntfs-3g's s7, which nothing touched"
-    );
+    for untouched in ["s6", "s7"] {
+        assert_eq!(
+            ntfscat(&img, "/streams.txt", Some(untouched)).map(|d| sha(&d)),
+            m.streams
+                .get(&("/streams.txt".to_string(), untouched.to_string()))
+                .map(|(_, d)| d.clone()),
+            "{cluster}: ntfs-3g's {untouched}, which the refused delete and nothing else touched"
+        );
+    }
     assert_eq!(
         ntfscat(&img, "/made-here.txt", None).as_deref(),
         Some(&made[..]),
@@ -340,18 +364,18 @@ fn written_on(cluster: u32) {
         Some(&grown[..]),
         "{cluster}: ntfs-3g's /grüße.txt"
     );
-    assert_eq!(
-        ntfscat(&img, "/links/target", None).map(|d| sha(&d)),
-        m.files.get("/links/target").map(|(_, d)| d.clone()),
-        "{cluster}: ntfs-3g's /links/target, one name fewer"
-    );
-    for gone in [&gone_link, &gone_wide] {
+    for name in ["/links/target", gone_link.as_str()] {
         assert_eq!(
-            ntfscat(&img, gone, None),
-            None,
-            "{cluster}: ntfs-3g still finds {gone}"
+            ntfscat(&img, name, None).map(|d| sha(&d)),
+            m.files.get("/links/target").map(|(_, d)| d.clone()),
+            "{cluster}: ntfs-3g's {name}, every name kept by the refused unlink"
         );
     }
+    assert_eq!(
+        ntfscat(&img, &gone_wide, None),
+        None,
+        "{cluster}: ntfs-3g still finds {gone_wide}"
+    );
 
     // And it would still mount the volume read-write.
     let probe = Command::new("ntfs-3g.probe")
