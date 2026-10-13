@@ -29,3 +29,15 @@ mirror_offset() { echo $(($(u64 "$1" 56) * $(cluster_size "$1") + $2 * $(record_
 
 # poke IMAGE OFFSET BYTES: overwrite bytes in place (printf escapes allowed).
 poke() { printf "$3" | dd of="$1" bs=1 seek="$2" conv=notrunc 2>/dev/null; }
+
+# byte_at IMAGE OFFSET: the byte there, as two hex digits.
+byte_at() { od -An -tx1 -j "$2" -N1 "$1" | tr -d ' \n'; }
+
+# flip IMAGE OFFSET: invert every bit of the byte there, so it changes
+# whatever it held. A constant written over a byte that already held it
+# changes nothing, which a timestamp's byte does one time in 256 (#558).
+flip() {
+    local was
+    was=$(byte_at "$1" "$2")
+    poke "$1" "$2" "$(printf '\\x%02x' $((0x$was ^ 0xff)))"
+}
