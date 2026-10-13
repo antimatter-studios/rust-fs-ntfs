@@ -6629,27 +6629,19 @@ fn unlink_unstamped_io<T: BlockIo + ?Sized>(io: &mut T, file_path: &str) -> Resu
     remove_file_record_io(io, parent_rec, file_rec, &basename)
 }
 
-/// Free the `$Bitmap` clusters backing **every** non-resident attribute in
-/// `record` — the unnamed `$DATA`, any named `$DATA` streams, and any
-/// attribute promoted to non-resident. Resident attributes own no clusters
-/// (their value lives inside the MFT record). Sparse holes (`lcn == None`)
-/// hold no allocation and are skipped.
+/// The `$Bitmap` clusters backing **every** non-resident attribute in
+/// `record`, as `(lcn, count)` runs — the unnamed `$DATA`, any named
+/// `$DATA` streams, and any attribute promoted to non-resident. Resident
+/// attributes own no clusters (their value lives inside the MFT record).
+/// Sparse holes (`lcn == None`) hold no allocation and are skipped.
 ///
 /// Used by the file-delete path: freeing only the unnamed `$DATA` (as it
 /// historically did) leaked the runs of named streams / promoted
-/// attributes on every last-link delete.
-///
-/// MVP limitation: attributes that live in `$ATTRIBUTE_LIST` extension
-/// records (not the base record) are not visited here; reclaiming those is
-/// tracked separately. The common cases — named streams and promoted
-/// attributes in the base record — are covered.
-fn free_all_nonresident_runs_io<T: BlockIo + ?Sized>(
-    io: &mut T,
-    record: &[u8],
-) -> Result<(), Error> {
-    // Decode every non-resident attribute's runs first, so the cluster
-    // bitmap is only touched after the whole record parses cleanly (no
-    // half-freed state if a later attribute's mapping is malformed).
+/// attributes on every last-link delete. The caller decodes every record
+/// of the file, base and extension records alike (#565), before it frees
+/// any of them, so a malformed mapping is found before anything is
+/// written rather than half way through.
+fn nonresident_runs(record: &[u8]) -> Result<Vec<(u64, u64)>, Error> {
     let mut to_free: Vec<(u64, u64)> = Vec::new();
     for loc in attr_io::iter_attributes(record) {
         if loc.is_resident {
@@ -6671,15 +6663,67 @@ fn free_all_nonresident_runs_io<T: BlockIo + ?Sized>(
             }
         }
     }
-    if to_free.is_empty() {
+    Ok(to_free)
+}
+
+/// Free `(lcn, count)` runs in `$Bitmap`.
+fn free_runs_io<T: BlockIo + ?Sized>(io: &mut T, runs: &[(u64, u64)]) -> Result<(), Error> {
+    if runs.is_empty() {
         return Ok(());
     }
     let bm = bitmap::locate_bitmap_io(io)?;
-    for (lcn, n) in to_free {
+    for &(lcn, n) in runs {
         bitmap::free_io(io, &bm, lcn, n)
             .map_err(|e| e.context(format!("free clusters [{lcn}..{}]", lcn + n)))?;
     }
     Ok(())
+}
+
+/// The extension records `base`'s `$ATTRIBUTE_LIST` names, by number, each
+/// checked to be in use and to name `base` as its base record (#565).
+/// Empty when the record has no list.
+///
+/// ntfs-3g and Windows move attributes out of a full base record into
+/// extension records and list where each went. Retiring the base record
+/// alone leaves those records in use, owned by a record that is not, and
+/// every cluster their attributes map allocated: the orphaned segments
+/// chkdsk reports. A record the list names that is free, or that belongs
+/// to another file, is a list this driver does not understand, and the
+/// unlink is refused before anything is written.
+fn extension_records_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    base: u64,
+    base_record: &[u8],
+) -> Result<Vec<(u64, Vec<u8>)>, Error> {
+    if attr_io::find_attribute(base_record, AttrType::AttributeList, None).is_none() {
+        return Ok(Vec::new());
+    }
+    let list = crate::read::read_attribute_value(io, base, AttrType::AttributeList, None)?;
+    let numbers: std::collections::BTreeSet<u64> = crate::read::parse_attribute_list(&list)?
+        .into_iter()
+        .map(|e| e.record_number)
+        .filter(|&r| r != base)
+        .collect();
+    let mut records = Vec::with_capacity(numbers.len());
+    for n in numbers {
+        let (_, record) = read_mft_record_io(io, n)?;
+        if crate::mft_io::record_flags(&record) & crate::mft_io::MFT_FLAG_IN_USE == 0 {
+            return Err(Error::io(format!(
+                "unlink: the $ATTRIBUTE_LIST of record {base} names record {n}, which is not \
+                 in use"
+            )));
+        }
+        let owner = u64::from_le_bytes(record[0x20..0x28].try_into().expect("8 bytes"))
+            & 0x0000_FFFF_FFFF_FFFF;
+        if owner != base {
+            return Err(Error::io(format!(
+                "unlink: the $ATTRIBUTE_LIST of record {base} names record {n}, whose base \
+                 record is {owner}"
+            )));
+        }
+        records.push((n, record));
+    }
+    Ok(records)
 }
 
 /// Free a regular-file MFT record and detach `basename` (which must
@@ -6723,6 +6767,22 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
             "unlink: no $FILE_NAME for '{basename}' under parent {parent_rec}"
         )));
     }
+
+    // The last name takes the whole file with it: its extension records
+    // and every cluster any of its records maps (#565). All of them are
+    // read and decoded now, before the parent's index entry goes, so a
+    // list or a mapping this cannot follow refuses the unlink with
+    // nothing written.
+    let (extensions, runs) = if hard_link_count > 1 {
+        (Vec::new(), Vec::new())
+    } else {
+        let extensions = extension_records_io(io, file_rec, &file_record_bytes)?;
+        let mut runs = nonresident_runs(&file_record_bytes)?;
+        for (_, record) in &extensions {
+            runs.extend(nonresident_runs(record)?);
+        }
+        (extensions, runs)
+    };
 
     remove_parent_index_entry_io(io, parent_rec, file_rec, basename)?;
 
@@ -6772,28 +6832,39 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
     //    This way round the worst case is the one truncate's comment
     //    describes: clusters still marked allocated that nothing owns.
     //    Wasted space, recoverable by a scan, and nothing is overwritten.
-    update_mft_record_io(io, file_rec, |record| {
-        let flags_off = 0x16;
-        let cur = u16::from_le_bytes([record[flags_off], record[flags_off + 1]]);
-        let new = cur & !crate::mft_io::MFT_FLAG_IN_USE;
-        record[flags_off..flags_off + 2].copy_from_slice(&new.to_le_bytes());
-        Ok(())
-    })?;
+    //
+    //    The base record goes first and its extension records after it: a
+    //    crash between them leaves extension records whose base is free,
+    //    which chkdsk deletes, rather than a live base record naming
+    //    extension records that are not.
+    for record_number in std::iter::once(file_rec).chain(extensions.iter().map(|(n, _)| *n)) {
+        update_mft_record_io(io, record_number, |record| {
+            let flags_off = 0x16;
+            let cur = u16::from_le_bytes([record[flags_off], record[flags_off + 1]]);
+            let new = cur & !crate::mft_io::MFT_FLAG_IN_USE;
+            record[flags_off..flags_off + 2].copy_from_slice(&new.to_le_bytes());
+            Ok(())
+        })?;
+    }
 
     // 3) Free the clusters of EVERY non-resident attribute, not just the
     //    unnamed $DATA: named non-resident $DATA streams and any attribute
-    //    promoted to non-resident own clusters in $Bitmap too. Freeing only
-    //    the unnamed $DATA (as this path used to) leaked theirs on every
-    //    last-link delete. Resident attributes live inside the MFT record
-    //    and are reclaimed when its bit is freed below.
+    //    promoted to non-resident own clusters in $Bitmap too, in the base
+    //    record and in every extension record. Freeing only the unnamed
+    //    $DATA (as this path used to) leaked theirs on every last-link
+    //    delete. Resident attributes live inside the MFT record and are
+    //    reclaimed when its bit is freed below.
     //
-    //    Read from `file_record_bytes`, the copy taken BEFORE the flag
-    //    was cleared, so the mapping pairs are the ones the file had.
-    free_all_nonresident_runs_io(io, &file_record_bytes)?;
+    //    Decoded from the copies taken BEFORE the flags were cleared, so
+    //    the mapping pairs are the ones the file had.
+    free_runs_io(io, &runs)?;
 
-    // 4) Free the MFT record bit.
+    // 4) Free the MFT record bits.
     let mbm = mft_bitmap::locate_io(io)?;
     mft_bitmap::free_io(io, &mbm, file_rec)?;
+    for (record_number, _) in &extensions {
+        mft_bitmap::free_io(io, &mbm, *record_number)?;
+    }
 
     Ok(())
 }
