@@ -1,11 +1,12 @@
 //! `$MFTMirr` on a 64 KiB-cluster volume, graded by Windows (#481).
 //!
 //! When a cluster holds more than the four records the mirror exists for,
-//! two formatters disagree about how many it declares: this crate declares
-//! four records (`mkfs::MFTMIRR_RECORDS`), and `mkntfs -c 65536` declares
-//! the whole cluster. ntfs-3g prints a fixup warning for every zero record
-//! it reads past the fourth on a volume of ours with that geometry. The
-//! formatter is held to neither of them but to Windows: the fixture is an
+//! two formatters disagreed about how many it declares: this crate
+//! declared four records, and `mkntfs -c 65536` the whole cluster, and
+//! ntfs-3g printed a fixup warning for every zero record it read past the
+//! fourth on a volume of ours with that geometry. Windows declares, and
+//! holds, the whole cluster, and so does this crate since. The
+//! formatter is held to neither of the others but to Windows: the fixture is an
 //! empty volume Windows' own formatter made with 64 KiB clusters
 //! (`test-disks/build-windows-native-read-fixtures.ps1`), and the volume
 //! this crate formats with the same size, cluster and record size must
