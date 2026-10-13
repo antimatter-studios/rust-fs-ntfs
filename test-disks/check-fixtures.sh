@@ -18,6 +18,11 @@ for img in basic manyfiles large-file sparse ads unicode deep attrlist compresse
     [ -f "$dir/ntfs-$img.img" ] || missing="$missing ntfs-$img.img"
 done
 [ -f "$dir/ntfs-symlink.targets.tsv" ] || missing="$missing ntfs-symlink.targets.tsv"
+for c in 512 4096; do
+    for f in "ntfs-populated-$c.img" "ntfs-populated-$c.manifest.tsv"; do
+        [ -f "$dir/$f" ] || missing="$missing $f"
+    done
+done
 if [ -n "$missing" ]; then
     echo "missing fixtures in test-disks/:$missing" >&2
     echo "build portable fixtures with test-disks/build-ntfs-feature-images.sh; Windows-only fixtures with test-disks/build-windows-native-read-fixtures.ps1" >&2

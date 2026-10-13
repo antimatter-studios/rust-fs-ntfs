@@ -20,7 +20,7 @@
 # ubuntu CI runners) this runs the builders natively — no VM. The tools come
 # from the `ntfs-3g` package:
 #
-#   apt-get install -y ntfs-3g       # Debian / Ubuntu  (mkntfs + ntfs-3g)
+#   apt-get install -y ntfs-3g attr  # Debian / Ubuntu  (mkntfs + ntfs-3g, setfattr)
 #
 # Mounting needs root, so the mount/umount steps run under `sudo` when the
 # script is not already root.
@@ -49,10 +49,10 @@ if [ "$(uname -s)" != "Linux" ]; then
     exit 1
 fi
 
-for tool in mkntfs ntfs-3g truncate dd; do
+for tool in mkntfs ntfs-3g truncate dd setfattr; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ERROR: '$tool' not found on PATH." >&2
-        echo "       Install the fixture toolchain:  apt-get install -y ntfs-3g" >&2
+        echo "       Install the fixture toolchain:  apt-get install -y ntfs-3g attr" >&2
         exit 1
     fi
 done
@@ -230,9 +230,118 @@ build_deep() {
     umount_ntfs
 }
 
+# A VOLUME ANOTHER IMPLEMENTATION POPULATED (#485). Every other image here
+# holds a handful of files. One volume ntfs-3g filled the way a user's would
+# be found four reader bugs at once (#468, #471, #472, #473): a directory
+# whose $INDEX_ROOT moved to an extension record, streams in extension
+# records, a $DATA run list split across records, and writes into a file
+# that already had an $ATTRIBUTE_LIST. This builds that volume at a 512-byte
+# and a 4 KiB cluster, and writes beside each a manifest of what the mount
+# itself reports: every directory, every file's size and SHA-256, and every
+# named stream's. tests/ntfs3g_populated.rs reads the volume back against it.
+#
+# Manifest lines, tab-separated, paths from the volume's root:
+#   D  <path>
+#   F  <path>  <size>  <sha256>
+#   S  <path>  <stream>  <size>  <sha256>
+build_populated() {
+    local cluster="$1"
+    local img="ntfs-populated-$cluster.img"
+    local manifest="ntfs-populated-$cluster.manifest.tsv"
+    echo "[build] $img"
+    rm -f "$img" "$manifest"
+    truncate -s 256M "$img"
+    mkntfs -q -F -f -L "Populated" -c "$cluster" --with-uuid "$img"
+    $SUDO ntfs-3g -o streams_interface=windows,big_writes,compression,default_permissions \
+        "$img" "$MNT"
+    local populate
+    populate="$(mktemp "${TMPDIR:-/tmp}/ntfs-populate.XXXXXX")"
+    cat >"$populate" <<'EOF'
+set -eu
+cd "$1"
+# 600 names of growing length in one directory: a multi-level index.
+mkdir wide
+i=1
+while [ "$i" -le 600 ]; do
+    name="$(printf '%*s' $((i % 120 + 1)) '' | tr ' ' n)-$i"
+    printf 'entry %d\n' "$i" >"wide/$name"
+    i=$((i + 1))
+done
+# A compressed directory (FILE_ATTRIBUTE_COMPRESSED), whose files inherit
+# it: text of 10 B to 1 MiB, which LZNT1 shrinks, and 300 KiB of random
+# bytes, which it cannot.
+mkdir compressed
+setfattr -n system.ntfs_attrib_be -v 0x00000800 compressed
+for n in 10 1000 10000 100000 1048576; do
+    yes 'a line of text that compresses well' | head -c "$n" >"compressed/text-$n.txt"
+done
+head -c 307200 /dev/urandom >compressed/random.bin
+# 60 long names for one file: its $FILE_NAME attributes spill into
+# extension records, and the directory's $INDEX_ROOT follows.
+mkdir links
+printf 'one file, sixty names\n' >links/target
+i=1
+while [ "$i" -le 60 ]; do
+    ln links/target "links/$(printf '%*s' 200 '' | tr ' ' l)-$i"
+    i=$((i + 1))
+done
+# 40 named streams and a 90 KiB non-resident one on one file.
+printf 'the unnamed stream\n' >streams.txt
+i=1
+while [ "$i" -le 40 ]; do
+    printf 'stream %d of 40\n' "$i" >"streams.txt:s$i"
+    i=$((i + 1))
+done
+head -c 92160 /dev/urandom >"streams.txt:big"
+# A 50 MiB sparse file with two islands of data.
+truncate -s 50M sparse.bin
+printf 'the first island' | dd of=sparse.bin bs=1 seek=1048576 conv=notrunc status=none
+printf 'the second island' | dd of=sparse.bin bs=1 seek=41943040 conv=notrunc status=none
+# Two files grown in alternating 8 KiB chunks: fragmented run lists.
+i=1
+while [ "$i" -le 96 ]; do
+    head -c 8192 /dev/urandom >>frag-a.bin
+    head -c 8192 /dev/urandom >>frag-b.bin
+    i=$((i + 1))
+done
+# Names across UTF-16, an astral one, one of 250 characters, a deep path
+# and an empty file.
+printf 'umlaut\n' >'grüße.txt'
+printf 'japanese\n' >'日本語.txt'
+printf 'emoji\n' >'hello-🌍.txt'
+printf 'long\n' >"$(printf '%*s' 250 '' | tr ' ' L)"
+mkdir -p deep/one/two/three/four/five
+printf 'five levels down\n' >deep/one/two/three/four/five/file.txt
+: >empty
+EOF
+    run_root "bash '$populate' '$MNT'"
+    rm -f "$populate"
+
+    local list
+    list="$(mktemp "${TMPDIR:-/tmp}/ntfs-manifest.XXXXXX")"
+    cat >"$list" <<'EOF'
+set -eu
+cd "$1"
+find . -mindepth 1 -type d | LC_ALL=C sort | while IFS= read -r p; do
+    printf 'D\t%s\n' "${p#.}"
+done
+find . -type f | LC_ALL=C sort | while IFS= read -r p; do
+    printf 'F\t%s\t%s\t%s\n' "${p#.}" "$(stat -c %s "$p")" "$(sha256sum <"$p" | cut -d' ' -f1)"
+done
+for s in $(seq 1 40 | sed 's/^/s/') big; do
+    printf 'S\t/streams.txt\t%s\t%s\t%s\n' "$s" "$(stat -c %s "streams.txt:$s")" \
+        "$(sha256sum <"streams.txt:$s" | cut -d' ' -f1)"
+done
+EOF
+    $SUDO bash "$list" "$MNT" >"$manifest"
+    rm -f "$list"
+    umount_ntfs
+    echo "[build] $manifest: $(grep -c . "$manifest") entries"
+}
+
 # --- dispatch -------------------------------------------------------------
 
-ALL="basic manyfiles large-file sparse ads unicode deep"
+ALL="basic manyfiles large-file sparse ads unicode deep populated"
 TARGETS="${*:-$ALL}"
 
 for t in $TARGETS; do
@@ -244,6 +353,7 @@ for t in $TARGETS; do
         ads)        build_ads ;;
         unicode)    build_unicode ;;
         deep)       build_deep ;;
+        populated)  build_populated 512; build_populated 4096 ;;
         *)          echo "unknown target: $t (have: $ALL)" >&2; exit 1 ;;
     esac
 done

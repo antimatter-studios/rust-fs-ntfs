@@ -458,7 +458,7 @@ jobs:
       - name: Install fixture toolchain (mkntfs + ntfs-3g)
         run: |
           sudo apt-get update
-          sudo apt-get install -y ntfs-3g
+          sudo apt-get install -y ntfs-3g attr
       # Generate the read-path .img fixtures. With these present the
       # fixture-driven integration tests (tests/ads.rs, tests/unicode.rs,
       # …) run instead of self-skipping. The Windows-authored fixtures arrive
