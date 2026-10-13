@@ -524,6 +524,11 @@ pub fn fsck_io_with<'cb, T: FsckIo>(
     }
 
     let dirty_cleared = if options.clear_dirty {
+        if is_dirty_io(io)? {
+            if let Some(refused) = unordered(io, "clearing the dirty flag") {
+                return Err(refused);
+            }
+        }
         emit("clear_dirty", 0, 1);
         let cleared = clear_dirty_io(io)?;
         emit("clear_dirty", 1, 1);
@@ -632,6 +637,26 @@ impl<T: BlockIo + ?Sized> BlockIo for Replayed<'_, T> {
     fn size(&self) -> u64 {
         self.io.size()
     }
+    fn can_sync(&self) -> bool {
+        self.io.can_sync()
+    }
+}
+
+/// Why a replay or a dirty-flag repair is refused on `io`, when its writes
+/// cannot be ordered (#518): the replayed metadata must be on the disk
+/// before the log stops saying there is work to do, and a backend whose
+/// sync does nothing could land the log's "clean" first. `None` when `io`
+/// can sync.
+fn unordered<T: BlockIo + ?Sized>(io: &T, doing: &str) -> Option<Error> {
+    (!io.can_sync()).then(|| {
+        Error::refused(format!(
+            "{doing} refused: it needs its writes to reach the disk in order, and this \
+             read/write callback pair has no flush callback to order them (#518). Use \
+             an fs_core device made by fs_core_device_from_callbacks with a flush \
+             callback, through fs_ntfs_fsck_with_fs_core_device or \
+             fs_ntfs_mount_rw_with_fs_core_device_replaying_log"
+        ))
+    })
 }
 
 /// Redo every change `$LogFile` holds that may not have reached the
@@ -644,6 +669,9 @@ impl<T: BlockIo + ?Sized> BlockIo for Replayed<'_, T> {
 /// the same changes: every MFT record and index block carries the LSN of
 /// the last change it holds, and is skipped once it holds it.
 pub fn replay_logfile_io<T: FsckIo>(io: &mut T) -> Result<ReplayReport, Error> {
+    if let Some(refused) = unordered(io, "replaying $LogFile") {
+        return Err(refused);
+    }
     let (log_offset, log_size) = locate_logfile_data_io(io)?;
     let size = usize::try_from(log_size).map_err(|_| Error::io("$LogFile is too large"))?;
     let mut log = vec![0u8; size];

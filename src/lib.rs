@@ -3472,6 +3472,11 @@ impl BlockIoTrait for CallbackIo {
         Ok(())
     }
 
+    /// No flush callback: a replay and a dirty-flag repair refuse (#518).
+    fn can_sync(&self) -> bool {
+        false
+    }
+
     fn size(&self) -> u64 {
         self.size
     }

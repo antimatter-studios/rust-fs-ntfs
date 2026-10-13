@@ -41,10 +41,17 @@ pub trait BlockIo {
     fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String>;
     fn size(&self) -> u64;
     /// Flush pending writes to stable storage. Path-backed impls call
-    /// `fsync`. Callback-backed impls let the host (FSKit / Go backend)
-    /// drain on its own sync barrier, so this is a no-op there.
+    /// `fsync`, and fs-core devices their `flush`. The read/write callback
+    /// pair has no flush callback, so this is a no-op there, and
+    /// [`BlockIo::can_sync`] says so.
     fn sync(&mut self) -> Result<(), String> {
         Ok(())
+    }
+    /// Whether [`BlockIo::sync`] reaches stable storage. A `$LogFile`
+    /// replay, and a dirty-flag repair, depend on their writes landing in
+    /// order, and refuse a backend that cannot promise it (#518).
+    fn can_sync(&self) -> bool {
+        true
     }
 }
 
@@ -62,6 +69,9 @@ impl<T: BlockIo + ?Sized> BlockIo for &mut T {
     }
     fn sync(&mut self) -> Result<(), String> {
         (**self).sync()
+    }
+    fn can_sync(&self) -> bool {
+        (**self).can_sync()
     }
 }
 
@@ -203,6 +213,12 @@ impl BlockIo for CallbackBlockIo {
 
     fn size(&self) -> u64 {
         self.size
+    }
+
+    /// `FsNtfsBlockdevCfg` has no flush callback, so nothing here orders
+    /// a write before the next (#518).
+    fn can_sync(&self) -> bool {
+        false
     }
 }
 

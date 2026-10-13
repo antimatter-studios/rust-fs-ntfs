@@ -264,9 +264,14 @@ fn is_dirty_with_callbacks_neg1_on_null_cfg() {
 }
 
 #[test]
-fn fsck_with_callbacks_clears_dirty_and_resets_log() {
+fn fsck_with_callbacks_refuses_to_clear_dirty_without_a_flush() {
+    // Clearing the flag is a repair whose writes must reach the disk in
+    // order, and this callback pair has no flush callback to order them
+    // (#518), so it is refused before anything is written. An fs_core
+    // device with a flush callback clears it (capi_fsck_fs_core_device.rs).
     let img = dirty_copy("cb_full", true, false);
     empty_logfile(&img);
+    let before = std::fs::read(&img).expect("snapshot image");
     let (ctx, size) = make_ctx(&img);
     let cfg = FsNtfsBlockdevCfg {
         read: read_cb,
@@ -285,13 +290,16 @@ fn fsck_with_callbacks_clears_dirty_and_resets_log() {
             FS_NTFS_FSCK_CLEAR_DIRTY,
         )
     };
-    assert_eq!(rc, 0, "expected success; last_error={}", last_error());
-    assert_eq!(cleared, 1);
-
-    // The callbacks wrote through to the file — re-read via path to
-    // confirm the on-disk result.
-    drop(ctx); // release the file handle so the verification reads see the final state
-    assert!(!read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
+    assert_eq!(rc, -1, "refused");
+    let why = last_error();
+    assert!(
+        why.contains("#518") && why.contains("flush"),
+        "refused, but not for the missing flush: {why}"
+    );
+    assert_eq!(cleared, 0);
+    drop(ctx);
+    assert_eq!(std::fs::read(&img).expect("read image"), before);
+    assert!(read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
     assert!(read_logfile_first_page(&img).iter().all(|&b| b == 0xFF));
 }
 
@@ -385,24 +393,20 @@ fn fsck_with_callbacks_emits_progress() {
             Some(progress_cb),
             &mut log as *mut ProgressLog as *mut c_void,
             std::ptr::null_mut(),
-            FS_NTFS_FSCK_CLEAR_DIRTY,
+            0,
         )
     };
     assert_eq!(rc, 0, "last_error={}", last_error());
 
-    // fsck reads the log and clears the flag. It never resets the log, so
-    // the `reset_logfile` phase is not emitted (#376) -- the C ABI change
-    // this pins.
+    // fsck reads the log and, not asked to clear the flag, leaves it
+    // (#519): this callback pair could not clear it anyway (#518). It
+    // never resets the log, so the `reset_logfile` phase is not emitted
+    // (#376) -- the C ABI change this pins.
     let phases: Vec<(&str, u64, u64)> =
         log.0.iter().map(|(p, d, t)| (p.as_str(), *d, *t)).collect();
     assert_eq!(
         phases,
-        [
-            ("check_logfile", 0, 1),
-            ("check_logfile", 1, 1),
-            ("clear_dirty", 0, 1),
-            ("clear_dirty", 1, 1)
-        ],
+        [("check_logfile", 0, 1), ("check_logfile", 1, 1)],
         "progress phases"
     );
 }

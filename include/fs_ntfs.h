@@ -260,6 +260,12 @@ fs_ntfs_fs_t *fs_ntfs_mount_with_callbacks(
  * not going to resume from a Fast Startup shutdown or a hibernation on
  * this volume. Refused, with nothing written: a dirty volume, or a log
  * that cannot be read or replayed in full.
+ *
+ * A log that holds work is refused too (rust-fs-ntfs#518): a replay needs
+ * its writes ordered, and this config has no flush callback. Replay
+ * through fs_ntfs_mount_rw_with_fs_core_device_replaying_log on a device
+ * from fs_core_device_from_callbacks with a flush callback instead; that,
+ * the path-based mounts and fsck are the backends that replay.
  */
 fs_ntfs_fs_t *fs_ntfs_mount_with_callbacks_replaying_log(
     const fs_ntfs_blockdev_cfg_t *cfg);
@@ -681,9 +687,12 @@ typedef int (*fs_ntfs_fsck_progress_fn)(void *context, const char *phase,
  * the dirty bit only when `flags` carries FS_NTFS_FSCK_CLEAR_DIRTY. A log
  * that cannot be replayed in full is refused before writing, dirty or not.
  *
- * `cfg->read` and `cfg->write` must both be set (fsck writes the replay
- * and patches `$Volume`'s flags). `progress_cb` may be NULL; if non-NULL,
- * it is invoked around each phase.
+ * `cfg->read` and `cfg->write` must both be set. This config has no flush
+ * callback, so a $LogFile holding work, and FS_NTFS_FSCK_CLEAR_DIRTY on a
+ * dirty volume, are refused with nothing written (rust-fs-ntfs#518):
+ * fs_ntfs_fsck_with_fs_core_device on a device with a flush callback does
+ * both. `progress_cb` may be NULL; if non-NULL, it is invoked around each
+ * phase.
  *
  * `out_dirty_cleared` mirrors the path-based fs_ntfs_fsck: if non-NULL it
  * is set on success to `1` if the dirty bit was set and cleared (`0`
