@@ -464,6 +464,20 @@ host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write-streams.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -Count '{step.count}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
+[ops.win-write-objids]
+# Write `count` files `f000.txt`.. under `dir`, each given an object id by
+# `fsutil objectid create`, so Windows grows $Extend\$ObjId:$O past its
+# root into INDX blocks: the shape a host-side unlink of one of them has
+# to take its entry out of (#571).
+#
+# Step fields:
+#   dir          — directory inside the volume (e.g. "/objid"), created
+#   count        — number of files (integer as string, 1 to 999)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write-objids.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Dir '{step.dir}' -Count '{step.count}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
 [ops.win-delete]
 # Delete a single file at `path` from the mounted volume. Mounts the
 # .img (re-using a prior op's .vhd if `keep_image=true` was set on

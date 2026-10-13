@@ -1722,7 +1722,21 @@ impl IndexNode {
 }
 
 /// Read the node whose INDEX_HEADER is at `ih`, bounded by `value_end`.
-fn parse_node(buf: &[u8], ih: usize, value_end: usize) -> Result<IndexNode, Error> {
+/// Which index a node belongs to, for what its entries' keys must be:
+/// a directory's `$I30`, keyed by `$FILE_NAME`, or a view index such as
+/// `$Extend\$ObjId:$O`, keyed by bytes its own collation orders (#571).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum NodeKeys {
+    FileNames,
+    View,
+}
+
+fn parse_node_of(
+    buf: &[u8],
+    ih: usize,
+    value_end: usize,
+    keys: NodeKeys,
+) -> Result<IndexNode, Error> {
     if ih
         .checked_add(INDEX_HEADER_SIZE)
         .is_none_or(|end| end > value_end || value_end > buf.len())
@@ -1771,8 +1785,18 @@ fn parse_node(buf: &[u8], ih: usize, value_end: usize) -> Result<IndexNode, Erro
         let mut key = buf[cursor..cursor + key_len].to_vec();
         key[IE_LENGTH..IE_LENGTH + 2].copy_from_slice(&(key_len as u16).to_le_bytes());
         key[IE_FLAGS..IE_FLAGS + 2].copy_from_slice(&(flags & !IE_FLAG_HAS_SUBNODE).to_le_bytes());
-        // Every key has to carry a readable name: the insert compares them.
-        entry_name(&key, 0, key.len())?;
+        match keys {
+            // Every key has to carry a readable name: the insert compares them.
+            NodeKeys::FileNames => {
+                entry_name(&key, 0, key.len())?;
+            }
+            NodeKeys::View => {
+                let key_len = u16::from_le_bytes([key[IE_KEY_LENGTH], key[IE_KEY_LENGTH + 1]]);
+                if IE_KEY_START + usize::from(key_len) > key.len() {
+                    return Err(Error::io("a view index entry's key runs past the entry"));
+                }
+            }
+        }
         entries.push(NodeEntry { key, child });
         cursor += len;
     }
@@ -1781,24 +1805,39 @@ fn parse_node(buf: &[u8], ih: usize, value_end: usize) -> Result<IndexNode, Erro
 
 /// The resident `$INDEX_ROOT:$I30` of `record` as a node.
 pub(crate) fn parse_index_root_node(record: &[u8]) -> Result<IndexNode, Error> {
-    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or(Error::io("$INDEX_ROOT:$I30 missing"))?;
+    parse_index_root_node_of(record, stream::I30, NodeKeys::FileNames)
+}
+
+/// [`parse_index_root_node`] for the index named `index`.
+pub(crate) fn parse_index_root_node_of(
+    record: &[u8],
+    index: &str,
+    keys: NodeKeys,
+) -> Result<IndexNode, Error> {
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(index))
+        .ok_or_else(|| Error::io(format!("$INDEX_ROOT:{index} missing")))?;
     let value = ir.attr_offset
         + ir.resident_value_offset
             .ok_or(Error::io("no value offset"))? as usize;
     let end = index_root_value_end(record, &ir)?;
-    parse_node(record, value + IR_INDEX_HEADER_OFFSET, end)
+    parse_node_of(record, value + IR_INDEX_HEADER_OFFSET, end, keys)
 }
 
 /// A clean (post-fixup) INDX block as a node.
 pub(crate) fn parse_indx_node(block: &[u8]) -> Result<IndexNode, Error> {
+    parse_indx_node_of(block, NodeKeys::FileNames)
+}
+
+/// [`parse_indx_node`] for a block of an index whose keys are `keys`.
+pub(crate) fn parse_indx_node_of(block: &[u8], keys: NodeKeys) -> Result<IndexNode, Error> {
     if block.get(0..4) != Some(b"INDX") {
         return Err(Error::io("not an INDX block"));
     }
-    parse_node(
+    parse_node_of(
         block,
         crate::idx_block::INDX_INDEX_HEADER_OFFSET,
         block.len(),
+        keys,
     )
 }
 
@@ -1894,9 +1933,18 @@ pub(crate) fn empty_indx_block(block_size: usize, bytes_per_sector: u16) -> Resu
 /// Fails with the record-capacity error when the record cannot hold them,
 /// leaving `record` in an unspecified state: callers work on a copy.
 pub(crate) fn write_index_root_node(record: &mut [u8], node: &IndexNode) -> Result<(), Error> {
+    write_index_root_node_of(record, stream::I30, node)
+}
+
+/// [`write_index_root_node`] for the index named `index`.
+pub(crate) fn write_index_root_node_of(
+    record: &mut [u8],
+    index: &str,
+    node: &IndexNode,
+) -> Result<(), Error> {
     let encoded = node.encode()?;
-    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or(Error::io("$INDEX_ROOT:$I30 missing"))?;
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(index))
+        .ok_or_else(|| Error::io(format!("$INDEX_ROOT:{index} missing")))?;
     let value_length = ir
         .resident_value_length
         .ok_or(Error::io("no value_length"))? as usize;
@@ -1909,7 +1957,7 @@ pub(crate) fn write_index_root_node(record: &mut [u8], node: &IndexNode) -> Resu
     let new_value_len =
         u32::try_from(IR_INDEX_HEADER_OFFSET + total).map_err(|_| "index root is too large")?;
     crate::attr_resize::resize_resident_value(record, ir.attr_offset, new_value_len)?;
-    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(index))
         .ok_or(Error::io("$INDEX_ROOT vanished"))?;
     let value = ir.attr_offset
         + ir.resident_value_offset

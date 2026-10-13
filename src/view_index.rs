@@ -16,13 +16,17 @@
 //!   with the 16-byte form of `$OBJECT_ID` has a birth volume and domain
 //!   id of zero and a birth object id equal to its object id.
 //!
-//! Only the resident `$INDEX_ROOT` is edited. An index that has spilled
-//! into INDX blocks, or a root with no room for the entry, is refused
-//! before anything is written: those need the index B-tree maintenance
-//! `$I30` has, which view indexes do not share yet.
+//! An entry is put only into the resident `$INDEX_ROOT`: an index that has
+//! spilled into INDX blocks, or a root with no room for the entry, refuses
+//! an insert before anything is written (#571). An entry is taken out
+//! wherever it is, the root or an INDX block ([`remove_io`]): a leaf's
+//! entry is cut from its node, and an interior one is replaced by its
+//! neighbour as `$I30`'s are, by the same code.
 
 use crate::attr_io::{self, AttrType};
+use crate::block_io::BlockIo;
 use crate::error::Error;
+use crate::index_io::{NodeEntry, NodeKeys};
 use std::cmp::Ordering;
 
 /// `$Extend\$Reparse`'s index.
@@ -275,6 +279,150 @@ pub fn remove(record: &mut [u8], index: &str, key: &[u8]) -> Result<bool, Error>
     root(&scratch, index)?;
     record.copy_from_slice(&scratch);
     Ok(true)
+}
+
+/// Whether the index named `index` in `record` has spilled into INDX
+/// blocks: its root's header says it has sub-nodes.
+pub fn spilled(record: &[u8], index: &str) -> Result<bool, Error> {
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(index))
+        .ok_or_else(|| Error::io(format!("$INDEX_ROOT:{index} not found")))?;
+    let value = ir.attr_offset
+        + ir.resident_value_offset
+            .ok_or_else(|| Error::io(format!("$INDEX_ROOT:{index} is not resident")))?
+            as usize;
+    record
+        .get(value + IR_INDEX_HEADER_OFFSET + IH_FLAGS)
+        .map(|f| f & IH_FLAG_HAS_SUBNODES != 0)
+        .ok_or_else(|| Error::io(format!("$INDEX_ROOT:{index} is too short for its header")))
+}
+
+/// The key a node's entry holds.
+fn node_key(entry: &NodeEntry) -> &[u8] {
+    let len = usize::from(u16::from_le_bytes([
+        entry.key[IE_KEY_LENGTH],
+        entry.key[IE_KEY_LENGTH + 1],
+    ]));
+    entry
+        .key
+        .get(IE_KEY_START..IE_KEY_START + len)
+        .unwrap_or(&[])
+}
+
+/// Take the entry for `key` out of the index named `index` of the record
+/// `rec`, wherever it is (#571). Returns whether there was one.
+///
+/// While the index fits its root, this is [`remove`]. Once it has spilled
+/// into INDX blocks, the entry is found in the root or in a block. A leaf's
+/// entry is cut from its node and the block written back; a leaf left empty
+/// stays, as Windows leaves it. An interior entry, which routes to the
+/// subtree below it, is replaced by its in-order neighbour, as a directory's
+/// `$I30` entries are (`write::remove_interior_entry_of_io`).
+pub(crate) fn remove_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    index: &str,
+    key: &[u8],
+) -> Result<bool, Error> {
+    let (_, record) = crate::mft_io::read_mft_record_io(io, rec)?;
+    if !spilled(&record, index)? {
+        if !remove(&mut record.clone(), index, key)? {
+            return Ok(false);
+        }
+        crate::mft_io::update_mft_record_io(io, rec, |r| remove(r, index, key).map(|_| ()))?;
+        return Ok(true);
+    }
+    let what = format!("the {index} entry of record {rec}");
+    let is_wanted = |entry: &NodeEntry| -> Result<bool, Error> { Ok(node_key(entry) == key) };
+    let root = crate::index_io::parse_index_root_node_of(&record, index, NodeKeys::View)?;
+    if root.entries.iter().any(|e| node_key(e) == key) {
+        crate::write::remove_interior_entry_of_io(
+            io,
+            rec,
+            index,
+            NodeKeys::View,
+            None,
+            &what,
+            &is_wanted,
+        )?;
+        return Ok(true);
+    }
+    let ia = crate::idx_block::load_index_io(io, rec, index)?;
+    for vcn in ia.allocated_block_vcns() {
+        let block = crate::idx_block::read_indx_block_io(io, &ia, vcn)?;
+        let mut node = crate::index_io::parse_indx_node_of(&block, NodeKeys::View)?;
+        let Some(at) = node.entries.iter().position(|e| node_key(e) == key) else {
+            continue;
+        };
+        if node.entries[at].child.is_some() {
+            crate::write::remove_interior_entry_of_io(
+                io,
+                rec,
+                index,
+                NodeKeys::View,
+                Some(vcn),
+                &what,
+                &is_wanted,
+            )?;
+        } else {
+            node.entries.remove(at);
+            let bytes = crate::index_io::write_indx_node(&block, &node, vcn)?;
+            crate::idx_block::write_indx_block_io(io, &ia, vcn, &bytes)?;
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Every key of the index named `index` of the record `rec`, in the
+/// index's order, each with whether it sits in an interior node: a walk of
+/// the whole tree, its root and its INDX blocks, child before entry.
+pub fn keys_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    index: &str,
+) -> Result<Vec<(Vec<u8>, bool)>, Error> {
+    let (_, record) = crate::mft_io::read_mft_record_io(io, rec)?;
+    let root = crate::index_io::parse_index_root_node_of(&record, index, NodeKeys::View)?;
+    if !root.is_interior() {
+        return Ok(root
+            .entries
+            .iter()
+            .map(|e| (node_key(e).to_vec(), false))
+            .collect());
+    }
+    let ia = crate::idx_block::load_index_io(io, rec, index)?;
+    let mut out = Vec::new();
+    // Recursive, with a depth bound, so a cycle is an error and not a hang.
+    fn visit<T: BlockIo + ?Sized>(
+        io: &mut T,
+        ia: &crate::idx_block::IndexAllocation,
+        node: &crate::index_io::IndexNode,
+        depth: usize,
+        out: &mut Vec<(Vec<u8>, bool)>,
+    ) -> Result<(), Error> {
+        if depth > 64 {
+            return Err(Error::io(
+                "a view index deeper than 64 levels, or with a cycle",
+            ));
+        }
+        let interior = node.is_interior();
+        for entry in &node.entries {
+            if let Some(child) = entry.child {
+                let block = crate::idx_block::read_indx_block_io(io, ia, child)?;
+                let below = crate::index_io::parse_indx_node_of(&block, NodeKeys::View)?;
+                visit(io, ia, &below, depth + 1, out)?;
+            }
+            out.push((node_key(entry).to_vec(), interior));
+        }
+        if let Some(child) = node.last_child {
+            let block = crate::idx_block::read_indx_block_io(io, ia, child)?;
+            let below = crate::index_io::parse_indx_node_of(&block, NodeKeys::View)?;
+            visit(io, ia, &below, depth + 1, out)?;
+        }
+        Ok(())
+    }
+    visit(io, &ia, &root, 0, &mut out)?;
+    Ok(out)
 }
 
 /// The keys in the resident root of `index` in `record`, in order.
