@@ -84,6 +84,14 @@ are documented there.
 Reverse chronological highlights from `git log`. Full per-commit
 history available via `git log` in the repo.
 
+### 2026-10-13 — 0.10.1
+
+- Unlinking a file's last name frees its extension records and every
+  cluster they map, where ntfs-3g or Windows spread its attributes over
+  them. They used to stay in use with no base record.
+- The first published release of everything 0.10.0 lists: 0.10.0 was
+  tagged, and its release run stopped before `cargo publish`.
+
 ### 2026-10-13 — 0.10.0
 
 - **Breaking:** fsck leaves the dirty flag set for Windows' chkdsk unless
@@ -217,37 +225,6 @@ history available via `git log` in the repo.
 - A rollback that cannot complete now says so: the caller still receives
   the error that actually failed, with the leaked record appended, rather
   than the leak being silent.
-
-### 2026-05-24
-
-- `feat(read)`: `read_reparse_point` exposes raw `(tag, data)` for
-  any reparse type (`fs_ntfs_readlink` only handles symlinks/mount
-  points). Useful for inspecting third-party tags (dedup, HSM, etc.).
-- `feat(read)`: `list_named_streams` enumerates the names of every
-  named `$DATA` attribute (ADS) on a file, excluding the unnamed
-  primary stream.
-- `feat(read)`: `list_ea_keys` returns just the EA names, skipping
-  values up to 64KB each — for callers that only need to discover
-  which EAs exist.
-- `feat(read)`: `read_si_full` surfaces every MS-FSCC §2.4.2
-  `$STANDARD_INFORMATION` field, including the NTFS 3.x trailer
-  (owner_id, security_id, quota, usn) when present.
-- `feat(capi)`: `fs_ntfs_set_object_id_extended_h` — handle-based
-  sibling of `fs_ntfs_write_object_id_extended` for callers holding
-  an open filesystem handle.
-- `fix(pr#49)`: bundle of 23 review-feedback fixes covering
-  `fn_namespace_for` DOS 8.3 validity, `read_volume_label` odd-byte
-  corruption surfacing, `read_object_id_extended` strict `{16, 64}`
-  length validation, `remove_attribute_at` bounds-checked helper
-  replacing five `copy_within` panic sites, `_pad[3]` → `_pad[5]`
-  explicit padding, smoke-mode gate failure-detection, dirty-tree
-  seal false-positive guard, VM-host redaction, PowerShell short-
-  read detection, portable verdict-collect path, cargo-fmt
-  hygiene. See `CHANGELOG.md` for the full per-item list.
-- `chore(hooks)`: `core.hooksPath` set to `.githooks` so
-  `cargo fmt --check` + `cargo clippy -- -D warnings` run locally
-  before commit (one-shot install:
-  `bash scripts/install-hooks.sh`).
 
 ## License
 
