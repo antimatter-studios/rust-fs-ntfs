@@ -1476,8 +1476,9 @@ fn rename_same_length_unstamped_io<T: BlockIo + ?Sized>(
     //    in the resident $INDEX_ROOT or spills into $INDEX_ALLOCATION;
     //    dispatch accordingly.
     let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
-    let ir_flags = index_io::index_root_flags(&parent_record_bytes)
-        .ok_or_else(|| Error::io("no $INDEX_ROOT on parent"))?;
+    let ir_flags = index_io::index_root_flags(&parent_record_bytes).ok_or_else(|| {
+        missing_index_root(&parent_record_bytes, "remove a name from a directory")
+    })?;
 
     // Reject a destination that already exists: two $I30 entries with the
     // same key is corruption (chkdsk flags it) and a silent clobber leaks
@@ -1949,8 +1950,8 @@ fn parent_index_overflows_io<T: BlockIo + ?Sized>(
     parent_rec: u64,
 ) -> Result<bool, Error> {
     let (_, record) = read_mft_record_io(io, parent_rec)?;
-    let flags =
-        index_io::index_root_flags(&record).ok_or_else(|| Error::io("no $INDEX_ROOT on parent"))?;
+    let flags = index_io::index_root_flags(&record)
+        .ok_or_else(|| missing_index_root(&record, "change a directory's index"))?;
     Ok(flags & index_io::IH_FLAG_HAS_SUBNODES != 0)
 }
 
@@ -2297,7 +2298,7 @@ fn create_file_unstamped_io<T: BlockIo + ?Sized>(
         )));
     }
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
-        .ok_or_else(|| Error::io("parent has no $INDEX_ROOT"))?;
+        .ok_or_else(|| missing_index_root(&parent_record_bytes, "add a name to a directory"))?;
     let parent_has_overflow = ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0;
 
     // Reject if the entry already exists anywhere (resident or INDX block).
@@ -3090,7 +3091,7 @@ fn mkdir_unstamped_io<T: BlockIo + ?Sized>(
         )));
     }
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
-        .ok_or_else(|| Error::io("parent has no $INDEX_ROOT"))?;
+        .ok_or_else(|| missing_index_root(&parent_record_bytes, "add a name to a directory"))?;
     let parent_has_overflow = ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0;
     if index_io::find_index_entry(&parent_record_bytes, basename, Some(&upcase))?.is_some() {
         return Err(Error::exists(format!(
@@ -3337,6 +3338,27 @@ fn commit_eas(record: &mut [u8], eas: &[crate::ea_io::Ea]) -> Result<(), Error> 
         &crate::record_build::build_resident_ea_attribute,
     )?;
     Ok(())
+}
+
+/// Why a directory's record offers no `$INDEX_ROOT` to change.
+///
+/// A record that carries an `$ATTRIBUTE_LIST` may hold its `$INDEX_ROOT` in
+/// an extension record, as ntfs-3g leaves a large directory: the readers
+/// follow the list there (#471), but this driver edits only the base
+/// record and does not maintain the list (#468), so the change is refused
+/// before anything is written. Any other record is not a directory this
+/// crate can read, and the error names what it does hold.
+fn missing_index_root(record: &[u8], what: &str) -> Error {
+    if let Err(refused) = crate::attr_resize::refuse_if_attribute_list(record, what) {
+        return refused;
+    }
+    let held: Vec<String> = attr_io::iter_attributes(record)
+        .map(|a| format!("{:#x}", a.type_code))
+        .collect();
+    Error::io(format!(
+        "{what}: no $INDEX_ROOT on parent; its record holds attributes [{}]",
+        held.join(", ")
+    ))
 }
 
 /// Remove the attribute at `attr_offset` (length `attr_length`) from
@@ -4362,7 +4384,7 @@ fn link_unstamped_io<T: BlockIo + ?Sized>(
         )));
     }
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
-        .ok_or_else(|| Error::io("parent has no $INDEX_ROOT"))?;
+        .ok_or_else(|| missing_index_root(&parent_record_bytes, "add a name to a directory"))?;
     let parent_has_overflow = ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0;
     if index_io::find_index_entry(&parent_record_bytes, new_basename, Some(&upcase))?.is_some() {
         return Err(Error::exists(format!(
@@ -5648,8 +5670,9 @@ fn remove_parent_index_entry_io<T: BlockIo + ?Sized>(
     // see `index_io::find_index_entry`.
     let upcase = crate::upcase::UpcaseTable::load_io(io)?;
     let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
-    let ir_flags = index_io::index_root_flags(&parent_record_bytes)
-        .ok_or_else(|| Error::io("no $INDEX_ROOT on parent"))?;
+    let ir_flags = index_io::index_root_flags(&parent_record_bytes).ok_or_else(|| {
+        missing_index_root(&parent_record_bytes, "remove a name from a directory")
+    })?;
     let in_root = index_io::find_index_entry(&parent_record_bytes, basename, Some(&upcase))?;
     if let Some(entry) = in_root {
         if entry.file_record_number != child_rec {
@@ -6186,7 +6209,7 @@ fn rename_replace_unstamped_io<T: BlockIo + ?Sized>(
 
     let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
-        .ok_or_else(|| Error::io("parent has no $INDEX_ROOT"))?;
+        .ok_or_else(|| missing_index_root(&parent_record_bytes, "add a name to a directory"))?;
     // A PARENT WITH INDX BLOCKS takes the entry out and inserts the new one
     // wherever it sorts, through the same index paths create and unlink
     // use. It was refused outright, and the root of every new volume has
@@ -6359,7 +6382,7 @@ fn find_existing_entry_record_io<T: BlockIo + ?Sized>(
         return Ok(Some(e.file_record_number));
     }
     let ir_flags = index_io::index_root_flags(&parent_record_bytes)
-        .ok_or_else(|| Error::io("parent has no $INDEX_ROOT"))?;
+        .ok_or_else(|| missing_index_root(&parent_record_bytes, "add a name to a directory"))?;
     if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0 {
         let ia = idx_block::load_for_directory_io(io, parent_rec)?;
         for vcn in ia.allocated_block_vcns() {
@@ -6443,7 +6466,7 @@ fn replace_existing_dest_io<T: BlockIo + ?Sized>(
     if !same_length {
         let (_, parent_record_bytes) = read_mft_record_io(io, parent_rec)?;
         let pir = index_io::index_root_flags(&parent_record_bytes)
-            .ok_or_else(|| Error::io("parent has no $INDEX_ROOT"))?;
+            .ok_or_else(|| missing_index_root(&parent_record_bytes, "rename within a directory"))?;
         if pir & index_io::IH_FLAG_HAS_SUBNODES != 0 {
             return Err(Error::io("variable-length rename MVP: parent has $INDEX_ALLOCATION overflow — not yet supported"));
         }
