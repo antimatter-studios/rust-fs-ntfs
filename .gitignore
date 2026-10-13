@@ -34,6 +34,8 @@ test-disks/*.sha256.tsv
 test-disks/win32-name-verdicts.tsv
 # The EA names and values handed to Windows, beside ntfs-ea.img.
 test-disks/*.names.tsv
+# What ntfs-3g's mount reported of the volumes it populated (#485).
+test-disks/*.manifest.tsv
 !test-disks/.gitkeep
 
 # Local Windows-VM test pipeline outputs. The orchestrator
