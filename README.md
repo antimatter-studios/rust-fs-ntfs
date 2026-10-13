@@ -84,6 +84,23 @@ are documented there.
 Reverse chronological highlights from `git log`. Full per-commit
 history available via `git log` in the repo.
 
+### 2026-10-13 — 0.10.0
+
+- **Breaking:** fsck leaves the dirty flag set for Windows' chkdsk unless
+  asked to clear it (`--clear-dirty`, `FsckOptions::clear_dirty`,
+  `FS_NTFS_FSCK_CLEAR_DIRTY`); the C `fs_ntfs_fsck*` functions take a
+  `flags` argument. A read-write mount replays a log holding work only when
+  asked, and a volume Windows hibernated is refused for writing.
+- `check_io` accounts for every cluster against `$Bitmap` and checks each
+  record's attribute chain. `$MFTMirr` holds a whole cluster of records on
+  large clusters, as Windows' formatter writes it.
+- `fs.ntfs rm` and `rmdir`. Writes advance the times of what they change;
+  names, streams, EAs, symlinks and renames are written the way Windows
+  writes them; a record with an `$ATTRIBUTE_LIST` is refused any change
+  that would need the list maintained.
+- Linux's ntfs3 and ntfs-3g read what this crate writes, and a volume
+  ntfs-3g populated reads back byte for byte.
+
 ### 2026-10-06 — 0.9.0
 
 - The crate is published as `rust-fs-ntfs`, the repository's name, and the
@@ -231,157 +248,6 @@ history available via `git log` in the repo.
   `cargo fmt --check` + `cargo clippy -- -D warnings` run locally
   before commit (one-shot install:
   `bash scripts/install-hooks.sh`).
-
-### 2026-05-23
-
-- `feat(read)`: `read_attributes` / `describe_attributes` — list every
-  attribute on a file's MFT record (type code + name + dimensions).
-  Diagnostics helper for chkdsk byte-diff work.
-- `feat(read)`: `read_file_names` returns every `$FILE_NAME` on a
-  file (multi-namespace files surface as multiple records).
-- `feat(read)`: `read_volume_label` decodes `$VOLUME_NAME` to UTF-8.
-- `feat(write)`: `set_volume_label` renames or clears the volume
-  `$VOLUME_NAME`. Empty label removes the attribute.
-- `feat(write)`: `set_security_id` points a file at an existing
-  `$Secure:$SDS` entry. Read counterpart `read_security_id` also
-  shipped.
-- `feat(write)`: `write_object_id` runtime 16-byte `$OBJECT_ID`
-  writer; `write_object_id_extended` covers the 64-byte
-  object_id + Birth GUIDs form (MS-FSCC §2.4.6).
-- `feat(volume)`: v2 of the volume-info struct adding
-  `volume_flags` / `is_dirty` / `mft_record_size` / `bytes_per_sector`
-  (`fs_ntfs_get_volume_info_v2`). v1 fields stay at the same offsets
-  so legacy callers still work — verified by compile-time
-  `offset_of!` assertion tests.
-- `feat(index_io)`: `compare_names_ordinal` primitive for
-  case-sensitive collation (foundation for `CASE_SENSITIVE_DIR`
-  work; not wired into the default code path yet).
-- `feat(test)`: seal-by-binary-hash matrix discipline
-  (`scripts/matrix-baseline.sh` writes
-  `test-diagnostics/matrix-results.json` with
-  `binary_sha256 = sha256(target/release/rust-ntfs)`; survives
-  rebase/squash-merge via `--remap-path-prefix`).
-  42/42 sealed runs recorded for staging tip `30fcdd6` (11369s) and
-  staging-2 tip `d9595c7` (13794s).
-
-### 2026-05-21
-
-- `chore(vendor)`: `rust-fs-core` is now a git submodule at
-  `vendor/rust-fs-core` rather than an unmanaged `../rust-fs-core`
-  sibling path. Clone with `--recurse-submodules` (or
-  `git submodule update --init --recursive`) and the crate is
-  self-buildable — no side-by-side checkout required.
-  *(Superseded 2026-09-04: the submodules are gone and the sibling
-  is back, pinned by `chore siblings`. Left as written because it
-  records what was true then.)*
-- `fix(facade)`: `Filesystem::volume_info()` now reads the real
-  `$VOLUME_INFORMATION` bytes via upstream `ntfs.volume_info()`
-  instead of returning a hardcoded `(3, 1)`. Fresh-format volumes
-  correctly report `(1, 2)` until `ntfs.sys` upgrades them on first
-  mount.
-- `feat(fsck)`: `upgrade_volume_version` rewrites a fresh-format
-  `1.2 + UPGRADE_ON_MOUNT` volume to `3.1` with the flag cleared —
-  the same transition `ntfs.sys` does on first RW mount. Now wired
-  into **every** RW entry point: `fs_ntfs_mount_rw_with_fs_core_device`,
-  `fs_ntfs_mount` (path-based), `fs_ntfs_mount_with_callbacks` (when
-  the caller supplied a `write` cb), and the new
-  `Filesystem::mount_rw()` used by the `rust-ntfs` CLI's mutating
-  commands (`touch`, `mkdir`, `rm`, `rmdir`, `write`). Best-effort
-  throughout — failure is logged at `warn` and never fails the mount.
-
-### 2026-05-03
-
-- `feat(observability)`: lifecycle events log via the `log` facade.
-- `feat(test-matrix)`: chkdsk `/F` repair-lane verdict shapes;
-  win:write fixture support; repeat-mount harness for Tier-3
-  stability cycles; mac-prefix dispatcher for pure-mac scenario
-  chains; 10 new Tier-1 scenarios.
-- `feat(fsck,cli)`: `set_dirty` symmetric to `clear_dirty`.
-- `refactor(cli)`: 4 separate bins consolidated into a single
-  `rust-ntfs` binary with subcommands.
-- `feat(api,ci)`: dirent name widened to 1024 bytes; ASan smoke
-  job in CI; cargo-deny licence enforcement; macOS runner added
-  to CI matrix.
-- `test(fuzz)`: cargo-fuzz harnesses for the three byte-decoders.
-- `test(bench)`: Criterion harness for byte-decoders.
-- `chore(license)`: GPL-tooling citations in source replaced with
-  Microsoft MS-FSCC / Windows Internals references throughout.
-
-### 2026-05-02 — mkfs mount + write breakthrough
-
-After a multi-month chkdsk run hitting the same `frs.cxx 60f` ceiling,
-the test contract was switched from "chkdsk-clean" to "mounts on
-Windows + accepts a real write" — and on **2026-05-02** images
-produced by the pure-Rust mkfs path mounted under `ntfs.sys` and
-took writes from a Windows host for the first time. Contributing
-fixes:
-
-- `mkfs`: `$STANDARD_INFORMATION` 48-byte NTFS-1.x form on system
-  records (commit `7072242`).
-- `mkfs`: bake Microsoft's canonical NT 3.x `$UpCase` table verbatim,
-  replacing the runtime generator (`d620205`).
-- `mkfs`: `$SECURITY_DESCRIPTOR` (0x50) on every system MFT record
-  (`091848d`); subsequently refined — adding it everywhere broke
-  mount, the layout-order-correct version landed (`f2677d3`).
-- `mkfs`: rec 11 left empty to match Microsoft's reserved-slot
-  layout (`26b1a02`).
-- `mkfs`: `file_attributes 0x06` on system `$STANDARD_INFORMATION`
-  (drop ARCHIVE) (`faaff9c`).
-- `infra(test)`: explicit cluster size pinned on the reference VHDX
-  format so the byte-diff has a stable baseline (`23ed755`).
-- Root `$I30` populated with system-file entries (`1c5007a`).
-
-### 2026-05-01
-
-- `feat(bin)`: `mkfs_ntfs --create-size` one-shot create+format for
-  image files (`7c9f1d7`).
-- `ci`: image wrapped in a GPT-partitioned fixed VHDX so Windows
-  `Mount-DiskImage` accepts it (`9af3146`, `c02c703`).
-- `ci+docs`: parallel reference-NTFS format + byte-diff comparison
-  in CI.
-
-### 2026-04-30
-
-- `feat`: handle-based `_h` mutation siblings for the callback-mount
-  read/write path (`7cd4020`).
-
-### 2026-04-19 .. 2026-04-30 — write surface (W1 → W4)
-
-Original write code shipped in stages, each with its own
-integration suite under `tests/`:
-
-- W1 — in-place writes against existing non-resident `$DATA`.
-- W2 — resident → non-resident promotion + cluster allocation.
-- W2.1 — `grow` / `truncate`.
-- W2.2 — resident-resize machinery.
-- W2.3 — `$Bitmap` cluster allocator.
-- W2.4 — `$MFT:$Bitmap` MFT-record allocator.
-- W2.5 — FILE-record assembly + fixup arrays + `create_file`,
-  `mkdir`, `unlink`, `rmdir`, `rename`, `link`.
-- W3.1 — index entry insert / remove inside `$INDEX_ROOT`.
-- W4.1 — reparse points + symlinks.
-- W4.2 — alternate data streams.
-- W4.3 — extended attributes.
-- W4.4 — file-attribute flag toggling and timestamp writes.
-
-### 2026-04-20 — 0.1.2
-
-Docs / packaging release. README rewritten with capability matrix
-contrasting fs-ntfs against upstream `ntfs = "0.4"`. `Cargo.toml`
-description neutralised (no longer Swift/FSKit-specific).
-
-### 2026-04-20 — 0.1.1
-
-Callback-based fsck. New: `fs_ntfs_blockdev_cfg_t.write` field;
-`fs_ntfs_is_dirty_with_callbacks`; `fs_ntfs_fsck_with_callbacks`
-with progress callbacks (`reset_logfile` / `clear_dirty` phases; since
-#376 fsck emits `check_logfile` / `clear_dirty` and never resets the log).
-
-### 2026-04-18 — 0.1.0 (unreleased) initial commit
-
-C-ABI wrapper around `ColinFinck/ntfs` (read-only). Lifecycle,
-`stat`, `readdir`, `read_file`, `last_error`. Extracted from the
-archived `ntfsbridge/` crate.
 
 ## License
 
