@@ -17,10 +17,13 @@
 //! - the sixty names of one file resolve to one record;
 //! - the named streams list and read back;
 //! - `check_io` finds nothing;
-//! - and after this crate writes to a copy (a stream rewritten, added and
-//!   removed, a file created and one rewritten, a name unlinked from the
-//!   sixty and from the wide directory), ntfs-3g's own tools read back what
-//!   was written and still mount the volume read-write.
+//! - and after this crate writes to a copy (a stream rewritten and
+//!   removed, a file created with a stream added and one rewritten, a name
+//!   unlinked from the sixty and from the wide directory), ntfs-3g's own
+//!   tools read back what was written and still mount the volume
+//!   read-write. A stream that would grow in the extension record ntfs-3g
+//!   filled is refused, because this crate writes no `$ATTRIBUTE_LIST`
+//!   (#480).
 //!
 //! A missing image or manifest fails, naming the builder: nothing skips.
 
@@ -252,12 +255,26 @@ fn written_on(cluster: u32) {
     std::fs::copy(fixture(&format!("ntfs-populated-{cluster}.img")), &img).unwrap();
 
     let fs = Filesystem::mount_rw(&img).unwrap_or_else(|e| panic!("mount_rw {cluster}: {e}"));
-    let rewritten = b"stream five, rewritten by this crate\n".repeat(40);
-    let added = b"a forty-first stream\n".to_vec();
+    // ntfs-3g spread streams.txt's forty streams over extension records
+    // it named in an $ATTRIBUTE_LIST, and filled them. A stream rewritten
+    // at its own length fits where it is.
+    let rewritten = b"STREAM 5 OF 40\n".to_vec();
     fs.write_named_stream("/streams.txt", "s5", &rewritten)
         .unwrap_or_else(|e| panic!("{cluster}: rewrite s5: {e}"));
-    fs.write_named_stream("/streams.txt", "s41", &added)
-        .unwrap_or_else(|e| panic!("{cluster}: add s41: {e}"));
+    // One that grows needs room its record does not have, and this crate
+    // writes no $ATTRIBUTE_LIST to move it with (#480), so the write is
+    // refused, and refused before anything is written.
+    let grown_s5 = b"stream five, grown by this crate\n".repeat(40);
+    match fs.write_named_stream("/streams.txt", "s5", &grown_s5) {
+        Err(e) => assert!(
+            e.to_string().contains("exceeds record capacity"),
+            "{cluster}: growing s5 was refused, but not for its record's room: {e}"
+        ),
+        Ok(()) => panic!(
+            "{cluster}: s5 grew in a full extension record; #480 is done, so assert the bytes \
+             ntfs-3g reads instead"
+        ),
+    }
     fs.delete_named_stream("/streams.txt", "s6")
         .unwrap_or_else(|e| panic!("{cluster}: delete s6: {e}"));
     fs.create_file("/", "made-here.txt")
@@ -265,6 +282,10 @@ fn written_on(cluster: u32) {
     let made = b"written by this crate onto a volume ntfs-3g filled\n".repeat(300);
     fs.write_file_contents("/made-here.txt", &made)
         .unwrap_or_else(|e| panic!("{cluster}: write the new file: {e}"));
+    // A new stream goes on the new file, whose record has the room.
+    let added = b"a stream added by this crate\n".to_vec();
+    fs.write_named_stream("/made-here.txt", "added", &added)
+        .unwrap_or_else(|e| panic!("{cluster}: add a stream: {e}"));
     let grown = b"umlaut, and more after it\n".repeat(100);
     fs.write_file_contents("/grüße.txt", &grown)
         .unwrap_or_else(|e| panic!("{cluster}: rewrite grüße.txt: {e}"));
@@ -293,9 +314,9 @@ fn written_on(cluster: u32) {
         "{cluster}: ntfs-3g's s5"
     );
     assert_eq!(
-        ntfscat(&img, "/streams.txt", Some("s41")).as_deref(),
+        ntfscat(&img, "/made-here.txt", Some("added")).as_deref(),
         Some(&added[..]),
-        "{cluster}: ntfs-3g's s41"
+        "{cluster}: ntfs-3g's /made-here.txt:added"
     );
     assert_eq!(
         ntfscat(&img, "/streams.txt", Some("s6")),
