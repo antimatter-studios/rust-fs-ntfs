@@ -33,10 +33,12 @@ jq_check "the report counts the clusters it accounted for" '.scanned.clusters >=
 check "fsck.ntfs --text says clean" grep -q ': clean' <<<"$(fsck.ntfs --text "$img")"
 check "rust-fs-ntfs fsck is the same program" test "$(rust-fs-ntfs fsck --text "$img")" = "$(fsck.ntfs --text "$img")"
 
-# Dirty: reported, exit 4. -y clears it and exits 1: the log a fresh volume
-# carries is marked clean, as Windows marks a cleanly dismounted one, so
-# there is nothing to replay and the log is kept (#375). A log that may
-# hold transactions is still refused; tests/logfile_state.rs and the unit
+# Dirty: reported, exit 4. The flag asks for a check of the whole volume,
+# which this is not, so -y leaves it set for Windows' chkdsk and still exits
+# 4, saying so (#519); -y --clear-dirty clears it and exits 1. The log a
+# fresh volume carries is marked clean, as Windows marks a cleanly dismounted
+# one, so there is nothing to replay and the log is kept (#375). A log that
+# may hold transactions is still refused; tests/logfile_state.rs and the unit
 # tests in src/fsck.rs make one. `set dirty false` is the explicit override.
 fs.ntfs "$img" set dirty true >"$SANDBOX/set.json" 2>"$SANDBOX/set.err"
 status=$?
@@ -51,12 +53,18 @@ jq_check "a dirty volume with a clean log is repairable" \
     '.logfile == "clean" and (.findings[] | select(.kind == "dirty") | .repairable == true)' \
     "$SANDBOX/dirty.json"
 fsck.ntfs -y "$img" >"$SANDBOX/y.json" 2>/dev/null
-check "fsck.ntfs -y on a dirty volume whose log is clean exits 1" test $? -eq 1
-jq_check "-y cleared the flag and kept the clean log" \
-    '.repaired == 1 and .remaining == 0 and .dirty == false and .logfile == "clean"' \
+check "fsck.ntfs -y on a dirty volume leaves the flag set and exits 4" test $? -eq 4
+jq_check "-y left the flag for chkdsk, said how to clear it, and kept the clean log" \
+    '.repaired == 0 and .dirty == true and .logfile == "clean" and (.findings[] | select(.kind == "dirty") | .repaired == false and (.why | test("--clear-dirty")))' \
     "$SANDBOX/y.json"
+check "get dirty is still true after -y" test "$(fs.ntfs "$img" get dirty --text)" = true
+fsck.ntfs -y --clear-dirty "$img" >"$SANDBOX/yd.json" 2>/dev/null
+check "fsck.ntfs -y --clear-dirty on a dirty volume whose log is clean exits 1" test $? -eq 1
+jq_check "-y --clear-dirty cleared the flag and kept the clean log" \
+    '.repaired == 1 and .remaining == 0 and .dirty == false and .logfile == "clean"' \
+    "$SANDBOX/yd.json"
 fsck.ntfs "$img" >/dev/null 2>&1
-check "fsck.ntfs exits 0 after -y" test $? -eq 0
+check "fsck.ntfs exits 0 after -y --clear-dirty" test $? -eq 0
 fs.ntfs "$img" set dirty true >/dev/null 2>&1
 fs.ntfs "$img" set dirty false >/dev/null 2>&1
 check "set dirty false exits 0" test $? -eq 0

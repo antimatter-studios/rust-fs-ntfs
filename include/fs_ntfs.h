@@ -602,20 +602,30 @@ int fs_ntfs_clear_dirty(const char *path);
 int64_t fs_ntfs_reset_logfile(const char *path);
 
 /*
- * Read $LogFile and, when it records nothing to replay -- all 0xFF, or a
- * restart area with nothing to redo or undo -- clear the dirty flag. Any
- * other log returns -1 before anything is written, whether or not the
- * volume is marked dirty. The log is never written: fs_ntfs_reset_logfile
- * is the explicit way to discard one. This does not replay transactions
- * or validate metadata consistency. The out-param is filled only on
- * success.
+ * `flags` bit for fs_ntfs_fsck, fs_ntfs_fsck_with_callbacks and
+ * fs_ntfs_fsck_with_fs_core_device: clear the dirty flag once $LogFile
+ * holds nothing to redo or undo. Without it the flag is left set. It asks
+ * for a check of the whole volume, which Windows' chkdsk makes and this
+ * library does not, so set this only for a volume known to be consistent
+ * by some other means (rust-fs-ntfs#519).
+ */
+#define FS_NTFS_FSCK_CLEAR_DIRTY 0x01u
+
+/*
+ * Replay $LogFile when it holds work, and clear the dirty flag only when
+ * `flags` carries FS_NTFS_FSCK_CLEAR_DIRTY. A log that is empty or records
+ * nothing to redo or undo is kept. A log that cannot be replayed in full
+ * returns -1 before anything is written, whether or not the volume is
+ * marked dirty. This does not validate metadata consistency. The out-param
+ * is filled only on success: 1 when the dirty flag was set and cleared.
+ * An unknown flag is EINVAL.
  *
- * BREAKING in the next minor (rust-fs-ntfs#376): the `uint64_t *out_logfile_bytes`
- * parameter is gone. fsck no longer overwrites the log, so the count it
- * reported would always be 0.
+ * BREAKING in 0.10 (rust-fs-ntfs#519): the `flags` parameter is new, and
+ * without FS_NTFS_FSCK_CLEAR_DIRTY the dirty flag is no longer cleared.
  */
 int fs_ntfs_fsck(const char *path,
-                 uint8_t *out_dirty_cleared);
+                 uint8_t *out_dirty_cleared,
+                 uint32_t flags);
 
 /* ---- Filesystem creation ---- */
 
@@ -652,8 +662,10 @@ int fs_ntfs_is_dirty_with_callbacks(const fs_ntfs_blockdev_cfg_t *cfg);
 /*
  * Progress callback for fs_ntfs_fsck_with_callbacks. Fires zero or more
  * times per phase:
- *   phase    — "check_logfile" (0/1, then 1/1) and "clear_dirty" (0/1,
- *              then 1/1). "reset_logfile" is no longer emitted (#376).
+ *   phase    — "check_logfile" (0/1, then 1/1), "replay_logfile" when the
+ *              log holds work, and "clear_dirty" (0/1, then 1/1) when
+ *              FS_NTFS_FSCK_CLEAR_DIRTY was passed. "reset_logfile" is no
+ *              longer emitted (#376).
  *   done     — bytes/units completed in this phase.
  *   total    — total bytes/units for this phase.
  *   context  — the `progress_ctx` passed to fs_ntfs_fsck_with_callbacks.
@@ -665,29 +677,29 @@ typedef int (*fs_ntfs_fsck_progress_fn)(void *context, const char *phase,
                                         uint64_t done, uint64_t total);
 
 /*
- * fs_ntfs_fsck via callbacks: read $LogFile, then clear the dirty bit when
- * the log records nothing to replay. Any other log is refused before
- * writing, dirty or not; the log is never written, and no transaction
- * replay is performed.
+ * fs_ntfs_fsck via callbacks: replay $LogFile when it holds work, and clear
+ * the dirty bit only when `flags` carries FS_NTFS_FSCK_CLEAR_DIRTY. A log
+ * that cannot be replayed in full is refused before writing, dirty or not.
  *
- * `cfg->read` and `cfg->write` must both be set (fsck patches `$Volume`'s
- * flags). `progress_cb` may be NULL; if non-NULL, it is invoked around the
- * `check_logfile` read and the 2-byte `clear_dirty` write.
+ * `cfg->read` and `cfg->write` must both be set (fsck writes the replay
+ * and patches `$Volume`'s flags). `progress_cb` may be NULL; if non-NULL,
+ * it is invoked around each phase.
  *
  * `out_dirty_cleared` mirrors the path-based fs_ntfs_fsck: if non-NULL it
- * is set on success to `1` if the dirty bit was set and cleared (`0` if
- * the volume was already clean).
+ * is set on success to `1` if the dirty bit was set and cleared (`0`
+ * otherwise).
  *
- * BREAKING in the next minor (rust-fs-ntfs#376): `uint64_t *out_logfile_bytes` is
- * gone, and the `reset_logfile` progress phase is no longer emitted.
+ * BREAKING in 0.10 (rust-fs-ntfs#519): `flags` is new, and without
+ * FS_NTFS_FSCK_CLEAR_DIRTY the dirty bit is no longer cleared.
  *
- * Returns 0 on success, -1 on error.
+ * Returns 0 on success, -1 on error; EINVAL for an unknown flag.
  */
 int fs_ntfs_fsck_with_callbacks(
     const fs_ntfs_blockdev_cfg_t *cfg,
     fs_ntfs_fsck_progress_fn progress_cb,
     void *progress_ctx,
-    uint8_t  *out_dirty_cleared);
+    uint8_t  *out_dirty_cleared,
+    uint32_t flags);
 
 /*
  * fs_core counterparts of `fs_ntfs_is_dirty_with_callbacks` and
@@ -704,8 +716,9 @@ int fs_ntfs_fsck_with_callbacks(
  * Semantics + return values match the `_with_callbacks` siblings:
  *   is_dirty: 1 = dirty, 0 = clean, -1 = error.
  *   fsck:     0 = success, -1 = error. out_dirty_cleared (if
- *             non-NULL) filled on success. out_logfile_bytes is gone
- *             (BREAKING in 0.6, rust-fs-ntfs#376).
+ *             non-NULL) filled on success. The dirty bit is cleared only
+ *             with FS_NTFS_FSCK_CLEAR_DIRTY in `flags` (BREAKING in 0.10,
+ *             rust-fs-ntfs#519).
  *
  * fsck requires the device to report `is_writable() == true`;
  * otherwise it fails up front with -1 and a descriptive error.
@@ -715,7 +728,8 @@ int fs_ntfs_fsck_with_fs_core_device(
     struct FsCoreDevice *handle,
     fs_ntfs_fsck_progress_fn progress_cb,
     void *progress_ctx,
-    uint8_t  *out_dirty_cleared);
+    uint8_t  *out_dirty_cleared,
+    uint32_t flags);
 
 /* ---- In-place writes (phase W1) ---- */
 

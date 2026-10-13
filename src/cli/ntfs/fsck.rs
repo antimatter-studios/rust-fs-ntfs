@@ -11,11 +11,16 @@
 //! authority.
 //!
 //! WHAT IT REPAIRS, with `-y` (or `-p`): a `$LogFile` that holds work, by
-//! replaying it (#137), and the dirty flag, once the log records nothing to
-//! redo or undo (#375); a clean log is kept as it is. A log that cannot be
-//! replayed in full is refused and reported, nothing is written, and the
-//! flag is left set: clearing it over the log would discard what the log
-//! holds. Nothing else is repaired.
+//! replaying it (#137); a clean log is kept as it is. A log that cannot be
+//! replayed in full is refused and reported, and nothing is written.
+//!
+//! THE DIRTY FLAG IS LEFT SET unless `--clear-dirty` is given with `-y`
+//! (#519), and then only once the log records nothing to redo or undo
+//! (#375). The flag asks for a check of the whole volume, which Windows'
+//! chkdsk makes and this does not; clearing it would tell Windows that check
+//! had been made. ntfs-3g's `ntfsfix` leaves it set too unless given `-d`.
+//! A flag left set is still a finding, so the exit status stays 4 and the
+//! report says how to clear it. Nothing else is repaired.
 //!
 //! EXIT STATUS IS fsck(8)'s, because scripts and the `fsck` front-end read
 //! it: 0 clean, 1 errors corrected, 4 errors left uncorrected, 8 an
@@ -53,6 +58,12 @@ const CHECKS: &[&str] = &[
     "cluster_allocation",
 ];
 
+/// Why `-y` leaves the dirty flag set, and how to clear it (#519).
+const LEFT_FOR_CHKDSK: &str = "left set: the dirty flag asks for a check of the whole volume, \
+                               which Windows' chkdsk makes at the next mount and this is not; \
+                               pass --clear-dirty with -y to clear it on a volume known to be \
+                               consistent";
+
 /// The sentence that stops exit 0 being read as more than it is.
 const SCOPE: &str = "the dirty flag, whether $LogFile is empty, $MFTMirr against $MFT, the \
                      header of every in-use MFT record, and $Bitmap against every run list; not \
@@ -78,9 +89,12 @@ fn command() -> Cmd {
              against the clusters every run list claims. This is not a full structural \
              check, and the report says so: Windows' chkdsk is the authority.\n\n\
              Nothing is written unless -y (or -p) is given. Then a $LogFile that holds \
-             work is replayed, and the dirty flag is cleared once the log holds nothing to \
-             redo or undo. A log that cannot be replayed in full is left as it is, with \
-             nothing written.\n\n\
+             work is replayed; a log that cannot be replayed in full is left as it is, \
+             with nothing written.\n\n\
+             The dirty flag is left set for Windows' chkdsk, which runs at the next mount \
+             of a volume that carries it: it asks for a check of the whole volume, which \
+             this is not. --clear-dirty with -y clears it once the log holds nothing to \
+             redo or undo, for a volume known to be consistent by other means.\n\n\
              The report is JSON on stdout (--text for people).\n\n\
              Exit status, as fsck(8): 0 clean, 1 errors corrected, 4 errors left \
              uncorrected, 8 operational error, 16 usage error.",
@@ -103,7 +117,7 @@ fn command() -> Cmd {
             Arg::new("yes")
                 .short('y')
                 .long("yes")
-                .help("Repair what can be repaired: replay $LogFile, then clear the dirty flag")
+                .help("Repair what can be repaired: replay $LogFile")
                 .action(ArgAction::SetTrue)
                 .conflicts_with("no"),
         )
@@ -113,6 +127,17 @@ fn command() -> Cmd {
                 .visible_short_alias('a')
                 .long("preen")
                 .help("Repair automatically, as -y (the repairs made here are safe ones)")
+                .action(ArgAction::SetTrue)
+                .conflicts_with("no"),
+        )
+        .arg(
+            Arg::new("clear_dirty")
+                .short('d')
+                .long("clear-dirty")
+                .help(
+                    "With -y or -p, also clear the dirty flag, which is otherwise left for \
+                     Windows' chkdsk",
+                )
                 .action(ArgAction::SetTrue)
                 .conflicts_with("no"),
         )
@@ -142,7 +167,8 @@ fn command() -> Cmd {
         .after_help(
             "Examples:\n  fsck.ntfs disk.img                 check, change nothing\n  \
              fsck.ntfs -fn disk.img             the same, as fsck(8) front-ends spell it\n  \
-             fsck.ntfs -y disk.img              replay $LogFile, clear the dirty flag\n  \
+             fsck.ntfs -y disk.img              replay $LogFile; the dirty flag stays set\n  \
+             fsck.ntfs -y --clear-dirty disk.img   and clear the dirty flag too\n  \
              fsck.ntfs --text disk.img; echo $?",
         )
 }
@@ -153,6 +179,13 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         .expect("clap requires the device");
     let offset = matches.get_one::<u64>("offset").copied().unwrap_or(0);
     let repair = matches.get_flag("yes") || matches.get_flag("preen");
+    let clear_dirty = matches.get_flag("clear_dirty");
+    if clear_dirty && !repair {
+        return Err(CliError::usage(
+            "--clear-dirty writes, so it needs -y or -p: nothing is written without them",
+        )
+        .with_code(USAGE));
+    }
     let name = target.to_string_lossy().into_owned();
     let operational = |e: CliError| e.with_code(OPERATIONAL);
 
@@ -173,14 +206,17 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
             Err(why) => replay_refused = Some(String::from(why)),
         }
     }
-    // Then the dirty flag, when the log holds nothing to lose.
+    // Then the dirty flag, when asked and the log holds nothing to lose
+    // (#519): otherwise it is left for Windows' chkdsk.
     let mut dirty_refused = None;
-    if repair && before.dirty && replay_refused.is_none() {
+    if repair && before.dirty && replay_refused.is_none() && clear_dirty {
         match repair_dirty_io(&mut dev) {
             Ok(true) => repaired += 1,
             Ok(false) => {}
             Err(why) => dirty_refused = Some(String::from(why)),
         }
+    } else if repair && before.dirty && replay_refused.is_none() {
+        dirty_refused = Some(LEFT_FOR_CHKDSK.to_string());
     } else if repair && before.dirty {
         dirty_refused = replay_refused.clone();
     }

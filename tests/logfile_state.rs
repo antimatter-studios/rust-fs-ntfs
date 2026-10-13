@@ -113,8 +113,8 @@ fn a_dirty_volume_this_crate_formatted_is_repaired_and_its_log_kept() {
     );
     let log_before = logfile_bytes(&img);
 
-    let report =
-        fsck::fsck(&img).expect("fsck must clear the dirty flag over a log with nothing to replay");
+    let report = fsck::fsck_with(&img, fsck::FsckOptions { clear_dirty: true })
+        .expect("fsck must clear the dirty flag over a log with nothing to replay");
     assert!(report.dirty_cleared, "{report:?}");
     assert!(
         matches!(report.logfile, LogfileState::Clean(_)),

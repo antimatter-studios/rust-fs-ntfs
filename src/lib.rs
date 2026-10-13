@@ -3363,22 +3363,46 @@ pub extern "C" fn fs_ntfs_set_object_id_extended_h(
     })
 }
 
-/// Clear the dirty flag when `$LogFile` records nothing to replay (empty, or
-/// a restart area with nothing to redo or undo). Any other log is refused
-/// without writes, whether or not the volume is marked dirty, and the log is
-/// never written (#376). No transaction replay or metadata consistency check
-/// is performed.
+/// `flags` bit for the `fs_ntfs_fsck*` functions: clear the dirty flag once
+/// the log holds nothing to redo or undo. Without it the flag is left set
+/// for Windows' chkdsk (#519); see [`fsck::FsckOptions::clear_dirty`].
+pub const FS_NTFS_FSCK_CLEAR_DIRTY: u32 = 0x01;
+
+/// The options `flags` asks for, or `None` with EINVAL set for a bit no
+/// `fs_ntfs_fsck*` function knows.
+fn fsck_options(flags: u32, func: &str) -> Option<fsck::FsckOptions> {
+    if flags & !FS_NTFS_FSCK_CLEAR_DIRTY != 0 {
+        set_einval(&format!("{func}: unknown flags {flags:#x}"));
+        return None;
+    }
+    Some(fsck::FsckOptions {
+        clear_dirty: flags & FS_NTFS_FSCK_CLEAR_DIRTY != 0,
+    })
+}
+
+/// Replay `$LogFile` when it holds work, as [`fsck::fsck`] does, and clear the
+/// dirty flag only when `flags` carries [`FS_NTFS_FSCK_CLEAR_DIRTY`] (#519).
+/// A log that cannot be replayed in full is refused without writes, whether
+/// or not the volume is marked dirty (#376, #137). No metadata consistency
+/// check is performed.
 ///
 /// Optional out-param:
 /// * `out_dirty_cleared`: `1` if the dirty flag was found set and cleared,
-///   `0` if the volume was already clean (non-null to receive)
+///   `0` otherwise (non-null to receive)
 ///
-/// Returns `0` on success, `-1` on error.
+/// Returns `0` on success, `-1` on error; EINVAL for an unknown flag.
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_ntfs_fsck(path: *const c_char, out_dirty_cleared: *mut u8) -> c_int {
+pub extern "C" fn fs_ntfs_fsck(
+    path: *const c_char,
+    out_dirty_cleared: *mut u8,
+    flags: u32,
+) -> c_int {
     ffi_guard("fs_ntfs_fsck", -1, move || {
         cstr_or_return!(path, "fs_ntfs_fsck", "path", -1);
-        match fsck::fsck(path) {
+        let Some(options) = fsck_options(flags, "fs_ntfs_fsck") else {
+            return -1;
+        };
+        match fsck::fsck_with(path, options) {
             Ok(report) => {
                 if !out_dirty_cleared.is_null() {
                     unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };
@@ -3502,18 +3526,23 @@ pub extern "C" fn fs_ntfs_is_dirty_with_callbacks(cfg: *const FsNtfsBlockdevCfg)
 /// Progress callback matching the `fs_ntfs_fsck_progress_fn` C typedef.
 type FsckProgressCallback = unsafe extern "C" fn(*mut c_void, *const c_char, u64, u64) -> c_int;
 
-/// [`fs_ntfs_fsck`] via callbacks: read `$LogFile`, then clear the dirty
-/// bit when the log records nothing to replay. Requires both `cfg->read` and `cfg->write` to be set. Emits
-/// progress via `progress_cb` when non-NULL. Returns `0` on success,
-/// `-1` on error.
+/// [`fs_ntfs_fsck`] via callbacks: replay `$LogFile` when it holds work, and
+/// clear the dirty bit only when `flags` carries [`FS_NTFS_FSCK_CLEAR_DIRTY`]
+/// (#519). Requires both `cfg->read` and `cfg->write` to be set. Emits
+/// progress via `progress_cb` when non-NULL. Returns `0` on success, `-1` on
+/// error; EINVAL for an unknown flag.
 #[unsafe(no_mangle)]
 pub extern "C" fn fs_ntfs_fsck_with_callbacks(
     cfg: *const FsNtfsBlockdevCfg,
     progress_cb: Option<FsckProgressCallback>,
     progress_ctx: *mut c_void,
     out_dirty_cleared: *mut u8,
+    flags: u32,
 ) -> c_int {
     ffi_guard("fs_ntfs_fsck_with_callbacks", -1, move || {
+        let Some(options) = fsck_options(flags, "fs_ntfs_fsck_with_callbacks") else {
+            return -1;
+        };
         if cfg.is_null() {
             set_einval("fs_ntfs_fsck_with_callbacks: null config");
             return -1;
@@ -3562,7 +3591,7 @@ pub extern "C" fn fs_ntfs_fsck_with_callbacks(
             None
         };
 
-        match fsck::fsck_io(&mut io, progress) {
+        match fsck::fsck_io_with(&mut io, options, progress) {
             Ok(report) => {
                 if !out_dirty_cleared.is_null() {
                     unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };
@@ -3613,16 +3642,17 @@ pub extern "C" fn fs_ntfs_is_dirty_with_fs_core_device(
     })
 }
 
-/// `fs_core` counterpart of [`fs_ntfs_fsck_with_callbacks`]: reads
-/// `$LogFile` and clears the dirty bit through an `FsCoreDevice` handle
-/// when the log records nothing to replay. The device must report
-/// `is_writable() == true`; otherwise the call fails up front. Any other
-/// log is refused, dirty or not, and the log is never written (#376);
-/// this entry point does not replay transactions.
+/// `fs_core` counterpart of [`fs_ntfs_fsck_with_callbacks`]: replays
+/// `$LogFile` through an `FsCoreDevice` handle when it holds work, and clears
+/// the dirty bit only when `flags` carries [`FS_NTFS_FSCK_CLEAR_DIRTY`]
+/// (#519). The device must report `is_writable() == true`; otherwise the
+/// call fails up front. A log that cannot be replayed in full is refused,
+/// dirty or not, before anything is written (#376, #137).
 ///
 /// On success `out_dirty_cleared` (if non-NULL) is set to `1` if the dirty bit
-/// was actually cleared (meaning the volume was dirty before the
-/// call). Returns `0` on success, `-1` on error.
+/// was actually cleared (meaning the volume was dirty before the call and
+/// the flag was asked for). Returns `0` on success, `-1` on error; EINVAL
+/// for an unknown flag.
 ///
 /// `progress_cb` (if non-NULL) is invoked from the calling thread as
 /// fsck advances; the `phase` C string is owned by fs_ntfs and only
@@ -3637,8 +3667,12 @@ pub extern "C" fn fs_ntfs_fsck_with_fs_core_device(
     progress_cb: Option<FsckProgressCallback>,
     progress_ctx: *mut c_void,
     out_dirty_cleared: *mut u8,
+    flags: u32,
 ) -> c_int {
     ffi_guard("fs_ntfs_fsck_with_fs_core_device", -1, move || {
+        let Some(options) = fsck_options(flags, "fs_ntfs_fsck_with_fs_core_device") else {
+            return -1;
+        };
         if handle.is_null() {
             set_einval("fs_ntfs_fsck_with_fs_core_device: null handle");
             return -1;
@@ -3672,7 +3706,7 @@ pub extern "C" fn fs_ntfs_fsck_with_fs_core_device(
             None
         };
 
-        match fsck::fsck_io(&mut io, progress) {
+        match fsck::fsck_io_with(&mut io, options, progress) {
             Ok(report) => {
                 if !out_dirty_cleared.is_null() {
                     unsafe { *out_dirty_cleared = u8::from(report.dirty_cleared) };

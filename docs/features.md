@@ -60,7 +60,7 @@ States:
 | A log holding an operation no capture has held, a prepared or committed transaction not forgotten, or an LFS version other than 2.x | Refused for writing, with nothing written | 0.8.0 (#137) | #137 | `windows_interrupted_fixture.rs` |
 | A replay stopped after any write (a power cut), run again | Supported: it reaches the volume an uninterrupted replay does, and the log reads as clean from the moment it starts being emptied | Unreleased (#514) | #137 | `windows_interrupted_fixture.rs` |
 | A read-only mount of a volume whose log holds work | Partial: read as it is on disk, without replaying | 0.8.0 | #137 | |
-| Clear the dirty flag; reset the log | Supported, for volumes known consistent | 0.1.0 | | `fsck.rs`, `capi_fsck.rs`, `capi_fsck_callbacks.rs` |
+| Clear the dirty flag; reset the log | Supported, for volumes known consistent: fsck clears the flag only when asked (`--clear-dirty`, `FsckOptions::clear_dirty`, `FS_NTFS_FSCK_CLEAR_DIRTY`) and the log holds nothing to redo or undo, and otherwise leaves it for Windows' chkdsk | 0.1.0; left set by default Unreleased (#519) | | `fsck.rs`, `capi_fsck.rs`, `capi_fsck_callbacks.rs`, `tests/cli/test-fsck.sh` |
 | Repair beyond log replay and the dirty flag | Not supported | | | |
 
 ## Writing

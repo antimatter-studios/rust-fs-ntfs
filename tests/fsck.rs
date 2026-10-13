@@ -323,17 +323,33 @@ fn reset_logfile_fills_entire_logfile() {
 }
 
 #[test]
-fn fsck_clears_the_flag_over_an_empty_log() {
+fn fsck_clears_the_flag_over_an_empty_log_when_asked() {
     let img = dirty_copy("fsck_both", true, false);
     empty_logfile(&img);
     assert!(read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
 
-    let report = fsck::fsck(&img).expect("fsck");
+    let report = fsck::fsck_with(&img, fsck::FsckOptions { clear_dirty: true }).expect("fsck");
     assert!(report.dirty_cleared);
     assert_eq!(report.logfile, fsck::LogfileState::Empty);
 
     assert!(!read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
     assert!(read_logfile_first_page(&img).iter().all(|&b| b == 0xFF));
+}
+
+/// fsck is not chkdsk. The dirty flag asks for a check of the whole volume,
+/// which this crate does not make, so fsck leaves it set for Windows to act
+/// on; clearing it would tell Windows a check it was asked to run has been
+/// done (#519).
+#[test]
+fn fsck_leaves_the_dirty_flag_for_windows_to_check() {
+    let img = dirty_copy("fsck_leaves_dirty", true, false);
+    empty_logfile(&img);
+    let report = fsck::fsck(&img).expect("fsck");
+    assert!(
+        !report.dirty_cleared,
+        "fsck cleared the dirty flag without being asked"
+    );
+    assert!(read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
 }
 
 #[test]
