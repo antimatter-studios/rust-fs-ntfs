@@ -1279,6 +1279,7 @@ unsafe extern "C" fn rec_flush(ctx: *mut c_void) -> c_int {
 /// Through a device with a flush callback, the replay flushes at each point
 /// the path backend calls `fsync` (#518): the replayed metadata, a flush,
 /// the restart pages marked clean, a flush, the rest of the log erased, a
+/// flush, and then the restart pages themselves erased, each followed by a
 /// flush.
 #[test]
 fn a_replay_through_a_device_that_flushes_orders_its_writes() {
@@ -1342,22 +1343,31 @@ fn a_replay_through_a_device_that_flushes_orders_its_writes() {
         Seen::Write(..) => 'M',
     };
     let kinds: String = seen.iter().map(kind).collect();
-    let last = |c: char| kinds.rfind(c);
-    let first = |c: char| kinds.find(c);
-    let (m, r, e) = (last('M'), first('R'), first('E'));
+    let (Some(m), Some(r), Some(e)) = (kinds.rfind('M'), kinds.find('R'), kinds.find('E')) else {
+        panic!("writes seen: {kinds}");
+    };
     assert!(
-        m.is_some() && r.is_some() && e.is_some(),
-        "writes seen: {kinds}"
+        m < r && r < e,
+        "the replayed metadata, then the restart pages, then the log: {kinds}"
     );
-    let flush_between = |from: usize, to: usize| kinds[from..to].contains('F');
+    // The restart pages marked clean are the R writes before the first E;
+    // the R writes after the last E erase them once the log is empty.
+    let marked = kinds[..e].rfind('R').expect("an R before the first E");
+    let erased = kinds.rfind('E').expect("an E");
     assert!(
-        flush_between(m.unwrap(), r.unwrap()),
+        kinds[m..r].contains('F'),
         "no flush between the replayed metadata and the restart pages: {kinds}"
     );
     assert!(
-        flush_between(last('R').unwrap(), e.unwrap()),
-        "no flush between the restart pages and the erased log: {kinds}"
+        kinds[marked..e].contains('F'),
+        "no flush between the restart pages marked clean and the erased log: {kinds}"
     );
+    if let Some(after) = kinds[erased..].find('R') {
+        assert!(
+            kinds[erased..erased + after].contains('F'),
+            "no flush between the erased log and the erased restart pages: {kinds}"
+        );
+    }
     assert!(
         kinds.ends_with('F'),
         "the last write is not followed by a flush: {kinds}"
