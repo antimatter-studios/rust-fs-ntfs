@@ -20,8 +20,7 @@
 #   unit-debug  723 / 46,497 cold (Mac), 674 / 46,723 (CI Linux)  1,000 / 64,000
 #   mkfs        115 / 3,858 cold (Mac), 24 / 1,022 warm           160 / 5,200
 #   suite       2,143 / 108,930 (CI Linux, fixtures built)        2,900 / 150,000
-#   kernel      12 / 508 warm (arm64 Pi, 4 tests); cold estimate:  160 / 6,000
-#               +106 crates compiled, one line each (2026-10-12)
+#   kernel      243 / 10,875 (CI Linux, cold, run 38233380518)    325 / 14,500
 #   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
 #   scripts     101 / 2,669 (11 shell tests, rebased 2026-09-26)  135 / 3,500
 #   matrix      1,381 / 100,339 green (72 cases, 2026-10-10)       1,850 / 135,000
@@ -35,6 +34,13 @@
 # plus a third, by the same rule as every other row. This is the "raise the
 # budget deliberately" the failure message asks for -- the run passed, it
 # simply printed more than the old measurement allowed.
+
+# THE KERNEL ROW MOVED ON 2026-10-13, from 160/6,000 to 325/14,500. The
+# first row was 12 lines / 508 bytes measured warm on an arm64 Pi, plus an
+# estimate of one line per crate a cold build compiles. The first CI run of
+# the tier (run 38233380518, job 114770169342, x86_64 with KVM) passed all
+# four tests and printed 243 lines / 10,875 bytes on a cold runner. Raised
+# to that plus a third, by the same rule as every other row.
 
 # THE SCRIPTS ROW MOVED ON 2026-09-26, from 80/1,800 to 110/2,500.
 # `chore test:scripts` on fix/diagnostics-verdict-shape at b815f12 printed
@@ -92,7 +98,7 @@ unit         1000   64000
 unit-debug   1000   64000
 mkfs          160    5200
 suite        2900  150000
-kernel        160    6000
+kernel        325    14500
 asan         1100   72000
 scripts       135    3500
 semver         40    4000
