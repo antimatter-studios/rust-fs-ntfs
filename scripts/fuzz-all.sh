@@ -46,7 +46,7 @@ for target in $targets; do
 
     mkdir -p "$scratch/$target"
     if cargo +nightly fuzz run "$target" "$scratch/$target" "fuzz/corpus/$seeds" \
-        -- -max_total_time="$budget"; then
+        -- -max_total_time="$budget" -timeout=60 -malloc_limit_mb=768; then
         echo "$target: clean"
     else
         echo "::error::fuzz target '$target' found an input that crashed or hung"

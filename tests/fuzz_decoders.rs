@@ -63,6 +63,12 @@ fn corpus_root() -> PathBuf {
 // than depended on.
 include!("../fuzz/shared/walk.rs");
 
+/// The structure-aware explorer (#483), shared the same way, in a module
+/// of its own because it imports what `walk.rs` does.
+mod structured {
+    include!("../fuzz/shared/structured.rs");
+}
+
 /// Distinct starting points for the mutation stream. Fixed, so a
 /// failure reproduces from the message alone.
 const SEEDS: u64 = 6;
@@ -172,6 +178,23 @@ fn targets() -> Vec<Target> {
                     let mut record = b.to_vec();
                     let _ = fs_ntfs::mft_io::apply_fixup_on_read(&mut record, bytes_per_sector);
                 }
+            },
+        },
+        // THE STRUCTURE-AWARE EXPLORER (#483). Its corpus is recipes, not
+        // volumes: which seed volume (the committed `image` corpus, and
+        // one this crate formats and fills), which fields of which records
+        // and index blocks to change with their fixups kept valid, and
+        // which writes to make. A case copies an 8 MiB volume and reads
+        // it twice around the writes, so it gets few cases.
+        Target {
+            corpus: "structured",
+            name: "structured",
+            cases: 4,
+            run: |recipe| {
+                static VOLUMES: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+                let seeds =
+                    VOLUMES.get_or_init(|| structured::volumes(&corpus_root().join("image")));
+                structured::explore(seeds, recipe);
             },
         },
     ]

@@ -79,3 +79,18 @@ path = "fuzz_targets/apply_fixup.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "structured"
+path = "fuzz_targets/structured.rs"
+test = false
+doc = false
+bench = false
+
+# Overflow checks and debug assertions in the build the fuzzer runs (#483).
+# A release build wraps an overflowing multiplication silently, and two of
+# the three panics the structure-aware explorer first found were exactly
+# that.
+[profile.release]
+debug-assertions = true
+overflow-checks = true
