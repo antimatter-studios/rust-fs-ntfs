@@ -3587,45 +3587,31 @@ fn drop_view_index_entries_io<T: BlockIo + ?Sized>(
     record: &[u8],
 ) -> Result<(), Error> {
     let file_ref = file_reference_of(rec, record);
-    let tag = reparse_tag_of(record);
-    let id = object_id_of(record).map(|(id, _)| id);
-    let unreparse = |r: &mut [u8]| -> Result<(), Error> {
-        if let Some(tag) = tag {
-            view_index::remove(
-                r,
-                view_index::REPARSE_INDEX,
-                &view_index::reparse_key(tag, file_ref),
-            )?;
-        }
-        Ok(())
-    };
-    let unobjid = |r: &mut [u8]| -> Result<(), Error> {
-        if let Some(id) = id {
-            view_index::remove(r, view_index::OBJID_INDEX, &id)?;
-        }
-        Ok(())
-    };
-    for (present, path, edit) in [
-        (
-            tag.is_some(),
+    if let Some(tag) = reparse_tag_of(record) {
+        remove_view_entry_io(
+            io,
             view_index::REPARSE_PATH,
-            &unreparse as &dyn Fn(&mut [u8]) -> Result<(), Error>,
-        ),
-        (id.is_some(), view_index::OBJID_PATH, &unobjid),
-    ] {
-        if present {
-            let r = resolve_path_to_record_number_io(io, path)?;
-            let (_, bytes) = read_mft_record_io(io, r)?;
-            edit(&mut bytes.clone()).map_err(|e| e.context(path.to_string()))?;
-        }
+            view_index::REPARSE_INDEX,
+            &view_index::reparse_key(tag, file_ref),
+        )?;
     }
-    if tag.is_some() {
-        edit_view_index_io(io, view_index::REPARSE_PATH, &unreparse)?;
-    }
-    if id.is_some() {
-        edit_view_index_io(io, view_index::OBJID_PATH, &unobjid)?;
+    if let Some((id, _)) = object_id_of(record) {
+        remove_view_entry_io(io, view_index::OBJID_PATH, view_index::OBJID_INDEX, &id)?;
     }
     Ok(())
+}
+
+/// Take the entry for `key` out of the `$Extend` view index `index` of the
+/// record at `path`, in its root or in an INDX block (#571).
+fn remove_view_entry_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    path: &str,
+    index: &str,
+    key: &[u8],
+) -> Result<bool, Error> {
+    let rec = resolve_path_to_record_number_io(io, path)
+        .map_err(|e| e.context(format!("{path}, the index this attribute is entered in")))?;
+    view_index::remove_io(io, rec, index, key).map_err(|e| e.context(path.to_string()))
 }
 
 /// Remove the `$REPARSE_POINT` attribute and clear the
@@ -3654,9 +3640,14 @@ pub fn remove_reparse_point_io<T: BlockIo + ?Sized>(
         Ok(())
     };
     clear(&mut before.clone())?;
-    // Its entry leaves $Extend\$Reparse:$R with it (#478).
-    let unindex = |r: &mut [u8]| view_index::remove(r, view_index::REPARSE_INDEX, &key).map(|_| ());
-    edit_view_index_io(io, view_index::REPARSE_PATH, &unindex)?;
+    // Its entry leaves $Extend\$Reparse:$R with it (#478), from the root or
+    // an INDX block (#571).
+    remove_view_entry_io(
+        io,
+        view_index::REPARSE_PATH,
+        view_index::REPARSE_INDEX,
+        &key,
+    )?;
     if let Err(e) = update_mft_record_io(io, rec, clear) {
         let undo = |r: &mut [u8]| view_index::put(r, view_index::REPARSE_INDEX, &key, &[]);
         return Err(
@@ -4530,10 +4521,9 @@ pub fn remove_object_id_io<T: BlockIo + ?Sized>(
     refuse_metafile_io(io, rec, &format!("remove_object_id {file_path}"))?;
     let (_, before) = read_mft_record_io(io, rec)?;
     if let Some((id, births)) = object_id_of(&before) {
-        // Its entry leaves $Extend\$ObjId:$O with it (#478).
-        let unindex =
-            |r: &mut [u8]| view_index::remove(r, view_index::OBJID_INDEX, &id).map(|_| ());
-        edit_view_index_io(io, view_index::OBJID_PATH, &unindex)?;
+        // Its entry leaves $Extend\$ObjId:$O with it (#478), from the root
+        // or an INDX block (#571).
+        remove_view_entry_io(io, view_index::OBJID_PATH, view_index::OBJID_INDEX, &id)?;
         let data = view_index::objid_data(file_reference_of(rec, &before), &id, births.as_ref());
         let undo = |r: &mut [u8]| view_index::put(r, view_index::OBJID_INDEX, &id, &data);
         let mut removed = false;
@@ -6010,34 +6000,65 @@ fn remove_interior_index_entry_io<T: BlockIo + ?Sized>(
     basename: &str,
     upcase: &crate::upcase::UpcaseTable,
 ) -> Result<(), Error> {
-    let ia = idx_block::load_for_directory_io(io, parent_rec)?;
+    let wanted: Vec<u16> = basename.encode_utf16().collect();
+    let is_wanted = |entry: &index_io::NodeEntry| -> Result<bool, Error> {
+        let name = index_io::node_entry_name(entry)?;
+        Ok(index_io::compare_names(&name, &wanted, Some(upcase)) == std::cmp::Ordering::Equal)
+    };
+    remove_interior_entry_of_io(
+        io,
+        parent_rec,
+        crate::mkfs::stream::I30,
+        index_io::NodeKeys::FileNames,
+        node_vcn,
+        &format!("'{basename}'"),
+        &is_wanted,
+    )
+}
+
+/// [`remove_interior_index_entry_io`] for any index of the record
+/// `parent_rec`: the directory's `$I30`, or a view index such as
+/// `$Extend\$ObjId:$O` (#571). `is_wanted` picks the entry out of its
+/// node, and `what` names it in errors.
+pub(crate) fn remove_interior_entry_of_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    index: &str,
+    keys: index_io::NodeKeys,
+    node_vcn: Option<u64>,
+    what: &str,
+    is_wanted: &dyn Fn(&index_io::NodeEntry) -> Result<bool, Error>,
+) -> Result<(), Error> {
+    let basename = what;
+    let ia = idx_block::load_index_io(io, parent_rec, index)?;
     let (_, record) = read_mft_record_io(io, parent_rec)?;
     let (mut node, block) = match node_vcn {
-        None => (index_io::parse_index_root_node(&record)?, None),
+        None => (
+            index_io::parse_index_root_node_of(&record, index, keys)?,
+            None,
+        ),
         Some(vcn) => {
             let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
-            (index_io::parse_indx_node(&block)?, Some(block))
+            (index_io::parse_indx_node_of(&block, keys)?, Some(block))
         }
     };
-    let wanted: Vec<u16> = basename.encode_utf16().collect();
     let mut at = None;
     for (i, entry) in node.entries.iter().enumerate() {
-        let name = index_io::node_entry_name(entry)?;
-        if index_io::compare_names(&name, &wanted, Some(upcase)) == std::cmp::Ordering::Equal {
+        if is_wanted(entry)? {
             at = Some(i);
             break;
         }
     }
-    let at = at.ok_or_else(|| Error::io(format!("the entry for '{basename}' vanished")))?;
+    let at = at.ok_or_else(|| Error::io(format!("the entry for {basename} vanished")))?;
     let left = node.entries[at]
         .child
-        .ok_or_else(|| Error::io(format!("the entry for '{basename}' has no child")))?;
+        .ok_or_else(|| Error::io(format!("the entry for {basename} has no child")))?;
     let right = node
         .entries
         .get(at + 1)
         .and_then(|e| e.child)
         .or(node.last_child)
-        .ok_or_else(|| Error::io(format!("the entry after '{basename}' has no child")))?;
+        .ok_or_else(|| Error::io(format!("the entry after {basename} has no child")))?;
 
     // Every node from `start` down to a leaf, always taking the last child
     // (`rightmost`) or the first.
@@ -6047,7 +6068,7 @@ fn remove_interior_index_entry_io<T: BlockIo + ?Sized>(
         let mut vcn = start;
         for _ in 0..64 {
             let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
-            let node = index_io::parse_indx_node(&block)?;
+            let node = index_io::parse_indx_node_of(&block, keys)?;
             let next = if rightmost {
                 node.last_child
             } else {
@@ -6063,7 +6084,7 @@ fn remove_interior_index_entry_io<T: BlockIo + ?Sized>(
             }
         }
         Err(Error::io(format!(
-            "directory record {parent_rec}: its index is deeper than 64 levels, or has a cycle"
+            "record {parent_rec}: its index {index} is deeper than 64 levels, or has a cycle"
         )))
     };
     let vcns = |path: &[(u64, Vec<u8>, index_io::IndexNode)]| -> Vec<u64> {
@@ -6112,13 +6133,13 @@ fn remove_interior_index_entry_io<T: BlockIo + ?Sized>(
     // A bitmap this cannot clear refuses the removal before anything is
     // written.
     if !freed.is_empty() {
-        clear_index_block_bits(&mut record.to_vec(), &ia, &freed)?;
+        clear_index_block_bits_of(&mut record.to_vec(), index, &ia, &freed)?;
     }
 
     // 1) The entry's node, holding the neighbour in the entry's place.
     match (node_vcn, &block) {
         (None, _) => update_mft_record_io(io, parent_rec, |record| {
-            index_io::write_index_root_node(record, &node)
+            index_io::write_index_root_node_of(record, index, &node)
         })?,
         (Some(vcn), Some(original)) => {
             let bytes = index_io::write_indx_node(original, &node, vcn)?;
@@ -6141,12 +6162,12 @@ fn remove_interior_index_entry_io<T: BlockIo + ?Sized>(
             };
             return Err(match undo {
                 Ok(()) => e.map_message(|m| {
-                    format!("taking the neighbour of '{basename}' out of its node failed ({m}); the index is as it was")
+                    format!("taking the neighbour of {basename} out of its node failed ({m}); the index is as it was")
                 }),
                 Err(ue) => e.map_message(|m| {
                     format!(
-                        "taking the neighbour of '{basename}' out of its node failed ({m}), and \
-                         putting the entry's node back failed too ({ue}): one name is in the \
+                        "taking the neighbour of {basename} out of its node failed ({m}), and \
+                         putting the entry's node back failed too ({ue}): one entry is in the \
                          index twice -- run chkdsk"
                     )
                 }),
@@ -6156,12 +6177,12 @@ fn remove_interior_index_entry_io<T: BlockIo + ?Sized>(
     // 3) The empty nodes no entry points to any more.
     if !freed.is_empty() {
         update_mft_record_io(io, parent_rec, |record| {
-            clear_index_block_bits(record, &ia, &freed)
+            clear_index_block_bits_of(record, index, &ia, &freed)
         })
         .map_err(|e| {
             e.map_message(|m| {
                 format!(
-                    "removing '{basename}': freeing {} empty index block(s) failed ({m}); they \
+                    "removing {basename}: freeing {} empty index block(s) failed ({m}); they \
                      stay allocated and unreferenced -- run chkdsk",
                     freed.len()
                 )
@@ -6175,29 +6196,31 @@ fn remove_interior_index_entry_io<T: BlockIo + ?Sized>(
 /// `$Bitmap:$I30` of the directory `record`, so the blocks are free for the
 /// next split. Their clusters stay in `$INDEX_ALLOCATION`, as Windows
 /// leaves them.
-fn clear_index_block_bits(
+fn clear_index_block_bits_of(
     record: &mut [u8],
+    index: &str,
     ia: &idx_block::IndexAllocation,
     vcns: &[u64],
 ) -> Result<(), Error> {
-    let bitmap = attr_io::find_attribute(record, AttrType::Bitmap, Some(crate::mkfs::stream::I30))
-        .ok_or(Error::io("$Bitmap:$I30 missing"))?;
+    let bitmap = attr_io::find_attribute(record, AttrType::Bitmap, Some(index))
+        .ok_or_else(|| Error::io(format!("$Bitmap:{index} missing")))?;
     if !bitmap.is_resident {
-        return Err(Error::io(
-            "freeing an index block in a non-resident $Bitmap:$I30 is not supported",
-        ));
+        return Err(Error::io(format!(
+            "freeing an index block in a non-resident $Bitmap:{index} is not supported"
+        )));
     }
     let value = bitmap.attr_offset
         + bitmap
             .resident_value_offset
-            .ok_or(Error::io("$Bitmap:$I30 has no value offset"))? as usize;
+            .ok_or_else(|| Error::io(format!("$Bitmap:{index} has no value offset")))?
+            as usize;
     let length = bitmap.resident_value_length.unwrap_or(0) as usize;
     for &vcn in vcns {
         let block = vcn * ia.params.cluster_size / ia.block_size;
         let byte = (block / 8) as usize;
         if byte >= length {
             return Err(Error::io(format!(
-                "index block {block} is past $Bitmap:$I30's {length} bytes"
+                "index block {block} is past $Bitmap:{index}'s {length} bytes"
             )));
         }
         record[value + byte] &= !(1u8 << (block % 8));
