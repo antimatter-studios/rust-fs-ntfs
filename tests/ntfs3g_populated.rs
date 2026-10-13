@@ -24,7 +24,9 @@
 //!   ntfs-3g gave an `$ATTRIBUTE_LIST` -- growing a stream, deleting one,
 //!   unlinking one of the sixty names or a name in the 600-name directory
 //!   -- is refused, because this crate does not maintain the list (#468,
-//!   #480), and ntfs-3g reads it all as it was.
+//!   #480), and ntfs-3g reads it all as it was;
+//! - unlinking the last name of a file whose streams fill extension
+//!   records frees those records and the clusters they map (#565).
 //!
 //! A missing image or manifest fails, naming the builder: nothing skips.
 
@@ -409,4 +411,124 @@ fn ntfs3g_reads_what_this_crate_wrote_on_its_volume_at_512_byte_clusters() {
 #[test]
 fn ntfs3g_reads_what_this_crate_wrote_on_its_volume_at_4k_clusters() {
     written_on(4096);
+}
+
+/// Every cluster the non-resident attributes of one MFT record map.
+fn clusters_mapped(record: &[u8]) -> u64 {
+    fs_ntfs::attr_io::iter_attributes(record)
+        .filter(|l| !l.is_resident)
+        .filter_map(|l| {
+            let start = l.attr_offset + l.non_resident_mapping_pairs_offset? as usize;
+            Some(
+                fs_ntfs::data_runs::decode_runs(&record[start..l.attr_offset + l.attr_length])
+                    .unwrap(),
+            )
+        })
+        .flatten()
+        .filter(|run| run.lcn.is_some())
+        .map(|run| run.length)
+        .sum()
+}
+
+/// Unlinking the last name of a file whose attributes ntfs-3g spread over
+/// extension records frees those records and every cluster their
+/// attributes map, as well as the base record's (#565). They used to stay
+/// in use, owned by a base record that was not.
+fn unlinked_on(cluster: u32) {
+    let img = PathBuf::from(common::temp_image_path(format!(
+        "ntfs3g_unlinked_{cluster}"
+    )));
+    std::fs::copy(fixture(&format!("ntfs-populated-{cluster}.img")), &img).unwrap();
+
+    let mut io = PathIo::open_ro(&img).unwrap();
+    let base = fs_ntfs::read::resolve_path(&mut io, "/streams.txt").unwrap();
+    let list =
+        fs_ntfs::read::read_attribute_value(&mut io, base, AttrType::AttributeList, None).unwrap();
+    let extensions: BTreeSet<u64> = fs_ntfs::read::parse_attribute_list(&list)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.record_number)
+        .filter(|&r| r != base)
+        .collect();
+    assert!(
+        !extensions.is_empty(),
+        "{cluster}: ntfs-3g put none of /streams.txt's attributes in an extension record"
+    );
+    let mut mapped = 0;
+    for &r in std::iter::once(&base).chain(&extensions) {
+        mapped += clusters_mapped(&fs_ntfs::mft_io::read_mft_record_io(&mut io, r).unwrap().1);
+    }
+    let bm = fs_ntfs::bitmap::locate_bitmap_io(&mut io).unwrap();
+    let mbm = fs_ntfs::mft_bitmap::locate_io(&mut io).unwrap();
+    let free_clusters = fs_ntfs::bitmap::count_free_io(&mut io, &bm).unwrap();
+    let free_records = fs_ntfs::mft_bitmap::count_free_io(&mut io, &mbm).unwrap();
+    drop(io);
+
+    let fs = Filesystem::mount_rw(&img).unwrap_or_else(|e| panic!("mount_rw {cluster}: {e}"));
+    fs.unlink("/streams.txt")
+        .unwrap_or_else(|e| panic!("{cluster}: unlink /streams.txt: {e}"));
+    drop(fs);
+
+    let mut io = PathIo::open_ro(&img).unwrap();
+    for &r in std::iter::once(&base).chain(&extensions) {
+        let (_, record) = fs_ntfs::mft_io::read_mft_record_io(&mut io, r).unwrap();
+        assert_eq!(
+            fs_ntfs::mft_io::record_flags(&record) & fs_ntfs::mft_io::MFT_FLAG_IN_USE,
+            0,
+            "{cluster}: record {r} of /streams.txt (base {base}) is still in use"
+        );
+        assert!(
+            !fs_ntfs::mft_bitmap::is_allocated_io(&mut io, &mbm, r).unwrap(),
+            "{cluster}: record {r} of /streams.txt (base {base}) is still allocated in $MFT's bitmap"
+        );
+    }
+    assert_eq!(
+        fs_ntfs::mft_bitmap::count_free_io(&mut io, &mbm).unwrap(),
+        free_records + 1 + extensions.len() as u64,
+        "{cluster}: the records freed are the base and its {} extension records",
+        extensions.len()
+    );
+    assert_eq!(
+        fs_ntfs::bitmap::count_free_io(&mut io, &bm).unwrap(),
+        free_clusters + mapped,
+        "{cluster}: the clusters freed are the {mapped} the file's records mapped"
+    );
+    let report = fs_ntfs::fsck::check_io(&mut io).unwrap();
+    assert!(
+        !report.dirty && report.findings.is_empty(),
+        "{cluster}: check_io: {report:?}"
+    );
+    drop(io);
+
+    // ntfs-3g finds no file there, and would still mount the volume
+    // read-write.
+    assert_eq!(
+        ntfscat(&img, "/streams.txt", None),
+        None,
+        "{cluster}: ntfs-3g still reads /streams.txt"
+    );
+    let probe = Command::new("ntfs-3g.probe")
+        .arg("--readwrite")
+        .arg(&img)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "ntfs-3g.probe could not be run ({e}): install ntfs-3g (`apt-get install ntfs-3g`)"
+            )
+        });
+    assert!(
+        probe.status.success(),
+        "{cluster}: ntfs-3g.probe --readwrite: {}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+}
+
+#[test]
+fn unlinking_a_file_whose_streams_fill_extension_records_frees_them_at_512_byte_clusters() {
+    unlinked_on(512);
+}
+
+#[test]
+fn unlinking_a_file_whose_streams_fill_extension_records_frees_them_at_4k_clusters() {
+    unlinked_on(4096);
 }

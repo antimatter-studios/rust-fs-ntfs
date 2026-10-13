@@ -433,6 +433,21 @@ host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
+[ops.win-write-streams]
+# Write one file at `path` carrying `count` named streams of `size_bytes`
+# each (`s1`..`sN`). Enough non-resident streams overflow the base MFT
+# record, so Windows itself moves attributes to extension records behind
+# an $ATTRIBUTE_LIST: the shape a host-side unlink has to free (#565).
+#
+# Step fields:
+#   path         — file path inside the volume (e.g. "/streams.txt")
+#   count        — number of named streams (integer as string)
+#   size_bytes   — bytes per stream (integer as string)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write-streams.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -Count '{step.count}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
 [ops.win-delete]
 # Delete a single file at `path` from the mounted volume. Mounts the
 # .img (re-using a prior op's .vhd if `keep_image=true` was set on
