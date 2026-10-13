@@ -1,8 +1,10 @@
 //! `fsck.ntfs`'s one repair, end to end through the binary: a dirty volume
-//! whose `$LogFile` is empty is corrected (exit 1) and clean after (exit
-//! 0). The shell suite cannot reach this state with the installed tools --
-//! nothing it installs empties a log -- so it is made here with the
-//! library's own `reset_logfile` and `set_dirty`.
+//! whose `$LogFile` is empty keeps its flag under `-y` alone, which leaves
+//! it for Windows' chkdsk (exit 4, #519), is corrected by `-y
+//! --clear-dirty` (exit 1), and is clean after (exit 0). The shell suite
+//! cannot reach this state with the installed tools -- nothing it installs
+//! empties a log -- so it is made here with the library's own
+//! `reset_logfile` and `set_dirty`.
 
 mod common;
 
@@ -42,6 +44,15 @@ fn a_dirty_volume_with_an_empty_log_is_corrected_then_clean() {
     assert_eq!(report["findings"][0]["repairable"], true);
 
     let (code, report) = fsck(&["-y", &img]);
+    assert_eq!(code, 4, "left for chkdsk: {report}");
+    assert_eq!(report["repaired"], 0);
+    assert_eq!(report["dirty"], true);
+    assert!(report["findings"][0]["why"]
+        .as_str()
+        .is_some_and(|why| why.contains("--clear-dirty")));
+    assert!(fs_ntfs::fsck::is_dirty(&img).unwrap());
+
+    let (code, report) = fsck(&["-y", "--clear-dirty", &img]);
     assert_eq!(code, 1, "corrected: {report}");
     assert_eq!(report["repaired"], 1);
     assert_eq!(report["dirty"], false);
