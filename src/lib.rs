@@ -70,6 +70,7 @@ pub mod record_build;
 pub mod sds;
 pub mod sparse;
 pub mod upcase;
+pub mod view_index;
 pub mod write;
 
 #[cfg(test)]
