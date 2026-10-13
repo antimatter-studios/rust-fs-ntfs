@@ -1,0 +1,19 @@
+# The Linux test VM (fs-linux-test-harness, the sibling `chore siblings`
+# checks out at LINUX_HARNESS_REF): where the kernel's own ntfs3 driver
+# reads what this crate writes (`chore test:kernel`, #486). Nothing here
+# mounts an image on the host.
+[project]
+name = "rust-fs-ntfs"
+
+[setup]
+script = "scripts/vm-setup.sh"
+
+[share]
+dir = ".vm-share"
+
+[vm]
+memory = "2G"
+cpus = 2
+disk = "16G"
+ssh_port = 50132
+deadline_minutes = 120

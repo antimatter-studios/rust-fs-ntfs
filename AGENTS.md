@@ -246,13 +246,14 @@ version they ship as.
 The tasks are the interface; CI runs exactly these:
 
 ```sh
-chore siblings          # ../rust-fs-core and ../fs-windows-test-harness at their pinned tags
+chore siblings          # ../rust-fs-core and both harnesses at their pinned tags
 chore siblings:check    # report drift, change nothing
 chore lint              # fmt + clippy, exactly as CI runs them
 chore test:unit         # unit tests (src/), release
 chore test:unit:debug   # unit tests, debug, overflow checks armed
 chore test:mkfs         # the two fixture-free integration files
 chore test:suite        # every unit and integration test, release
+chore test:kernel       # Linux's ntfs3 reads what we wrote, and we read what it wrote (Linux VM)
 chore test              # every tier CI runs, quietly
 chore test:scripts      # the shell tests (tests/scripts/*.sh)
 chore test:ignored      # the #[ignore]d tests: known defects, run so a fix cannot go unnoticed
@@ -269,6 +270,21 @@ is written to a volume must pass it before it lands: `validate rust-ntfs format
 
 Docs-only and CI-only changes report `skipping` for that context rather than
 failing, which is why they can merge without a VM run.
+
+### Linux's ntfs3, in the Linux harness VM
+
+`chore test:kernel` (#486) mounts what this crate wrote with the Linux
+kernel's own ntfs3 driver, a third implementation beside Windows and ntfs-3g,
+and compares every path, size and SHA-256. It also has ntfs3 write a tree that
+this crate must read back byte for byte. It runs in the `fs-linux-test-harness`
+VM, never on the host; the harness's tasks are `chore linux:*`, because `vm:*`
+is the Windows VM's. CI runs it on an x86_64 runner, the only kind with KVM.
+
+ntfs3 grades whether a volume READS BACK, not whether every record is intact.
+Read-only, it read straight through a file record whose update-sequence check
+was broken, a torn `$MFT` record 0 and a garbage `$LogFile`, logging nothing,
+where ntfs-3g and this crate refuse the record. A dirty volume is the case
+found to make it log. Integrity is `check_io`'s and chkdsk's to grade.
 
 ## How the budget is wired here
 

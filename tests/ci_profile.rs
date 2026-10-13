@@ -861,6 +861,7 @@ fn ci_ok_covers_every_gating_job_and_preserves_windows_filter() {
             "changes",
             "validate-mkfs-windows",
             "cli",
+            "kernel",
             "semver"
         ]
     );

@@ -1266,6 +1266,62 @@ jobs:
           path: tmp/logs/*.log
           if-no-files-found: error
 
+  kernel:
+    # `chore test:kernel`: Linux's ntfs3 mounts what this crate wrote and
+    # writes what this crate must read, in the fs-linux-test-harness VM
+    # (#486). A third NTFS implementation beside Windows and ntfs-3g. Only
+    # an x86_64 runner has KVM; ci-setup-linux.sh is the harness's one setup
+    # for it, run from the sibling checkout as every consumer does.
+    name: kernel oracle (Linux ntfs3, harness VM, x86_64 KVM)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install chore and check out sibling repos
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 "https://github.com/antimatter-studios/chore/releases/download/v0.11.0/chore-0.11.0-linux-x86_64.tar.gz" \
+            | sudo tar xz -C /usr/local/bin chore
+          chore siblings
+      - name: KVM, QEMU and Vagrant
+        id: vm-host
+        run: ../fs-linux-test-harness/scripts/ci-setup-linux.sh
+      - name: Cache the Vagrant box
+        uses: actions/cache@v4
+        with:
+          path: ~/.vagrant.d/boxes
+          key: ${{ steps.vm-host.outputs.box-cache-key }}
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-kernel-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: chore test:kernel
+        id: tier
+        run: chore test:kernel
+      # The tier runs in a harness session, which takes the VM down however
+      # it ends; a VM still up here would hold the machine's slot.
+      - name: The VM is down again
+        if: always() && steps.tier.outcome != 'skipped'
+        run: '! chore linux:status'
+      - name: Keep the tier log
+        if: always() && steps.tier.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-kernel
+          path: tmp/logs/*.log
+          if-no-files-found: error
+
   # Keep the existing required-check name while making an intentional Windows
   # skip report as success. A failed or missing run must report failure.
   semver:
@@ -1331,7 +1387,7 @@ jobs:
     name: ci-ok
     runs-on: ubuntu-latest
     if: always()
-    needs: [test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, semver]
+    needs: [test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, kernel, semver]
     steps:
       - uses: actions/checkout@v4
       - name: Check every gating job

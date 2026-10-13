@@ -65,6 +65,11 @@ vars:
   # is the local Windows VM; the vm:* tasks below run it in place.
   HARNESS_REF: v4.4.0
 
+  # The Linux test VM (fs-linux-test-harness): where Linux's own ntfs3
+  # mounts what this crate writes, `chore test:kernel` (#486). Not a cargo
+  # dependency; a tool the kernel tests invoke from ../fs-linux-test-harness.
+  LINUX_HARNESS_REF: v0.4.1
+
   # The in-house VHD writer (rust-img-vhd) the Windows jobs build to wrap
   # a raw image for Windows. Not a cargo dependency, so this is the only
   # thing that decides which version runs, and every workflow reads it
@@ -92,6 +97,24 @@ vars:
 # loaded`, before a test ran. A machine with no VM config runs everything
 # that does not need one.
 dotenv: ['?.test-env']
+
+# THE LINUX VM'S TASKS, as `chore linux:<task>`: linux:up, linux:run --
+# <command>, linux:down, linux:slot:status and the rest of the harness's
+# vm.chores.yml. Not `vm:`, which this file's own tasks already use for the
+# Windows VM. The harness's messages still say `chore vm:down`; here that is
+# `chore linux:down`. Optional, because `chore siblings` is what checks the
+# harness out.
+includes:
+  linux:
+    taskfile: ../fs-linux-test-harness/vm.chores.yml
+    optional: true
+
+# The net for a run that left the Linux VM up without a session: the slot
+# is one for the whole machine, so an idle VM blocks every other
+# repository's VM work.
+lifecycle:
+  after_all:
+    - '[ ! -x ../fs-linux-test-harness/scripts/vm.sh ] || ../fs-linux-test-harness/scripts/vm.sh reap'
 
 tasks:
   staticlib:
@@ -179,6 +202,7 @@ tasks:
         printf '%s\t%s\t%s\n' \
           rust-fs-core            https://github.com/antimatter-studios/rust-fs-core.git            '{{.FS_CORE_REF}}' \
           fs-windows-test-harness https://github.com/antimatter-studios/fs-windows-test-harness.git '{{.HARNESS_REF}}' \
+          fs-linux-test-harness   https://github.com/antimatter-studios/fs-linux-test-harness.git   '{{.LINUX_HARNESS_REF}}' \
         | while IFS="$(printf '\t')" read -r name url ref; do
             dir="../$name"
 
@@ -226,6 +250,7 @@ tasks:
         printf '%s\t%s\n' \
           rust-fs-core            '{{.FS_CORE_REF}}' \
           fs-windows-test-harness '{{.HARNESS_REF}}' \
+          fs-linux-test-harness   '{{.LINUX_HARNESS_REF}}' \
         | while IFS="$(printf '\t')" read -r name ref; do
             dir="../$name"
             # -e, not -d: a worktree's .git is a FILE naming its gitdir, and every
@@ -417,7 +442,7 @@ tasks:
       # or a call to a local copy.
       - bash ../rust-fs-core/scripts/family-check.sh
       - task: check:ci-gate
-      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness -- -D warnings
+      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness,kernel -- -D warnings
 
   check:ci-gate:
     desc: ci-ok needs every gating job in ci.yml, and .github-guard requires ci-ok alone
@@ -482,21 +507,33 @@ tasks:
       - test-disks/check-fixtures.sh
       - bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli,harness --no-fail-fast
 
+  test:kernel:
+    desc: "The kernel oracle: Linux's ntfs3 mounts what this crate wrote, in the fs-linux-test-harness VM, and this crate reads what ntfs3 wrote"
+    deps: [siblings:gate]
+    # A harness session: the VM the tests boot comes down, and the
+    # machine-wide slot is released, when cargo ends, however it ends. The
+    # floor fails a run that built no kernel test, which `cargo test` would
+    # report as a green `0 passed`.
+    cmds:
+      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips kernel -- ../fs-linux-test-harness/scripts/vm.sh session cargo test --release --locked --features cli,harness,kernel --test kernel_ntfs3
+      - bash ../rust-fs-core/scripts/test-floor.sh kernel 4
+
   test:
-    desc: 'Every test tier CI runs, quietly: unit, unit (debug), mkfs, the whole suite, the installed tools'
+    desc: 'Every test tier CI runs, quietly: unit, unit (debug), mkfs, the whole suite, the kernel oracle, the installed tools'
     # `-- --verbose` reaches every tier: CLI_ARGS is chore's, not the task's.
     cmds:
       - task: test:unit
       - task: test:unit:debug
       - task: test:mkfs
       - task: test:suite
+      - task: test:kernel
       # The command-line tools, built and staged from this checkout, then
       # tested as installed. A separate invocation because test:cli reads
       # PATH, and the staged directory has to come first on it.
       - task: cli:install
       - 'PATH="$(scripts/cli-install.sh --print-bin-dir):$PATH" "{{.CHORE_EXE}}" test:cli'
       # THE LAST LINE: one number across the tiers, and where the detail is.
-      - scripts/test-verdict.sh unit unit-debug mkfs suite cli
+      - scripts/test-verdict.sh unit unit-debug mkfs suite kernel cli
 
   cli:install:
     desc: 'Build the command-line tools (release, --features cli) and stage them as an install prefix in tmp/cli: bin/rust-fs-ntfs and every dotted name linked to it'
