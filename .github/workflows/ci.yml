@@ -940,6 +940,19 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      # A symbolic link and an object id made here: each has an entry in
+      # its $Extend index, and chkdsk grades that it does (#478).
+      - name: Validate reparse point and object id indexes on Windows
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh mac-format-mac-symlink-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
+          bash scripts/run-matrix.sh mac-format-mac-objid-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       - name: Validate routed leaf split on Windows
         shell: bash
         run: |

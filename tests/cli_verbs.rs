@@ -81,6 +81,8 @@ fn every_verb_documents_itself_on_stdout() {
         "remove",
         "set-dirty",
         "sparse",
+        "symlink",
+        "objid",
     ] {
         let out = run(&[verb, "--help"]);
         assert_eq!(code(&out), 0, "`{verb} --help` exit status");
@@ -132,6 +134,16 @@ fn the_verbs_that_change_a_volume_report_success() {
     assert_eq!(code(&run(&["rename", &img, "/alias.txt", "alias2.txt"])), 0);
     assert_eq!(code(&run(&["rm", &img, "/alias2.txt"])), 0);
     assert_eq!(code(&run(&["rmdir", &img, "/d"])), 0);
+    assert_eq!(code(&run(&["symlink", &img, "/", "s.txt", "f.txt"])), 0);
+    assert_eq!(
+        code(&run(&[
+            "objid",
+            &img,
+            "/f.txt",
+            "00112233445566778899aabbccddeeff"
+        ])),
+        0
+    );
     assert_eq!(code(&run(&["set-dirty", &img])), 0);
 
     let listing = run(&["ls", &img]);
@@ -165,6 +177,19 @@ fn the_verbs_fail_when_the_target_is_wrong() {
         (
             "a link from a file that is not there",
             vec!["link", &img, "/nope.txt", "/", "l.txt"],
+        ),
+        (
+            "a symlink whose name is taken",
+            vec!["symlink", &img, "/", "f.txt", "d"],
+        ),
+        (
+            "an object id for a file that is not there",
+            vec![
+                "objid",
+                &img,
+                "/nope.txt",
+                "00112233445566778899aabbccddeeff",
+            ],
         ),
         ("ls of an image that is not there", vec!["ls", "/nope.img"]),
     ] {
@@ -211,6 +236,11 @@ fn a_usage_error_and_a_failure_have_different_exit_codes() {
         code(&run(&["rm", &img, "/nope.txt"])),
         1,
         "a file that is not there is a failure, not a usage error"
+    );
+    assert_eq!(
+        code(&run(&["objid", &img, "/f.txt", "not-hexadecimal"])),
+        2,
+        "an object id that is not 32 hexadecimal digits is a usage error"
     );
     assert_eq!(code(&run(&["rm", &img, "/f.txt"])), 0);
 }

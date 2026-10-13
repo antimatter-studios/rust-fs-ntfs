@@ -232,6 +232,22 @@ host = "host"
 command = "{binary} rename {image_dir}/{run_id}/{scenario.image} {step.path} {step.new_basename}"
 expect_exit = 0
 
+[ops.mac-symlink]
+# rust-ntfs symlink takes (image, parent, basename, target): a file at
+# parent/basename carrying an IO_REPARSE_TAG_SYMLINK reparse point. A
+# reparse point has an entry in $Extend\$Reparse:$R (#478).
+host = "host"
+command = "{binary} symlink {image_dir}/{run_id}/{scenario.image} {step.parent} {step.basename} {step.target}"
+expect_exit = 0
+
+[ops.mac-objid]
+# rust-ntfs objid takes (image, path, object-id as 32 hex digits) and
+# writes the file's $OBJECT_ID. An object id has an entry in
+# $Extend\$ObjId:$O (#478).
+host = "host"
+command = "{binary} objid {image_dir}/{run_id}/{scenario.image} {step.path} {step.object_id}"
+expect_exit = 0
+
 # ----- inspection / verification -----
 
 [ops.mac-enumerate]
