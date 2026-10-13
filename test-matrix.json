@@ -1709,7 +1709,7 @@
         {
           "op": "mac-write",
           "path": "/target.txt",
-          "content": "the target"
+          "content": "target"
         },
         {
           "op": "mac-symlink",
