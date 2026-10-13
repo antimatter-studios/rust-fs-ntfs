@@ -436,6 +436,7 @@ fsck.ntfs disk.img                 # dirty flag, $LogFile, $MFTMirr, MFT records
 rust-fs-ntfs doctor                # is every name on PATH this program?
 chore test:cli                     # the tools as installed: doctor, then tests/cli/
 chore test:cli:oracle              # against Windows-written volumes, and ntfs-3g (tests/cli-oracle/)
+chore test:cli:host                # the Windows matrix's cli steps that run on this machine, no VM
 ```
 
 Reports are JSON on stdout (`--text` for people); a failure is

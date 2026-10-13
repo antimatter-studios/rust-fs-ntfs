@@ -519,7 +519,7 @@ tasks:
       - bash ../rust-fs-core/scripts/test-floor.sh kernel 4
 
   test:
-    desc: 'Every test tier CI runs, quietly: unit, unit (debug), mkfs, the whole suite, the kernel oracle, the installed tools'
+    desc: 'Every test tier CI runs, quietly: unit, unit (debug), mkfs, the whole suite, the kernel oracle, the installed tools, the host half of the cli matrix'
     # `-- --verbose` reaches every tier: CLI_ARGS is chore's, not the task's.
     cmds:
       - task: test:unit
@@ -532,8 +532,9 @@ tasks:
       # PATH, and the staged directory has to come first on it.
       - task: cli:install
       - 'PATH="$(scripts/cli-install.sh --print-bin-dir):$PATH" "{{.CHORE_EXE}}" test:cli'
+      - task: test:cli:host
       # THE LAST LINE: one number across the tiers, and where the detail is.
-      - scripts/test-verdict.sh unit unit-debug mkfs suite kernel cli
+      - scripts/test-verdict.sh unit unit-debug mkfs suite kernel cli cli-host
 
   cli:install:
     desc: 'Build the command-line tools (release, --features cli) and stage them as an install prefix in tmp/cli: bin/rust-fs-ntfs and every dotted name linked to it'
@@ -578,6 +579,19 @@ tasks:
     # fs.ntfs wrote; the floor is 54.
     cmds:
       - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=54 scripts/test-cli.sh'
+
+  test:cli:host:
+    desc: 'The host half of the cli scenarios in the Windows matrix, without the VM: every step each runs before its first Windows step (scripts/cli-oracle.sh)'
+    # Windows still grades what these steps make, in the matrix job. They are
+    # our own half, which used to run only there: a break in it first showed
+    # eleven minutes into the Windows job (#546). Each command and its
+    # expected exit come from fs-windows-test-harness.toml and
+    # test-matrix.json, so a new cli scenario is covered with no edit here.
+    # They run the release CLI at target/release/rust-fs-ntfs, which
+    # cli:install builds. FLOOR: the 20 cli scenarios when the tier was added.
+    deps: [cli:install]
+    cmds:
+      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-host -- python3 scripts/fs-windows-test-harness/run-host-steps --group cli --floor 20'
 
   test:ignored:
     desc: 'The #[ignore]d tests: known defects, run so a fix cannot go unnoticed'

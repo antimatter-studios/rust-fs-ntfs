@@ -1236,6 +1236,11 @@ jobs:
       - name: chore test:cli
         id: tier
         run: chore test:cli
+      # The host half of the Windows matrix's cli scenarios, without the VM:
+      # a break in it used to show only in the Windows job, ten minutes in
+      # (#546). Windows still grades the images there.
+      - name: chore test:cli:host
+        run: chore test:cli:host
       - name: Download Windows-authored native read fixtures
         uses: actions/download-artifact@v4
         with:
