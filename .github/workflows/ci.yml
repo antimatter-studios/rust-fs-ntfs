@@ -923,6 +923,16 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      # A file whose streams Windows spread over extension records,
+      # unlinked here: chkdsk grades that its extension records and
+      # their clusters went with it (#565).
+      - name: Validate unlinking a file whose attributes fill extension records
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh win-format-win-write-streams-mac-delete-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       - name: Validate enumeration without required paths on Windows
         shell: bash
         run: |
