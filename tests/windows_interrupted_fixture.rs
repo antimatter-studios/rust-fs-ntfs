@@ -75,10 +75,11 @@ mod common;
 use fs_ntfs::facade::{FileType, Filesystem};
 use fs_ntfs::fsck;
 use fs_ntfs::{
-    fs_ntfs_create_file, fs_ntfs_mount, fs_ntfs_mount_replaying_log,
-    fs_ntfs_mount_rw_with_fs_core_device, fs_ntfs_mount_rw_with_fs_core_device_replaying_log,
-    fs_ntfs_mount_with_callbacks, fs_ntfs_mount_with_callbacks_replaying_log,
-    fs_ntfs_mount_with_fs_core_device, fs_ntfs_umount, FsNtfsBlockdevCfg,
+    fs_ntfs_create_file, fs_ntfs_fsck_with_callbacks, fs_ntfs_fsck_with_fs_core_device,
+    fs_ntfs_mount, fs_ntfs_mount_replaying_log, fs_ntfs_mount_rw_with_fs_core_device,
+    fs_ntfs_mount_rw_with_fs_core_device_replaying_log, fs_ntfs_mount_with_callbacks,
+    fs_ntfs_mount_with_callbacks_replaying_log, fs_ntfs_mount_with_fs_core_device, fs_ntfs_umount,
+    FsNtfsBlockdevCfg,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -880,7 +881,7 @@ const RW_MOUNTS: [(&str, Mount); 4] = [
 
 /// Every way this crate asks a read-write mount to replay a `$LogFile`
 /// holding work first, each over an image path, as [`RW_MOUNTS`].
-const RW_MOUNTS_REPLAYING: [(&str, Mount); 4] = [
+const RW_MOUNTS_REPLAYING: [(&str, Mount); 3] = [
     ("Filesystem::mount_rw_replaying_log", |img| {
         Filesystem::mount_rw_replaying_log(img)
             .map(|_| ())
@@ -895,9 +896,9 @@ const RW_MOUNTS_REPLAYING: [(&str, Mount); 4] = [
         fs_ntfs_umount(h);
         Ok(())
     }),
-    ("fs_ntfs_mount_with_callbacks_replaying_log", |img| {
-        callback_mount_as(img, true, true)
-    }),
+    // fs_ntfs_mount_with_callbacks_replaying_log is not here: the
+    // read/write callback pair cannot flush, so it refuses to replay (#518),
+    // as `a_replay_through_callbacks_that_cannot_flush_is_refused` pins.
     (
         "fs_ntfs_mount_rw_with_fs_core_device_replaying_log",
         |img| {
@@ -1194,6 +1195,173 @@ fn a_dirty_volume_is_refused_before_its_log_is_replayed() {
             std::fs::remove_file(&img).unwrap();
         }
     }
+}
+
+/// A replay through the read/write callback pair is refused, with nothing
+/// written (#518). The pair has no flush callback, so nothing orders the
+/// replayed metadata before the log's "clean": a host whose write callback
+/// buffers could land the second first, and a power cut then leaves a log
+/// saying there is nothing to replay over metadata the replay never
+/// finished. The mount that replays and fsck are both refused.
+#[test]
+fn a_replay_through_callbacks_that_cannot_flush_is_refused() {
+    let img = unpack("windows-interrupted-1");
+    let before = std::fs::read(&img).unwrap();
+    let why = callback_mount_as(&img, true, true)
+        .expect_err("a replaying mount through callbacks with no flush callback");
+    assert!(why.contains("flush"), "the refusal names the flush: {why}");
+    assert!(
+        std::fs::read(&img).unwrap() == before,
+        "the refused mount wrote to the volume"
+    );
+
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&img)
+        .unwrap();
+    let size = f.metadata().unwrap().len();
+    let ctx = FileCtx(Mutex::new(f));
+    let cfg = FsNtfsBlockdevCfg {
+        read: read_cb,
+        context: &ctx as *const FileCtx as *mut c_void,
+        size_bytes: size,
+        write: Some(write_cb),
+    };
+    let rc = fs_ntfs_fsck_with_callbacks(&cfg, None, std::ptr::null_mut(), std::ptr::null_mut(), 0);
+    let why = last_error();
+    assert_eq!(
+        rc, -1,
+        "fsck through callbacks with no flush callback replayed"
+    );
+    assert!(why.contains("flush"), "the refusal names the flush: {why}");
+    drop(ctx);
+    assert!(
+        std::fs::read(&img).unwrap() == before,
+        "the refused fsck wrote to the volume"
+    );
+}
+
+/// What a device that can flush saw: each write's offset and length, and
+/// each flush, in order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Seen {
+    Write(u64, usize),
+    Flush,
+}
+
+struct Recording {
+    file: Mutex<File>,
+    seen: Mutex<Vec<Seen>>,
+}
+
+unsafe extern "C" fn rec_read(ctx: *mut c_void, at: u64, buf: *mut u8, len: usize) -> c_int {
+    let r = unsafe { &*(ctx as *const Recording) };
+    let mut f = r.file.lock().unwrap();
+    let buf = unsafe { std::slice::from_raw_parts_mut(buf, len) };
+    c_int::from(f.seek(SeekFrom::Start(at)).is_err() || f.read_exact(buf).is_err())
+}
+
+unsafe extern "C" fn rec_write(ctx: *mut c_void, at: u64, buf: *const u8, len: usize) -> c_int {
+    let r = unsafe { &*(ctx as *const Recording) };
+    r.seen.lock().unwrap().push(Seen::Write(at, len));
+    let mut f = r.file.lock().unwrap();
+    let buf = unsafe { std::slice::from_raw_parts(buf, len) };
+    c_int::from(f.seek(SeekFrom::Start(at)).is_err() || f.write_all(buf).is_err())
+}
+
+unsafe extern "C" fn rec_flush(ctx: *mut c_void) -> c_int {
+    let r = unsafe { &*(ctx as *const Recording) };
+    r.seen.lock().unwrap().push(Seen::Flush);
+    c_int::from(r.file.lock().unwrap().sync_all().is_err())
+}
+
+/// Through a device with a flush callback, the replay flushes at each point
+/// the path backend calls `fsync` (#518): the replayed metadata, a flush,
+/// the restart pages marked clean, a flush, the rest of the log erased, a
+/// flush.
+#[test]
+fn a_replay_through_a_device_that_flushes_orders_its_writes() {
+    let img = unpack("windows-interrupted-1");
+    let (log_start, log_len) = {
+        let mut io = fs_ntfs::block_io::PathIo::open_ro(std::path::Path::new(&img)).unwrap();
+        fs_ntfs::read::nonresident_contiguous_disk_range(
+            &mut io,
+            2,
+            fs_ntfs::attr_io::AttrType::Data,
+            None,
+        )
+        .expect("$LogFile is one extent")
+    };
+    // The restart pages: the first two system pages of the log, whose size
+    // the restart page header records at 0x10.
+    let page = {
+        let mut f = File::open(&img).unwrap();
+        let mut b = [0u8; 4];
+        f.seek(SeekFrom::Start(log_start + 0x10)).unwrap();
+        f.read_exact(&mut b).unwrap();
+        u64::from(u32::from_le_bytes(b))
+    };
+    assert!(
+        page.is_power_of_two() && page >= 512,
+        "restart page size {page}"
+    );
+
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&img)
+        .unwrap();
+    let size = f.metadata().unwrap().len();
+    let rec = Recording {
+        file: Mutex::new(f),
+        seen: Mutex::new(Vec::new()),
+    };
+    let cfg = fs_core::ffi::FsCoreCallbackCfg {
+        read: Some(rec_read),
+        write: Some(rec_write),
+        flush: Some(rec_flush),
+        ctx: &rec as *const Recording as *mut c_void,
+        size,
+    };
+    let dev = unsafe { fs_core::ffi::fs_core_device_from_callbacks(&cfg) };
+    assert!(!dev.is_null(), "fs_core_device_from_callbacks");
+    let rc =
+        fs_ntfs_fsck_with_fs_core_device(dev, None, std::ptr::null_mut(), std::ptr::null_mut(), 0);
+    let why = last_error();
+    unsafe { fs_core::ffi::fs_core_device_close(dev) };
+    assert_eq!(rc, 0, "fsck through a device that flushes: {why}");
+
+    let seen = rec.seen.lock().unwrap().clone();
+    let restart = log_start..log_start + 2 * page;
+    let log = log_start..log_start + log_len;
+    let kind = |s: &Seen| match *s {
+        Seen::Flush => 'F',
+        Seen::Write(at, _) if restart.contains(&at) => 'R',
+        Seen::Write(at, _) if log.contains(&at) => 'E',
+        Seen::Write(..) => 'M',
+    };
+    let kinds: String = seen.iter().map(kind).collect();
+    let last = |c: char| kinds.rfind(c);
+    let first = |c: char| kinds.find(c);
+    let (m, r, e) = (last('M'), first('R'), first('E'));
+    assert!(
+        m.is_some() && r.is_some() && e.is_some(),
+        "writes seen: {kinds}"
+    );
+    let flush_between = |from: usize, to: usize| kinds[from..to].contains('F');
+    assert!(
+        flush_between(m.unwrap(), r.unwrap()),
+        "no flush between the replayed metadata and the restart pages: {kinds}"
+    );
+    assert!(
+        flush_between(last('R').unwrap(), e.unwrap()),
+        "no flush between the restart pages and the erased log: {kinds}"
+    );
+    assert!(
+        kinds.ends_with('F'),
+        "the last write is not followed by a flush: {kinds}"
+    );
 }
 
 fn last_error() -> String {
