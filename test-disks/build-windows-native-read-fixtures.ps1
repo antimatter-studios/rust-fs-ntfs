@@ -7,6 +7,8 @@
 #     each file's path, size and the SHA-256 Windows itself computes
 #   * ntfs-ea.img: extended attributes Windows set through NtSetEaFile, plus
 #     ntfs-ea.names.tsv, each name and value as it was handed to Windows
+#   * ntfs-format-64k.img: an empty volume Windows formatted with 64 KiB
+#     clusters, whose $MFTMirr the formatter is held to
 #
 # Run from the repository root on an elevated Windows host. rust-img-vhd must be
 # on PATH; CI installs the pinned rust-img-vhd release before invoking this.
@@ -21,7 +23,8 @@ function New-WindowsFixture {
     param(
         [Parameter(Mandatory=$true)] [string]$ImagePath,
         [Parameter(Mandatory=$true)] [string]$Label,
-        [Parameter(Mandatory=$true)] [scriptblock]$Populate
+        [Parameter(Mandatory=$true)] [scriptblock]$Populate,
+        [int]$AllocationUnitSize = 4096
     )
 
     $image = [System.IO.Path]::GetFullPath($ImagePath)
@@ -37,7 +40,7 @@ function New-WindowsFixture {
     try {
         $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
         Format-Volume -DriveLetter $letter -FileSystem NTFS `
-            -AllocationUnitSize 4096 -NewFileSystemLabel $Label `
+            -AllocationUnitSize $AllocationUnitSize -NewFileSystemLabel $Label `
             -Force -Confirm:$false | Out-Null
         & $Populate "${letter}:\"
         Sync-VhdToImg -Vhd $state.Vhd -ImagePath $image
@@ -201,5 +204,11 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-ea.img' -Label 'EA' -Populate {
         (New-Object System.Text.UTF8Encoding($false)))
 }
 
-Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img |
+# What Windows' formatter writes into $MFTMirr when a cluster holds more than
+# the four records the mirror is for, so the formatter here is held to
+# Windows rather than to mkntfs (tests/mftmirr_windows_oracle.rs, #481).
+New-WindowsFixture -ImagePath 'test-disks/ntfs-format-64k.img' -Label 'C64K' `
+    -AllocationUnitSize 65536 -Populate { param($root) }
+
+Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img,test-disks/ntfs-format-64k.img |
     Format-Table Name,Length
