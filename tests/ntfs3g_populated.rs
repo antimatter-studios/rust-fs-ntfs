@@ -24,6 +24,8 @@
 //!
 //! A missing image or manifest fails, naming the builder: nothing skips.
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -81,9 +83,12 @@ fn manifest(cluster: u32) -> Manifest {
             _ => panic!("a manifest line this test does not know: {line:?}"),
         }
     }
+    // 600 wide entries, 6 compressed files, the target and its 60 other
+    // names, the stream file, the sparse and the two fragmented files, the
+    // four oddly named ones, the deep file and the empty one.
     assert!(
-        m.files.len() > 700 && m.streams.len() == 41,
-        "the manifest is short: {} files, {} streams",
+        m.files.len() == 677 && m.streams.len() == 41,
+        "the manifest holds {} files and {} streams, where the builder makes 677 and 41",
         m.files.len(),
         m.streams.len()
     );
@@ -243,9 +248,7 @@ fn ntfscat(img: &Path, path: &str, stream: Option<&str>) -> Option<Vec<u8>> {
 
 fn written_on(cluster: u32) {
     let m = manifest(cluster);
-    let dir = std::env::temp_dir().join(format!("ntfs3g-populated-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let img = dir.join(format!("written-{cluster}.img"));
+    let img = PathBuf::from(common::temp_image_path(format!("ntfs3g_written_{cluster}")));
     std::fs::copy(fixture(&format!("ntfs-populated-{cluster}.img")), &img).unwrap();
 
     let fs = Filesystem::mount_rw(&img).unwrap_or_else(|e| panic!("mount_rw {cluster}: {e}"));
@@ -344,7 +347,6 @@ fn written_on(cluster: u32) {
         "{cluster}: ntfs-3g.probe --readwrite: {}",
         String::from_utf8_lossy(&probe.stderr)
     );
-    std::fs::remove_file(&img).ok();
 }
 
 #[test]
