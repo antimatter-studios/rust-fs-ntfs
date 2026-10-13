@@ -18,13 +18,13 @@
 //! - the named streams list and read back;
 //! - `check_io` finds nothing;
 //! - and after this crate writes to a copy (a stream rewritten in place, a
-//!   file created with a stream added and one rewritten, a name unlinked
-//!   from the wide directory), ntfs-3g's own tools read back what was
-//!   written and still mount the volume read-write. What would add,
-//!   remove or grow an attribute of a record ntfs-3g gave an
-//!   `$ATTRIBUTE_LIST` -- growing a stream, deleting one, unlinking one of
-//!   the sixty names -- is refused, because this crate does not maintain
-//!   the list (#468, #480), and ntfs-3g reads it all as it was.
+//!   file created with a stream added and one rewritten), ntfs-3g's own
+//!   tools read back what was written and still mount the volume
+//!   read-write. What would add, remove or grow an attribute of a record
+//!   ntfs-3g gave an `$ATTRIBUTE_LIST` -- growing a stream, deleting one,
+//!   unlinking one of the sixty names or a name in the 600-name directory
+//!   -- is refused, because this crate does not maintain the list (#468,
+//!   #480), and ntfs-3g reads it all as it was.
 //!
 //! A missing image or manifest fails, naming the builder: nothing skips.
 
@@ -330,8 +330,15 @@ fn written_on(cluster: u32) {
         .find(|p| p.starts_with("/wide/"))
         .unwrap()
         .clone();
-    fs.unlink(&gone_wide)
-        .unwrap_or_else(|e| panic!("{cluster}: unlink {gone_wide}: {e}"));
+    // ntfs-3g gave /wide, with its 600 names, an $ATTRIBUTE_LIST of its own,
+    // and the index root a name is removed from is not in the directory's
+    // base record, which is the only one this crate edits; the removal is
+    // refused for the list, before anything is written.
+    refused_for_the_list(
+        cluster,
+        &format!("unlink {gone_wide}"),
+        fs.unlink(&gone_wide),
+    );
     drop(fs);
 
     // ntfs-3g reads back what was written, and not what was removed.
@@ -372,9 +379,9 @@ fn written_on(cluster: u32) {
         );
     }
     assert_eq!(
-        ntfscat(&img, &gone_wide, None),
-        None,
-        "{cluster}: ntfs-3g still finds {gone_wide}"
+        ntfscat(&img, &gone_wide, None).map(|d| sha(&d)),
+        m.files.get(&gone_wide).map(|(_, d)| d.clone()),
+        "{cluster}: ntfs-3g's {gone_wide}, kept by the refused unlink"
     );
 
     // And it would still mount the volume read-write.
