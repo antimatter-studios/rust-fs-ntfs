@@ -50,18 +50,18 @@ States:
 | Feature | State | Since | Tracking | Checked by |
 |---|---|---|---|---|
 | `fsck.ntfs` / `fsck::check_io`: dirty flag, `$LogFile`, `$MFTMirr`, the header of every in-use MFT record | Supported | 0.6.0 | | `cli_fsck.rs`, `tests/cli/test-fsck.sh` |
-| `fsck.ntfs` / `fsck::check_io`: each in-use record's attribute chain: lengths, types and their order, names, ids, resident values, run lists against their VCNs and allocated size, the end marker | Supported | Unreleased (#515) | | `check_io_reads_attribute_structure.rs` |
-| `fsck.ntfs` / `fsck::check_io`: `$Bitmap` against every run list: leaked, cross-linked and in-use-but-free clusters, runs past the volume | Supported | Unreleased (#528) | | `check_io_cluster_accounting.rs`, `tests/cli/test-fsck.sh` |
+| `fsck.ntfs` / `fsck::check_io`: each in-use record's attribute chain: lengths, types and their order, names, ids, resident values, run lists against their VCNs and allocated size, the end marker | Supported | 0.10.0 (#515) | | `check_io_reads_attribute_structure.rs` |
+| `fsck.ntfs` / `fsck::check_io`: `$Bitmap` against every run list: leaked, cross-linked and in-use-but-free clusters, runs past the volume | Supported | 0.10.0 (#528) | | `check_io_cluster_accounting.rs`, `tests/cli/test-fsck.sh` |
 | `fsck.ntfs` / `fsck::check_io`: indexes | Not supported | | | |
 | `$LogFile` state, read from every record page | Supported | 0.6.0 | | `logfile_state.rs` |
-| `$LogFile` replay on `fsck` and on a read-write mount that asks for it (`mount_rw_replaying_log`, the `_replaying_log` C ABI mounts), as Windows' restart does, for every operation captured Windows logs hold; open transactions rolled back; wrapped logs; small clusters | Supported | 0.8.0 (#137); only when asked Unreleased (#513) | | `windows_interrupted_fixture.rs` |
-| A read-write mount, a path-based write or `fs.ntfs` over a log holding work, unasked: Windows leaves one after a Fast Startup shutdown or a hibernation too, which a replay corrupts | Refused, with nothing written, naming `fsck.ntfs -y` | Unreleased (#513) | #137 | `windows_interrupted_fixture.rs`, `tests/cli/test-write.sh` |
-| `UpdateRecordDataRoot` redo; a checkpoint that names no start | Supported | Unreleased (#456, #457) | | `windows_interrupted_fixture.rs` |
+| `$LogFile` replay on `fsck` and on a read-write mount that asks for it (`mount_rw_replaying_log`, the `_replaying_log` C ABI mounts), as Windows' restart does, for every operation captured Windows logs hold; open transactions rolled back; wrapped logs; small clusters | Supported | 0.8.0 (#137); only when asked 0.10.0 (#513) | | `windows_interrupted_fixture.rs` |
+| A read-write mount, a path-based write or `fs.ntfs` over a log holding work, unasked: Windows leaves one after a Fast Startup shutdown or a hibernation too, which a replay corrupts | Refused, with nothing written, naming `fsck.ntfs -y` | 0.10.0 (#513) | #137 | `windows_interrupted_fixture.rs`, `tests/cli/test-write.sh` |
+| `UpdateRecordDataRoot` redo; a checkpoint that names no start | Supported | 0.10.0 (#456, #457) | | `windows_interrupted_fixture.rs` |
 | A log holding an operation no capture has held, a prepared or committed transaction not forgotten, or an LFS version other than 2.x | Refused for writing, with nothing written | 0.8.0 (#137) | #137 | `windows_interrupted_fixture.rs` |
-| A replay stopped after any write (a power cut), run again | Supported: it reaches the volume an uninterrupted replay does, and the log reads as clean from the moment it starts being emptied | Unreleased (#514) | #137 | `windows_interrupted_fixture.rs` |
+| A replay stopped after any write (a power cut), run again | Supported: it reaches the volume an uninterrupted replay does, and the log reads as clean from the moment it starts being emptied | 0.10.0 (#514) | #137 | `windows_interrupted_fixture.rs` |
 | A read-only mount of a volume whose log holds work | Partial: read as it is on disk, without replaying | 0.8.0 | #137 | |
-| A replay, or a dirty-flag repair, through the read/write callback pair (`FsNtfsBlockdevCfg`), which has no flush callback to order its writes | Refused, with nothing written; the path backends and an fs-core device (`fs_core_device_from_callbacks` with a flush callback) replay, flushing where `fsync` would | Unreleased (#518) | #137 | `windows_interrupted_fixture.rs` |
-| Clear the dirty flag; reset the log | Supported, for volumes known consistent: fsck clears the flag only when asked (`--clear-dirty`, `FsckOptions::clear_dirty`, `FS_NTFS_FSCK_CLEAR_DIRTY`) and the log holds nothing to redo or undo, and otherwise leaves it for Windows' chkdsk | 0.1.0; left set by default Unreleased (#519) | | `fsck.rs`, `capi_fsck.rs`, `capi_fsck_callbacks.rs`, `tests/cli/test-fsck.sh` |
+| A replay, or a dirty-flag repair, through the read/write callback pair (`FsNtfsBlockdevCfg`), which has no flush callback to order its writes | Refused, with nothing written; the path backends and an fs-core device (`fs_core_device_from_callbacks` with a flush callback) replay, flushing where `fsync` would | 0.10.0 (#518) | #137 | `windows_interrupted_fixture.rs` |
+| Clear the dirty flag; reset the log | Supported, for volumes known consistent: fsck clears the flag only when asked (`--clear-dirty`, `FsckOptions::clear_dirty`, `FS_NTFS_FSCK_CLEAR_DIRTY`) and the log holds nothing to redo or undo, and otherwise leaves it for Windows' chkdsk | 0.1.0; left set by default 0.10.0 (#519) | | `fsck.rs`, `capi_fsck.rs`, `capi_fsck_callbacks.rs`, `tests/cli/test-fsck.sh` |
 | Repair beyond log replay and the dirty flag | Not supported | | | |
 
 ## Writing
@@ -90,8 +90,8 @@ multi-VM test matrix (`test-matrix.json`) has Windows mount, write and
 | Volume label | Supported | 0.1.3 | | `volume_label.rs` |
 | A recycled MFT record keeps counting its sequence number | Supported | 0.5.0 | | `record_sequence_reuse.rs` |
 | An allocation the volume cannot honour | Refused before anything is written | 0.5.0 | | `allocation_bounds.rs`, `write_run_bounds.rs` |
-| A read-write mount of, or a path-based write to, a dirty volume, or one whose log cannot be replayed in full | Refused | 0.7.0; path-based writes Unreleased (#465) | #137 | `windows_interrupted_fixture.rs` |
-| A read-write mount of, or `fsck` on, a volume Windows is hibernated on: `hiberfil.sys` begins `hibr` or `HIBR`, or is too short to hold its header | Refused, with nothing written | Unreleased (#496) | #137 | `hibernated_volume.rs` |
+| A read-write mount of, or a path-based write to, a dirty volume, or one whose log cannot be replayed in full | Refused | 0.7.0; path-based writes 0.10.0 (#465) | #137 | `windows_interrupted_fixture.rs` |
+| A read-write mount of, or `fsck` on, a volume Windows is hibernated on: `hiberfil.sys` begins `hibr` or `HIBR`, or is too short to hold its header | Refused, with nothing written | 0.10.0 (#496) | #137 | `hibernated_volume.rs` |
 | `$MFT` self-growth once a resident `$MFT:$Bitmap` is full | Not supported | | W2.6 | |
 | Compressed `$DATA` writes | Refused | 0.5.0 | | `write_transform_guards.rs` |
 | `$UsnJrnl` updates | Not supported | | | |
@@ -104,8 +104,8 @@ multi-VM test matrix (`test-matrix.json`) has Windows mount, write and
 |---|---|---|---|---|
 | `mkfs.ntfs` / `format_filesystem`: volumes Windows mounts and writes, and `chkdsk /scan` accepts | Supported | 0.1.3 | | `mkfs_roundtrip.rs`, `format_populate_remount.rs`, `cluster_size_matrix.rs`, `test-matrix.json` |
 | Volumes ntfs-3g mounts read-write | Supported | 0.6.0 | | |
-| What this crate writes, read back identically by Linux's ntfs3: nested and INDX-sized directories, resident, non-resident and sparse files, renames, hard links, unlinks, relative symlinks, at 512-byte and 4 KiB clusters | Supported | Unreleased (#542) | | `kernel_ntfs3.rs` |
-| Volumes Linux's ntfs3 wrote, read back byte for byte | Supported | Unreleased (#542) | | `kernel_ntfs3.rs` |
+| What this crate writes, read back identically by Linux's ntfs3: nested and INDX-sized directories, resident, non-resident and sparse files, renames, hard links, unlinks, relative symlinks, at 512-byte and 4 KiB clusters | Supported | 0.10.0 (#542) | | `kernel_ntfs3.rs` |
+| Volumes Linux's ntfs3 wrote, read back byte for byte | Supported | 0.10.0 (#542) | | `kernel_ntfs3.rs` |
 | 1024-byte MFT records | Supported | 0.8.0 | | `large_directory.rs` |
 
 ## Interfaces
@@ -116,6 +116,6 @@ multi-VM test matrix (`test-matrix.json`) has Windows mount, write and
 | C ABI errno: 0 after success, decided where the error is raised | Supported | 0.7.0 | | `errno_companion.rs`, `errno_as_data.rs`, `errno_kinds.rs` |
 | Rust facade (`facade::Filesystem`), typed errors | Supported | 0.1.0; typed errors 0.7.0 | | `facade.rs`, `error_paths.rs` |
 | `fs.ntfs` `ls`, `read`, `get`/`info`, `write`, `mkdir`, `set label` (`--features cli`) | Supported | 0.6.0 | | `cli_verbs.rs`, `tests/cli/test-fs.sh`, `tests/cli/test-write.sh` |
-| `fs.ntfs` `rm`, `rmdir` (`--features cli`) | Supported | Unreleased | #550 | `tests/cli/test-rm.sh`, matrix `cli-empty-directory-win-verify-chkdsk` |
+| `fs.ntfs` `rm`, `rmdir` (`--features cli`) | Supported | 0.10.0 | #550 | `tests/cli/test-rm.sh`, matrix `cli-empty-directory-win-verify-chkdsk` |
 | `fs.ntfs` writing verbs on a volume whose log holds work | Refused | 0.8.0 | | `tests/cli/test-write.sh` |
-| `rust-fs-ntfs doctor`, man pages, shell completions, one program on `PATH` | Supported | 0.6.0; one program Unreleased (#454) | | `cli_verbs.rs`, `one_binary_on_path.rs` |
+| `rust-fs-ntfs doctor`, man pages, shell completions, one program on `PATH` | Supported | 0.6.0; one program 0.10.0 (#454) | | `cli_verbs.rs`, `one_binary_on_path.rs` |
