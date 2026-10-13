@@ -5,6 +5,27 @@ pull request; a release gathers them into a section here.
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-10-13
+
+### Fixed
+
+- **Unlinking a file's last name frees its extension records and their
+  clusters (#565).** When ntfs-3g or Windows had spread a file's attributes
+  over extension records behind an `$ATTRIBUTE_LIST`, unlinking it retired
+  only the base record and freed only the clusters the base record mapped.
+  The extension records stayed in use with no base, and their attributes'
+  clusters stayed allocated, which chkdsk reports as orphaned segments.
+  Every record the list names is now checked, retired and freed with the
+  base record, and every cluster any of them maps is freed; a list naming
+  a free record or another file's is refused before anything is written.
+
+### Notes
+
+- **0.10.0 was tagged and never published.** Its release run passed the
+  whole suite and then exceeded the suite tier's output budget, so the job
+  that gates `cargo publish` failed (#568). 0.10.1 is the first release to
+  carry everything the 0.10.0 section lists.
+
 ## [0.10.0] — 2026-10-13
 
 ### Added
