@@ -202,13 +202,13 @@ fn walk(record: &[u8], r: &Root) -> Result<(Vec<Entry>, usize), Error> {
     }
 }
 
-/// Write the root's new value length into its index header, both sizes.
-fn set_sizes(record: &mut [u8], index: &str, total: usize) -> Result<(), Error> {
-    let r = root(record, index)?;
+/// Write the size of the root's entries into the index header at `header`,
+/// as both its total and its allocated size: a resident root has no slack.
+fn set_sizes(record: &mut [u8], header: usize, total: usize) -> Result<(), Error> {
     let total = u32::try_from(total).map_err(|_| Error::io("index root size overflows"))?;
-    record[r.header + IH_TOTAL_SIZE..r.header + IH_TOTAL_SIZE + 4]
+    record[header + IH_TOTAL_SIZE..header + IH_TOTAL_SIZE + 4]
         .copy_from_slice(&total.to_le_bytes());
-    record[r.header + IH_ALLOCATED_SIZE..r.header + IH_ALLOCATED_SIZE + 4]
+    record[header + IH_ALLOCATED_SIZE..header + IH_ALLOCATED_SIZE + 4]
         .copy_from_slice(&total.to_le_bytes());
     Ok(())
 }
@@ -242,7 +242,8 @@ pub fn put(record: &mut [u8], index: &str, key: &[u8], data: &[u8]) -> Result<()
     scratch.copy_within(at..r2.value_start + old_len, at + new.len());
     scratch[at..at + new.len()].copy_from_slice(&new);
     debug_assert_eq!(r2.header - r2.value_start, header_rel);
-    set_sizes(&mut scratch, index, total + new.len())?;
+    set_sizes(&mut scratch, r2.header, total + new.len())?;
+    root(&scratch, index)?;
     record.copy_from_slice(&scratch);
     Ok(())
 }
@@ -259,14 +260,20 @@ pub fn remove(record: &mut [u8], index: &str, key: &[u8]) -> Result<bool, Error>
     let old_len = r.value_len;
     let total = r.end - r.header;
     let value_end = r.value_start + old_len;
-    record.copy_within(at + length..value_end, at);
-    record[value_end - length..value_end].fill(0);
+    // On a copy, so a refusal leaves `record` unchanged. The header's sizes
+    // shrink before the value does, so the root never names entries past
+    // its own end.
+    let mut scratch = record.to_vec();
+    scratch.copy_within(at + length..value_end, at);
+    scratch[value_end - length..value_end].fill(0);
+    set_sizes(&mut scratch, r.header, total - length)?;
     crate::attr_resize::resize_resident_value(
-        record,
+        &mut scratch,
         r.attr_offset,
         u32::try_from(old_len - length).map_err(|_| Error::io("index root size overflows"))?,
     )?;
-    set_sizes(record, index, total - length)?;
+    root(&scratch, index)?;
+    record.copy_from_slice(&scratch);
     Ok(true)
 }
 
