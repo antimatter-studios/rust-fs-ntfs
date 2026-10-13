@@ -67,9 +67,16 @@ fs.ntfs "$img" set dirty maybe >/dev/null 2>"$SANDBOX/maybe.err"
 check "set dirty maybe exits 2" test $? -eq 2
 jq_check "set dirty maybe says what it takes" '.code == 2 and (.error | test("true or false"))' "$SANDBOX/maybe.err"
 
-# A mirror that disagrees with $MFT: one byte of $MFTMirr's copy of record 0.
+# A mirror that disagrees with $MFT: one byte of $MFTMirr's copy of record 0,
+# flipped. Byte 200 is in a timestamp, which mkfs.ntfs writes afresh, so a
+# constant poked there once matched what was already there and changed
+# nothing, and the volume was rightly found clean (#558).
 cp "$img" "$SANDBOX/mirror.img"
-poke "$SANDBOX/mirror.img" $(($(mirror_offset "$SANDBOX/mirror.img" 0) + 200)) '\x5a'
+at=$(($(mirror_offset "$SANDBOX/mirror.img" 0) + 200))
+before=$(byte_at "$SANDBOX/mirror.img" "$at")
+flip "$SANDBOX/mirror.img" "$at"
+check "the mirror's byte changed (was $before, now $(byte_at "$SANDBOX/mirror.img" "$at"), at $at)" \
+    test "$(byte_at "$SANDBOX/mirror.img" "$at")" != "$before"
 fsck.ntfs "$SANDBOX/mirror.img" >"$SANDBOX/mirror.json" 2>/dev/null
 check "fsck.ntfs on a disagreeing mirror exits 4" test $? -eq 4
 jq_check "the mirror is the finding, record 0" \
