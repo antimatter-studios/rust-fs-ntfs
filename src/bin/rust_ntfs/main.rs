@@ -1,8 +1,8 @@
 //! rust-ntfs — unified NTFS CLI (format, list, write, delete).
 //!
-//! Subcommand dispatcher for the twelve operations the matrix runner and
+//! Subcommand dispatcher for the fourteen operations the matrix runner and
 //! one-off NTFS work both need. (It said "the four operations" and then
-//! listed ten, for a binary that dispatches twelve -- #186.)
+//! listed ten, for a binary that dispatched twelve -- #186.)
 //!
 //!   format     Build a fresh NTFS volume on a pre-sized image / device.
 //!   ls         Read-only recursive directory walk.
@@ -16,6 +16,8 @@
 //!   rename     Rename an entry within its parent directory.
 //!   remove     POSIX-style remove (dispatches file/dir by type).
 //!   set-dirty  Mark a volume dirty (test-scenario helper).
+//!   symlink    Create a symbolic link (a reparse point).
+//!   objid      Give a file an object id.
 //!
 //! Single binary so distribution (GitHub releases, Homebrew taps) ships
 //! one artefact rather than four. Each subcommand lives in its own
@@ -29,12 +31,14 @@ mod format;
 mod link;
 mod ls;
 mod mkdir;
+mod objid;
 mod remove;
 mod rename;
 mod rm;
 mod rmdir;
 mod set_dirty;
 mod sparse;
+mod symlink;
 mod touch;
 mod write;
 
@@ -56,6 +60,8 @@ Subcommands:
   remove  POSIX-style remove (dispatches file/dir by type).
   sparse  Write a file's $DATA as a SPARSE stream (holes, no clusters).
   set-dirty  Mark an NTFS volume as dirty (test-scenario helper).
+  symlink    Create a symbolic link (a reparse point).
+  objid      Give a file an object id.
 
 Run `rust-ntfs <subcommand> --help` for per-subcommand options.
 
@@ -85,6 +91,8 @@ fn main() -> ExitCode {
         "rename" => rename::run(rest),
         "remove" => remove::run(rest),
         "set-dirty" => set_dirty::run(rest),
+        "symlink" => symlink::run(rest),
+        "objid" => objid::run(rest),
         "-h" | "--help" => {
             print!("{HELP}");
             ExitCode::SUCCESS

@@ -86,6 +86,7 @@ multi-VM test matrix (`test-matrix.json`) has Windows mount, write and
 | Hard links | Supported | 0.1.0 | | `write_link.rs`, `hardlink_scenarios.rs` |
 | Alternate data streams: write, delete, promote | Supported | 0.1.0 | | `write_ads.rs`, `write_ads_promote.rs`, `ads_combinatorics.rs` |
 | Reparse points and symlinks: write and remove | Supported | 0.1.0 | | `write_reparse.rs` |
+| Reparse points and object ids entered in `$Extend\$Reparse:$R` and `$Extend\$ObjId:$O`, and taken out with the attribute or the file; a second file refused an object id another has | Supported while the index fits its `$INDEX_ROOT`; one that has spilled into INDX blocks is refused | Unreleased (#478) | #478 | `extend_view_indexes.rs`; Windows matrix `mac-format-mac-symlink-win-chkdsk`, `mac-format-mac-objid-win-chkdsk` |
 | Extended attributes: write and remove | Supported | 0.1.0 | | `write_ea.rs`, `field_exhaustion_ea.rs` |
 | Timestamps, file-attribute flags, `$OBJECT_ID`, security id | Supported | 0.1.0 | | `write_times.rs`, `write_attrs.rs`, `set_object_id_extended_h.rs`, `security_id.rs` |
 | Volume label | Supported | 0.1.3 | | `volume_label.rs` |

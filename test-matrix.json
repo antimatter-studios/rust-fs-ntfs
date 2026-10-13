@@ -1687,6 +1687,90 @@
       "image": "nfs-mac-format-rename-win-chkdsk.img",
       "_notes": "Validates the mac-side rename write path end-to-end: rename before.txt -> after.txt (same-length path patches the $INDEX_ROOT entry + the file's own $FILE_NAME). chkdsk must report Clean \u2014 a duplicate/stale $I30 key or mismatched $FILE_NAME would flag."
     },
+    "mac-format-mac-symlink-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "SYMLINK",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "target.txt"
+        },
+        {
+          "op": "mac-write",
+          "path": "/target.txt",
+          "content": "target"
+        },
+        {
+          "op": "mac-symlink",
+          "parent": "/",
+          "basename": "link.txt",
+          "target": "target.txt"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-mac-format-mac-symlink-win-chkdsk.img",
+      "_notes": "A symbolic link this crate makes is a reparse point, which $Extend\\$Reparse:$R indexes by tag and file reference. chkdsk grades that the index has its entry (#478)."
+    },
+    "mac-format-mac-objid-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "OBJID",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "tracked.txt"
+        },
+        {
+          "op": "mac-objid",
+          "path": "/tracked.txt",
+          "object_id": "00112233445566778899aabbccddeeff"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-mac-format-mac-objid-win-chkdsk.img",
+      "_notes": "An object id this crate writes is indexed in $Extend\\$ObjId:$O, by the id, with the file reference and birth ids as its data. chkdsk grades that the index has its entry (#478)."
+    },
     "win-format-mac-enumerate-empty": {
       "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {

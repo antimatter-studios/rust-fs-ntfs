@@ -18,6 +18,7 @@ use crate::mft_bitmap;
 use crate::mft_io::{
     read_mft_record_io, update_mft_record_io, update_mft_record_io_typed, MFT_FLAG_DIRECTORY,
 };
+use crate::view_index;
 
 use std::path::Path;
 
@@ -3460,7 +3461,10 @@ pub fn write_reparse_point_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     refuse_metafile_io(io, rec, &format!("write_reparse_point {file_path}"))?;
-    update_mft_record_io(io, rec, |record| {
+    let (_, before) = read_mft_record_io(io, rec)?;
+    let file_ref = file_reference_of(rec, &before);
+    let old_tag = reparse_tag_of(&before);
+    let set_attribute = |record: &mut [u8]| -> Result<(), Error> {
         let existing = attr_io::find_attribute(record, AttrType::ReparsePoint, None);
         if let Some(loc) = existing {
             let attr_id = loc.attribute_id;
@@ -3481,7 +3485,147 @@ pub fn write_reparse_point_io<T: BlockIo + ?Sized>(
         }
         set_si_file_attributes_bit(record, FILE_ATTRIBUTE_REPARSE_POINT, true)?;
         Ok(())
-    })
+    };
+    // $Extend\$Reparse:$R gains the entry for the new tag and loses the
+    // old one's (#478). Both changes are tried on copies first, so a
+    // refusal from either leaves the volume as it was.
+    set_attribute(&mut before.clone())?;
+    let reindex = |r: &mut [u8]| -> Result<(), Error> {
+        if let Some(old) = old_tag {
+            view_index::remove(
+                r,
+                view_index::REPARSE_INDEX,
+                &view_index::reparse_key(old, file_ref),
+            )?;
+        }
+        view_index::put(
+            r,
+            view_index::REPARSE_INDEX,
+            &view_index::reparse_key(reparse_tag, file_ref),
+            &[],
+        )
+    };
+    edit_view_index_io(io, view_index::REPARSE_PATH, &reindex)?;
+    if let Err(e) = update_mft_record_io(io, rec, set_attribute) {
+        let undo = |r: &mut [u8]| -> Result<(), Error> {
+            view_index::remove(
+                r,
+                view_index::REPARSE_INDEX,
+                &view_index::reparse_key(reparse_tag, file_ref),
+            )?;
+            if let Some(old) = old_tag {
+                view_index::put(
+                    r,
+                    view_index::REPARSE_INDEX,
+                    &view_index::reparse_key(old, file_ref),
+                    &[],
+                )?;
+            }
+            Ok(())
+        };
+        return Err(
+            match edit_view_index_io(io, view_index::REPARSE_PATH, &undo) {
+                Ok(()) => e,
+                Err(u) => e.context(format!("and putting $Reparse:$R back failed: {u}")),
+            },
+        );
+    }
+    Ok(())
+}
+
+/// The file reference (record number and sequence) of record `rec`.
+fn file_reference_of(rec: u64, record: &[u8]) -> u64 {
+    crate::record_build::encode_file_reference(rec, crate::mft_io::record_sequence(record))
+}
+
+/// The tag of the record's resident `$REPARSE_POINT`, if it has one.
+fn reparse_tag_of(record: &[u8]) -> Option<u32> {
+    let loc = attr_io::find_attribute(record, AttrType::ReparsePoint, None)?;
+    let start = attr_io::resident_value_start(&loc)?;
+    record
+        .get(start..start + 4)
+        .map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")))
+}
+
+/// The object id of the record's resident `$OBJECT_ID`, and its three
+/// birth ids when it carries them, if it has one.
+fn object_id_of(record: &[u8]) -> Option<([u8; 16], Option<[u8; 48]>)> {
+    let loc = attr_io::find_attribute(record, AttrType::ObjectId, None)?;
+    let start = attr_io::resident_value_start(&loc)?;
+    let len = loc.resident_value_length? as usize;
+    let id: [u8; 16] = record.get(start..start + 16)?.try_into().ok()?;
+    let births = (len >= 64)
+        .then(|| record.get(start + 16..start + 64))
+        .flatten()
+        .and_then(|b| b.try_into().ok());
+    Some((id, births))
+}
+
+/// Apply `edit` to the resident root of the `$Extend` view index whose
+/// record is at `path` (#478). The edit is tried on a copy first, so one
+/// the index refuses -- it has spilled into INDX blocks, or its record is
+/// full -- leaves the volume unchanged.
+fn edit_view_index_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    path: &str,
+    edit: &dyn Fn(&mut [u8]) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let rec = resolve_path_to_record_number_io(io, path)
+        .map_err(|e| e.context(format!("{path}, the index this attribute is entered in")))?;
+    let (_, record) = read_mft_record_io(io, rec)?;
+    edit(&mut record.clone()).map_err(|e| e.context(path.to_string()))?;
+    update_mft_record_io(io, rec, edit)
+}
+
+/// Take the file whose record is `record` out of the `$Extend` view
+/// indexes its attributes are entered in: `$Reparse:$R` for a reparse
+/// point, `$ObjId:$O` for an object id (#478). Used when the file goes.
+/// Both edits are tried before either is written.
+fn drop_view_index_entries_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    record: &[u8],
+) -> Result<(), Error> {
+    let file_ref = file_reference_of(rec, record);
+    let tag = reparse_tag_of(record);
+    let id = object_id_of(record).map(|(id, _)| id);
+    let unreparse = |r: &mut [u8]| -> Result<(), Error> {
+        if let Some(tag) = tag {
+            view_index::remove(
+                r,
+                view_index::REPARSE_INDEX,
+                &view_index::reparse_key(tag, file_ref),
+            )?;
+        }
+        Ok(())
+    };
+    let unobjid = |r: &mut [u8]| -> Result<(), Error> {
+        if let Some(id) = id {
+            view_index::remove(r, view_index::OBJID_INDEX, &id)?;
+        }
+        Ok(())
+    };
+    for (present, path, edit) in [
+        (
+            tag.is_some(),
+            view_index::REPARSE_PATH,
+            &unreparse as &dyn Fn(&mut [u8]) -> Result<(), Error>,
+        ),
+        (id.is_some(), view_index::OBJID_PATH, &unobjid),
+    ] {
+        if present {
+            let r = resolve_path_to_record_number_io(io, path)?;
+            let (_, bytes) = read_mft_record_io(io, r)?;
+            edit(&mut bytes.clone()).map_err(|e| e.context(path.to_string()))?;
+        }
+    }
+    if tag.is_some() {
+        edit_view_index_io(io, view_index::REPARSE_PATH, &unreparse)?;
+    }
+    if id.is_some() {
+        edit_view_index_io(io, view_index::OBJID_PATH, &unobjid)?;
+    }
+    Ok(())
 }
 
 /// Remove the `$REPARSE_POINT` attribute and clear the
@@ -3497,14 +3641,32 @@ pub fn remove_reparse_point_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     refuse_metafile_io(io, rec, &format!("remove_reparse_point {file_path}"))?;
-    update_mft_record_io(io, rec, |record| {
+    let (_, before) = read_mft_record_io(io, rec)?;
+    let file_ref = file_reference_of(rec, &before);
+    let tag = reparse_tag_of(&before).ok_or_else(|| Error::io("no $REPARSE_POINT to remove"))?;
+    let key = view_index::reparse_key(tag, file_ref);
+    let clear = |record: &mut [u8]| -> Result<(), Error> {
         let loc = attr_io::find_attribute(record, AttrType::ReparsePoint, None)
             .ok_or_else(|| Error::io("no $REPARSE_POINT to remove"))?;
         remove_attribute_at(record, loc.attr_offset, loc.attr_length)?;
 
         set_si_file_attributes_bit(record, FILE_ATTRIBUTE_REPARSE_POINT, false)?;
         Ok(())
-    })
+    };
+    clear(&mut before.clone())?;
+    // Its entry leaves $Extend\$Reparse:$R with it (#478).
+    let unindex = |r: &mut [u8]| view_index::remove(r, view_index::REPARSE_INDEX, &key).map(|_| ());
+    edit_view_index_io(io, view_index::REPARSE_PATH, &unindex)?;
+    if let Err(e) = update_mft_record_io(io, rec, clear) {
+        let undo = |r: &mut [u8]| view_index::put(r, view_index::REPARSE_INDEX, &key, &[]);
+        return Err(
+            match edit_view_index_io(io, view_index::REPARSE_PATH, &undo) {
+                Ok(()) => e,
+                Err(u) => e.context(format!("and putting $Reparse:$R back failed: {u}")),
+            },
+        );
+    }
+    Ok(())
 }
 
 /// Decoded `$REPARSE_POINT` attribute: the 32-bit reparse tag plus the
@@ -4284,7 +4446,38 @@ fn write_object_id_inner<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     refuse_metafile_io(io, rec, &format!("write_object_id {file_path}"))?;
-    update_mft_record_io(io, rec, |record| {
+    let (_, before) = read_mft_record_io(io, rec)?;
+    let file_ref = file_reference_of(rec, &before);
+    let old = object_id_of(&before);
+    // An object id names one file on the volume: $Extend\$ObjId:$O is
+    // keyed by it, and Windows refuses a second file the same id.
+    let objid_rec = resolve_path_to_record_number_io(io, view_index::OBJID_PATH)?;
+    let (_, objid_record) = read_mft_record_io(io, objid_rec)?;
+    let taken = view_index::keys(&objid_record, view_index::OBJID_INDEX)
+        .map_err(|e| e.context(view_index::OBJID_PATH))?
+        .iter()
+        .any(|k| k.as_slice() == object_id.as_slice());
+    if taken && old.map(|(id, _)| id) != Some(*object_id) {
+        return Err(Error::exists(format!(
+            "write_object_id {file_path}: another file already has that object id"
+        )));
+    }
+    let births: Option<[u8; 48]> = birth_ids.map(|(v, o, d)| {
+        let mut b = [0u8; 48];
+        b[..16].copy_from_slice(v);
+        b[16..32].copy_from_slice(o);
+        b[32..].copy_from_slice(d);
+        b
+    });
+    let entry_data = view_index::objid_data(file_ref, object_id, births.as_ref());
+    // The file's entry in $O moves to the new id (#478).
+    let reindex = |r: &mut [u8]| -> Result<(), Error> {
+        if let Some((old_id, _)) = old {
+            view_index::remove(r, view_index::OBJID_INDEX, &old_id)?;
+        }
+        view_index::put(r, view_index::OBJID_INDEX, object_id, &entry_data)
+    };
+    let set_attribute = |record: &mut [u8]| -> Result<(), Error> {
         if let Some(loc) = attr_io::find_attribute(record, AttrType::ObjectId, None) {
             let attr_id = loc.attribute_id;
             let new_attr = crate::record_build::build_resident_object_id_attribute_full(
@@ -4299,7 +4492,26 @@ fn write_object_id_inner<T: BlockIo + ?Sized>(
             crate::attr_resize::insert_attribute_sorted(record, &new_attr)?;
         }
         Ok(())
-    })
+    };
+    set_attribute(&mut before.clone())?;
+    edit_view_index_io(io, view_index::OBJID_PATH, &reindex)?;
+    if let Err(e) = update_mft_record_io(io, rec, set_attribute) {
+        let undo = |r: &mut [u8]| -> Result<(), Error> {
+            view_index::remove(r, view_index::OBJID_INDEX, object_id)?;
+            if let Some((old_id, old_births)) = old {
+                let data = view_index::objid_data(file_ref, &old_id, old_births.as_ref());
+                view_index::put(r, view_index::OBJID_INDEX, &old_id, &data)?;
+            }
+            Ok(())
+        };
+        return Err(
+            match edit_view_index_io(io, view_index::OBJID_PATH, &undo) {
+                Ok(()) => e,
+                Err(u) => e.context(format!("and putting $ObjId:$O back failed: {u}")),
+            },
+        );
+    }
+    Ok(())
 }
 
 /// Remove the `$OBJECT_ID` attribute. Returns `Ok(false)` if the file
@@ -4316,6 +4528,33 @@ pub fn remove_object_id_io<T: BlockIo + ?Sized>(
 ) -> Result<bool, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     refuse_metafile_io(io, rec, &format!("remove_object_id {file_path}"))?;
+    let (_, before) = read_mft_record_io(io, rec)?;
+    if let Some((id, births)) = object_id_of(&before) {
+        // Its entry leaves $Extend\$ObjId:$O with it (#478).
+        let unindex =
+            |r: &mut [u8]| view_index::remove(r, view_index::OBJID_INDEX, &id).map(|_| ());
+        edit_view_index_io(io, view_index::OBJID_PATH, &unindex)?;
+        let data = view_index::objid_data(file_reference_of(rec, &before), &id, births.as_ref());
+        let undo = |r: &mut [u8]| view_index::put(r, view_index::OBJID_INDEX, &id, &data);
+        let mut removed = false;
+        let result = update_mft_record_io(io, rec, |record| {
+            let Some(loc) = attr_io::find_attribute(record, AttrType::ObjectId, None) else {
+                return Ok(());
+            };
+            remove_attribute_at(record, loc.attr_offset, loc.attr_length)?;
+            removed = true;
+            Ok(())
+        });
+        if let Err(e) = result {
+            return Err(
+                match edit_view_index_io(io, view_index::OBJID_PATH, &undo) {
+                    Ok(()) => e,
+                    Err(u) => e.context(format!("and putting $ObjId:$O back failed: {u}")),
+                },
+            );
+        }
+        return Ok(removed);
+    }
     let mut removed = false;
     update_mft_record_io(io, rec, |record| {
         let Some(loc) = attr_io::find_attribute(record, AttrType::ObjectId, None) else {
@@ -6023,6 +6262,10 @@ fn remove_dir_record_io<T: BlockIo + ?Sized>(
         }
     }
 
+    // A junction or a directory with an object id leaves the $Extend
+    // view indexes with it (#478).
+    drop_view_index_entries_io(io, dir_rec, &dir_record_bytes)?;
+
     // Remove from parent's index. Parent's index may or may not be
     // overflowed — dispatch like unlink.
     remove_parent_index_entry_io(io, parent_rec, dir_rec, basename)?;
@@ -6783,6 +7026,13 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
         }
         (extensions, runs)
     };
+
+    // The last name takes the file's entries in the $Extend view indexes
+    // with it (#478). Tried before anything is written, so an index this
+    // cannot change refuses the unlink with nothing written.
+    if hard_link_count <= 1 {
+        drop_view_index_entries_io(io, file_rec, &file_record_bytes)?;
+    }
 
     remove_parent_index_entry_io(io, parent_rec, file_rec, basename)?;
 
