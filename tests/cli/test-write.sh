@@ -111,20 +111,32 @@ check "the volume is not dirty after the writes" test "$(fs.ntfs "$img" get dirt
 
 # A volume Windows was writing to when it was captured, its $LogFile
 # holding work Windows had not yet written home (dirty flag clear, as
-# Windows 8 and later leave it). A write replays the log first, as Windows
-# does when it mounts the volume: every file Windows listed after its own
-# recovery of the same image is there at Windows' size and SHA-256, the new
-# file beside them, and fsck.ntfs finds nothing left to do.
+# Windows 8 and later leave it). Windows leaves the same after a Fast
+# Startup shutdown, when replaying the log corrupts the volume, so a write
+# refuses it and names the replay to ask for: `fsck.ntfs -y` (#137). After
+# that replay every file Windows listed after its own recovery of the same
+# image is there at Windows' size and SHA-256, the new file beside them,
+# and fsck.ntfs finds nothing left to do.
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -d' ' -f1; }
 mid="$SANDBOX/interrupted.img"
 gzip -dc "$REPO/test-disks/windows-interrupted-1.img.gz" >"$mid"
 check "the fixture volume Windows left mid-write unpacked" test -s "$mid"
 random "$SANDBOX/after" 5000
+cp "$mid" "$SANDBOX/interrupted.before"
 # The status is taken before the message is built: a command substitution
 # in check's arguments resets $? before `test $?` reads it.
 fs.ntfs "$mid" write /after-replay <"$SANDBOX/after" >/dev/null 2>"$SANDBOX/mid.err"
 status=$?
-check "write over a log holding work exits 0 ($(cat "$SANDBOX/mid.err"))" test "$status" -eq 0
+check "write over a log holding work exits 1 (exit $status)" test "$status" -eq 1
+jq_check "the refusal names \$LogFile and fsck.ntfs -y" \
+    '.error | contains("$LogFile") and contains("fsck.ntfs -y")' "$SANDBOX/mid.err"
+check "a refused write leaves the image as it was" cmp -s "$mid" "$SANDBOX/interrupted.before"
+fsck.ntfs -y "$mid" >/dev/null 2>"$SANDBOX/mid-replay.err"
+status=$?
+check "fsck.ntfs -y replays the log (exit $status, $(cat "$SANDBOX/mid-replay.err"))" test "$status" -le 1
+fs.ntfs "$mid" write /after-replay <"$SANDBOX/after" >/dev/null 2>"$SANDBOX/mid.err"
+status=$?
+check "write after the replay exits 0 ($(cat "$SANDBOX/mid.err"))" test "$status" -eq 0
 check "the file written after the replay reads back" cmp -s "$SANDBOX/after" <(fs.ntfs "$mid" read /after-replay)
 fsck.ntfs "$mid" >"$SANDBOX/mid-fsck.json" 2>/dev/null
 status=$?

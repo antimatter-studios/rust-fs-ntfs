@@ -26,10 +26,12 @@
 #                                    fsck.ntfs -y replays it, and IMAGE.manifest is
 #                                    what Windows listed after recovering the same
 #                                    image itself, for win-cli-verify.ps1
-#   mount-replay IMAGE SNAPSHOT      IMAGE is test-disks/windows-interrupted-SNAPSHOT;
-#                                    fsck.ntfs reports its log, then fs.ntfs mkdir and
-#                                    write, which replay the log at mount as Windows
-#                                    does, and fsck.ntfs after finds nothing.
+#   write-after-replay IMAGE SNAPSHOT
+#                                    IMAGE is test-disks/windows-interrupted-SNAPSHOT;
+#                                    fsck.ntfs reports its log, fs.ntfs mkdir is
+#                                    refused with every byte left as it was,
+#                                    fsck.ntfs -y replays the log, then fs.ntfs mkdir
+#                                    and write, and fsck.ntfs after finds nothing.
 #                                    IMAGE.manifest is Windows' listing of its own
 #                                    recovery plus what fs.ntfs wrote
 #   empty-directory IMAGE            fs.ntfs fills /kept and /gone past one index
@@ -242,21 +244,32 @@ case "$step" in
         [ "$status" -eq 0 ] || die "fsck.ntfs after the replay exited $status: $out"
         windows_listing "$1"
         ;;
-    mount-replay)
-        [ $# -eq 1 ] || die "mount-replay IMAGE SNAPSHOT"
+    write-after-replay)
+        [ $# -eq 1 ] || die "write-after-replay IMAGE SNAPSHOT"
         unpack_interrupted "$1"
         windows_listing "$1"
         work="$(mktemp -d)"
         trap 'rm -rf "$work"' EXIT
-        # No fsck.ntfs -y: the first write's mount replays the log, as
-        # Windows does when it mounts the volume. Then a directory, a
-        # non-resident file in it, a resident file in a directory the log
-        # changed, and a file the log created, replaced. Growing $MFT on
-        # the same volume is the grow-mft step's.
+        # A write is refused while the log holds work (#137): Windows leaves
+        # the same log after a Fast Startup shutdown, when replaying it
+        # corrupts the volume, so the replay is fsck.ntfs -y's, asked for by
+        # someone who knows Windows shut down fully. The refusal writes
+        # nothing.
+        before="$(sha "$image")"
+        run fs "$image" mkdir /after-replay
+        [ "$status" -eq 1 ] || die "fs.ntfs mkdir over a log holding work exited $status, not 1 (refused): $(cat "$image.cli-err")"
+        grep -q 'LogFile' "$image.cli-err" && grep -q 'fsck.ntfs -y' "$image.cli-err" ||
+            die "the refusal names neither \$LogFile nor fsck.ntfs -y: $(cat "$image.cli-err")"
+        [ "$(sha "$image")" = "$before" ] || die "the refused fs.ntfs mkdir wrote to the volume"
+        run fsck -y "$image"
+        [ "$status" -eq 1 ] || die "fsck.ntfs -y exited $status, not 1 (corrected): $out"
+        # Then a directory, a non-resident file in it, a resident file in a
+        # directory the log changed, and a file the log created, replaced.
+        # Growing $MFT on the same volume is the grow-mft step's.
         replaced="$(awk -F '\t' '$2 ~ /^\/d000\// { print $2; exit }' "$image.manifest")"
         [ -n "$replaced" ] || die "Windows' listing has no file under /d000"
         run fs "$image" mkdir /after-replay
-        [ "$status" -eq 0 ] || die "fs.ntfs mkdir over a log holding work exited $status: $(cat "$image.cli-err")"
+        [ "$status" -eq 0 ] || die "fs.ntfs mkdir after the replay exited $status: $(cat "$image.cli-err")"
         printf 'dir\t/after-replay\n' >>"$image.manifest"
         for spec in /after-replay/new.bin:5000 /d000/after-replay.txt:500 "$replaced:4097"; do
             path="${spec%:*}"
@@ -273,7 +286,7 @@ case "$step" in
         done
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the writes exited $status: $out"
-        has '"logfile": "empty"' || die "the mount did not leave the log empty: $out"
+        has '"logfile": "empty"' || die "the log is not empty after the writes: $out"
         ;;
     grow-mft)
         [ $# -eq 1 ] || die "grow-mft IMAGE SNAPSHOT"

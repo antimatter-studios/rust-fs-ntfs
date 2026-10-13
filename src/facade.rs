@@ -144,16 +144,32 @@ impl Filesystem {
     /// Upgrade failure is logged at `warn` but doesn't fail the
     /// mount; the volume is still usable in its pre-upgrade form.
     ///
-    /// A `$LogFile` holding work is replayed first, as Windows does when it
-    /// mounts a volume, so the changes made through this handle land on
-    /// metadata that already holds every change the log committed (#137).
-    /// Refused, with nothing written, when the dirty flag is set or the log
-    /// cannot be read or replayed in full. Windows 8 and later record an
-    /// unclean shutdown in the log alone and leave the flag clear, so the
-    /// log is read whatever the flag says.
+    /// Refused, with nothing written, when the dirty flag is set, the log
+    /// cannot be read, or `$LogFile` holds work (#137): Windows leaves a log
+    /// holding work after a Fast Startup shutdown or a hibernation as well
+    /// as after a crash, and replaying it in the first case corrupts the
+    /// volume. [`mount_rw_replaying_log`](Self::mount_rw_replaying_log)
+    /// asks for the replay. Windows 8 and later record an unclean shutdown
+    /// in the log alone and leave the flag clear, so the log is read
+    /// whatever the flag says.
     pub fn mount_rw(path: impl AsRef<Path>) -> Result<Self, Error> {
+        Self::mount_rw_as(path, false)
+    }
+
+    /// [`mount_rw`](Self::mount_rw), replaying a `$LogFile` that holds work
+    /// first, as Windows does when it mounts a volume after a crash, so the
+    /// changes made through this handle land on metadata that already holds
+    /// every change the log committed (#137). For a caller that knows
+    /// Windows is not going to resume from a Fast Startup shutdown or a
+    /// hibernation on this volume. Refused, with nothing written, when the
+    /// dirty flag is set or the log cannot be read or replayed in full.
+    pub fn mount_rw_replaying_log(path: impl AsRef<Path>) -> Result<Self, Error> {
+        Self::mount_rw_as(path, true)
+    }
+
+    fn mount_rw_as(path: impl AsRef<Path>, replay: bool) -> Result<Self, Error> {
         let fs = Self::mount(path)?;
-        crate::prepare_rw_mount_path(&fs.image).map_err(|e| Error(e.to_string()))?;
+        crate::prepare_rw_mount_path(&fs.image, replay).map_err(|e| Error(e.to_string()))?;
         match fs.upgrade_volume_version() {
             Ok(true) => log::info!(
                 target: "fs_ntfs::facade",

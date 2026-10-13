@@ -214,14 +214,26 @@ typedef struct {
  * Mount an NTFS filesystem from the given device/image path.
  * Returns NULL on failure. The returned handle permits writes.
  *
- * A $LogFile holding work is replayed before the handle is returned, as
- * Windows does when it mounts a volume. Refused, with nothing written:
- * a dirty volume, or a log that cannot be read or replayed in full. For
- * read-only access to such a volume (no replay), use
+ * Refused, with nothing written: a dirty volume, a log that cannot be
+ * read, and a $LogFile holding work. Windows leaves a log holding work
+ * after a Fast Startup shutdown or a hibernation as well as after a
+ * crash, and replaying it in the first case corrupts the volume, so the
+ * replay is the caller's to ask for: fs_ntfs_mount_replaying_log, or
+ * fsck. For read-only access to such a volume (no replay), use
  * fs_ntfs_mount_with_callbacks with cfg->write=NULL or
  * fs_ntfs_mount_with_fs_core_device.
  */
 fs_ntfs_fs_t *fs_ntfs_mount(const char *device_path);
+
+/*
+ * fs_ntfs_mount, replaying a $LogFile that holds work before the handle
+ * is returned, as Windows does when it mounts a volume after a crash.
+ * For a caller that knows Windows is not going to resume from a Fast
+ * Startup shutdown or a hibernation on this volume. Refused, with nothing
+ * written: a dirty volume, or a log that cannot be read or replayed in
+ * full.
+ */
+fs_ntfs_fs_t *fs_ntfs_mount_replaying_log(const char *device_path);
 
 /*
  * Mount an NTFS filesystem using callback-based I/O.
@@ -233,11 +245,23 @@ fs_ntfs_fs_t *fs_ntfs_mount(const char *device_path);
  * read-only — `_h` mutators will then fail with -1 / EINVAL.
  *
  * Dirty volumes mount with cfg->write=NULL, and nothing is replayed. A
- * non-NULL write callback requests a writable mount: a $LogFile holding
- * work is replayed through it first, and a dirty volume, or a log that
- * cannot be read or replayed in full, is refused with nothing written.
+ * non-NULL write callback requests a writable mount, which is refused,
+ * with nothing written, for a dirty volume, a log that cannot be read,
+ * or a $LogFile holding work; fs_ntfs_mount_with_callbacks_replaying_log
+ * asks for the replay.
  */
 fs_ntfs_fs_t *fs_ntfs_mount_with_callbacks(
+    const fs_ntfs_blockdev_cfg_t *cfg);
+
+/*
+ * fs_ntfs_mount_with_callbacks, with a writable mount replaying a
+ * $LogFile that holds work through cfg->write first, as Windows does when
+ * it mounts a volume after a crash. For a caller that knows Windows is
+ * not going to resume from a Fast Startup shutdown or a hibernation on
+ * this volume. Refused, with nothing written: a dirty volume, or a log
+ * that cannot be read or replayed in full.
+ */
+fs_ntfs_fs_t *fs_ntfs_mount_with_callbacks_replaying_log(
     const fs_ntfs_blockdev_cfg_t *cfg);
 
 /*
@@ -268,9 +292,9 @@ fs_ntfs_fs_t *fs_ntfs_mount_with_fs_core_device(struct FsCoreDevice *handle);
  * (`fs_ntfs_create_file_h`, `fs_ntfs_mkdir_h`,
  * `fs_ntfs_write_file_contents_h`, `fs_ntfs_unlink_h`, …) can write
  * through it.
- * A $LogFile holding work is replayed through the device first; a dirty
- * volume, or a log that cannot be read or replayed in full, is refused
- * before any mount-time write.
+ * A dirty volume, a log that cannot be read, and a $LogFile holding work
+ * are refused before any mount-time write;
+ * fs_ntfs_mount_rw_with_fs_core_device_replaying_log asks for the replay.
  *
  * The supplied device should report `is_writable=true` (see
  * `fs_core_device_is_writable`); a non-writable device still mounts
@@ -285,6 +309,17 @@ fs_ntfs_fs_t *fs_ntfs_mount_with_fs_core_device(struct FsCoreDevice *handle);
  * Returns NULL on failure; use fs_ntfs_last_error() for detail.
  */
 fs_ntfs_fs_t *fs_ntfs_mount_rw_with_fs_core_device(struct FsCoreDevice *handle);
+
+/*
+ * fs_ntfs_mount_rw_with_fs_core_device, replaying a $LogFile that holds
+ * work through the device first, as Windows does when it mounts a volume
+ * after a crash. For a caller that knows Windows is not going to resume
+ * from a Fast Startup shutdown or a hibernation on this volume. A dirty
+ * volume, or a log that cannot be read or replayed in full, is refused
+ * before any mount-time write.
+ */
+fs_ntfs_fs_t *fs_ntfs_mount_rw_with_fs_core_device_replaying_log(
+    struct FsCoreDevice *handle);
 
 /*
  * Unmount and free all resources.

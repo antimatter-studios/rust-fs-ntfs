@@ -75,9 +75,10 @@ mod common;
 use fs_ntfs::facade::{FileType, Filesystem};
 use fs_ntfs::fsck;
 use fs_ntfs::{
-    fs_ntfs_create_file, fs_ntfs_mount, fs_ntfs_mount_rw_with_fs_core_device,
-    fs_ntfs_mount_with_callbacks, fs_ntfs_mount_with_fs_core_device, fs_ntfs_umount,
-    FsNtfsBlockdevCfg,
+    fs_ntfs_create_file, fs_ntfs_mount, fs_ntfs_mount_replaying_log,
+    fs_ntfs_mount_rw_with_fs_core_device, fs_ntfs_mount_rw_with_fs_core_device_replaying_log,
+    fs_ntfs_mount_with_callbacks, fs_ntfs_mount_with_callbacks_replaying_log,
+    fs_ntfs_mount_with_fs_core_device, fs_ntfs_umount, FsNtfsBlockdevCfg,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -707,7 +708,10 @@ fn a_quota_entry_update_leaves_the_record_lsn_where_windows_left_it() {
         ("fsck", |img| {
             fsck::fsck(img).map(|_| ()).map_err(|e| e.to_string())
         }),
-        ("Filesystem::mount_rw", RW_MOUNTS[0].1),
+        (
+            "Filesystem::mount_rw_replaying_log",
+            RW_MOUNTS_REPLAYING[0].1,
+        ),
     ];
     for (how, run) in replay {
         let img = unpack("windows-interrupted-quota");
@@ -734,7 +738,10 @@ fn a_deallocation_undone_keeps_the_record_windows_kept() {
         ("fsck", |img| {
             fsck::fsck(img).map(|_| ()).map_err(|e| e.to_string())
         }),
-        ("Filesystem::mount_rw", RW_MOUNTS[0].1),
+        (
+            "Filesystem::mount_rw_replaying_log",
+            RW_MOUNTS_REPLAYING[0].1,
+        ),
     ];
     for (how, run) in replay {
         let img = unpack("windows-interrupted-open-at-checkpoint");
@@ -753,7 +760,10 @@ fn a_rolled_back_record_holds_what_windows_own_log_says_it_held_after_restart() 
         ("fsck", |img| {
             fsck::fsck(img).map(|_| ()).map_err(|e| e.to_string())
         }),
-        ("Filesystem::mount_rw", RW_MOUNTS[0].1),
+        (
+            "Filesystem::mount_rw_replaying_log",
+            RW_MOUNTS_REPLAYING[0].1,
+        ),
     ];
     for (how, run) in replay {
         let img = unpack("windows-interrupted-undo");
@@ -794,7 +804,10 @@ fn fsck_and_mount_rw_replay_to_what_windows_recovered(k: &str, log_end: u64) {
         ("fsck", |img| {
             fsck::fsck(img).map(|_| ()).map_err(|e| e.to_string())
         }),
-        ("Filesystem::mount_rw", RW_MOUNTS[0].1),
+        (
+            "Filesystem::mount_rw_replaying_log",
+            RW_MOUNTS_REPLAYING[0].1,
+        ),
     ];
     for (how, run) in replay {
         let img = unpack(&format!("windows-interrupted-{k}"));
@@ -865,6 +878,47 @@ const RW_MOUNTS: [(&str, Mount); 4] = [
     }),
 ];
 
+/// Every way this crate asks a read-write mount to replay a `$LogFile`
+/// holding work first, each over an image path, as [`RW_MOUNTS`].
+const RW_MOUNTS_REPLAYING: [(&str, Mount); 4] = [
+    ("Filesystem::mount_rw_replaying_log", |img| {
+        Filesystem::mount_rw_replaying_log(img)
+            .map(|_| ())
+            .map_err(|e| e.0)
+    }),
+    ("fs_ntfs_mount_replaying_log", |img| {
+        let c_path = CString::new(img).unwrap();
+        let h = fs_ntfs_mount_replaying_log(c_path.as_ptr());
+        if h.is_null() {
+            return Err(last_error());
+        }
+        fs_ntfs_umount(h);
+        Ok(())
+    }),
+    ("fs_ntfs_mount_with_callbacks_replaying_log", |img| {
+        callback_mount_as(img, true, true)
+    }),
+    (
+        "fs_ntfs_mount_rw_with_fs_core_device_replaying_log",
+        |img| {
+            let c_path = CString::new(img).unwrap();
+            let dev = unsafe { fs_core::ffi::fs_core_file_open(c_path.as_ptr(), true) };
+            assert!(!dev.is_null(), "open fs-core device on {img}");
+            let h = fs_ntfs_mount_rw_with_fs_core_device_replaying_log(dev);
+            let why = last_error();
+            if !h.is_null() {
+                fs_ntfs_umount(h);
+            }
+            unsafe { fs_core::ffi::fs_core_device_close(dev) };
+            if h.is_null() {
+                Err(why)
+            } else {
+                Ok(())
+            }
+        },
+    ),
+];
+
 struct FileCtx(Mutex<File>);
 
 unsafe extern "C" fn read_cb(ctx: *mut c_void, buf: *mut c_void, at: u64, len: u64) -> c_int {
@@ -883,6 +937,12 @@ unsafe extern "C" fn write_cb(ctx: *mut c_void, buf: *const c_void, at: u64, len
 
 /// Mount `img` through host callbacks, with a write callback or without.
 fn callback_mount(img: &str, writable: bool) -> Result<(), String> {
+    callback_mount_as(img, writable, false)
+}
+
+/// [`callback_mount`], through the mount that replays a log holding work
+/// when `replay` asks for it.
+fn callback_mount_as(img: &str, writable: bool, replay: bool) -> Result<(), String> {
     let f = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -896,7 +956,11 @@ fn callback_mount(img: &str, writable: bool) -> Result<(), String> {
         size_bytes: size,
         write: if writable { Some(write_cb) } else { None },
     };
-    let h = fs_ntfs_mount_with_callbacks(&cfg);
+    let h = if replay {
+        fs_ntfs_mount_with_callbacks_replaying_log(&cfg)
+    } else {
+        fs_ntfs_mount_with_callbacks(&cfg)
+    };
     if h.is_null() {
         return Err(last_error());
     }
@@ -905,19 +969,17 @@ fn callback_mount(img: &str, writable: bool) -> Result<(), String> {
 }
 
 #[test]
-fn every_read_write_mount_replays_a_volume_windows_left_mid_write_to_what_windows_recovered() {
-    // Windows replays `$LogFile` when it mounts a volume, and so must a
-    // read-write mount here (#137): refusing it sends the user to a
-    // separate repair step for the most common state a disk arrives in,
-    // and writing without it lands this crate's changes on metadata whose
-    // committed updates are still in the log. Each entry point must reach
-    // the metadata Windows' own restart reached from the same pre-image.
+fn every_read_write_mount_asked_to_replay_reaches_what_windows_recovered() {
+    // Windows replays `$LogFile` when it mounts a volume after a crash, and
+    // so does a read-write mount here when it is asked to (#137). Each
+    // entry point must reach the metadata Windows' own restart reached from
+    // the same pre-image.
     for (k, log_end) in LOG_END {
         let pre_img = unpack(&format!("windows-interrupted-{k}"));
         let pre = Image::read(&pre_img);
         let win = Image::read(&unpack(&format!("windows-interrupted-{k}.recovered")));
         let want = manifest(k);
-        for (name, rw_mount) in RW_MOUNTS {
+        for (name, rw_mount) in RW_MOUNTS_REPLAYING {
             let img = unpack(&format!("windows-interrupted-{k}"));
             rw_mount(&img).unwrap_or_else(|e| panic!("snapshot {k}: {name}: {e}"));
 
@@ -965,21 +1027,22 @@ const PATH_WRITES: [(&str, PathWrite); 3] = [
 
 #[test]
 fn every_write_without_a_read_write_mount_replays_the_log_first_or_writes_nothing() {
-    // `mount_rw` replays the log before anything is written (#137). These
-    // write over an image path with no read-write mount, and skipped that
-    // check: on snapshot 6 each put its file in MFT record 1069 and left
-    // the log holding work, where a write after `mount_rw` takes 1277.
-    // Windows' restart, run on that volume later, gives 1069 to a file of
-    // its own, and one of the two is lost. So each must refuse with
-    // nothing written, or replay first: the log holding no work, every
-    // file Windows recovered in place, and the new file in the record a
-    // write after `mount_rw` takes.
+    // A read-write mount refuses a log holding work, or replays it when
+    // asked to, before anything is written (#137). These write over an
+    // image path with no read-write mount, and skipped that check: on
+    // snapshot 6 each put its file in MFT record 1069 and left the log
+    // holding work, where a write after the replay takes 1277. Windows'
+    // restart, run on that volume later, gives 1069 to a file of its own,
+    // and one of the two is lost. So each must refuse with nothing
+    // written, or replay first: the log holding no work, every file
+    // Windows recovered in place, and the new file in the record a write
+    // after `mount_rw_replaying_log` takes.
     for (k, _) in LOG_END {
         let want = manifest(k);
         let after_mount_rw = {
             let img = unpack(&format!("windows-interrupted-{k}"));
-            let fs = Filesystem::mount_rw(&img)
-                .unwrap_or_else(|e| panic!("snapshot {k}: mount_rw: {e}"));
+            let fs = Filesystem::mount_rw_replaying_log(&img)
+                .unwrap_or_else(|e| panic!("snapshot {k}: mount_rw_replaying_log: {e}"));
             let rn = fs
                 .create_file("/", "written")
                 .unwrap_or_else(|e| panic!("snapshot {k}: create_file after mount_rw: {e}"));
@@ -1056,7 +1119,7 @@ fn a_read_write_mount_refuses_a_log_it_cannot_replay_in_full_and_writes_nothing(
     // done whole, so none of it may be done, and the mount is refused as
     // it was before replay existed. The volume is left exactly as found.
     for (k, page) in NEEDED_LOG_PAGE {
-        for (name, rw_mount) in RW_MOUNTS {
+        for (name, rw_mount) in RW_MOUNTS_REPLAYING {
             let img = unpack(&format!("windows-interrupted-{k}"));
             let logfile_lcn = 10_318u64; // $LogFile's one run, in both images
             let at = logfile_lcn * 4096 + page + 510; // the first sector's USN copy
@@ -1079,12 +1142,45 @@ fn a_read_write_mount_refuses_a_log_it_cannot_replay_in_full_and_writes_nothing(
 }
 
 #[test]
+fn a_read_write_mount_refuses_a_log_holding_work_unless_asked_to_replay_it() {
+    // Windows leaves a log holding work after a crash, which replaying it
+    // recovers, and after a Fast Startup shutdown or a hibernation, which
+    // replaying it corrupts: Windows resumes from what it cached and does
+    // not see the replay's changes. Only `hiberfil.sys` tells the two
+    // apart, and only on the volume Windows boots from; a data volume Fast
+    // Startup left looks exactly like a crashed one. So a read-write mount
+    // does not replay unasked. It refuses, with nothing written, and names
+    // `fsck`, which replays on request (#137).
+    for (k, _) in LOG_END {
+        for (name, rw_mount) in RW_MOUNTS {
+            let img = unpack(&format!("windows-interrupted-{k}"));
+            let before = std::fs::read(&img).unwrap();
+
+            let err = rw_mount(&img).expect_err("a read-write mount of a log holding work");
+            assert!(
+                err.contains("$LogFile") && err.contains("read-write mount refused"),
+                "snapshot {k}: {name}: {err}"
+            );
+            assert!(
+                err.contains("fsck"),
+                "snapshot {k}: {name}: the refusal does not say how to replay: {err}"
+            );
+            assert!(
+                std::fs::read(&img).unwrap() == before,
+                "snapshot {k}: {name}: a refused mount wrote to the volume"
+            );
+            std::fs::remove_file(&img).unwrap();
+        }
+    }
+}
+
+#[test]
 fn a_dirty_volume_is_refused_before_its_log_is_replayed() {
     // The dirty flag asks for a check of the whole volume, which a replay
     // is not. A read-write mount refuses it as before, and does not replay
     // first: nothing is written to a volume the mount then declines.
     for k in ["1", "6"] {
-        for (name, rw_mount) in RW_MOUNTS {
+        for (name, rw_mount) in RW_MOUNTS.iter().chain(&RW_MOUNTS_REPLAYING) {
             let img = unpack(&format!("windows-interrupted-{k}"));
             fsck::set_dirty(&img).expect("mark dirty");
             let before = std::fs::read(&img).unwrap();
