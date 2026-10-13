@@ -2373,6 +2373,9 @@ fn create_file_unstamped_io<T: BlockIo + ?Sized>(
             Error::io(format!("write new record: {e}")),
         ));
     }
+    // A new record inside the range `$MFTMirr` holds is mirrored too
+    // (#481); on most volumes that range ends before the first free slot.
+    crate::mft_io::sync_mftmirr_record_with_io(io, &params, new_rec)?;
     if let Err(e) = io.sync() {
         return Err(undo_new_record_io(
             io,
@@ -3163,6 +3166,9 @@ fn mkdir_unstamped_io<T: BlockIo + ?Sized>(
             Error::io(format!("write new dir record: {e}")),
         ));
     }
+    // A new record inside the range `$MFTMirr` holds is mirrored too
+    // (#481); on most volumes that range ends before the first free slot.
+    crate::mft_io::sync_mftmirr_record_with_io(io, &params, new_rec)?;
     if let Err(e) = io.sync() {
         return Err(undo_new_record_io(
             io,

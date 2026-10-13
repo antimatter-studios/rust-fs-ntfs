@@ -859,12 +859,6 @@ fn prepare_rw_mount_as<T: FsckIo>(io: &mut T, replay: bool) -> Result<Option<Rep
 // Read-only check: what a checker reports without writing anything
 // ---------------------------------------------------------------------------
 
-/// `$MFTMirr` holds copies of the first four MFT records (`$MFT`,
-/// `$MFTMirr`, `$LogFile`, `$Volume`); a volume with a smaller record size
-/// holds as many as fit its mirror's data. Same count as
-/// `mkfs::MFTMIRR_RECORDS` and `mft_io::sync_mftmirr_record_io`.
-const MIRRORED_RECORDS: u64 = 4;
-
 /// One thing [`check_io`] found wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckFinding {
@@ -1066,10 +1060,14 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
     })
 }
 
-/// The records `$MFTMirr` holds, as stored.
+/// The records `$MFTMirr` holds, as stored: as many as its data declares,
+/// up to [`crate::mft_io::mirror_records_bound`] -- the first four
+/// (`$MFT`, `$MFTMirr`, `$LogFile`, `$Volume`), or a whole cluster of
+/// records when a cluster holds more, as Windows formats it (#481).
 fn read_mirror<T: FsckIo>(io: &mut T, record_size: u64) -> Result<Vec<u8>, Error> {
+    let params = crate::mft_io::read_boot_params_io(io)?;
     let mirror_bytes = crate::read::read_stat(io, 1)?.size;
-    let mirrored = MIRRORED_RECORDS.min(mirror_bytes / record_size);
+    let mirrored = crate::mft_io::mirror_records_bound(&params).min(mirror_bytes / record_size);
     crate::read::read_attribute_range(
         io,
         1,

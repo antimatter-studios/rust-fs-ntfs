@@ -10,7 +10,7 @@
 //! At any geometry where a cluster holds more than four MFT records the
 //! two disagree, and the disagreement is made of zeros. A recovery that
 //! trusted the declared length would write those zeros over live system
-//! records. `MFTMIRR_RECORDS` is 4, so the mirror holds records 0..3 --
+//! records. The mirror held four records then, so records 0..3 --
 //! `$MFT`, `$MFTMirr`, `$LogFile` and `$Volume` -- and the zero tail
 //! starts at record 4. What a recovery trusting the declared length
 //! would overwrite is therefore `$AttrDef` (4) onward: the root

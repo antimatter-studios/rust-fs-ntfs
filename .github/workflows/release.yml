@@ -79,6 +79,7 @@ jobs:
             test-disks/win32-name-verdicts.tsv
             test-disks/ntfs-ea.img
             test-disks/ntfs-ea.names.tsv
+            test-disks/ntfs-format-64k.img
           if-no-files-found: error
           retention-days: 1
 

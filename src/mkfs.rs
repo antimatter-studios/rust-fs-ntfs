@@ -365,12 +365,18 @@ pub mod stream {
     }
 }
 
-/// How many MFT records `$MFTMirr` holds: 0..3, which is `$MFT`,
-/// `$MFTMirr`, `$LogFile` and `$Volume`. The mirror's declared `$DATA`
-/// length is this many records, and exactly this many records are
-/// copied into it -- the two are read together by anything that
-/// recovers from the mirror, so they are written from one constant.
-const MFTMIRR_RECORDS: u64 = 4;
+/// How many MFT records `$MFTMirr` holds: the first four -- `$MFT`,
+/// `$MFTMirr`, `$LogFile` and `$Volume` -- or, when a cluster holds more
+/// than four records, every record in one cluster, which is what Windows'
+/// formatter writes (#481: a 64 KiB-cluster volume's mirror declares and
+/// holds 64 records). The mirror's declared `$DATA` length is this many
+/// records, and exactly this many records are copied into it -- the two
+/// are read together by anything that recovers from the mirror, so they
+/// are written from one number. [`crate::mft_io::mirror_records_bound`]
+/// is the same rule, read back from a volume's boot sector.
+fn mftmirr_records(cluster_size: u32, mft_record_size: u32) -> u64 {
+    (u64::from(cluster_size) / u64::from(mft_record_size)).max(4)
+}
 
 /// Size of the root directory's index blocks, as the boot sector declares.
 const INDEX_BLOCK_SIZE: u32 = 4096;
@@ -494,15 +500,13 @@ pub fn format_filesystem(
 
     let mftmirr_lcn = cluster_count / 2;
     // The mirror holds MFT records 0..3 -- $MFT, $MFTMirr, $LogFile and
-    // $Volume, the four a repair needs to reach everything else.
-    let mftmirr_bytes: u64 = MFTMIRR_RECORDS * mft_record_size as u64;
-    // The allocation is cluster-granular, so it rounds up. The comment
-    // that used to sit here worried about `record_size > cluster_size`,
-    // where the rounding adds nothing; the direction that matters is
-    // `cluster_size > 4 x record_size`, where it adds a whole cluster's
-    // worth of records the mirror does not hold. Those extra records
-    // must not appear in the DECLARED length -- see the $DATA lengths
-    // below.
+    // $Volume, the four a repair needs to reach everything else -- and
+    // the rest of their cluster when it holds more, as Windows' does.
+    let mftmirr_record_count = mftmirr_records(cluster_size, mft_record_size);
+    let mftmirr_bytes: u64 = mftmirr_record_count * mft_record_size as u64;
+    // The allocation is cluster-granular, so it rounds up, and the
+    // declared length is whole records: a cluster is filled with records,
+    // never declared past the ones written -- see the $DATA lengths below.
     let mftmirr_clusters: u64 = mftmirr_bytes.div_ceil(cluster_size as u64);
 
     let backup_boot_lcn = cluster_count - 1;
@@ -1616,10 +1620,19 @@ pub fn format_filesystem(
         place_record(&mut mft_buf, rs, slot, rec_bytes)?;
     }
 
-    // 6. Write $MFT to disk + mirror first 4 records ----------------------
+    // Records the mirror covers past the sixteen above are free records,
+    // formatted rather than zeroed, so the mirror's copy of each is a
+    // record a repair can read (#481): Windows' mirror of a 64 KiB
+    // cluster holds 64 `FILE` records.
+    for slot in 16..mftmirr_record_count.min(mft_records_capacity) as u32 {
+        let rec_bytes = build_free_record(&mft_record_layout, slot)?;
+        place_record(&mut mft_buf, rs, slot, rec_bytes)?;
+    }
+
+    // 6. Write $MFT to disk + mirror its first records --------------------
     dev.write_all_at(mft_lcn * cluster_size as u64, &mft_buf)?;
 
-    let mirror_size = (MFTMIRR_RECORDS as usize * rs).min(mft_buf.len());
+    let mirror_size = (mftmirr_record_count as usize * rs).min(mft_buf.len());
     let mut mirror = vec![0u8; (mftmirr_clusters * cluster_size as u64) as usize];
     mirror[..mirror_size].copy_from_slice(&mft_buf[..mirror_size]);
     dev.write_all_at(mftmirr_lcn * cluster_size as u64, &mirror)?;
@@ -1993,6 +2006,37 @@ fn build_reserved_placeholder(layout: &MftLayout, record_number: u32) -> Result<
     cursor += 8;
     rec[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4].copy_from_slice(&(cursor as u32).to_le_bytes());
 
+    apply_fixup_on_write(&mut rec, bps)?;
+    Ok(rec)
+}
+
+/// A free MFT record: the header and an empty attribute list, not in
+/// use, with sequence number 0, which says it has never held a file, so
+/// the first allocation of the slot gives it 1 as it would a zeroed one
+/// (`mft_io::next_sequence_for_slot`).
+fn build_free_record(layout: &MftLayout, record_number: u32) -> Result<Vec<u8>, Error> {
+    let rs = layout.record_size;
+    let bps = layout.bytes_per_sector;
+    if rs < 512 || !rs.is_multiple_of(bps as usize) {
+        return Err(Error::invalid(format!("invalid record_size {rs}")));
+    }
+    let mut rec = vec![0u8; rs];
+    rec[0..4].copy_from_slice(FILE_MAGIC);
+    rec[REC_OFF_USA_OFFSET..REC_OFF_USA_OFFSET + 2]
+        .copy_from_slice(&(USA_OFFSET as u16).to_le_bytes());
+    let sectors = rs / bps as usize;
+    rec[REC_OFF_USA_COUNT..REC_OFF_USA_COUNT + 2]
+        .copy_from_slice(&((sectors + 1) as u16).to_le_bytes());
+    let attrs_offset = align8(USA_OFFSET + 2 + sectors * 2);
+    rec[REC_OFF_ATTRS_OFFSET..REC_OFF_ATTRS_OFFSET + 2]
+        .copy_from_slice(&(attrs_offset as u16).to_le_bytes());
+    rec[REC_OFF_BYTES_ALLOCATED..REC_OFF_BYTES_ALLOCATED + 4]
+        .copy_from_slice(&(rs as u32).to_le_bytes());
+    rec[REC_OFF_MFT_REC_NUM..REC_OFF_MFT_REC_NUM + 4].copy_from_slice(&record_number.to_le_bytes());
+    rec[USA_OFFSET..USA_OFFSET + 2].copy_from_slice(&1u16.to_le_bytes());
+    rec[attrs_offset..attrs_offset + 4].copy_from_slice(&ATTR_END_MARKER.to_le_bytes());
+    rec[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4]
+        .copy_from_slice(&((attrs_offset + 8) as u32).to_le_bytes());
     apply_fixup_on_write(&mut rec, bps)?;
     Ok(rec)
 }

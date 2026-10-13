@@ -879,6 +879,9 @@ where
     io.write_all_at(offset, &record)
         .map_err(|e| E::from(Error::io(format!("write record {record_number}: {e}"))))?;
     io.sync().map_err(|e| E::from(Error::from(e)))?;
+    // A record `$MFTMirr` holds is copied there too, or the two disagree
+    // from this write on (#145, #481).
+    sync_mftmirr_record_with_io(io, &params, record_number).map_err(E::from)?;
     Ok(())
 }
 
@@ -921,18 +924,42 @@ where
 /// `$Volume` with the dirty bit and the version this driver had already
 /// changed.
 ///
-/// Records 4 and up are not mirrored, so this is a no-op for them.
+/// A record past the ones the mirror holds -- record 4 and up on most
+/// volumes, past a cluster's worth on one with large clusters (#481) --
+/// is not mirrored, so this is a no-op for it.
 pub fn sync_mftmirr_record_io<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
 ) -> Result<(), Error> {
-    /// `$MFTMirr` mirrors records 0..MIRRORED-1. Same constant as
-    /// `mkfs::MFTMIRR_RECORDS`, which sizes the mirror when it is built.
-    const MIRRORED: u64 = 4;
-    if record_number >= MIRRORED {
+    let params = read_boot_params_io(io)?;
+    sync_mftmirr_record_with_io(io, &params, record_number)
+}
+
+/// How many records `$MFTMirr` can hold on a volume of this geometry: the
+/// first four, or a whole cluster of records when a cluster holds more,
+/// which is what Windows' formatter mirrors (#481). The mirror's declared
+/// `$DATA` length says how many it does hold; this bounds it, so a record
+/// past it needs no look at the mirror at all.
+pub fn mirror_records_bound(params: &BootParams) -> u64 {
+    (params.cluster_size / params.file_record_size.max(1)).max(4)
+}
+
+/// [`sync_mftmirr_record_io`] with the boot parameters already read.
+///
+/// The records the mirror holds are those its `$DATA` declares, up to
+/// [`mirror_records_bound`]: four on a volume whose cluster holds four or
+/// fewer, a whole cluster's worth on one Windows formatted with larger
+/// clusters, and four on one an older release of this crate formatted
+/// with them.
+pub(crate) fn sync_mftmirr_record_with_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    params: &BootParams,
+    record_number: u64,
+) -> Result<(), Error> {
+    if record_number >= mirror_records_bound(params) {
         return Ok(());
     }
-    let params = read_boot_params_io(io)?;
+    let params = *params;
 
     // Where the mirror lives: $MFTMirr is record 1, and its unnamed
     // $DATA's first run is the mirror itself.
@@ -943,6 +970,10 @@ pub fn sync_mftmirr_record_io<T: BlockIo + ?Sized>(
         return Err(Error::io(
             "$MFTMirr's $DATA is resident, which is not a volume this crate wrote",
         ));
+    }
+    let declared = loc.non_resident_value_length.unwrap_or(0);
+    if record_number >= declared / params.file_record_size.max(1) {
+        return Ok(());
     }
     let mpo = loc
         .non_resident_mapping_pairs_offset
