@@ -17,14 +17,13 @@
 //! - the sixty names of one file resolve to one record;
 //! - the named streams list and read back;
 //! - `check_io` finds nothing;
-//! - and after this crate writes to a copy (a stream rewritten in place, a
-//!   file created with a stream added and one rewritten), ntfs-3g's own
-//!   tools read back what was written and still mount the volume
-//!   read-write. What would add, remove or grow an attribute of a record
-//!   ntfs-3g gave an `$ATTRIBUTE_LIST` -- growing a stream, deleting one,
-//!   unlinking one of the sixty names or a name in the 600-name directory
-//!   -- is refused, because this crate does not maintain the list (#468,
-//!   #480), and ntfs-3g reads it all as it was;
+//! - and after this crate writes to a copy (a stream rewritten in place or
+//!   grown into an extension record, a file created with a stream added and
+//!   one rewritten), ntfs-3g's own tools read back what was written and still
+//!   mount the volume read-write. Deleting a stream or unlinking one of the
+//!   sixty names or a name in the 600-name directory is refused, because
+//!   this crate does not maintain those `$ATTRIBUTE_LIST` entries (#468,
+//!   #480), and ntfs-3g reads the refused changes as untouched;
 //! - unlinking the last name of a file whose streams fill extension
 //!   records frees those records and the clusters they map (#565).
 //!
@@ -279,20 +278,12 @@ fn written_on(cluster: u32) {
     let rewritten = b"STREAM 5 OF 40\n".to_vec();
     fs.write_named_stream("/streams.txt", "s5", &rewritten)
         .unwrap_or_else(|e| panic!("{cluster}: rewrite s5: {e}"));
-    // One that grows needs room its record does not have, and this crate
-    // writes no $ATTRIBUTE_LIST to move it with (#480), so the write is
-    // refused, and refused before anything is written.
+    // Growing this stream outgrows its extension record. The writer must
+    // add an extent through the existing $ATTRIBUTE_LIST; ntfs-3g below
+    // independently verifies the resulting bytes.
     let grown_s5 = b"stream five, grown by this crate\n".repeat(40);
-    match fs.write_named_stream("/streams.txt", "s5", &grown_s5) {
-        Err(e) => assert!(
-            e.to_string().contains("exceeds record capacity"),
-            "{cluster}: growing s5 was refused, but not for its record's room: {e}"
-        ),
-        Ok(()) => panic!(
-            "{cluster}: s5 grew in a full extension record; #480 is done, so assert the bytes \
-             ntfs-3g reads instead"
-        ),
-    }
+    fs.write_named_stream("/streams.txt", "s5", &grown_s5)
+        .unwrap_or_else(|e| panic!("{cluster}: grow s5: {e}"));
     // Removing an attribute from a record ntfs-3g gave an $ATTRIBUTE_LIST
     // would leave the list naming one that is gone, and this crate does
     // not maintain the list (#468, #480), so the removal is refused.
@@ -346,8 +337,8 @@ fn written_on(cluster: u32) {
     // ntfs-3g reads back what was written, and not what was removed.
     assert_eq!(
         ntfscat(&img, "/streams.txt", Some("s5")).as_deref(),
-        Some(&rewritten[..]),
-        "{cluster}: ntfs-3g's s5"
+        Some(&grown_s5[..]),
+        "{cluster}: ntfs-3g's grown s5"
     );
     assert_eq!(
         ntfscat(&img, "/made-here.txt", Some("added")).as_deref(),
