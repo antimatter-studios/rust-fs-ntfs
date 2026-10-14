@@ -17,6 +17,11 @@ use std::path::Path;
 
 const VOL_SIZE: u64 = 64 * 1024 * 1024;
 const CLUSTER: u32 = 4096;
+/// Windows lays a sparse file out a whole sparse unit at a time: 16
+/// clusters at 4 KiB (#512). A hole only saves space as a whole unit, so
+/// these cases place data and holes a unit at a time.
+const UNIT: usize = 16 * CLUSTER as usize;
+const UNIT_CLUSTERS: u64 = 16;
 
 fn fresh_vol(tag: &str) -> String {
     let dst = common::temp_image_path(format!("sparsew_{tag}"));
@@ -98,7 +103,7 @@ fn sparse_hole_in_middle_roundtrips_and_saves_a_cluster() {
     write::create_file(Path::new(&img), "/", "sp.bin").expect("create");
 
     // 3 clusters: data, hole, data.
-    let cs = CLUSTER as usize;
+    let cs = UNIT;
     let mut data = vec![0u8; 3 * cs];
     data[0..cs].fill(0xAA); // cluster 0
                             // cluster 1 left zero (hole)
@@ -117,8 +122,8 @@ fn sparse_hole_in_middle_roundtrips_and_saves_a_cluster() {
     // Only 2 of the 3 clusters were allocated — the hole cost nothing.
     assert_eq!(
         after - before,
-        2,
-        "expected 2 clusters allocated (hole saved 1); before={before} after={after}"
+        2 * UNIT_CLUSTERS,
+        "expected 2 units allocated (hole saved 1); before={before} after={after}"
     );
 }
 
@@ -173,7 +178,7 @@ fn dense_data_with_no_holes_allocates_every_cluster() {
     // holes from the sparse planner).
     let img = fresh_vol("dense");
     write::create_file(Path::new(&img), "/", "d.bin").expect("create");
-    let cs = CLUSTER as usize;
+    let cs = UNIT;
     let data = vec![0x7Fu8; 4 * cs]; // 4 fully non-zero clusters
 
     let before = allocated_clusters(&img);
@@ -181,7 +186,11 @@ fn dense_data_with_no_holes_allocates_every_cluster() {
     let after = allocated_clusters(&img);
 
     assert_eq!(read_back(&img, "/d.bin"), data);
-    assert_eq!(after - before, 4, "no holes → all 4 clusters allocated");
+    assert_eq!(
+        after - before,
+        4 * UNIT_CLUSTERS,
+        "no holes → all 4 units allocated"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +201,7 @@ fn dense_data_with_no_holes_allocates_every_cluster() {
 fn hole_at_start_roundtrips_and_saves_clusters() {
     let img = fresh_vol("hole_start");
     write::create_file(Path::new(&img), "/", "hs.bin").expect("create");
-    let cs = CLUSTER as usize;
+    let cs = UNIT;
     let mut data = vec![0u8; 4 * cs];
     data[3 * cs..4 * cs].fill(0xCC); // only the last cluster has data
     let before = allocated_clusters(&img);
@@ -203,14 +212,18 @@ fn hole_at_start_roundtrips_and_saves_clusters() {
         data,
         "leading holes read as zeros"
     );
-    assert_eq!(after - before, 1, "3 leading holes cost nothing");
+    assert_eq!(
+        after - before,
+        UNIT_CLUSTERS,
+        "3 leading holes cost nothing"
+    );
 }
 
 #[test]
 fn hole_at_end_roundtrips_and_saves_clusters() {
     let img = fresh_vol("hole_end");
     write::create_file(Path::new(&img), "/", "he.bin").expect("create");
-    let cs = CLUSTER as usize;
+    let cs = UNIT;
     let mut data = vec![0u8; 5 * cs];
     data[0..cs].fill(0xDD); // first cluster data; trailing 4 are holes
     let before = allocated_clusters(&img);
@@ -221,14 +234,18 @@ fn hole_at_end_roundtrips_and_saves_clusters() {
         data,
         "trailing holes read as zeros"
     );
-    assert_eq!(after - before, 1, "4 trailing holes cost nothing");
+    assert_eq!(
+        after - before,
+        UNIT_CLUSTERS,
+        "4 trailing holes cost nothing"
+    );
 }
 
 #[test]
 fn multiple_holes_interleaved() {
     let img = fresh_vol("multi_hole");
     write::create_file(Path::new(&img), "/", "mh.bin").expect("create");
-    let cs = CLUSTER as usize;
+    let cs = UNIT;
     // data, hole, data, hole, data  (clusters 0,2,4 have data)
     let mut data = vec![0u8; 5 * cs];
     for c in [0usize, 2, 4] {
@@ -242,14 +259,18 @@ fn multiple_holes_interleaved() {
         data,
         "interleaved holes round-trip"
     );
-    assert_eq!(after - before, 3, "only the 3 data clusters allocated");
+    assert_eq!(
+        after - before,
+        3 * UNIT_CLUSTERS,
+        "only the 3 data units allocated"
+    );
 }
 
 #[test]
 fn large_scattered_sparse_file() {
     let img = fresh_vol("scattered");
     write::create_file(Path::new(&img), "/", "big.bin").expect("create");
-    let cs = CLUSTER as usize;
+    let cs = UNIT;
     // 64 clusters, data in only 5 of them.
     let mut data = vec![0u8; 64 * cs];
     let data_clusters = [1usize, 8, 17, 40, 63];
@@ -266,7 +287,7 @@ fn large_scattered_sparse_file() {
     );
     assert_eq!(
         after - before,
-        data_clusters.len() as u64,
+        data_clusters.len() as u64 * UNIT_CLUSTERS,
         "only the {} data clusters allocated of 64",
         data_clusters.len()
     );

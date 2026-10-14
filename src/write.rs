@@ -7521,7 +7521,9 @@ mod tests {
                 .unwrap_or_else(|e| panic!("sparse write with {what}: {e}"));
 
             let (last_vcn, allocated, covered) = sparse_data_header(&mut dev, rec);
-            let expected = (data.len() as u64).div_ceil(cs as u64);
+            // Windows covers the file rounded up to a whole 16-cluster
+            // sparse unit at 4 KiB clusters (#512).
+            let expected = (data.len() as u64).div_ceil(16 * cs as u64) * 16;
             assert_eq!(
                 covered, expected,
                 "{what}: the run list must cover every cluster of the file, holes \
