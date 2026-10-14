@@ -30,9 +30,14 @@ use std::path::Path;
 /// before the write. Without the check, a write landed on metadata whose
 /// committed changes were still in the log, in an MFT record Windows' own
 /// restart would later give to another file.
+///
+/// A change journal is retired before the write, which it will not record
+/// ([`crate::fsck::retire_usn_journal_io`], #479).
 fn open_for_write(image: &Path) -> Result<PathIo, Error> {
     let mut io = PathIo::open_rw(image)?;
     crate::prepare_rw_mount(&mut io, false)?;
+    crate::fsck::retire_usn_journal_io(&mut io)
+        .map_err(|e| e.context("write refused: the change journal could not be retired"))?;
     Ok(io)
 }
 

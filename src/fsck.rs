@@ -83,6 +83,17 @@ const VOLUME_FLAGS_OFFSET: u64 = 10;
 /// `NtfsVolumeFlags` enum so fsck doesn't depend on the `ntfs` crate.
 const VOLUME_IS_DIRTY: u16 = 0x0001;
 const VOLUME_UPGRADE_ON_MOUNT: u16 = 0x0004;
+/// Named `VOLUME_MOUNTED_ON_NT4` in the published layouts: the volume was
+/// written by something that does not keep its change journal. Windows
+/// answers it on its next mount by giving the journal a new id, and clears
+/// it (#479, measured by `test-disks/measure-usn-journal.ps1`).
+const VOLUME_MOUNTED_ON_NT4: u16 = 0x0008;
+/// `VOLUME_DELETE_USN_UNDERWAY`: Windows had begun deleting the change
+/// journal, and completes the deletion on its next mount (measured, as above).
+const VOLUME_DELETE_USN_UNDERWAY: u16 = 0x0010;
+
+/// Where a volume keeps its change journal, when it has one.
+const USN_JOURNAL_PATH: &str = "/$Extend/$UsnJrnl";
 
 /// NTFS format-level "empty log" sentinel byte. An all-`0xFF` `$LogFile`
 /// is the documented "no transactions pending" signal per Windows
@@ -434,6 +445,55 @@ pub fn upgrade_volume_version_io<T: FsckIo>(io: &mut T) -> Result<bool, Error> {
     new_bytes[2..4].copy_from_slice(&new_flags.to_le_bytes());
     io.write_all_at(major_disk_offset, &new_bytes)
         .map_err(|e| format!("write volume version+flags: {e}"))?;
+    io.sync().map_err(|e| format!("fsync: {e}"))?;
+    crate::mft_io::sync_mftmirr_record_io(io, VOLUME_RECORD_NUMBER)?;
+    Ok(true)
+}
+
+/// Retire the volume's change journal before this crate writes to it (#479).
+///
+/// A volume with an active change journal (`$Extend\$UsnJrnl`) promises
+/// whoever reads it a record of every change after the last USN they saw:
+/// Windows Search, backup, DFS-R and antivirus carry on from where they
+/// stopped. This crate does not append to `$UsnJrnl:$J`, so its writes used
+/// to leave the journal reporting the same id and the same next USN, and a
+/// reader carrying on from its last USN missed them with no way to tell.
+///
+/// The journal's own contract is the way out: a reader that finds a new
+/// `UsnJournalID` knows the records it holds no longer cover the volume and
+/// scans it again. This sets `$VOLUME_INFORMATION`'s `0x0008` flag, the one
+/// a writer that does not keep the journal leaves, and Windows answers it on
+/// its next mount by giving the journal a new id, starting its records past
+/// every one already in `$J`, and clearing the flag. The journal stays
+/// active, at the size it was created with, and records what Windows does
+/// from then on.
+///
+/// Nothing is written to a volume with no journal, or to one whose journal
+/// Windows is already deleting (`0x0010`), which its next mount completes.
+/// Running it again before Windows has mounted the volume keeps the same
+/// flag and synchronizes the mirror, including after a failed mirror write.
+///
+/// `Ok(true)` when the flag was set now, `Ok(false)` when there was nothing
+/// to do.
+pub fn retire_usn_journal_io<T: FsckIo>(io: &mut T) -> Result<bool, Error> {
+    let (flag_disk_offset, current_flags) = locate_volume_flags_io(io)?;
+    if current_flags & VOLUME_MOUNTED_ON_NT4 != 0 {
+        // A previous attempt may have set the flag but failed to copy it
+        // to the mirror. Do not allow a retry to bypass that failure.
+        crate::mft_io::sync_mftmirr_record_io(io, VOLUME_RECORD_NUMBER)?;
+        return Ok(false);
+    }
+    if current_flags & VOLUME_DELETE_USN_UNDERWAY != 0 {
+        return Ok(false);
+    }
+    match crate::read::resolve_path(io, USN_JOURNAL_PATH) {
+        Ok(_) => {}
+        Err(e) if e.kind() == Kind::NotFound => return Ok(false),
+        Err(e) => return Err(e.context("look up $Extend\\$UsnJrnl")),
+    }
+    let new_flags = current_flags | VOLUME_MOUNTED_ON_NT4;
+    io.write_all_at(flag_disk_offset, &new_flags.to_le_bytes())
+        .map_err(|e| format!("write volume flags: {e}"))?;
     io.sync().map_err(|e| format!("fsync: {e}"))?;
     crate::mft_io::sync_mftmirr_record_io(io, VOLUME_RECORD_NUMBER)?;
     Ok(true)

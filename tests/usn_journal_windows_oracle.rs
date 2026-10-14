@@ -141,11 +141,15 @@ fn the_journal_reads_as_windows_reports_it() {
     // Each record fsutil read back is where its USN says, as USN_RECORD_V2:
     // what Windows writes, whatever version fsutil converts it to.
     let csv = std::fs::read_to_string(RECORDS).expect("read the records");
-    let mut lines = csv.lines().skip_while(|l| !l.starts_with("Usn,")).map(|l| {
-        l.split(',')
-            .map(|f| f.trim_matches('"'))
-            .collect::<Vec<_>>()
-    });
+    let mut lines = csv
+        .lines()
+        .skip_while(|l| !l.starts_with("Usn,"))
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            l.split(',')
+                .map(|f| f.trim_matches('"'))
+                .collect::<Vec<_>>()
+        });
     let header = lines.next().expect("the records' header");
     let column = |name: &str| {
         header
@@ -163,7 +167,13 @@ fn the_journal_reads_as_windows_reports_it() {
     );
     let hex = |s: &str| u128::from_str_radix(s.trim_start_matches("0x"), 16).expect(s);
     let mut checked = 0;
-    for row in lines.filter(|r| r.len() == header.len()) {
+    for row in lines {
+        // fsutil lists the V4 extent columns in the header but omits them
+        // from V2/V3 rows. Validate every row, including those shorter rows.
+        assert!(
+            row.len() > column("Record length") && row.len() <= header.len(),
+            "{RECORDS}: malformed record: {row:?}"
+        );
         let usn: usize = row[c_usn].parse().expect("a USN");
         let rec = &j[usn..];
         let length = le_u32(rec, 0) as usize;
@@ -286,6 +296,54 @@ fn a_write_through_a_mounted_handle_retires_the_journal() {
         "$MFTMirr's copy of $Volume disagrees with $MFT's"
     );
     let _ = std::fs::remove_file(&copy);
+}
+
+#[test]
+fn retirement_retries_a_failed_mirror_write() {
+    struct FailMirrorWrite {
+        io: PathIo,
+        mirror_at: u64,
+        fail: bool,
+    }
+    impl BlockIo for FailMirrorWrite {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            self.io.read_exact_at(offset, buf)
+        }
+        fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+            if self.fail && offset == self.mirror_at {
+                return Err("injected mirror write failure".into());
+            }
+            self.io.write_all_at(offset, buf)
+        }
+        fn size(&self) -> u64 {
+            self.io.size()
+        }
+        fn sync(&mut self) -> Result<(), String> {
+            self.io.sync()
+        }
+    }
+
+    let copy = copy_of_fixture("usn_mirror_retry");
+    let mut io = PathIo::open_rw(Path::new(&copy)).expect("open_rw");
+    let params = fs_ntfs::mft_io::read_boot_params_io(&mut io).expect("boot parameters");
+    let (mirror, _) =
+        read::nonresident_contiguous_disk_range(&mut io, MFTMIRR_RECORD, AttrType::Data, None)
+            .expect("mirror range");
+    let mut io = FailMirrorWrite {
+        io,
+        mirror_at: mirror + VOLUME_RECORD * params.file_record_size,
+        fail: true,
+    };
+    for _ in 0..2 {
+        let error = fs_ntfs::fsck::retire_usn_journal_io(&mut io).expect_err("mirror must fail");
+        assert!(error.to_string().contains("injected mirror write failure"));
+    }
+    io.fail = false;
+    assert!(!fs_ntfs::fsck::retire_usn_journal_io(&mut io).expect("retry retirement"));
+    drop(io);
+    assert_ne!(volume_flags(&copy) & MOUNTED_ON_NT4, 0);
+    let (record, mirror) = volume_record_and_mirror(&copy);
+    assert_eq!(record, mirror, "retry must synchronize the mirror");
 }
 
 #[test]

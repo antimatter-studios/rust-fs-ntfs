@@ -546,7 +546,8 @@ fn split_path(path: &str) -> Result<(String, &str), CliError> {
 /// before anything is written (#137). Windows leaves a log holding work
 /// after a Fast Startup shutdown as well as after a crash, so the replay is
 /// the user's to ask for, with `fsck.ntfs -y`. A fresh-format
-/// volume is upgraded first, as Windows does on its first read-write mount.
+/// volume is upgraded first, as Windows does on its first read-write mount,
+/// and a change journal is retired, since the edit will not be in it (#479).
 fn edit<T>(
     target: &OsString,
     offset: u64,
@@ -558,6 +559,8 @@ fn edit<T>(
         .map_err(|e| CliError::failed(format!("{what}: {e}")))?;
     fs_ntfs::fsck::upgrade_volume_version_io(&mut dev)
         .map_err(|e| CliError::failed(format!("{what}: upgrade the volume version: {e}")))?;
+    fs_ntfs::fsck::retire_usn_journal_io(&mut dev)
+        .map_err(|e| CliError::failed(format!("{what}: retire the change journal: {e}")))?;
     let done = edit(&mut dev).map_err(|e| CliError::failed(format!("{what}: {e}")))?;
     fs_ntfs::block_io::BlockIo::sync(&mut dev)
         .map_err(|e| CliError::failed(format!("{what}: {e}")))?;

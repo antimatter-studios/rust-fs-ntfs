@@ -97,7 +97,7 @@ multi-VM test matrix (`test-matrix.json`) has Windows mount, write and
 | A read-write mount of, or `fsck` on, a volume Windows is hibernated on: `hiberfil.sys` begins `hibr` or `HIBR`, or is too short to hold its header | Refused, with nothing written | 0.10.0 (#496) | #137 | `hibernated_volume.rs` |
 | `$MFT` self-growth once a resident `$MFT:$Bitmap` is full | Not supported | | W2.6 | |
 | Compressed `$DATA` writes | Refused | 0.5.0 | | `write_transform_guards.rs` |
-| `$UsnJrnl` updates | Not supported | | | |
+| A write to a volume with an active change journal (`$Extend\$UsnJrnl`) | Partial: no record is appended to `$UsnJrnl:$J`; before the first write the journal is retired (`$Volume` flag `0x0008`), Windows gives it a new id on its next mount, and its readers scan the volume again rather than miss the write. A journal that cannot be retired refuses the write | Unreleased (#574) | #479 | `usn_journal_windows_oracle.rs`; Windows matrix `win-format-win-usn-journal-mac-write-win-usn-retired-chkdsk` |
 | Transactional NTFS (TxF) | Not supported: deprecated by Microsoft | | | |
 | Resize | Not supported (`not implemented`, exit 3) | 0.6.0 | | `tests/cli/test-fs.sh` |
 

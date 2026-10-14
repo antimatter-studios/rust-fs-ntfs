@@ -318,6 +318,21 @@ pub struct FsNtfsHandle {
     /// this *before* building a writable `BlockIo`, so a read-only mount of
     /// a physically-writable device still refuses writes.
     writable: bool,
+    /// Whether the change journal has been seen to: retired before the
+    /// first mutation through this handle, or found absent (#479). Checked
+    /// once per mount rather than on every write, since nothing this crate
+    /// does gives a volume a journal.
+    usn_journal_settled: std::sync::atomic::AtomicBool,
+}
+
+impl FsNtfsHandle {
+    fn new(source: MountSource, writable: bool) -> Self {
+        Self {
+            source: Some(source),
+            writable,
+            usn_journal_settled: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
 }
 
 /// Tracks whether the handle was mounted from a filesystem path
@@ -673,10 +688,10 @@ fn mount_path(device_path: *const c_char, replay: bool) -> *mut FsNtfsHandle {
             return std::ptr::null_mut();
         }
     };
-    let bridge = Box::new(FsNtfsHandle {
-        source: Some(MountSource::Path { device: mounted }),
-        writable: true,
-    });
+    let bridge = Box::new(FsNtfsHandle::new(
+        MountSource::Path { device: mounted },
+        true,
+    ));
     log::info!(target: "fs_ntfs", "mount path={path}");
     Box::into_raw(bridge)
 }
@@ -781,13 +796,13 @@ fn mount_with_callbacks(cfg: *const FsNtfsBlockdevCfg, replay: bool) -> *mut FsN
         callback_device(cfg.read, cfg.write, cfg.context, cfg.size_bytes),
         cfg.write.is_some(),
     );
-    let bridge = Box::new(FsNtfsHandle {
-        source: Some(MountSource::Callbacks {
+    let bridge = Box::new(FsNtfsHandle::new(
+        MountSource::Callbacks {
             write_fn: cfg.write,
             device: mounted,
-        }),
-        writable: cfg.write.is_some(),
-    });
+        },
+        cfg.write.is_some(),
+    ));
     Box::into_raw(bridge)
 }
 
@@ -840,18 +855,18 @@ pub extern "C" fn fs_ntfs_mount_with_fs_core_device(
                 }
             }
 
-            let bridge = Box::new(FsNtfsHandle {
-                // Record the device so the native read path can build a
-                // `BlockIo`; `writable: false` is what makes this a read-only
-                // mount — the mutator API refuses before ever building a
-                // writable `BlockIo`, even though the device may be physically
-                // writable. RW callers must use
-                // `fs_ntfs_mount_rw_with_fs_core_device` instead.
-                source: Some(MountSource::FsCore {
+            // Record the device so the native read path can build a
+            // `BlockIo`; `writable: false` is what makes this a read-only
+            // mount — the mutator API refuses before ever building a
+            // writable `BlockIo`, even though the device may be physically
+            // writable. RW callers must use
+            // `fs_ntfs_mount_rw_with_fs_core_device` instead.
+            let bridge = Box::new(FsNtfsHandle::new(
+                MountSource::FsCore {
                     device: cache_device(inner, false),
-                }),
-                writable: false,
-            });
+                },
+                false,
+            ));
             log::info!(target: "fs_ntfs", "mount via fs_core handle (size={size})");
             Box::into_raw(bridge)
         },
@@ -970,12 +985,12 @@ fn mount_rw_with_fs_core_device(
         }
     }
 
-    let bridge = Box::new(FsNtfsHandle {
-        source: Some(MountSource::FsCore {
+    let bridge = Box::new(FsNtfsHandle::new(
+        MountSource::FsCore {
             device: cache_device(device, true),
-        }),
-        writable: true,
-    });
+        },
+        true,
+    ));
     log::info!(target: "fs_ntfs", "mount rw via fs_core handle (size={size})");
     Box::into_raw(bridge)
 }
@@ -3089,9 +3104,28 @@ fn handle_io_from_ptr(fs: *mut FsNtfsHandle) -> Result<HandleIo, ()> {
         return Err(());
     }
     let handle = unsafe { &*fs };
-    handle_to_rw_io(handle).map_err(|e| {
+    let mut io = handle_to_rw_io(handle).map_err(|e| {
         set_error(&e);
-    })
+    })?;
+    settle_usn_journal(handle, &mut io).map_err(|e| {
+        set_error(&e);
+    })?;
+    Ok(io)
+}
+
+/// Retire the change journal before the first mutation through `handle`,
+/// which the journal will not record ([`fsck::retire_usn_journal_io`],
+/// #479). A journal that cannot be retired refuses the mutation: writing
+/// anyway would leave it reporting changes it does not hold.
+fn settle_usn_journal(handle: &FsNtfsHandle, io: &mut HandleIo) -> Result<(), Error> {
+    use std::sync::atomic::Ordering;
+    if handle.usn_journal_settled.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    fsck::retire_usn_journal_io(io)
+        .map_err(|e| e.context("write refused: the change journal could not be retired"))?;
+    handle.usn_journal_settled.store(true, Ordering::Release);
+    Ok(())
 }
 
 /// Handle-based [`fs_ntfs_create_file`].
