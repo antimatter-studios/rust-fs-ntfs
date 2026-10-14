@@ -55,6 +55,10 @@
 //!   whose last checkpoint is the first after the log was emptied, and
 //!   names no start and no tables. See [`FRESH_LOG_END`].
 //!
+//! * `windows-interrupted-quota-spilled*`: the same three files for a
+//!   capture whose `$Quota` index has outgrown its root, so the log updates
+//!   its entries in index blocks. See [`QUOTA_SPILLED_LOG_END`].
+//!
 //! Every partition's SHA-256 is in [`PARTITIONS`] and checked on unpacking.
 //!
 //! WHAT WINDOWS' REPLAY CHANGED, read by ntfs-3g without replaying: on
@@ -91,7 +95,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 /// The SHA-256 of each decompressed partition, as captured.
-const PARTITIONS: [(&str, &str); 24] = [
+const PARTITIONS: [(&str, &str); 26] = [
     (
         "windows-interrupted-1",
         "7236ffe64f5532b6f5cd976c1fa81c66e6be6cd31cfb8c22bc0bb588e8fad54f",
@@ -187,6 +191,14 @@ const PARTITIONS: [(&str, &str); 24] = [
     (
         "windows-interrupted-fresh-log.recovered",
         "82ec1c217ae55a204a2ca762a15141154d0f3ba19cb974d7208c5a4320742fed",
+    ),
+    (
+        "windows-interrupted-quota-spilled",
+        "ac136b999efadf505021501b616312c692ab9ca0b7a4d1b1219f6e5be09aaf2c",
+    ),
+    (
+        "windows-interrupted-quota-spilled.recovered",
+        "3d66170a0ec7815d6ea698a2c52d27591cae29483ba376b30606072afc0fb19b",
     ),
 ];
 
@@ -417,6 +429,18 @@ const QUOTA_LOG_END: [(&str, u64); 1] = [("quota", 0x33_eced)];
 /// independent reader.
 const FRESH_LOG_END: [(&str, u64); 1] = [("fresh-log", 0x22_578d)];
 
+/// A volume with quota tracking on whose files belong to 48 owners, so
+/// `$Quota`'s `$Q` index has outgrown its root into two index blocks (in
+/// extension record 122): the log holds `UpdateRecordDataAllocation` redo
+/// records, each rewriting the start of an entry's data in an index block
+/// as `UpdateRecordDataRoot` does in the root, which replay refused before
+/// it performed them (#137). Made by the same capture, and recovered by
+/// Windows the same way, as the snapshots above (run 38535425189,
+/// `mix: views` with an owner per file, one writer for 120 s, snapshot 2:
+/// refused at LSN `0x1bfc19`); its last LSN read by the same independent
+/// reader.
+const QUOTA_SPILLED_LOG_END: [(&str, u64); 1] = [("quota-spilled", 0x20_754f)];
+
 /// Where, in each pre-image, a `$LogFile` record page the replay needs
 /// sits: inside the walk from the oldest dirty page to the log's end, and
 /// in no tail copy.
@@ -601,6 +625,17 @@ fn a_quota_entry_updated_in_an_index_root_is_replayed_to_what_windows_recovered(
     }
 }
 
+#[test]
+fn a_quota_entry_updated_in_an_index_block_is_replayed_to_what_windows_recovered() {
+    // Once a volume's owners outnumber what `$Quota`'s index root holds,
+    // the charges land in its index blocks, logged as
+    // UpdateRecordDataAllocation. A replay that refuses it sends every such
+    // volume back to Windows (#137).
+    for (k, log_end) in QUOTA_SPILLED_LOG_END {
+        fsck_and_mount_rw_replay_to_what_windows_recovered(k, log_end);
+    }
+}
+
 /// Changes Windows made after its restart that moved no LSN, so the
 /// comparison cannot tell them from the restart's own by the LSN of the
 /// record or block they are in. `UpdateRecordDataRoot` and
@@ -632,9 +667,21 @@ fn a_quota_entry_updated_in_an_index_root_is_replayed_to_what_windows_recovered(
 /// * the entry at `0xd70` of VCN 2: the undo of `0x225a3c`;
 /// * the entry at `0x378` of VCN 0: the undo of `0x2257e1`.
 ///
-/// Fields: fixture, MFT record, the index block's VCN in that record's
+/// On `quota-spilled`, the `$Q` entry Windows charges after its restart is
+/// in `$Q`'s index block at VCN 0, in record 122 (`$Quota`'s extension
+/// record), whose LSN stays `0x11676c` on the pre-image and on Windows'
+/// copy alike. Windows' transaction 24 also updates the root directory's
+/// entry at `0xd70` of its index block at VCN 2 again:
+///
+/// * the `$Q` entry at `0x88`, its data `0x14` into it: version, flags and
+///   bytes charged from the undo of `0x20781e`, the first charge after the
+///   restart; the change time from the last 8 bytes of the undo of
+///   `0x208229`, the first after it to log one;
+/// * the entry at `0xd70` of VCN 2: the undo of `0x2076c9`.
+///
+/// Fields: fixture, MFT record, the index block in that record's
 /// `$INDEX_ALLOCATION` (or `None` for the record itself), offset, bytes.
-const AFTER_RESTART_UNSTAMPED: [(&str, u64, Option<u64>, usize, &str); 5] = [
+const AFTER_RESTART_UNSTAMPED: [(&str, u64, Option<IndexBlock>, usize, &str); 7] = [
     (
         "quota",
         24,
@@ -645,7 +692,7 @@ const AFTER_RESTART_UNSTAMPED: [(&str, u64, Option<u64>, usize, &str); 5] = [
     (
         "quota",
         5,
-        Some(2),
+        Some(("$I30", 2)),
         0xd70 + 0x18,
         "5307c6f53e56dd0150a5c6f53e56dd0150a5c6f53e56dd0150a5c6f53e56dd01\
          000000000000000000000000000000000600001000000000",
@@ -660,7 +707,7 @@ const AFTER_RESTART_UNSTAMPED: [(&str, u64, Option<u64>, usize, &str); 5] = [
     (
         "fresh-log",
         5,
-        Some(2),
+        Some(("$I30", 2)),
         0xd70 + 0x18,
         "5307c6f53e56dd0150a5c6f53e56dd0150a5c6f53e56dd0150a5c6f53e56dd01\
          000000000000000000000000000000000600001000000000",
@@ -668,16 +715,36 @@ const AFTER_RESTART_UNSTAMPED: [(&str, u64, Option<u64>, usize, &str); 5] = [
     (
         "fresh-log",
         5,
-        Some(0),
+        Some(("$I30", 0)),
         0x378 + 0x18,
         "8534aef53e56dd018534aef53e56dd018534aef53e56dd018534aef53e56dd01\
          000000000000000000000000000000000600002000000000",
     ),
+    (
+        "quota-spilled",
+        122,
+        Some(("$Q", 0)),
+        0x88 + 0x14,
+        "020000000100000000c402000000000009471525b65bdd01",
+    ),
+    (
+        "quota-spilled",
+        5,
+        Some(("$I30", 2)),
+        0xd70 + 0x18,
+        "56fc2425b65bdd0156fc2425b65bdd0156fc2425b65bdd0156fc2425b65bdd01\
+         000000000000000000000000000000000600001000000000",
+    ),
 ];
 
-/// Windows' content of MFT record `n`, or of the index block at `vcn` of
-/// its `$INDEX_ALLOCATION`, with [`AFTER_RESTART_UNSTAMPED`] undone.
-fn after_restart(k: &str, n: u64, vcn: Option<u64>, c: Option<Vec<u8>>) -> Option<Vec<u8>> {
+/// An index block: the name of the `$INDEX_ALLOCATION` it is in, and its
+/// VCN there. `$Quota`'s `$O` and `$Q` each have a block at VCN 0, so the
+/// name tells them apart.
+type IndexBlock<'a> = (&'a str, u64);
+
+/// Windows' content of MFT record `n`, or of the index block `vcn` of its
+/// `$INDEX_ALLOCATION`, with [`AFTER_RESTART_UNSTAMPED`] undone.
+fn after_restart(k: &str, n: u64, vcn: Option<IndexBlock>, c: Option<Vec<u8>>) -> Option<Vec<u8>> {
     let mut c = c?;
     for &(f, rec, v, at, hex) in &AFTER_RESTART_UNSTAMPED {
         if f != k || rec != n || v != vcn {
@@ -723,6 +790,52 @@ fn a_quota_entry_update_leaves_the_record_lsn_where_windows_left_it() {
             want,
             "quota: {how}: record 24's LSN moved"
         );
+        std::fs::remove_file(&img).unwrap();
+    }
+}
+
+/// `$Q`'s two index blocks on `quota-spilled`, by LCN, and the LSN each
+/// carries on the pre-image and on Windows' copy alike, though the log
+/// updates entries in both many times after it.
+const QUOTA_SPILLED_BLOCK_LSN: [(u64, u64); 2] = [(0x7e3, 0x11_676c), (0x895, 0x11_a1b2)];
+
+#[test]
+fn a_quota_entry_update_in_an_index_block_leaves_the_block_lsn_where_windows_left_it() {
+    // Windows charges a `$Q` entry in an index block in place and leaves
+    // the block's LSN as it was, as it does in the index root. A replay
+    // leaves it there too, or it writes a block no Windows run would have
+    // (#137). The comparison blanks LSNs, so this is checked here.
+    let lsn = |img: &Image, lcn: u64| {
+        le(
+            &fixed(img.cluster_bytes(lcn, 1), b"INDX").expect("an index block"),
+            8,
+            8,
+        )
+    };
+    let win = Image::read(&unpack("windows-interrupted-quota-spilled.recovered"));
+    for (lcn, want) in QUOTA_SPILLED_BLOCK_LSN {
+        assert_eq!(lsn(&win, lcn), want, "Windows' block at LCN {lcn:#x}");
+    }
+    let replay: [(&str, Mount); 2] = [
+        ("fsck", |img| {
+            fsck::fsck(img).map(|_| ()).map_err(|e| e.to_string())
+        }),
+        (
+            "Filesystem::mount_rw_replaying_log",
+            RW_MOUNTS_REPLAYING[0].1,
+        ),
+    ];
+    for (how, run) in replay {
+        let img = unpack("windows-interrupted-quota-spilled");
+        run(&img).unwrap_or_else(|e| panic!("quota-spilled: {how}: {e}"));
+        let ours = Image::read(&img);
+        for (lcn, want) in QUOTA_SPILLED_BLOCK_LSN {
+            assert_eq!(
+                lsn(&ours, lcn),
+                want,
+                "quota-spilled: {how}: the block at LCN {lcn:#x} moved its LSN"
+            );
+        }
         std::fs::remove_file(&img).unwrap();
     }
 }
@@ -797,8 +910,13 @@ fn fsck_and_mount_rw_replay_to_what_windows_recovered(k: &str, log_end: u64) {
     let pre = Image::read(&pre_img);
     let win = Image::read(&unpack(&format!("windows-interrupted-{k}.recovered")));
     let want = manifest(k);
-    // `fresh-log` was captured 5 s in: Windows listed 125 files.
-    let lines = if k == "fresh-log" { 100 } else { 500 };
+    // `fresh-log` was captured 5 s in: Windows listed 125 files;
+    // `quota-spilled` after 343 workload operations: 339.
+    let lines = match k {
+        "fresh-log" => 100,
+        "quota-spilled" => 300,
+        _ => 500,
+    };
     assert!(want.len() > lines, "{k}: the manifest lost its lines");
 
     let replay: [(&str, Mount); 2] = [
@@ -1491,10 +1609,16 @@ fn windows_replay_changed_what_the_volumes_hold() {
 /// | open-at-checkpoint | 15  | 250    | 2,771 |
 /// | quota          | 43      | 73     | 106   |
 /// | fresh-log      | 213     | 4      | 535   |
+/// | quota-spilled  | 19      | 34     | <= 48 |
 ///
 /// `quota`'s and `fresh-log`'s were measured on 2026-10-07, with Windows'
 /// changes after its restart that moved no LSN undone
 /// ([`AFTER_RESTART_UNSTAMPED`]).
+///
+/// `quota-spilled`'s were measured on 2026-10-14 from the pre-image and
+/// Windows' copy alone, by a separate reader, with the same changes
+/// undone; its bits are at most the 48 `$Bitmap` differs in between them
+/// on clusters no record Windows wrote after its restart holds.
 ///
 /// `index-vcn`'s records and blocks were measured from the pre-image and
 /// Windows' recovered copy alone; its bits are at most the 99 `$Bitmap`
@@ -1513,6 +1637,7 @@ fn floors(k: &str) -> (usize, usize, usize) {
         "open-at-checkpoint" => (10, 180, 2000),
         "quota" => (30, 50, 80),
         "fresh-log" => (150, 3, 400),
+        "quota-spilled" => (14, 25, 30),
         other => panic!("no floors measured for fixture {other}"),
     }
 }
@@ -1555,6 +1680,13 @@ fn runs_of(rec: &[u8], a: usize) -> Vec<(u64, u64)> {
         at += 1 + ln + on;
     }
     out
+}
+
+/// The name of the attribute at `a` in `rec`, empty for an unnamed one.
+fn attr_name(rec: &[u8], a: usize) -> String {
+    let (len, at) = (rec[a + 9] as usize, a + le(rec, a + 0x0A, 2) as usize);
+    let name: Vec<u16> = (0..len).map(|i| le(rec, at + 2 * i, 2) as u16).collect();
+    String::from_utf16_lossy(&name)
 }
 
 /// Attributes of a record (fixups undone): (offset, type, non-resident).
@@ -1692,7 +1824,11 @@ mod oracle {
     /// record (new log records, written once the volume was mounted), and
     /// the transactional-NTFS metadata under `$Extend\$RmMetadata`, which
     /// Windows' resource manager rewrites at mount whether or not there
-    /// was anything to replay.
+    /// was anything to replay. A file's extension records hold its
+    /// attributes too, so they go with it: on `quota-spilled`, Windows adds
+    /// security descriptors after its restart, stamping `$Secure`'s record
+    /// 9 past the log's end and adding entries to the `$SDH` and `$SII`
+    /// index blocks that extension record 212 holds.
     fn windows_after_recovery(win: &Image, log_end: u64) -> BTreeSet<u64> {
         let mut out = BTreeSet::new();
         let mut parent = std::collections::BTreeMap::new();
@@ -1730,6 +1866,13 @@ mod oracle {
             rm.extend(more);
         }
         out.extend(rm);
+        let extensions: Vec<u64> = (0..win.records())
+            .filter(|&n| {
+                win.record(n)
+                    .is_some_and(|rec| out.contains(&le(&rec, 0x20, 6)))
+            })
+            .collect();
+        out.extend(extensions);
         out
     }
 
@@ -1782,6 +1925,7 @@ mod oracle {
                 // Block by block through the allocation, which a block
                 // spans several clusters of when clusters are small.
                 let runs = runs_of(&rec, a);
+                let name = attr_name(&rec, a);
                 let (w_alloc, o_alloc): (Vec<u8>, Vec<u8>) = (
                     runs.iter()
                         .flat_map(|&(l, n)| win.cluster_bytes(l, n).to_vec())
@@ -1795,7 +1939,7 @@ mod oracle {
                     let w = after_restart(
                         k,
                         n,
-                        Some(at as u64 / win.cluster),
+                        Some((&name, at as u64 / win.cluster)),
                         content(&w_alloc[at..at + size], b"INDX"),
                     );
                     if w.is_none() {
@@ -1804,8 +1948,8 @@ mod oracle {
                     blocks += 1;
                     assert!(
                         content(&o_alloc[at..at + size], b"INDX") == w,
-                        "snapshot {k}: record {n}'s index block at VCN {} differs from what \
-                         Windows recovered",
+                        "snapshot {k}: record {n}'s {name} index block at VCN {} differs from \
+                         what Windows recovered",
                         at as u64 / win.cluster
                     );
                 }
