@@ -2,16 +2,15 @@
 //! and taken out of `$Extend\$ObjId:$O` and `$Extend\$Reparse:$R` once they
 //! have spilled into INDX blocks, wherever each entry belongs.
 //!
-//! Most of the volumes here are `windows-interrupted-quota.recovered`,
-//! which Windows itself wrote: its workload gave every fourth file an
-//! object id with `fsutil objectid create` and every eighth a junction
-//! beside it, and Windows grew both `$O` and `$R` past their roots. One is
-//! formatted here, so that this crate grows the indexes from their roots
-//! itself. The indexes are read back whole after each change, so an entry
-//! left behind, an entry lost or an order broken shows here; the Windows
-//! matrix scenarios `win-format-win-write-objids-mac-delete-win-chkdsk` and
-//! `win-format-win-write-views-mac-write-views-win-chkdsk` have chkdsk
-//! grade the same changes on volumes Windows filled.
+//! Most volumes here are `windows-interrupted-quota.recovered`, a volume
+//! Windows wrote whose `$O` already spills past its root. Its `$R` does not:
+//! this test grows `$R` from its root while adding reparse points. One
+//! volume is formatted here, so this crate grows both indexes itself. The
+//! indexes are read back whole after each change, so a lost, extra or
+//! misordered entry shows here. Windows matrix scenarios
+//! `win-format-win-write-objids-mac-delete-win-chkdsk` and
+//! `win-format-win-write-views-mac-write-views-win-chkdsk` also grade
+//! insertions into indexes Windows itself spilled, with chkdsk.
 
 mod common;
 
@@ -200,16 +199,19 @@ fn unlinking_files_whose_object_ids_windows_indexed_past_the_root_takes_their_en
 }
 
 #[test]
-fn object_ids_and_reparse_points_are_put_into_indexes_windows_spilled() {
+fn object_ids_and_reparse_points_grow_indexes_on_a_windows_volume() {
     let img = unpack();
     let o_before = objid_tree(&img);
     let r_before = tree(&img, REPARSE_PATH, REPARSE_INDEX);
-    for (index, before) in [("$O", &o_before), ("$R", &r_before)] {
-        assert!(
-            interior(before) > 0 && before.iter().any(|(_, i)| !*i),
-            "{NAME}'s {index} has not spilled past its root: the test proves nothing"
-        );
-    }
+    assert!(
+        interior(&o_before) > 0 && o_before.iter().any(|(_, i)| !*i),
+        "{NAME}'s $O has not spilled past its root: the test proves nothing"
+    );
+    assert_eq!(
+        interior(&r_before),
+        0,
+        "{NAME}'s $R fixture changed; update this root-growth test"
+    );
     let found_before = findings(&img);
 
     // Workload files with no object id of their own. Their junctions are
@@ -231,26 +233,50 @@ fn object_ids_and_reparse_points_are_put_into_indexes_windows_spilled() {
         .map(|n| spread_id(n, 0x0571_0571))
         .chain((0..top as u32).map(top_id))
         .collect();
-    for (path, id) in bare.iter().zip(&ids) {
-        fs_ntfs::write::write_object_id(Path::new(&img), path, id)
-            .unwrap_or_else(|e| panic!("give {path} an object id: {e}"));
+    let mut object_paths = Vec::with_capacity(ids.len());
+    for path in &bare {
+        let Some(id) = ids.get(object_paths.len()) else {
+            break;
+        };
+        match fs_ntfs::write::write_object_id(Path::new(&img), path, id) {
+            Ok(()) => object_paths.push(path.clone()),
+            Err(e) if e.to_string().contains("no room for new attribute") => continue,
+            Err(e) => panic!("give {path} an object id: {e}"),
+        }
     }
-    // A symlink's tag sorts after the junctions Windows indexed, so each of
-    // these goes into the last leaf of $R, which splits as it fills.
+    assert_eq!(
+        object_paths.len(),
+        ids.len(),
+        "only {} files had room for the {} object ids",
+        object_paths.len(),
+        ids.len()
+    );
+    // New symlink keys go after the fixture's existing $R entries, so they
+    // grow its rightmost leaf (and split it as it fills).
     let mut r_added = Vec::new();
-    for path in bare.iter().take(links) {
-        fs_ntfs::write::write_reparse_point(
+    for path in &bare {
+        if r_added.len() == links {
+            break;
+        }
+        match fs_ntfs::write::write_reparse_point(
             Path::new(&img),
             path,
             IO_REPARSE_TAG_SYMLINK,
             &[0; 12],
-        )
-        .unwrap_or_else(|e| panic!("give {path} a reparse point: {e}"));
-        r_added.push(view_index::reparse_key(
-            IO_REPARSE_TAG_SYMLINK,
-            reference(&img, path),
-        ));
+        ) {
+            Ok(()) => r_added.push(view_index::reparse_key(
+                IO_REPARSE_TAG_SYMLINK,
+                reference(&img, path),
+            )),
+            Err(e) if e.to_string().contains("no room for new attribute") => continue,
+            Err(e) => panic!("give {path} a reparse point: {e}"),
+        }
     }
+    assert_eq!(
+        r_added.len(),
+        links,
+        "too few files had room for reparse points"
+    );
 
     let o_added: Vec<Vec<u8>> = ids.iter().map(|id| id.to_vec()).collect();
     let o_after = objid_tree(&img);
@@ -277,7 +303,7 @@ fn object_ids_and_reparse_points_are_put_into_indexes_windows_spilled() {
         found_before,
         "the INDX blocks the splits took are not accounted for in $Bitmap"
     );
-    for (path, id) in bare.iter().zip(&ids) {
+    for (path, id) in object_paths.iter().zip(&ids) {
         assert_eq!(
             fs_ntfs::write::read_object_id(Path::new(&img), path).unwrap(),
             Some(*id),
