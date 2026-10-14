@@ -64,7 +64,13 @@ and `build_directory_record` in `src/record_build.rs` now return
 `Err("record overflow: …")` if the END-marker write would land
 past `record_size`. Prevents the previous silent buffer-overrun.
 
-**Still outstanding**: the `$ATTRIBUTE_LIST` extension-record
+**Named streams shipped** (#480): a named stream the base record
+cannot hold gives the file an `$ATTRIBUTE_LIST` and moves its named
+streams to extension records (`src/attr_list.rs`), with the list going
+non-resident when it no longer fits.
+
+**Still outstanding**: the same for every other attribute -- the
+`$ATTRIBUTE_LIST` extension-record
 mechanism — i.e. the constructive answer to "OK, the attributes
 don't fit, so spill some to a satellite record." Not yet exercised
 in practice (4096-byte records have ~3700 bytes capacity which is

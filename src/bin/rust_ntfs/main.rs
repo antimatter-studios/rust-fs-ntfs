@@ -19,6 +19,7 @@
 //!   symlink    Create a symbolic link (a reparse point).
 //!   objid      Give a file an object id.
 //!   layout     Print how a file's `$DATA` is stored (flags, sizes, runs).
+//!   stream     Write or delete one of a file's named streams.
 //!
 //! Single binary so distribution (GitHub releases, Homebrew taps) ships
 //! one artefact rather than four. Each subcommand lives in its own
@@ -40,6 +41,7 @@ mod rm;
 mod rmdir;
 mod set_dirty;
 mod sparse;
+mod stream;
 mod symlink;
 mod touch;
 mod write;
@@ -65,6 +67,7 @@ Subcommands:
   symlink    Create a symbolic link (a reparse point).
   objid      Give a file an object id.
   layout     Print how a file's $DATA is stored (flags, sizes, runs).
+  stream     Write or delete one of a file's named streams.
 
 Run `rust-ntfs <subcommand> --help` for per-subcommand options.
 
@@ -97,6 +100,7 @@ fn main() -> ExitCode {
         "symlink" => symlink::run(rest),
         "objid" => objid::run(rest),
         "layout" => layout::run(rest),
+        "stream" => stream::run(rest),
         "-h" | "--help" => {
             print!("{HELP}");
             ExitCode::SUCCESS

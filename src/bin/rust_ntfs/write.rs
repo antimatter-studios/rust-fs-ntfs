@@ -52,7 +52,7 @@ fn run_inner(args: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_data_source(args: &mut Vec<String>) -> Result<Vec<u8>, String> {
+pub(crate) fn parse_data_source(args: &mut Vec<String>) -> Result<Vec<u8>, String> {
     let mut content: Option<String> = None;
     let mut bytes: Option<u64> = None;
     let mut from_file: Option<String> = None;
