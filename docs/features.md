@@ -50,6 +50,7 @@ States:
 | Feature | State | Since | Tracking | Checked by |
 |---|---|---|---|---|
 | `fsck.ntfs` / `fsck::check_io`: dirty flag, `$LogFile`, `$MFTMirr`, the header of every in-use MFT record | Supported | 0.6.0 | | `cli_fsck.rs`, `tests/cli/test-fsck.sh` |
+| Seeded operation sequences against an independent byte model and reader | Partial: create, offset write, truncate, duplicate-create refusal; broader operations and Windows grading remain | Unreleased (#578) | #484 | `op_sequence_readback.rs`, `chore test:op-sequence-oracle` |
 | `fsck.ntfs` / `fsck::check_io`: each in-use record's attribute chain: lengths, types and their order, names, ids, resident values, run lists against their VCNs and allocated size, the end marker | Supported | 0.10.0 (#515) | | `check_io_reads_attribute_structure.rs` |
 | `fsck.ntfs` / `fsck::check_io`: `$Bitmap` against every run list: leaked, cross-linked and in-use-but-free clusters, runs past the volume | Supported | 0.10.0 (#528) | | `check_io_cluster_accounting.rs`, `tests/cli/test-fsck.sh` |
 | `fsck.ntfs` / `fsck::check_io`: indexes | Not supported | | | |
