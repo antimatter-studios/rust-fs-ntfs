@@ -252,6 +252,22 @@ jobs:
               exit 1
           fi
 
+      - name: Seeded operation sequences against ntfs-3g
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ntfs-3g
+          chore test:op-sequence-oracle
+
+      - name: Keep operation sequence reproducers and refusal statistics
+        if: always() && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-sequence-model
+          path: tmp/op-sequence-model/
+          if-no-files-found: error
+
       # AND ONCE IN DEBUG, BECAUSE `overflow-checks` IS OFF IN RELEASE.
       #
       # Every other `cargo test` in this repository is `--release`, and

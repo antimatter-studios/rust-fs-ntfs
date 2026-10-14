@@ -507,6 +507,12 @@ tasks:
       - test-disks/check-fixtures.sh
       - bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli,harness --no-fail-fast
 
+  test:op-sequence-oracle:
+    desc: "Four seeded readback sequences, graded by ntfs-3g (install ntfs-3g first)"
+    deps: [siblings:gate]
+    cmds:
+      - bash scripts/test-op-sequence-oracle.sh
+
   test:kernel:
     desc: "The kernel oracle: Linux's ntfs3 mounts what this crate wrote, in the fs-linux-test-harness VM, and this crate reads what ntfs3 wrote"
     deps: [siblings:gate]
