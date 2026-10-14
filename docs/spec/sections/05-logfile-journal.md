@@ -212,7 +212,7 @@ transaction handling, not a disk mutation applied like a filename update.
 | `1C` | OpenNonresidentAttribute | Open-table analysis |
 | `1D`–`20` | Attribute/table dumps | Checkpoint analysis as supported |
 | `21` | UpdateRecordDataRoot | Supported view-index data mutation |
-| `22` | UpdateRecordDataAllocation | Refused: no validating capture |
+| `22` | UpdateRecordDataAllocation | Supported view-index data mutation in an INDX block; the block LSN is left as Windows leaves it |
 | `23` / `24` | UpdateRelativeDataInIndex / 2 | Refused mutation |
 | `25` | ZeroEndOfFileRecord | FILE mutation |
 

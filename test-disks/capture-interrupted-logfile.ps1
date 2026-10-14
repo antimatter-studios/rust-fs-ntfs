@@ -43,7 +43,12 @@
 #                               and deletes. views adds, per operation,
 #                               what the files mix never logs: quota
 #                               tracking is on, so every allocation updates
-#                               the owner's $Quota entry in place; every
+#                               the owner's $Quota entry in place, and
+#                               every file is owned by one of 48 SIDs, so
+#                               $Quota's $Q index (an entry per owner)
+#                               outgrows its root and a charge to an owner
+#                               whose entry sits in an index block is an
+#                               UpdateRecordDataAllocation; every
 #                               file gets a security descriptor of its own
 #                               ($Secure's $SDH/$SII); every 4th gets an
 #                               object id ($ObjId's $O), every 8th becomes
@@ -138,6 +143,42 @@ if ($Mix -eq 'views') {
 $workload = Join-Path $root 'workload.ps1'
 @'
 param($Vol, $Markers, $Seconds, $Writer, $Writers, $Mix)
+if ($Mix -eq 'views') {
+    # Making a SID other than one's own a file's owner takes
+    # SeRestorePrivilege, which an elevated administrator holds disabled.
+    # Not held at all fails the run here, not as a silent single owner.
+    Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class CaptureToken {
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    struct Privileges { public int Count; public long Luid; public int Attributes; }
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool OpenProcessToken(IntPtr process, int access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool LookupPrivilegeValue(string system, string name, out long luid);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref Privileges state, int length, IntPtr previous, IntPtr returned);
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+    public static void Enable(string name) {
+        IntPtr token;
+        // TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
+        if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) throw new Win32Exception();
+        Privileges p = new Privileges();
+        p.Count = 1;
+        p.Attributes = 2; // SE_PRIVILEGE_ENABLED
+        if (!LookupPrivilegeValue(null, name, out p.Luid)) throw new Win32Exception();
+        if (!AdjustTokenPrivileges(token, false, ref p, 0, IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
+        // ERROR_NOT_ALL_ASSIGNED: the token does not hold the privilege.
+        int status = Marshal.GetLastWin32Error();
+        if (status != 0) throw new Win32Exception(status);
+    }
+}
+"@
+    [CaptureToken]::Enable('SeRestorePrivilege')
+}
 $rng = New-Object System.Random (366 + $Writer)
 $end = (Get-Date).AddSeconds($Seconds)
 $n = 0
@@ -161,6 +202,12 @@ while ((Get-Date) -lt $end) {
         $sid = New-Object System.Security.Principal.SecurityIdentifier ('S-1-5-21-366-137-{0}' -f $i)
         $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule ($sid, 'Read', 'Allow')))
         Set-Acl -LiteralPath $file -AclObject $acl
+        # Then one of 48 owners, after Set-Acl, which translates the owner
+        # to an account name and has none for these. A FileSecurity that
+        # only sets an owner writes only the owner.
+        $owner = New-Object System.Security.AccessControl.FileSecurity
+        $owner.SetOwner((New-Object System.Security.Principal.SecurityIdentifier ('S-1-5-21-366-138-{0}' -f ($i % 48))))
+        [System.IO.FileSystemAclExtensions]::SetAccessControl((New-Object System.IO.FileInfo $file), $owner)
         if ($i % 4 -eq 0) {
             $o = & fsutil.exe objectid create $file 2>&1
             if ($LASTEXITCODE -ne 0) { throw "fsutil objectid create $file failed: $o" }
