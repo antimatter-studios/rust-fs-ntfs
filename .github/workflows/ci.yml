@@ -380,6 +380,11 @@ jobs:
       - name: Measure which names Win32 can create as files
         shell: pwsh
         run: pwsh -File test-disks/measure-win32-names.ps1
+      # What Windows does with a change journal in each state a writer that
+      # cannot append to it could leave it in (#479).
+      - name: Measure what Windows does with a change journal
+        shell: pwsh
+        run: pwsh -File test-disks/measure-usn-journal.ps1
       - name: Upload Windows-authored fixtures
         uses: actions/upload-artifact@v4
         with:
@@ -395,8 +400,21 @@ jobs:
             test-disks/ntfs-ea.img
             test-disks/ntfs-ea.names.tsv
             test-disks/ntfs-format-64k.img
+            test-disks/ntfs-usnjrnl.img
+            test-disks/ntfs-usnjrnl.query.txt
+            test-disks/ntfs-usnjrnl.records.csv
           if-no-files-found: error
           retention-days: 1
+      - name: Upload the change journal measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-usn-journal-measurements
+          path: |
+            test-disks/usn-journal-measurements.txt
+            test-disks/usn-measure-*.img
+          if-no-files-found: warn
+          retention-days: 7
 
   # Full integration suite — every unit AND integration test, with the
   # read-path .img fixtures generated on the runner via ntfs-3g/mkntfs.
@@ -987,6 +1005,16 @@ jobs:
         shell: bash
         run: |
           bash scripts/run-matrix.sh win-format-win-write-objids-mac-delete-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
+      # A volume Windows journals, written here: Windows must not report
+      # the same journal afterwards, which would promise consumers a record
+      # of every change that this crate's changes are not in (#479).
+      - name: Validate the change journal after a write on Windows
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh win-format-win-usn-journal-mac-write-win-usn-retired-chkdsk \
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix

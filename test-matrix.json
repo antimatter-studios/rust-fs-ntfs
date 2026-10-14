@@ -2083,6 +2083,66 @@
       "image": "nfs-win-format-win-write-objids-mac-delete-win-chkdsk.img",
       "_notes": "Windows writes sixty files and gives each an object id, which grows $Extend\\$ObjId:$O past its root into INDX blocks. This crate unlinks nine of them spread across the index, so their entries come out of leaves and of interior nodes, and chkdsk grades the index (#571)."
     },
+    "win-format-win-usn-journal-mac-write-win-usn-retired-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "USNJRNL",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-usn-create",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "mac-write",
+          "path": "/journaled.txt",
+          "content": "written here, with no record in the journal"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/journaled-dir",
+          "basename": "created-here.txt"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-usn-query",
+          "expect": "Retired",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-win-format-win-usn-journal-mac-write-win-usn-retired-chkdsk.img",
+      "_notes": "Windows gives the volume a change journal and records changes in it. This crate writes one file and creates another, records neither in $UsnJrnl:$J, and must not leave the journal reporting the same id: a consumer reading on from its last USN would miss both changes and could not tell. Windows' fsutil usn queryjournal must report no journal or a new id, and chkdsk grades the volume (#479)."
+    },
     "win-format-win-write-mac-verify": {
       "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {

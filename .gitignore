@@ -36,6 +36,11 @@ test-disks/win32-name-verdicts.tsv
 test-disks/*.names.tsv
 # What ntfs-3g's mount reported of the volumes it populated (#485).
 test-disks/*.manifest.tsv
+# What fsutil reports of ntfs-usnjrnl.img's change journal, and what
+# measure-usn-journal.ps1 measured (#479).
+test-disks/ntfs-usnjrnl.query.txt
+test-disks/*.records.csv
+test-disks/usn-journal-measurements.txt
 !test-disks/.gitkeep
 
 # Local Windows-VM test pipeline outputs. The orchestrator
