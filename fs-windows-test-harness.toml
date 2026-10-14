@@ -402,6 +402,29 @@ host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-dirty-query.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Expect '{step.expect}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
+[ops.win-usn-create]
+# Give the mounted volume a change journal (`fsutil usn createjournal`) and
+# a change for it to record, and note the journal's id in the scenario's
+# diag directory for win-usn-query (#479).
+#
+# Step fields:
+#   keep_image?  -- `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-usn-create.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
+[ops.win-usn-query]
+# Mount the .img and ask `fsutil usn queryjournal` whether Windows still
+# reports the journal win-usn-create noted: Windows' own reading of
+# $UsnJrnl, through ntfs.sys.
+#
+# Step fields:
+#   expect       -- `Retired` (no journal, or another id) or `Kept` (the same id)
+#   keep_image?  -- `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-usn-query.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Expect '{step.expect}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
 [ops.win-cli-verify]
 # Mount the .img and check, through ntfs.sys, every line of the manifest
 # cli-populate wrote: each file's length and Get-FileHash SHA-256, each

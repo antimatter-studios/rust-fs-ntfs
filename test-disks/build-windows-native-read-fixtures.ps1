@@ -9,6 +9,9 @@
 #     ntfs-ea.names.tsv, each name and value as it was handed to Windows
 #   * ntfs-format-64k.img: an empty volume Windows formatted with 64 KiB
 #     clusters, whose $MFTMirr the formatter is held to
+#   * ntfs-usnjrnl.img: a volume with an active change journal, plus
+#     ntfs-usnjrnl.query.txt and ntfs-usnjrnl.records.csv, what fsutil
+#     reports of the journal and of every record in it
 #
 # Run from the repository root on an elevated Windows host. rust-img-vhd must be
 # on PATH; CI installs the pinned rust-img-vhd release before invoking this.
@@ -210,5 +213,53 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-ea.img' -Label 'EA' -Populate {
 New-WindowsFixture -ImagePath 'test-disks/ntfs-format-64k.img' -Label 'C64K' `
     -AllocationUnitSize 65536 -Populate { param($root) }
 
-Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img,test-disks/ntfs-format-64k.img |
+# A volume with a change journal Windows created and wrote to, plus what
+# Windows itself reports of it: ntfs-usnjrnl.query.txt, `fsutil usn
+# queryjournal`'s answer, and ntfs-usnjrnl.records.csv, every record `fsutil
+# usn readjournal` reads back. Each change below is one this crate also
+# makes, on a file named for it, so the records show what Windows journals
+# for each (#479).
+$usnQuery = [System.IO.Path]::GetFullPath('test-disks/ntfs-usnjrnl.query.txt')
+$usnRecords = [System.IO.Path]::GetFullPath('test-disks/ntfs-usnjrnl.records.csv')
+New-WindowsFixture -ImagePath 'test-disks/ntfs-usnjrnl.img' -Label 'USNJRNL' -Populate {
+    param($root)
+    $volume = $root.TrimEnd('\')
+    $o = & fsutil.exe usn createjournal m=8388608 a=1048576 $volume 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "fsutil usn createjournal: $o" }
+
+    [System.IO.File]::WriteAllBytes((Join-Path $root 'create-empty.txt'), [byte[]]@())
+    [System.IO.File]::WriteAllText((Join-Path $root 'write-resident.txt'), 'resident')
+    [System.IO.File]::WriteAllBytes((Join-Path $root 'write-nonresident.bin'), (New-Object byte[] 10000))
+    $f = [System.IO.File]::Open((Join-Path $root 'truncate.bin'), 'Create')
+    try { $f.SetLength(8192); $f.SetLength(100) } finally { $f.Close() }
+    New-Item -ItemType Directory -Path (Join-Path $root 'mkdir') | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $root 'rmdir') | Out-Null
+    Remove-Item -LiteralPath (Join-Path $root 'rmdir')
+    [System.IO.File]::WriteAllText((Join-Path $root 'rename-from.txt'), 'r')
+    Rename-Item -LiteralPath (Join-Path $root 'rename-from.txt') -NewName 'rename-to.txt'
+    [System.IO.File]::WriteAllText((Join-Path $root 'move.txt'), 'm')
+    Move-Item -LiteralPath (Join-Path $root 'move.txt') -Destination (Join-Path $root 'mkdir\move.txt')
+    [System.IO.File]::WriteAllText((Join-Path $root 'unlink.txt'), 'u')
+    Remove-Item -LiteralPath (Join-Path $root 'unlink.txt')
+    [System.IO.File]::WriteAllText((Join-Path $root 'link-target.txt'), 'l')
+    New-Item -ItemType HardLink -Path (Join-Path $root 'link-name.txt') `
+        -Target (Join-Path $root 'link-target.txt') | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $root 'ads.txt'), 'a')
+    [System.IO.File]::WriteAllText((Join-Path $root 'ads.txt:stream'), 's')
+    [System.IO.File]::WriteAllText((Join-Path $root 'attributes.txt'), 'h')
+    [System.IO.File]::SetAttributes((Join-Path $root 'attributes.txt'), 'Hidden')
+    [System.IO.File]::WriteAllText((Join-Path $root 'times.txt'), 't')
+    [System.IO.File]::SetLastWriteTimeUtc((Join-Path $root 'times.txt'), [datetime]'2020-01-01T00:00:00Z')
+
+    $q = & fsutil.exe usn queryjournal $volume 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "fsutil usn queryjournal: $q" }
+    [System.IO.File]::WriteAllText($usnQuery, (($q | Out-String).Trim() + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+    $r = & fsutil.exe usn readjournal $volume csv 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "fsutil usn readjournal: $r" }
+    [System.IO.File]::WriteAllText($usnRecords, (($r | Out-String).Trim() + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+
+Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img,test-disks/ntfs-format-64k.img,test-disks/ntfs-usnjrnl.img |
     Format-Table Name,Length
