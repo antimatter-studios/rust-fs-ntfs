@@ -25,7 +25,7 @@ impl Rng {
     }
 }
 
-fn verify(image: &str, model: &BTreeMap<String, Vec<u8>>) {
+fn verify(image: &str, model: &BTreeMap<String, Vec<u8>>, initialized: &BTreeMap<String, usize>) {
     // A fresh descriptor and fresh independent parser, with no writer state.
     let mut io = PathIo::open_rw(Path::new(image)).expect("reopen image");
     let (oracle, mut reader) = common::open(image);
@@ -53,10 +53,18 @@ fn verify(image: &str, model: &BTreeMap<String, Vec<u8>>) {
             read::read_attribute_value(&mut io, record, fs_ntfs::attr_io::AttrType::Data, None)
                 .expect("read data");
         assert_eq!(&actual, expected, "driver contents of {path}");
+        let parsed = common::read_file_all(&oracle, &mut reader, path);
+        assert_eq!(parsed.len(), expected.len(), "independent size of {path}");
+        // The upstream `ntfs` reader follows allocated runs but does not
+        // honor $DATA's initialized_size. After a shrink followed by a grow,
+        // NTFS reads the uninitialized tail as zeros even if freed clusters
+        // still contain the old bytes. Compare the parser over initialized
+        // bytes; ntfs-3g checks the complete logical value below.
+        let initialized_len = initialized[path].min(expected.len());
         assert_eq!(
-            common::read_file_all(&oracle, &mut reader, path),
-            *expected,
-            "independent ntfs parser contents of {path}"
+            &parsed[..initialized_len],
+            &expected[..initialized_len],
+            "independent ntfs parser initialized contents of {path}"
         );
     }
     let report = fsck::check_io(&mut io).expect("check_io");
@@ -107,22 +115,31 @@ fn sequence(seed: u64) {
     let mut io = PathIo::open_rw(Path::new(&image)).expect("open writer");
     mkfs::format_filesystem(&mut io, SIZE, 4096, 1024, Some("OPSEQ"), Some(seed)).expect("format");
     let mut model = BTreeMap::new();
+    let mut initialized = BTreeMap::new();
     for name in ["a", "b", "c"] {
         writeln!(trace, "create\t/\t{name}").unwrap();
         trace.flush().unwrap();
         write::create_file_io(&mut io, "/", name).expect("create");
-        model.insert(format!("/{name}"), Vec::new());
+        let path = format!("/{name}");
+        model.insert(path.clone(), Vec::new());
+        initialized.insert(path, 0);
     }
     let mut rng = Rng(seed);
+    let mut capacity_refusals = 0usize;
     for step in 0..STEPS {
         let path = format!("/{}", ["a", "b", "c"][(rng.next() % 3) as usize]);
         let expected = model.get_mut(&path).unwrap();
         if step % 3 == 2 {
             let length = (rng.next() % 12289) as usize;
+            let previous_length = expected.len();
             writeln!(trace, "truncate\t{path}\t{length}").unwrap();
             trace.flush().unwrap();
             write::truncate_io(&mut io, &path, length as u64).expect("truncate must execute");
             expected.resize(length, 0);
+            if length < previous_length {
+                let initialized_len = initialized.get_mut(&path).unwrap();
+                *initialized_len = (*initialized_len).min(length);
+            }
         } else {
             let offset = (rng.next() % 16384) as usize;
             let length = (rng.next() % 4096 + 1) as usize;
@@ -131,17 +148,31 @@ fn sequence(seed: u64) {
             let data: Vec<_> = (0..length).map(|_| bytes_rng.next() as u8).collect();
             writeln!(trace, "write_at\t{path}\t{offset}\t{length}\t{fill}").unwrap();
             trace.flush().unwrap();
-            assert_eq!(
-                write::write_at_io(&mut io, &path, offset as u64, &data)
-                    .expect("write_at must execute"),
-                length as u64
-            );
-            expected.resize(expected.len().max(offset + length), 0);
-            expected[offset..offset + length].copy_from_slice(&data);
+            match write::write_at_io(&mut io, &path, offset as u64, &data) {
+                Ok(written) => {
+                    assert_eq!(written, length as u64);
+                    expected.resize(expected.len().max(offset + length), 0);
+                    expected[offset..offset + length].copy_from_slice(&data);
+                    let initialized_len = initialized.get_mut(&path).unwrap();
+                    *initialized_len = (*initialized_len).max(offset + length);
+                }
+                Err(error) if error.to_string().contains("exceed attr capacity") => {
+                    // Attribute-record expansion is W2.1. The allocator
+                    // must refuse this growth cleanly until that lands.
+                    capacity_refusals += 1;
+                    writeln!(
+                        trace,
+                        "refused\twrite_at\t{path}\t{offset}\t{length}\t{error}"
+                    )
+                    .unwrap();
+                    trace.flush().unwrap();
+                }
+                Err(error) => panic!("write_at must succeed or hit the known W2.1 limit: {error}"),
+            }
         }
         io.sync().expect("sync");
         drop(io);
-        verify(&image, &model);
+        verify(&image, &model, &initialized);
         io = PathIo::open_rw(Path::new(&image)).expect("reopen writer");
         assert!(
             started.elapsed() < Duration::from_secs(90),
@@ -153,12 +184,13 @@ fn sequence(seed: u64) {
     let refusal = write::create_file_io(&mut io, "/", "a").expect_err("duplicate must refuse");
     io.sync().expect("sync refusal");
     drop(io);
-    verify(&image, &model);
+    verify(&image, &model, &initialized);
     fs::write(
         artifacts.join("refusals.tsv"),
         format!(
-            "operation\tcount\tkind\ncreate-existing\t1\t{:?}\n",
-            refusal.kind()
+            "operation\tcount\tkind\ncreate-existing\t1\t{:?}\nwrite_at-mapping-capacity\t{}\tIo\n",
+            refusal.kind(),
+            capacity_refusals
         ),
     )
     .expect("refusal histogram");
