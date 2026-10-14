@@ -2116,7 +2116,7 @@
         {
           "op": "mac-write",
           "path": "/journaled.txt",
-          "content": "written here, with no record in the journal"
+          "content": "written-here-with-no-record-in-the-journal"
         },
         {
           "op": "mac-touch",
