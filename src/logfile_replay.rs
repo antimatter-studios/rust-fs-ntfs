@@ -81,9 +81,13 @@
 //!   time every allocation updates in place
 //!   (`test-disks/windows-interrupted-quota`). It leaves the record's LSN
 //!   as it was, as Windows does, so every such redo after the record's
-//!   last stamped change is applied. Its index-block counterpart,
-//!   `UpdateRecordDataAllocation`, is still refused: no capture has held
-//!   one.
+//!   last stamped change is applied.
+//! * `UpdateRecordDataAllocation` does the same to a view index entry in
+//!   an index block: once a volume's owners outnumber what `$Q`'s root
+//!   holds, their entries, and the charges, are in its index blocks. It
+//!   leaves the block's LSN as it was too: both of `$Q`'s blocks keep their
+//!   LSN on the pre-image and after Windows' restart, which redid many
+//!   charges in them (`test-disks/windows-interrupted-quota-spilled`).
 //! * `DeleteIndexEntryAllocation` moves the entries after it down and
 //!   leaves the bytes past the block's new end as they were; the block's
 //!   update sequence array, which records the end of every sector, shows
@@ -161,6 +165,7 @@ const OPEN_NONRESIDENT_ATTRIBUTE: u16 = 0x1C;
 const OPEN_ATTRIBUTE_TABLE_DUMP: u16 = 0x1D;
 const TRANSACTION_TABLE_DUMP: u16 = 0x20;
 const UPDATE_RECORD_DATA_ROOT: u16 = 0x21;
+const UPDATE_RECORD_DATA_ALLOCATION: u16 = 0x22;
 const ZERO_END_OF_FILE_RECORD: u16 = 0x25;
 
 /// Operations on an MFT record (`$MFT`'s `$DATA`).
@@ -186,6 +191,7 @@ const ON_INDEX_BLOCK: &[u16] = &[
     WRITE_END_OF_INDEX_BUFFER,
     SET_INDEX_ENTRY_VCN_ALLOCATION,
     UPDATE_FILE_NAME_ALLOCATION,
+    UPDATE_RECORD_DATA_ALLOCATION,
 ];
 
 fn op_name(op: u16) -> &'static str {
@@ -1147,10 +1153,12 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
         }
         .map_err(|e| e.context(format!("LSN {lsn:#x}, {}", op_name(op))))?;
         // Windows writes a view index entry's data in place and leaves the
-        // record's LSN as it was: `$Quota`'s record keeps an LSN older
-        // than every UpdateRecordDataRoot it holds, on the pre-image and
-        // after Windows' restart (`test-disks/windows-interrupted-quota`).
-        if op != UPDATE_RECORD_DATA_ROOT {
+        // record's or block's LSN as it was: `$Quota`'s record, and `$Q`'s
+        // index blocks, keep an LSN older than every UpdateRecordDataRoot
+        // or UpdateRecordDataAllocation they hold, on the pre-image and
+        // after Windows' restart (`test-disks/windows-interrupted-quota`,
+        // `test-disks/windows-interrupted-quota-spilled`).
+        if !matches!(op, UPDATE_RECORD_DATA_ROOT | UPDATE_RECORD_DATA_ALLOCATION) {
             put_u64(
                 &mut block.bytes,
                 0x08,
@@ -1402,24 +1410,7 @@ fn redo_file_record(
             put(rec, a + off + entry_len - 8, data)?;
         }
         UPDATE_FILE_NAME_ROOT => put(rec, a + off + 0x18, data)?,
-        UPDATE_RECORD_DATA_ROOT => {
-            // A view index entry -- `$Quota`'s `$Q`, `$ObjId`'s `$O` --
-            // keeps its data at the offset its first two bytes give, for
-            // the length the next two give; the redo overwrites the start
-            // of that data.
-            let entry = a + off;
-            let (at, len) = (
-                u16_at(rec, entry)? as usize,
-                u16_at(rec, entry + 2)? as usize,
-            );
-            if data.len() > len {
-                return Err(refuse(format!(
-                    "{} bytes of data for a view index entry holding {len}",
-                    data.len()
-                )));
-            }
-            put(rec, entry + at, data)?
-        }
+        UPDATE_RECORD_DATA_ROOT => put_view_entry_data(rec, a + off, data)?,
         ZERO_END_OF_FILE_RECORD => put(rec, a + off, data)?,
         _ => unreachable!("only file-record operations reach here"),
     }
@@ -1463,9 +1454,24 @@ fn redo_index_block(b: &mut [u8], op: u16, pos: usize, data: &[u8]) -> Result<()
             put(b, pos + entry_len - 8, data)?;
         }
         UPDATE_FILE_NAME_ALLOCATION => put(b, pos + 0x18, data)?,
+        UPDATE_RECORD_DATA_ALLOCATION => put_view_entry_data(b, pos, data)?,
         _ => unreachable!("only index-block operations reach here"),
     }
     Ok(())
+}
+
+/// Overwrite the start of the data of the view index entry at `entry` --
+/// `$Quota`'s `$Q`, `$ObjId`'s `$O` -- which keeps its data at the offset
+/// its first two bytes give, for the length the next two give.
+fn put_view_entry_data(b: &mut [u8], entry: usize, data: &[u8]) -> Result<(), Error> {
+    let (at, len) = (u16_at(b, entry)? as usize, u16_at(b, entry + 2)? as usize);
+    if data.len() > len {
+        return Err(refuse(format!(
+            "{} bytes of data for a view index entry holding {len}",
+            data.len()
+        )));
+    }
+    put(b, entry + at, data)
 }
 
 #[cfg(test)]
@@ -1531,6 +1537,25 @@ mod tests {
         assert_eq!(&rec[a + off + 0x14..a + off + 0x14 + 24], &[7; 24]);
         assert_eq!(&rec[..a + off + 0x14], &before[..a + off + 0x14]);
         assert_eq!(&rec[a + off + 0x14 + 24..], &before[a + off + 0x14 + 24..]);
+    }
+
+    #[test]
+    fn a_view_index_entry_in_an_index_block_has_its_data_overwritten_and_no_more() {
+        // A `$Q` entry at 0x88 into an index block: data at 0x14, 0x40
+        // bytes of it, as on `test-disks/windows-interrupted-quota-spilled`.
+        let mut b = vec![0u8; 4096];
+        b[0x1C..0x20].copy_from_slice(&0x200u32.to_le_bytes());
+        let pos = 0x88;
+        b[pos..pos + 2].copy_from_slice(&0x14u16.to_le_bytes());
+        b[pos + 2..pos + 4].copy_from_slice(&0x40u16.to_le_bytes());
+        let before = b.clone();
+        // More data than the entry holds is refused, and nothing written.
+        assert!(redo_index_block(&mut b, UPDATE_RECORD_DATA_ALLOCATION, pos, &[7; 0x41]).is_err());
+        assert_eq!(b, before);
+        redo_index_block(&mut b, UPDATE_RECORD_DATA_ALLOCATION, pos, &[7; 16]).unwrap();
+        assert_eq!(&b[pos + 0x14..pos + 0x14 + 16], &[7; 16]);
+        assert_eq!(&b[..pos + 0x14], &before[..pos + 0x14]);
+        assert_eq!(&b[pos + 0x14 + 16..], &before[pos + 0x14 + 16..]);
     }
 
     #[test]
