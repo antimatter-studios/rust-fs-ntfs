@@ -15,7 +15,7 @@ use std::process::ExitCode;
 const SPARSE_BLOCK: usize = 4096;
 
 const USAGE: &str = "\
-Usage: rust-ntfs sparse <image> <path> --bytes N [--pattern PAT]
+Usage: rust-ntfs sparse <image> <path> --bytes N [--pattern PAT | --regions LIST]
 
 Writes N bytes into the unnamed $DATA stream of an existing file as a
 SPARSE stream. Cluster-aligned all-zero regions are stored as holes.
@@ -25,11 +25,17 @@ SPARSE stream. Cluster-aligned all-zero regions are stored as holes.
                       zeros        all holes (fully sparse).
                       sparse       alternating 4 KiB data / hole blocks.
                       incrementing dense (no holes); a control pattern.
+  --regions LIST    Data only in the listed byte ranges, zeros elsewhere:
+                    `OFFSET+LENGTH[,OFFSET+LENGTH...]`, or `none` for all
+                    zeros. The byte at offset i of a range is
+                    `(i & 0xFF) | 1`, the bytes the test matrix's Windows
+                    writer puts there.
 
 Examples:
   rust-ntfs touch  vol.img / big.bin
   rust-ntfs sparse vol.img /big.bin --bytes 65536 --pattern zeros
   rust-ntfs sparse vol.img /big.bin --bytes 65536 --pattern sparse
+  rust-ntfs sparse vol.img /big.bin --bytes 400000 --regions 0+100,200000+100
 ";
 
 pub fn run(args: Vec<String>) -> ExitCode {
@@ -66,6 +72,7 @@ fn run_inner(args: Vec<String>) -> Result<(), String> {
 fn parse_sparse_source(args: &mut Vec<String>) -> Result<Vec<u8>, String> {
     let mut bytes: Option<u64> = None;
     let mut pattern = String::from("sparse");
+    let mut regions: Option<String> = None;
     while !args.is_empty() {
         let flag = args.remove(0);
         match flag.as_str() {
@@ -84,11 +91,53 @@ fn parse_sparse_source(args: &mut Vec<String>) -> Result<Vec<u8>, String> {
                     .clone();
                 args.remove(0);
             }
+            "--regions" => {
+                regions = Some(
+                    args.first()
+                        .ok_or_else(|| "--regions requires a list".to_string())?
+                        .clone(),
+                );
+                args.remove(0);
+            }
             other => return Err(format!("unknown flag: {other}")),
         }
     }
     let n = bytes.ok_or("sparse: --bytes is required")? as usize;
-    gen_pattern(&pattern, n)
+    match regions {
+        Some(list) => gen_regions(&list, n),
+        None => gen_pattern(&pattern, n),
+    }
+}
+
+/// `n` bytes holding data only in the ranges `list` names.
+///
+/// The byte at offset `i` of a range is `(i & 0xFF) | 1`: never zero, so
+/// every cluster a range touches has data in it, and the same bytes the
+/// matrix's `win-write-sparse` op writes on Windows for the same list.
+fn gen_regions(list: &str, n: usize) -> Result<Vec<u8>, String> {
+    let mut data = vec![0u8; n];
+    if list == "none" {
+        return Ok(data);
+    }
+    for range in list.split(',') {
+        let (offset, len) = range
+            .split_once('+')
+            .ok_or_else(|| format!("--regions: {range:?} is not OFFSET+LENGTH"))?;
+        let offset: usize = offset
+            .parse()
+            .map_err(|_| format!("--regions: bad offset in {range:?}"))?;
+        let len: usize = len
+            .parse()
+            .map_err(|_| format!("--regions: bad length in {range:?}"))?;
+        let end = offset
+            .checked_add(len)
+            .filter(|&end| end <= n)
+            .ok_or_else(|| format!("--regions: {range:?} runs past the {n} bytes written"))?;
+        for (i, byte) in data[offset..end].iter_mut().enumerate() {
+            *byte = (((offset + i) & 0xFF) as u8) | 1;
+        }
+    }
+    Ok(data)
 }
 
 /// Generate `n` bytes for the named sparse pattern.
@@ -154,5 +203,27 @@ mod tests {
     #[test]
     fn unknown_pattern_errors() {
         assert!(gen_pattern("bogus", 16).is_err());
+    }
+
+    #[test]
+    fn regions_hold_data_only_where_listed() {
+        let d = gen_regions("2+3,10+1", 16).unwrap();
+        let mut want = [0u8; 16];
+        for i in [2usize, 3, 4, 10] {
+            want[i] = ((i & 0xFF) as u8) | 1;
+        }
+        assert_eq!(d, want);
+    }
+
+    #[test]
+    fn no_regions_is_all_zeros() {
+        assert_eq!(gen_regions("none", 8).unwrap(), vec![0u8; 8]);
+    }
+
+    #[test]
+    fn a_region_past_the_end_or_malformed_is_refused() {
+        assert!(gen_regions("10+7", 16).is_err(), "past the end");
+        assert!(gen_regions("10", 16).is_err(), "no length");
+        assert!(gen_regions("x+1", 16).is_err(), "bad offset");
     }
 }

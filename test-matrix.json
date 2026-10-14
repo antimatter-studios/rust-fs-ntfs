@@ -2329,6 +2329,234 @@
       ],
       "_notes": "Sparse-file write (sparse). mac creates + writes a sparse $DATA (holes for all-zero clusters), ships to VM, chkdsk must report Clean (validates SPARSE flag + hole mapping-pairs + allocated_size)."
     },
+    "win-format-win-write-sparse-mac-compare-win-chkdsk-512": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "SPRS512",
+        "alloc_unit_size": 512
+      },
+      "image": "nfs-win-format-win-write-sparse-mac-compare-win-chkdsk-512.img",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format-alloc",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-sparse",
+          "files": "/issue.bin@400000@0+100,200000+100,399900+100 /scattered.bin@4000000@0+100,2000000+100,3999900+100 /straddle.bin@200000@65000+1000 /alternating.bin@65536@0+4096,8192+4096,16384+4096,24576+4096,32768+4096,40960+4096,49152+4096,57344+4096 /zeros.bin@65536@none /short.bin@10000@0+100",
+          "mode": "write",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "mac-compare-sparse-layout",
+          "files": "/issue.bin@400000@0+100,200000+100,399900+100 /scattered.bin@4000000@0+100,2000000+100,3999900+100 /straddle.bin@200000@65000+1000 /alternating.bin@65536@0+4096,8192+4096,16384+4096,24576+4096,32768+4096,40960+4096,49152+4096,57344+4096 /zeros.bin@65536@none /short.bin@10000@0+100"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-sparse",
+          "files": "/ours-issue.bin@400000@0+100,200000+100,399900+100 /ours-scattered.bin@4000000@0+100,2000000+100,3999900+100 /ours-straddle.bin@200000@65000+1000 /ours-alternating.bin@65536@0+4096,8192+4096,16384+4096,24576+4096,32768+4096,40960+4096,49152+4096,57344+4096 /ours-zeros.bin@65536@none /ours-short.bin@10000@0+100",
+          "mode": "verify",
+          "keep_image": "false"
+        }
+      ],
+      "_notes": "Windows' sparse layout is the oracle for this crate's, at 512-byte clusters (#512). Windows formats the volume, writes each file whole, marks it sparse and frees its zero gaps with fsutil sparse setrange. This crate then writes the same content beside each one with write_sparse_file, and the two must be laid out alike: flags, compression unit, sizes, the VCN ranges that are data and that are holes. chkdsk must then find the volume clean, and Windows must read every file this crate wrote as the bytes it was given."
+    },
+    "win-format-win-write-sparse-mac-compare-win-chkdsk-4k": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "SPRS4K",
+        "alloc_unit_size": 4096
+      },
+      "image": "nfs-win-format-win-write-sparse-mac-compare-win-chkdsk-4k.img",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format-alloc",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-sparse",
+          "files": "/issue.bin@400000@0+100,200000+100,399900+100 /scattered.bin@4000000@0+100,2000000+100,3999900+100 /straddle.bin@200000@65000+1000 /alternating.bin@65536@0+4096,8192+4096,16384+4096,24576+4096,32768+4096,40960+4096,49152+4096,57344+4096 /zeros.bin@65536@none /short.bin@10000@0+100",
+          "mode": "write",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "mac-compare-sparse-layout",
+          "files": "/issue.bin@400000@0+100,200000+100,399900+100 /scattered.bin@4000000@0+100,2000000+100,3999900+100 /straddle.bin@200000@65000+1000 /alternating.bin@65536@0+4096,8192+4096,16384+4096,24576+4096,32768+4096,40960+4096,49152+4096,57344+4096 /zeros.bin@65536@none /short.bin@10000@0+100"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-sparse",
+          "files": "/ours-issue.bin@400000@0+100,200000+100,399900+100 /ours-scattered.bin@4000000@0+100,2000000+100,3999900+100 /ours-straddle.bin@200000@65000+1000 /ours-alternating.bin@65536@0+4096,8192+4096,16384+4096,24576+4096,32768+4096,40960+4096,49152+4096,57344+4096 /ours-zeros.bin@65536@none /ours-short.bin@10000@0+100",
+          "mode": "verify",
+          "keep_image": "false"
+        }
+      ],
+      "_notes": "Windows' sparse layout is the oracle for this crate's, at 4096-byte clusters (#512). Windows formats the volume, writes each file whole, marks it sparse and frees its zero gaps with fsutil sparse setrange. This crate then writes the same content beside each one with write_sparse_file, and the two must be laid out alike: flags, compression unit, sizes, the VCN ranges that are data and that are holes. chkdsk must then find the volume clean, and Windows must read every file this crate wrote as the bytes it was given."
+    },
+    "win-format-win-write-sparse-mac-compare-win-chkdsk-8k": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "SPRS8K",
+        "alloc_unit_size": 8192
+      },
+      "image": "nfs-win-format-win-write-sparse-mac-compare-win-chkdsk-8k.img",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format-alloc",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-sparse",
+          "files": "/issue.bin@400000@0+100,200000+100,399900+100 /scattered.bin@4000000@0+100,2000000+100,3999900+100 /straddle.bin@200000@65000+1000 /alternating.bin@65536@0+4096,8192+4096,16384+4096,24576+4096,32768+4096,40960+4096,49152+4096,57344+4096 /zeros.bin@65536@none /short.bin@10000@0+100",
+          "mode": "write",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "mac-compare-sparse-layout",
+          "files": "/issue.bin@400000@0+100,200000+100,399900+100 /scattered.bin@4000000@0+100,2000000+100,3999900+100 /straddle.bin@200000@65000+1000 /alternating.bin@65536@0+4096,8192+4096,16384+4096,24576+4096,32768+4096,40960+4096,49152+4096,57344+4096 /zeros.bin@65536@none /short.bin@10000@0+100"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-sparse",
+          "files": "/ours-issue.bin@400000@0+100,200000+100,399900+100 /ours-scattered.bin@4000000@0+100,2000000+100,3999900+100 /ours-straddle.bin@200000@65000+1000 /ours-alternating.bin@65536@0+4096,8192+4096,16384+4096,24576+4096,32768+4096,40960+4096,49152+4096,57344+4096 /ours-zeros.bin@65536@none /ours-short.bin@10000@0+100",
+          "mode": "verify",
+          "keep_image": "false"
+        }
+      ],
+      "_notes": "Windows' sparse layout is the oracle for this crate's, at 8192-byte clusters (#512). Windows formats the volume, writes each file whole, marks it sparse and frees its zero gaps with fsutil sparse setrange. This crate then writes the same content beside each one with write_sparse_file, and the two must be laid out alike: flags, compression unit, sizes, the VCN ranges that are data and that are holes. chkdsk must then find the volume clean, and Windows must read every file this crate wrote as the bytes it was given."
+    },
+    "win-format-win-write-sparse-mac-compare-win-chkdsk-64k": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "SPRS64K",
+        "alloc_unit_size": 65536
+      },
+      "image": "nfs-win-format-win-write-sparse-mac-compare-win-chkdsk-64k.img",
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format-alloc",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-sparse",
+          "files": "/issue.bin@400000@0+100,200000+100,399900+100 /scattered.bin@4000000@0+100,2000000+100,3999900+100 /straddle.bin@200000@65000+1000 /alternating.bin@65536@0+4096,8192+4096,16384+4096,24576+4096,32768+4096,40960+4096,49152+4096,57344+4096 /zeros.bin@65536@none /short.bin@10000@0+100",
+          "mode": "write",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "mac-compare-sparse-layout",
+          "files": "/issue.bin@400000@0+100,200000+100,399900+100 /scattered.bin@4000000@0+100,2000000+100,3999900+100 /straddle.bin@200000@65000+1000 /alternating.bin@65536@0+4096,8192+4096,16384+4096,24576+4096,32768+4096,40960+4096,49152+4096,57344+4096 /zeros.bin@65536@none /short.bin@10000@0+100"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-sparse",
+          "files": "/ours-issue.bin@400000@0+100,200000+100,399900+100 /ours-scattered.bin@4000000@0+100,2000000+100,3999900+100 /ours-straddle.bin@200000@65000+1000 /ours-alternating.bin@65536@0+4096,8192+4096,16384+4096,24576+4096,32768+4096,40960+4096,49152+4096,57344+4096 /ours-zeros.bin@65536@none /ours-short.bin@10000@0+100",
+          "mode": "verify",
+          "keep_image": "false"
+        }
+      ],
+      "_notes": "Windows' sparse layout is the oracle for this crate's, at 65536-byte clusters (#512). Windows formats the volume, writes each file whole, marks it sparse and frees its zero gaps with fsutil sparse setrange. This crate then writes the same content beside each one with write_sparse_file, and the two must be laid out alike: flags, compression unit, sizes, the VCN ranges that are data and that are holes. chkdsk must then find the volume clean, and Windows must read every file this crate wrote as the bytes it was given."
+    },
     "cli-mkfs-win-chkdsk": {
       "status": "pending",
       "volume_params": {
