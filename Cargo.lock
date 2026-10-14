@@ -784,7 +784,7 @@ dependencies = [
 
 [[package]]
 name = "rust-fs-ntfs"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "clap",
  "criterion",
