@@ -1928,6 +1928,74 @@
       "image": "nfs-win-format-win-write-streams-mac-delete-win-chkdsk.img",
       "_notes": "Windows writes one file with forty non-resident named streams, which overflow its base record, so Windows moves attributes to extension records behind an $ATTRIBUTE_LIST. This crate unlinks the file's last name, and chkdsk grades that the extension records and the clusters their attributes map were freed with the base record, not left in use with no base (#565)."
     },
+    "win-format-win-write-views-mac-write-views-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "VIEWS",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-objids",
+          "dir": "/objid",
+          "count": "60",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-junctions",
+          "dir": "/junctions",
+          "count": "150",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "mac-mkdir",
+          "parent": "/",
+          "basename": "views"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/views",
+          "basename": "target.txt"
+        },
+        {
+          "op": "mac-write-views",
+          "parent": "/views",
+          "count": "160"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-win-format-win-write-views-mac-write-views-win-chkdsk.img",
+      "_notes": "Windows gives sixty files object ids and makes a hundred and fifty junctions, which grows $Extend\\$ObjId:$O and $Extend\\$Reparse:$R past their roots into INDX blocks. This crate then makes a hundred and sixty symlinks and gives each an object id, so their entries go into the leaves Windows made, which fill and split, and chkdsk grades both indexes (#571). The junctions name their target by drive letter, so the volume is not walked afterwards."
+    },
     "win-format-win-write-objids-mac-delete-win-chkdsk": {
       "status": "pending",
       "volume_params": {
@@ -2014,74 +2082,6 @@
       ],
       "image": "nfs-win-format-win-write-objids-mac-delete-win-chkdsk.img",
       "_notes": "Windows writes sixty files and gives each an object id, which grows $Extend\\$ObjId:$O past its root into INDX blocks. This crate unlinks nine of them spread across the index, so their entries come out of leaves and of interior nodes, and chkdsk grades the index (#571)."
-    },
-    "win-format-win-write-views-mac-write-views-win-chkdsk": {
-      "status": "pending",
-      "volume_params": {
-        "size_mib": 256,
-        "label": "VIEWS",
-        "alloc_unit_size": 4096
-      },
-      "recipe": [
-        {
-          "op": "init-image"
-        },
-        {
-          "op": "ship-to-vm",
-          "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "{vm.workdir}/{scenario.image}"
-        },
-        {
-          "op": "win-format",
-          "label": "{scenario.volume_params.label}",
-          "keep_image": "true"
-        },
-        {
-          "op": "win-write-objids",
-          "dir": "/objid",
-          "count": "60",
-          "keep_image": "true"
-        },
-        {
-          "op": "win-write-junctions",
-          "dir": "/junctions",
-          "count": "150",
-          "keep_image": "true"
-        },
-        {
-          "op": "ship-to-host",
-          "src": "{vm.workdir}/{scenario.image}",
-          "dest": "{image_dir}/{run_id}/{scenario.image}"
-        },
-        {
-          "op": "mac-mkdir",
-          "parent": "/",
-          "basename": "views"
-        },
-        {
-          "op": "mac-touch",
-          "parent": "/views",
-          "basename": "target.txt"
-        },
-        {
-          "op": "mac-write-views",
-          "parent": "/views",
-          "count": "160"
-        },
-        {
-          "op": "ship-to-vm",
-          "src": "{image_dir}/{run_id}/{scenario.image}",
-          "dest": "{vm.workdir}/{scenario.image}"
-        },
-        {
-          "op": "win-chkdsk",
-          "modes": "readonly,/scan",
-          "verdict_shape": "Clean",
-          "keep_image": "false"
-        }
-      ],
-      "image": "nfs-win-format-win-write-views-mac-write-views-win-chkdsk.img",
-      "_notes": "Windows gives sixty files object ids and makes a hundred and fifty junctions, which grows $Extend\\$ObjId:$O and $Extend\\$Reparse:$R past their roots into INDX blocks. This crate then makes a hundred and sixty symlinks and gives each an object id, so their entries go into the leaves Windows made, which fill and split, and chkdsk grades both indexes (#571). The junctions name their target by drive letter, so the volume is not walked afterwards."
     },
     "win-format-win-write-mac-verify": {
       "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
