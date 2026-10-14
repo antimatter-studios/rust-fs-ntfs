@@ -215,6 +215,18 @@ host = "host"
 command = "{binary} sparse {image_dir}/{run_id}/{scenario.image} {step.path} --bytes {step.bytes} --pattern {step.pattern}"
 expect_exit = 0
 
+[ops.mac-compare-sparse-layout]
+# Windows has written each file of `{step.files}` into the image (op
+# win-write-sparse); this writes the same content beside each one as
+# /ours-<name> with `rust-ntfs sparse --regions`, and `rust-ntfs layout`
+# must print the same for both: flags, compression unit, sizes, the ranges
+# of data and holes, the value. Windows' layout is the oracle for ours
+# (#512). `{step.files}` is unquoted on purpose: each entry is one
+# argument. See scripts/sparse-layout-oracle.sh.
+host = "host"
+command = "bash scripts/sparse-layout-oracle.sh {binary} {image_dir}/{run_id}/{scenario.image} {step.files}"
+expect_exit = 0
+
 [ops.mac-rm]
 host = "host"
 command = "{binary} rm {image_dir}/{run_id}/{scenario.image} {step.path}"
@@ -487,6 +499,23 @@ host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write-objids.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Dir '{step.dir}' -Count '{step.count}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
+[ops.win-write-sparse]
+# Mode `write`: Windows writes each file of `files` -- space-separated
+# `/name@bytes@regions` entries, data only in `regions` -- whole, marks it
+# sparse and hands the zero gaps back with `fsutil sparse setrange`, so
+# what it frees is Windows' own answer to how such a file is laid out.
+# Mode `verify`: each file must read back through ntfs.sys as exactly that
+# content and be marked sparse. Either way, `fsutil sparse queryrange` and
+# `fsutil file layout` for every file are kept as evidence (#512).
+#
+# Step fields:
+#   files        — space-separated `/name@bytes@regions` entries
+#   mode         — `write` or `verify`
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write-sparse.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Files '{step.files}' -Mode '{step.mode}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
 [ops.win-delete]
 # Delete a single file at `path` from the mounted volume. Mounts the
 # .img (re-using a prior op's .vhd if `keep_image=true` was set on
@@ -675,6 +704,15 @@ expect_exit = 0
 #   diag         -- vm-side directory for format-result.txt + wrapper-create.txt
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-format.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Label '{step.label}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
+[ops.win-format-alloc]
+# win-format at the scenario's cluster size,
+# {scenario.volume_params.alloc_unit_size}, rather than Format-Volume's
+# default: for scenarios that measure what Windows writes at a given
+# cluster size (#512). Same step fields as win-format.
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-format.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Label '{step.label}' -AllocationUnitSize '{scenario.volume_params.alloc_unit_size}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 # Other win-side ops (win-mount/win-unmount as separate ops,

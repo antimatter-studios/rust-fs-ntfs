@@ -116,6 +116,60 @@ pub fn plan_sparse_segments(data: &[u8], cluster_size: u64) -> Vec<SparseSegment
     segments
 }
 
+/// The most clusters a sparse unit spans: 16, `compression_unit = 4`.
+const SPARSE_UNIT_MAX_CLUSTERS: u64 = 16;
+
+/// The most bytes a sparse unit spans: 64 KiB.
+const SPARSE_UNIT_MAX_BYTES: u64 = 64 * 1024;
+
+/// The clusters Windows allocates a sparse `$DATA` in: 16, but never more
+/// than 64 KiB, and never less than one cluster.
+///
+/// Measured on Windows (#512): fsutil-written sparse files carry
+/// `compression_unit = 4` at 512-byte and 4 KiB clusters, `3` at 8 KiB
+/// and `0` at 64 KiB, and every data run and hole is a whole unit.
+pub fn sparse_unit_clusters(cluster_size: u64) -> u64 {
+    assert!(cluster_size > 0, "cluster_size must be > 0");
+    (SPARSE_UNIT_MAX_BYTES / cluster_size).clamp(1, SPARSE_UNIT_MAX_CLUSTERS)
+}
+
+/// The `compression_unit` field (`+0x22`) of a sparse `$DATA`: the base-2
+/// log of [`sparse_unit_clusters`].
+pub fn sparse_compression_unit(cluster_size: u64) -> u16 {
+    sparse_unit_clusters(cluster_size).trailing_zeros() as u16
+}
+
+/// Classify `data` into hole / data segments a whole sparse unit at a time,
+/// as Windows lays a sparse file out: a unit holding any non-zero byte is
+/// allocated in full, an all-zero unit is a hole, and the run list covers
+/// the file rounded up to a whole unit.
+pub fn plan_sparse_units(data: &[u8], cluster_size: u64) -> Vec<SparseSegment> {
+    let unit = sparse_unit_clusters(cluster_size);
+    plan_sparse_segments(data, unit * cluster_size)
+        .into_iter()
+        .map(|seg| match seg {
+            SparseSegment::Hole {
+                start_vcn,
+                clusters,
+            } => SparseSegment::Hole {
+                start_vcn: start_vcn * unit,
+                clusters: clusters * unit,
+            },
+            SparseSegment::Data {
+                start_vcn,
+                clusters,
+                byte_start,
+                byte_len,
+            } => SparseSegment::Data {
+                start_vcn: start_vcn * unit,
+                clusters: clusters * unit,
+                byte_start,
+                byte_len,
+            },
+        })
+        .collect()
+}
+
 /// Total clusters that must be allocated for these segments (sum of `Data`
 /// segment cluster counts; holes cost nothing).
 pub fn allocated_clusters(segments: &[SparseSegment]) -> u64 {
@@ -523,5 +577,64 @@ mod tests {
     #[should_panic(expected = "cluster_size must be > 0")]
     fn zero_cluster_size_panics() {
         let _ = plan_sparse_segments(&[1, 2, 3], 0);
+    }
+
+    /// The compression_unit Windows wrote on fsutil sparse files, per
+    /// cluster size, in the #512 matrix scenarios.
+    #[test]
+    fn the_sparse_unit_is_the_one_windows_writes() {
+        for (cluster, unit) in [(512, 4), (4096, 4), (8192, 3), (65536, 0)] {
+            assert_eq!(
+                sparse_compression_unit(cluster),
+                unit,
+                "{cluster}-byte clusters"
+            );
+        }
+    }
+
+    /// Windows' layout of /straddle.bin at 4 KiB clusters: 200,000 bytes
+    /// with data at 65000..66000 is `data 0..32, hole 32..64`.
+    #[test]
+    fn a_unit_holding_any_data_is_allocated_whole() {
+        let mut data = vec![0u8; 200_000];
+        data[65_000..66_000].fill(0x5A);
+        assert_eq!(
+            plan_sparse_units(&data, CS),
+            vec![
+                SparseSegment::Data {
+                    start_vcn: 0,
+                    clusters: 32,
+                    byte_start: 0,
+                    byte_len: 131_072,
+                },
+                SparseSegment::Hole {
+                    start_vcn: 32,
+                    clusters: 32,
+                },
+            ]
+        );
+    }
+
+    /// Windows' layout of /short.bin at 512-byte clusters: 10,000 bytes
+    /// with data at 0..100 is `data 0..16, hole 16..32`.
+    #[test]
+    fn the_run_list_covers_the_file_rounded_up_to_a_unit() {
+        let mut data = vec![0u8; 10_000];
+        data[..100].fill(0x11);
+        assert_eq!(
+            plan_sparse_units(&data, 512),
+            vec![
+                SparseSegment::Data {
+                    start_vcn: 0,
+                    clusters: 16,
+                    byte_start: 0,
+                    byte_len: 8192,
+                },
+                SparseSegment::Hole {
+                    start_vcn: 16,
+                    clusters: 16,
+                },
+            ]
+        );
     }
 }

@@ -83,6 +83,7 @@ fn every_verb_documents_itself_on_stdout() {
         "sparse",
         "symlink",
         "objid",
+        "layout",
     ] {
         let out = run(&[verb, "--help"]);
         assert_eq!(code(&out), 0, "`{verb} --help` exit status");
@@ -145,6 +146,15 @@ fn the_verbs_that_change_a_volume_report_success() {
         0
     );
     assert_eq!(code(&run(&["set-dirty", &img])), 0);
+
+    // `layout` reads the file `write` left resident, and prints it.
+    let layout = run(&["layout", &img, "/f.txt"]);
+    assert_eq!(code(&layout), 0, "layout: {}", stderr(&layout));
+    assert!(
+        stdout(&layout).starts_with("resident=yes\n") && stdout(&layout).contains("data_size=2\n"),
+        "layout prints a resident two-byte $DATA: {}",
+        stdout(&layout)
+    );
 
     let listing = run(&["ls", &img]);
     assert_eq!(code(&listing), 0);
@@ -308,6 +318,7 @@ fn the_help_lists_every_verb_that_exists() {
         "rename",
         "remove",
         "set-dirty",
+        "layout",
     ] {
         assert!(
             help.contains(verb),

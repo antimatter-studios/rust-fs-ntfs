@@ -35,6 +35,9 @@
 # Args:
 #   -ImagePath  Path on the VM to the (zero-filled) .img file.
 #   -Label      Volume label for the formatted NTFS volume.
+#   -AllocationUnitSize  Cluster size in bytes. Omitted, Format-Volume picks
+#               its default (4 KiB on a 256 MiB volume); the
+#               win-format-alloc op passes the scenario's alloc_unit_size.
 #   -KeepImage  'true' to leave .img + .vhd for a follow-on op (default 'false').
 #   -Diag       Directory for format-result.txt + wrapper-create.txt.
 #
@@ -47,6 +50,7 @@ param(
     [Parameter(Mandatory=$true)] [string]$ImagePath,
     [Parameter(Mandatory=$true)] [string]$Label,
     [Parameter(Mandatory=$true)] [string]$Diag,
+    [string]$AllocationUnitSize = '',
     [string]$KeepImage = 'false'
 )
 
@@ -68,6 +72,16 @@ if ($Label.Trim() -eq '') {
     exit 2
 }
 
+$sizeArgs = @{}
+if ($AllocationUnitSize.Trim() -ne '') {
+    $unit = 0
+    if (-not [int]::TryParse($AllocationUnitSize, [ref]$unit) -or $unit -lt 512) {
+        [Console]::Error.WriteLine("win-format: -AllocationUnitSize must be a cluster size in bytes; got '$AllocationUnitSize'")
+        exit 2
+    }
+    $sizeArgs['AllocationUnitSize'] = $unit
+}
+
 New-Item -ItemType Directory -Path $Diag -Force | Out-Null
 
 $Vhd = Get-VhdPathFor -ImagePath $ImagePath
@@ -81,14 +95,14 @@ try {
         # rest of the v2 ops use; without these, Format-Volume would
         # prompt to confirm wiping the (RAW) volume and hang us.
         # AllocationUnitSize is left at the FS default (4 KiB on a 256
-        # MiB volume) -- the win-format-* scenarios that exist today
-        # don't pin it, and harmonising with mac-format's fixed 4 KiB
-        # cluster would require threading scenario.volume_params.alloc_unit_size
-        # through the op template. Defer to a follow-up if a scenario
-        # needs a non-default cluster.
+        # MiB volume) unless -AllocationUnitSize names one: the
+        # win-format op does not pass it, win-format-alloc passes the
+        # scenario's alloc_unit_size, for scenarios that measure how
+        # Windows lays a file out at a given cluster size (#512).
         $result = Format-Volume -DriveLetter $letter `
             -FileSystem NTFS `
             -NewFileSystemLabel $Label `
+            @sizeArgs `
             -Force `
             -Confirm:$false
         $result | Format-List | Out-File "$Diag\format-result.txt" -Encoding UTF8

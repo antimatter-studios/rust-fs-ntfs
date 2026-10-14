@@ -223,19 +223,21 @@ fn promotion_refuses_rather_than_writing_off_the_volume() {
 /// The sparse writer takes the same LCN from the same search.
 #[test]
 fn a_sparse_write_refuses_rather_than_writing_off_the_volume() {
-    let img = volume_with_only_the_tail_free("sparse", 2);
+    let unit = fs_ntfs::sparse::sparse_unit_clusters(CLUSTER as u64);
+    let img = volume_with_only_the_tail_free("sparse", unit);
     write::create_file(Path::new(&img), "/", "s.bin").expect("create");
     let before = image_len(&img);
     let free_before = free_clusters(&img);
 
-    let cs = CLUSTER as usize;
-    let mut data = vec![0u8; 3 * cs];
-    data[0..cs].fill(0xAA);
-    data[2 * cs..3 * cs].fill(0xBB);
-    let wrote = write::write_sparse_file(Path::new(&img), "/s.bin", &data);
+    let unit_bytes = CLUSTER as usize * unit as usize;
+    let mut data = vec![0u8; 3 * unit_bytes];
+    data[0..unit_bytes].fill(0xAA);
+    data[2 * unit_bytes..3 * unit_bytes].fill(0xBB);
+    let err = write::write_sparse_file(Path::new(&img), "/s.bin", &data)
+        .expect_err("the allocatable sparse unit crosses the volume's transfer bound");
     assert!(
-        wrote.is_err(),
-        "the only free run ends past the volume, yet the sparse write reported {wrote:?}"
+        err.contains("a transfer spans"),
+        "the sparse writer must reach the transfer guard, not fail at allocation: {err}"
     );
     assert_eq!(
         image_len(&img),

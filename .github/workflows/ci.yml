@@ -1006,6 +1006,19 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      # Windows' sparse layout is the oracle for this crate's (#512). Windows
+      # writes sparse files at four cluster sizes, this crate writes the same
+      # content beside them, and the two layouts must agree before chkdsk
+      # grades the volume and Windows reads back every file this crate wrote.
+      # The substring takes in the two mac-format sparse scenarios as well:
+      # chkdsk on a volume this crate formatted and wrote sparse files to.
+      - name: Validate sparse files against Windows
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh sparse \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       # The command-line tools' Windows half (the `cli` group): mkfs.ntfs,
       # fs.ntfs set and fsck.ntfs change the image on this runner, and
       # Windows grades it -- chkdsk, fsutil dirty query. chore has no

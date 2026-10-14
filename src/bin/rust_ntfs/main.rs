@@ -1,6 +1,6 @@
 //! rust-ntfs — unified NTFS CLI (format, list, write, delete).
 //!
-//! Subcommand dispatcher for the fourteen operations the matrix runner and
+//! Subcommand dispatcher for the fifteen operations the matrix runner and
 //! one-off NTFS work both need. (It said "the four operations" and then
 //! listed ten, for a binary that dispatched twelve -- #186.)
 //!
@@ -18,6 +18,7 @@
 //!   set-dirty  Mark a volume dirty (test-scenario helper).
 //!   symlink    Create a symbolic link (a reparse point).
 //!   objid      Give a file an object id.
+//!   layout     Print how a file's `$DATA` is stored (flags, sizes, runs).
 //!
 //! Single binary so distribution (GitHub releases, Homebrew taps) ships
 //! one artefact rather than four. Each subcommand lives in its own
@@ -28,6 +29,7 @@
 
 mod cli;
 mod format;
+mod layout;
 mod link;
 mod ls;
 mod mkdir;
@@ -62,6 +64,7 @@ Subcommands:
   set-dirty  Mark an NTFS volume as dirty (test-scenario helper).
   symlink    Create a symbolic link (a reparse point).
   objid      Give a file an object id.
+  layout     Print how a file's $DATA is stored (flags, sizes, runs).
 
 Run `rust-ntfs <subcommand> --help` for per-subcommand options.
 
@@ -93,6 +96,7 @@ fn main() -> ExitCode {
         "set-dirty" => set_dirty::run(rest),
         "symlink" => symlink::run(rest),
         "objid" => objid::run(rest),
+        "layout" => layout::run(rest),
         "-h" | "--help" => {
             print!("{HELP}");
             ExitCode::SUCCESS

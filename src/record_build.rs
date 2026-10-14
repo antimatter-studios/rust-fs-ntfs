@@ -891,6 +891,34 @@ pub fn build_sparse_nonresident_data_attribute(
     last_vcn: i64,
     mapping_pairs: &[u8],
 ) -> Result<Vec<u8>, Error> {
+    build_sparse_nonresident_data_attribute_with_unit(
+        attr_name,
+        attr_id,
+        data_length,
+        allocated_length,
+        total_allocated_length,
+        initialized_length,
+        last_vcn,
+        mapping_pairs,
+        0,
+    )
+}
+
+/// [`build_sparse_nonresident_data_attribute`] with its `compression_unit`
+/// (`+0x22`) set: a user file's sparse `$DATA` carries the sparse unit it
+/// is laid out in, as Windows writes it (#512).
+#[allow(clippy::too_many_arguments)]
+pub fn build_sparse_nonresident_data_attribute_with_unit(
+    attr_name: Option<&str>,
+    attr_id: u16,
+    data_length: u64,
+    allocated_length: u64,
+    total_allocated_length: u64,
+    initialized_length: u64,
+    last_vcn: i64,
+    mapping_pairs: &[u8],
+    compression_unit: u16,
+) -> Result<Vec<u8>, Error> {
     let name_u16: Vec<u16> = attr_name
         .map(|s| s.encode_utf16().collect())
         .unwrap_or_default();
@@ -921,7 +949,7 @@ pub fn build_sparse_nonresident_data_attribute(
     buf[16..24].copy_from_slice(&0u64.to_le_bytes()); // first_vcn
     buf[24..32].copy_from_slice(&last_vcn.to_le_bytes()); // last_vcn
     buf[32..34].copy_from_slice(&(mapping_offset as u16).to_le_bytes());
-    buf[34..36].copy_from_slice(&0u16.to_le_bytes()); // compression_unit = 0 (sparse, not compressed)
+    buf[34..36].copy_from_slice(&compression_unit.to_le_bytes()); // sparse unit, not compression
     buf[36..40].copy_from_slice(&0u32.to_le_bytes()); // reserved
     buf[40..48].copy_from_slice(&allocated_length.to_le_bytes()); // 0x28 allocated (full span)
     buf[48..56].copy_from_slice(&data_length.to_le_bytes()); // 0x30 data_size
