@@ -270,6 +270,16 @@ host = "host"
 command = "{binary} objid {image_dir}/{run_id}/{scenario.image} {step.path} {step.object_id}"
 expect_exit = 0
 
+[ops.mac-write-streams]
+# Give the file at `path` the named streams s1..s<count>, stream i holding
+# "stream <i> " repeated to `size_bytes`, then delete every
+# `delete_every`-th one ("0": none). Enough streams outgrow the base MFT
+# record, so this crate gives the file an $ATTRIBUTE_LIST and extension
+# records (#480).
+host = "host"
+command = "bash scripts/mac-write-streams.sh {binary} {image_dir}/{run_id}/{scenario.image} {step.path} {step.count} {step.size_bytes} {step.delete_every}"
+expect_exit = 0
+
 # ----- inspection / verification -----
 
 [ops.mac-enumerate]
@@ -507,6 +517,23 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write-streams.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -Count '{step.count}' -SizeBytes '{step.size_bytes}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
+[ops.win-verify-streams]
+# Read back the named streams of the file at `path` and fail unless they
+# are exactly s1..s<count> less every `delete_every`-th ("0": none), each
+# holding "stream <i> " repeated to `size_bytes`: what mac-write-streams
+# and win-write-streams write. A stream an $ATTRIBUTE_LIST misplaces is
+# one Windows cannot find (#480).
+#
+# Step fields:
+#   path          — file path inside the volume (e.g. "/many.bin")
+#   count         — highest stream number written (integer as string)
+#   size_bytes    — bytes per stream (integer as string)
+#   delete_every  — every k-th stream was deleted; "0" for none
+#   keep_image?   — `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-verify-streams.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -Count '{step.count}' -SizeBytes '{step.size_bytes}' -DeleteEvery '{step.delete_every}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-write-objids]
