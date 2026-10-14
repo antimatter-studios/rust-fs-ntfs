@@ -8216,37 +8216,77 @@ mod tests {
         let free_before = crate::bitmap::count_free_io(&mut dev, &bm).unwrap();
         assert!(free_before > 0, "the fixture must have free space");
 
-        // Take all but a handful of clusters, so the first segment of the
-        // sparse write succeeds and a later one cannot.
         let params = crate::mft_io::read_boot_params_io(&mut dev).unwrap();
         let cluster = params.cluster_size;
+        let unit = crate::sparse::sparse_unit_clusters(cluster);
+        // Reserve one whole sparse unit while exhausting the rest. With
+        // fewer free clusters the first allocation would fail, proving
+        // nothing about rollback of an earlier successful allocation.
+        let keep = crate::bitmap::find_free_run_io(&mut dev, &bm, unit, params.mft_lcn)
+            .unwrap()
+            .expect("the fixture has a contiguous sparse unit");
+        crate::bitmap::allocate_io(&mut dev, &bm, keep, unit).unwrap();
         // Free space is not one run — metadata is scattered through it —
         // so take it in whatever chunks are available.
-        let leave_free = 4u64;
         let mut take = 64u64;
-        while crate::bitmap::count_free_io(&mut dev, &bm).unwrap() > leave_free {
+        while crate::bitmap::count_free_io(&mut dev, &bm).unwrap() > 0 {
             match crate::bitmap::find_free_run_io(&mut dev, &bm, take, 0) {
                 Ok(Some(lcn)) => crate::bitmap::allocate_io(&mut dev, &bm, lcn, take).unwrap(),
                 _ if take > 1 => take /= 2,
-                _ => break,
+                other => panic!("free clusters cannot be exhausted: {other:?}"),
             }
         }
+        crate::bitmap::free_io(&mut dev, &bm, keep, unit).unwrap();
         let free_at_start = crate::bitmap::count_free_io(&mut dev, &bm).unwrap();
-        assert!(
-            free_at_start <= leave_free * 2,
-            "the volume should be nearly full, {free_at_start} clusters free"
+        assert_eq!(free_at_start, unit, "exactly one sparse unit remains");
+        assert_eq!(
+            crate::bitmap::find_free_run_io(&mut dev, &bm, unit, params.mft_lcn).unwrap(),
+            Some(keep),
+            "the first segment must fit"
         );
 
         // Two data segments either side of a hole. The first fits in
         // what is left; the pair does not.
-        let seg = (cluster * 2) as usize;
+        let seg = (cluster * unit) as usize;
         let mut data = vec![0xAAu8; seg];
-        data.extend(std::iter::repeat_n(0u8, cluster as usize * 4)); // hole
+        data.extend(std::iter::repeat_n(0u8, seg)); // one whole unit is a hole
         data.extend(std::iter::repeat_n(0xBBu8, seg));
+
+        // Observe the bitmap during writes as well as afterwards: a
+        // refusal before any allocation must not satisfy this test.
+        struct SparseAllocationProbe<'a> {
+            inner: MemDev,
+            bitmap: &'a crate::bitmap::BitmapLocation,
+            minimum_free: u64,
+        }
+        impl BlockIo for SparseAllocationProbe<'_> {
+            fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+                self.inner.read_exact_at(offset, buf)
+            }
+            fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+                self.inner.write_all_at(offset, buf)?;
+                let free = crate::bitmap::count_free_io(&mut self.inner, self.bitmap)
+                    .map_err(|e| e.to_string())?;
+                self.minimum_free = self.minimum_free.min(free);
+                Ok(())
+            }
+            fn size(&self) -> u64 {
+                self.inner.size()
+            }
+        }
+        let mut dev = SparseAllocationProbe {
+            inner: dev,
+            bitmap: &bm,
+            minimum_free: free_at_start,
+        };
 
         let err = write_sparse_file_io(&mut dev, "/sparse.bin", &data)
             .expect_err("the volume is too full for both segments");
-        assert!(!err.is_empty());
+        assert_eq!(err.kind(), crate::error::Kind::NoSpace, "{err}");
+        assert_eq!(
+            dev.minimum_free, 0,
+            "the first unit must actually be allocated before the second is refused"
+        );
 
         let free_after = crate::bitmap::count_free_io(&mut dev, &bm).unwrap();
         assert_eq!(
