@@ -1436,13 +1436,17 @@ pub fn insert_entry_into_index_root_with_collation(
 /// The returned INDX block is post-fixup (clean) bytes. The caller owns its
 /// cluster allocation, writes it with USA protection, and adds the named
 /// `$INDEX_ALLOCATION` and `$Bitmap` attributes to the same record.
+///
+/// `index` names the index: a directory's `$I30`, or a view index such as
+/// `$Extend\$ObjId:$O` (#571).
 pub(crate) fn promote_index_root_to_first_indx(
     record: &mut [u8],
+    index: &str,
     block_size: usize,
     bytes_per_sector: u16,
 ) -> Result<Vec<u8>, Error> {
-    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(stream::I30))
-        .ok_or_else(|| Error::io("$INDEX_ROOT:$I30 missing"))?;
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(index))
+        .ok_or_else(|| Error::io(format!("$INDEX_ROOT:{index} missing")))?;
     let value_offset = ir
         .resident_value_offset
         .ok_or(Error::io("no value_offset"))? as usize;
@@ -1803,12 +1807,8 @@ fn parse_node_of(
     Err(Error::io("index node has no LAST entry"))
 }
 
-/// The resident `$INDEX_ROOT:$I30` of `record` as a node.
-pub(crate) fn parse_index_root_node(record: &[u8]) -> Result<IndexNode, Error> {
-    parse_index_root_node_of(record, stream::I30, NodeKeys::FileNames)
-}
-
-/// [`parse_index_root_node`] for the index named `index`.
+/// The resident `$INDEX_ROOT` of the index named `index` in `record` as a
+/// node, its keys read as `keys`.
 pub(crate) fn parse_index_root_node_of(
     record: &[u8],
     index: &str,
@@ -1823,12 +1823,8 @@ pub(crate) fn parse_index_root_node_of(
     parse_node_of(record, value + IR_INDEX_HEADER_OFFSET, end, keys)
 }
 
-/// A clean (post-fixup) INDX block as a node.
-pub(crate) fn parse_indx_node(block: &[u8]) -> Result<IndexNode, Error> {
-    parse_indx_node_of(block, NodeKeys::FileNames)
-}
-
-/// [`parse_indx_node`] for a block of an index whose keys are `keys`.
+/// A clean (post-fixup) INDX block of an index whose keys are `keys` as a
+/// node.
 pub(crate) fn parse_indx_node_of(block: &[u8], keys: NodeKeys) -> Result<IndexNode, Error> {
     if block.get(0..4) != Some(b"INDX") {
         return Err(Error::io("not an INDX block"));
@@ -1929,14 +1925,10 @@ pub(crate) fn empty_indx_block(block_size: usize, bytes_per_sector: u16) -> Resu
     Ok(block)
 }
 
-/// Replace the resident `$INDEX_ROOT:$I30` entries of `record` with `node`.
-/// Fails with the record-capacity error when the record cannot hold them,
-/// leaving `record` in an unspecified state: callers work on a copy.
-pub(crate) fn write_index_root_node(record: &mut [u8], node: &IndexNode) -> Result<(), Error> {
-    write_index_root_node_of(record, stream::I30, node)
-}
-
-/// [`write_index_root_node`] for the index named `index`.
+/// Replace the resident `$INDEX_ROOT` entries of the index named `index`
+/// in `record` with `node`. Fails with the record-capacity error when the
+/// record cannot hold them, leaving `record` in an unspecified state:
+/// callers work on a copy.
 pub(crate) fn write_index_root_node_of(
     record: &mut [u8],
     index: &str,
@@ -2398,7 +2390,7 @@ mod tests {
     #[test]
     fn promoted_indx_entries_start_after_the_usa() {
         let mut record = index_root_record(&[make_entry(10, 5, "f_0000.txt")]);
-        let block = promote_index_root_to_first_indx(&mut record, 4096, 512).unwrap();
+        let block = promote_index_root_to_first_indx(&mut record, stream::I30, 4096, 512).unwrap();
         let ih = crate::idx_block::INDX_INDEX_HEADER_OFFSET;
         let first = read_u32_le(&block, ih + IH_FIRST_ENTRY_OFFSET).unwrap() as usize;
         let usa_offset = u16::from_le_bytes([block[4], block[5]]) as usize;

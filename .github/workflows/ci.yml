@@ -940,6 +940,16 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      # Symlinks given object ids here, on a volume whose $O and $R Windows
+      # had already grown past their roots: chkdsk grades that their
+      # entries went into Windows' INDX blocks, which split (#571).
+      - name: Validate reparse points and object ids put into spilled indexes
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh win-format-win-write-views-mac-write-views-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       # A symbolic link and an object id made here: each has an entry in
       # its $Extend index, and chkdsk grades that it does (#478).
       - name: Validate reparse point and object id indexes on Windows

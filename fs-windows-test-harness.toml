@@ -182,6 +182,15 @@ host = "host"
 command = "bash scripts/mac-touch-many.sh {binary} {image_dir}/{run_id}/{scenario.image} {step.parent} {step.prefix} {step.count}"
 expect_exit = 0
 
+[ops.mac-write-views]
+# Make `count` symlinks `l0000`.. under `parent`, each to `target.txt`
+# beside them, and give each an object id: as many entries put into
+# $Extend\$Reparse:$R and $Extend\$ObjId:$O, through their roots or the
+# INDX blocks Windows spilled them into (#571).
+host = "host"
+command = "bash scripts/mac-write-views.sh {binary} {image_dir}/{run_id}/{scenario.image} {step.parent} {step.count}"
+expect_exit = 0
+
 [ops.mac-write]
 # rust-ntfs write takes the full path and content via --content.
 # `{step.content}` is single-quoted so payloads with spaces (e.g.
@@ -621,6 +630,21 @@ expect_exit = 0
 #   diag           — vm-side directory for delete-many-result.txt + delete-many-error.txt
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-delete-many.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Start '{step.start}' -End '{step.end}' -Step '{step.step}' -NamePattern '{step.name_pattern}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
+[ops.win-write-junctions]
+# Make `count` junctions `j000`.. under `dir`, each a mount point naming
+# `dir\target`, so Windows grows $Extend\$Reparse:$R past its root into
+# INDX blocks: the shape a host-side insert of a reparse point has to find
+# its way through (#571). A junction names its target by drive letter, so
+# a scenario using this does not walk the volume afterwards.
+#
+# Step fields:
+#   dir          — directory inside the volume (e.g. "/junctions"), created
+#   count        — number of junctions (integer as string, 1 to 999)
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write-junctions.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Dir '{step.dir}' -Count '{step.count}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-format]
