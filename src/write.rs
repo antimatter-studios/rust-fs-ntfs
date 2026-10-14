@@ -5400,7 +5400,8 @@ fn write_sparse_file_unrefreshed_io<T: BlockIo + ?Sized>(
     }
     let attr_id = loc.attribute_id;
 
-    let segments = crate::sparse::plan_sparse_segments(data, cluster_size);
+    // A whole sparse unit at a time, as Windows lays a sparse file out (#512).
+    let segments = crate::sparse::plan_sparse_units(data, cluster_size);
 
     let bm = crate::bitmap::locate_bitmap_io(io)?;
 
@@ -5536,7 +5537,7 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
     let data_size = data.len() as u64;
     let last_vcn = clusters_covered as i64 - 1;
 
-    let new_attr_bytes = crate::record_build::build_sparse_nonresident_data_attribute(
+    let new_attr_bytes = crate::record_build::build_sparse_nonresident_data_attribute_with_unit(
         None,
         attr_id,
         data_size,
@@ -5545,6 +5546,7 @@ fn write_sparse_file_inner<T: BlockIo + ?Sized>(
         data_size, // initialized_length: holes within it read as zeros
         last_vcn,
         &mapping_pairs,
+        crate::sparse::sparse_compression_unit(cluster_size),
     )?;
 
     // In one RMW: set FILE_ATTRIBUTE_SPARSE_FILE on $STANDARD_INFORMATION
