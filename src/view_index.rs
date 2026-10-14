@@ -16,17 +16,18 @@
 //!   with the 16-byte form of `$OBJECT_ID` has a birth volume and domain
 //!   id of zero and a birth object id equal to its object id.
 //!
-//! An entry is put only into the resident `$INDEX_ROOT`: an index that has
-//! spilled into INDX blocks, or a root with no room for the entry, refuses
-//! an insert before anything is written (#571). An entry is taken out
-//! wherever it is, the root or an INDX block ([`remove_io`]): a leaf's
-//! entry is cut from its node, and an interior one is replaced by its
-//! neighbour as `$I30`'s are, by the same code.
+//! An entry is put and taken out wherever it belongs, the root or an INDX
+//! block, by the B-tree code a directory's `$I30` uses, ordered here by
+//! [`ulongs_cmp`] (#571). [`put_io`] puts one in the root while the root
+//! holds it; a root that fills hands its entries down to a first INDX
+//! block, and a full leaf splits. [`remove_io`] cuts a leaf's entry from
+//! its node and replaces an interior one by its neighbour.
 
 use crate::attr_io::{self, AttrType};
 use crate::block_io::BlockIo;
 use crate::error::Error;
-use crate::index_io::{NodeEntry, NodeKeys};
+use crate::index_io::{IndexNode, NodeEntry, NodeKeys};
+use crate::write::IndexOrder;
 use std::cmp::Ordering;
 
 /// `$Extend\$Reparse`'s index.
@@ -220,7 +221,8 @@ fn set_sizes(record: &mut [u8], header: usize, total: usize) -> Result<(), Error
 /// Put the entry for `key` with `data` in the resident root of `index` in
 /// `record`, in collation order, replacing one already under that key.
 /// Refused, with `record` unchanged, when the root has spilled into INDX
-/// blocks or the record has no room for the entry.
+/// blocks or the record has no room for the entry; [`put_io`] puts it
+/// wherever it belongs.
 pub fn put(record: &mut [u8], index: &str, key: &[u8], data: &[u8]) -> Result<(), Error> {
     let new = entry(key, data)?;
     let mut scratch = record.to_vec();
@@ -298,14 +300,281 @@ pub fn spilled(record: &[u8], index: &str) -> Result<bool, Error> {
 
 /// The key a node's entry holds.
 fn node_key(entry: &NodeEntry) -> &[u8] {
-    let len = usize::from(u16::from_le_bytes([
-        entry.key[IE_KEY_LENGTH],
-        entry.key[IE_KEY_LENGTH + 1],
-    ]));
-    entry
-        .key
-        .get(IE_KEY_START..IE_KEY_START + len)
-        .unwrap_or(&[])
+    entry_key(&entry.key)
+}
+
+/// The key the view-index entry `entry` holds.
+fn entry_key(entry: &[u8]) -> &[u8] {
+    let Some(len) = entry.get(IE_KEY_LENGTH..IE_KEY_LENGTH + 2) else {
+        return &[];
+    };
+    let len = usize::from(u16::from_le_bytes([len[0], len[1]]));
+    entry.get(IE_KEY_START..IE_KEY_START + len).unwrap_or(&[])
+}
+
+/// The child of the interior `node` that `key` routes to: that of the first
+/// entry whose key sorts after it, or the LAST entry's. `None` in a leaf.
+fn child_toward(node: &IndexNode, key: &[u8]) -> Option<u64> {
+    node.entries
+        .iter()
+        .find(|e| ulongs_cmp(key, node_key(e)) == Ordering::Less)
+        .map_or(node.last_child, |e| e.child)
+}
+
+/// The insert of the entry for `key` with `data` into the view index
+/// `index`, ordered `COLLATION_NTOFS_ULONGS`, for the B-tree insert a
+/// directory's `$I30` uses (#571).
+struct UlongsOrder<'a> {
+    index: &'a str,
+    key: &'a [u8],
+    data: &'a [u8],
+}
+
+impl UlongsOrder<'_> {
+    fn route(&self, node: &IndexNode) -> Result<u64, Error> {
+        let index = self.index;
+        if !node.is_interior() {
+            return Err(Error::io(format!("routing through a leaf of {index}")));
+        }
+        if node
+            .entries
+            .iter()
+            .any(|e| ulongs_cmp(self.key, node_key(e)) == Ordering::Equal)
+        {
+            return Err(Error::exists(format!(
+                "{index} already holds that key in an interior node"
+            )));
+        }
+        child_toward(node, self.key)
+            .ok_or_else(|| Error::io(format!("an interior node of {index} has no child")))
+    }
+}
+
+impl IndexOrder for UlongsOrder<'_> {
+    fn index(&self) -> &str {
+        self.index
+    }
+
+    fn keys(&self) -> NodeKeys {
+        NodeKeys::View
+    }
+
+    fn insert_into_root(&self, record: &mut [u8], _entry: &[u8]) -> Result<(), Error> {
+        put(record, self.index, self.key, self.data)
+    }
+
+    fn root_child_vcn(&self, record: &[u8]) -> Result<u64, Error> {
+        self.route(&crate::index_io::parse_index_root_node_of(
+            record,
+            self.index,
+            NodeKeys::View,
+        )?)
+    }
+
+    fn block_child_vcn(&self, block: &[u8]) -> Result<u64, Error> {
+        self.route(&crate::index_io::parse_indx_node_of(block, NodeKeys::View)?)
+    }
+
+    fn insert_into_block(&self, block: &mut [u8], entry: &[u8]) -> Result<(), Error> {
+        let mut node = crate::index_io::parse_indx_node_of(block, NodeKeys::View)?;
+        self.insert_sorted(&mut node, entry)?;
+        if !crate::index_io::indx_node_fits(block, &node)? {
+            return Err(Error::io(format!(
+                "INDX block has no room for another {} entry",
+                self.index
+            )));
+        }
+        let vcn = block
+            .get(0x10..0x18)
+            .and_then(|b| b.try_into().ok())
+            .map(u64::from_le_bytes)
+            .ok_or_else(|| Error::io("an INDX block too short for its VCN"))?;
+        let bytes = crate::index_io::write_indx_node(block, &node, vcn)?;
+        block.copy_from_slice(&bytes);
+        Ok(())
+    }
+
+    fn insert_sorted(&self, node: &mut IndexNode, entry: &[u8]) -> Result<(), Error> {
+        if node.is_interior() {
+            return Err(Error::io(
+                "a leaf entry cannot be inserted into an interior index node",
+            ));
+        }
+        let key = entry_key(entry);
+        let mut at = node.entries.len();
+        for (i, existing) in node.entries.iter().enumerate() {
+            match ulongs_cmp(key, node_key(existing)) {
+                Ordering::Greater => {}
+                Ordering::Equal => {
+                    return Err(Error::exists(format!(
+                        "{} already holds that key in its node",
+                        self.index
+                    )));
+                }
+                Ordering::Less => {
+                    at = i;
+                    break;
+                }
+            }
+        }
+        node.entries.insert(
+            at,
+            NodeEntry {
+                key: entry.to_vec(),
+                child: None,
+            },
+        );
+        Ok(())
+    }
+}
+
+/// Put the entry for `key` with `data` in the index named `index` of the
+/// record `rec`, wherever it belongs, replacing one already under that key
+/// (#571).
+///
+/// While the root holds it, this is [`put`]. A root with no room hands its
+/// entries down to a first INDX block, and the record gains the index's
+/// `$INDEX_ALLOCATION` and `$Bitmap`, as Windows grows them. Once the
+/// index has spilled, the entry goes into the leaf its key routes to, and a
+/// full leaf splits, up to the root, as a directory's `$I30` does. Each
+/// step is worked out before it is written, and one that fails part way
+/// puts back what it wrote.
+pub(crate) fn put_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    index: &str,
+    key: &[u8],
+    data: &[u8],
+) -> Result<(), Error> {
+    put_io_of(io, rec, index, key, data, false)
+}
+
+/// [`put_io`] worked out with nothing written: the refusals it would meet,
+/// met before anything is.
+pub(crate) fn check_put_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    index: &str,
+    key: &[u8],
+    data: &[u8],
+) -> Result<(), Error> {
+    put_io_of(io, rec, index, key, data, true)
+}
+
+fn put_io_of<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    index: &str,
+    key: &[u8],
+    data: &[u8],
+    dry_run: bool,
+) -> Result<(), Error> {
+    let new = entry(key, data)?;
+    let (params, record) = crate::mft_io::read_mft_record_io(io, rec)?;
+    let order = UlongsOrder { index, key, data };
+    if spilled(&record, index)? {
+        if replace_io(io, rec, index, key, &new, dry_run)? {
+            return Ok(());
+        }
+        return crate::write::insert_routed_entry_io(io, rec, &new, &order, dry_run);
+    }
+    match put(&mut record.clone(), index, key, data) {
+        Ok(()) if dry_run => return Ok(()),
+        Ok(()) => {
+            return crate::mft_io::update_mft_record_io(io, rec, |r| put(r, index, key, data))
+        }
+        Err(e) if e.contains("exceeds record capacity") => {}
+        Err(e) => return Err(e),
+    }
+    // The root is full. Promoting it adds the index's $INDEX_ALLOCATION and
+    // $Bitmap to the record, so one already there, or one an attribute
+    // list may have moved out of it, would be doubled: refused.
+    for (ty, what) in [
+        (
+            AttrType::IndexAllocation,
+            format!("$INDEX_ALLOCATION:{index}"),
+        ),
+        (AttrType::Bitmap, format!("$Bitmap:{index}")),
+        (AttrType::AttributeList, "$ATTRIBUTE_LIST".to_string()),
+    ] {
+        let name = (ty != AttrType::AttributeList).then_some(index);
+        if attr_io::find_attribute(&record, ty, name).is_some() {
+            return Err(Error::refused(format!(
+                "$INDEX_ROOT:{index} is full and has not spilled into INDX blocks, but its \
+                 record already has {what}; handing the root's entries down a level here is \
+                 not supported (#571)"
+            )));
+        }
+    }
+    let declared = root_block_size(&record, index)?;
+    if declared != params.index_block_size {
+        return Err(Error::refused(format!(
+            "$INDEX_ROOT:{index} says its blocks are {declared} bytes, not the volume's \
+             {} bytes; handing the root's entries down a level is not supported (#571)",
+            params.index_block_size
+        )));
+    }
+    crate::write::promote_parent_index_io(io, rec, &params, &new, &order, dry_run)
+}
+
+/// The index block size the root of `index` in `record` declares.
+fn root_block_size(record: &[u8], index: &str) -> Result<u32, Error> {
+    let ir = attr_io::find_attribute(record, AttrType::IndexRoot, Some(index))
+        .ok_or_else(|| Error::io(format!("$INDEX_ROOT:{index} not found")))?;
+    let value = ir.attr_offset
+        + ir.resident_value_offset
+            .ok_or_else(|| Error::io(format!("$INDEX_ROOT:{index} is not resident")))?
+            as usize;
+    record
+        .get(value + 0x08..value + 0x0C)
+        .map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")))
+        .ok_or_else(|| Error::io(format!("$INDEX_ROOT:{index} is too short for its header")))
+}
+
+/// Replace the entry for `key` in the spilled index named `index` of the
+/// record `rec` by `new`, in the node that holds it, found along the path
+/// the key routes. Returns whether there was one. A `dry_run` writes
+/// nothing.
+fn replace_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    index: &str,
+    key: &[u8],
+    new: &[u8],
+    dry_run: bool,
+) -> Result<bool, Error> {
+    let (_, record) = crate::mft_io::read_mft_record_io(io, rec)?;
+    let mut root = crate::index_io::parse_index_root_node_of(&record, index, NodeKeys::View)?;
+    if let Some(e) = root.entries.iter_mut().find(|e| node_key(e) == key) {
+        e.key = new.to_vec();
+        let mut out = record.clone();
+        crate::index_io::write_index_root_node_of(&mut out, index, &root)?;
+        if !dry_run {
+            crate::mft_io::restore_mft_record_io(io, rec, &out)?;
+        }
+        return Ok(true);
+    }
+    let ia = crate::idx_block::load_index_io(io, rec, index)?;
+    let mut next = child_toward(&root, key);
+    for _ in 0..64 {
+        let Some(vcn) = next else {
+            return Ok(false);
+        };
+        let block = crate::idx_block::read_indx_block_io(io, &ia, vcn)?;
+        let mut node = crate::index_io::parse_indx_node_of(&block, NodeKeys::View)?;
+        if let Some(e) = node.entries.iter_mut().find(|e| node_key(e) == key) {
+            e.key = new.to_vec();
+            let bytes = crate::index_io::write_indx_node(&block, &node, vcn)?;
+            if !dry_run {
+                crate::idx_block::write_indx_block_io(io, &ia, vcn, &bytes)?;
+            }
+            return Ok(true);
+        }
+        next = child_toward(&node, key);
+    }
+    Err(Error::io(format!(
+        "{index} is deeper than 64 levels, or has a cycle"
+    )))
 }
 
 /// Take the entry for `key` out of the index named `index` of the record

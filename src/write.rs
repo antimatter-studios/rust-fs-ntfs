@@ -2446,50 +2446,128 @@ fn insert_entry_in_parent_io<T: BlockIo + ?Sized>(
     // to the ASCII upcase-fold if $UpCase can't be loaded (shouldn't
     // happen on a well-formed volume).
     let upcase = crate::upcase::UpcaseTable::load_io(io).ok();
+    let order = FileNameOrder {
+        basename,
+        upcase: upcase.as_ref(),
+    };
     if !parent_has_overflow {
         let (params, mut parent) = read_mft_record_io(io, parent_rec)?;
-        match index_io::insert_entry_into_index_root_with_collation(
-            &mut parent,
-            entry_bytes,
-            basename,
-            upcase.as_ref(),
-        ) {
+        match order.insert_into_root(&mut parent, entry_bytes) {
             Ok(()) => return crate::mft_io::restore_mft_record_io(io, parent_rec, &parent),
             Err(e) if e.contains("exceeds record capacity") => {}
             Err(e) => return Err(e),
         }
 
-        return promote_parent_index_io(
-            io,
-            parent_rec,
-            &params,
-            entry_bytes,
-            basename,
-            upcase.as_ref(),
-        );
+        return promote_parent_index_io(io, parent_rec, &params, entry_bytes, &order, false);
     }
 
-    let (_, root) = read_mft_record_io(io, parent_rec)?;
-    let (ia, vcn, _) = routed_leaf_io(io, parent_rec, &root, basename, upcase.as_ref())?;
-    let insert = idx_block::update_indx_block_io(io, &ia, vcn, |block| {
+    insert_routed_entry_io(io, parent_rec, entry_bytes, &order, false)
+}
+
+/// What the B-tree insert needs to know of the index it puts an entry in:
+/// the index's name, how its keys read, and where the new entry goes. A
+/// directory's `$I30` orders file names ([`FileNameOrder`]); the `$Extend`
+/// view indexes order their keys as `COLLATION_NTOFS_ULONGS`
+/// (`view_index::UlongsOrder`, #571). Each value describes the insert of
+/// one entry, so the routing methods know which entry they route.
+pub(crate) trait IndexOrder {
+    /// The index's name, as its attributes carry it: `$I30`, `$R`, `$O`.
+    fn index(&self) -> &str;
+    /// How the index's keys read.
+    fn keys(&self) -> index_io::NodeKeys;
+    /// Put `entry` in the resident root of `record`, a leaf, in collation
+    /// order. Fails with the record-capacity error when the record cannot
+    /// hold it.
+    fn insert_into_root(&self, record: &mut [u8], entry: &[u8]) -> Result<(), Error>;
+    /// The child the entry routes to below the interior root of `record`.
+    fn root_child_vcn(&self, record: &[u8]) -> Result<u64, Error>;
+    /// The child the entry routes to below the interior INDX block `block`
+    /// (clean bytes).
+    fn block_child_vcn(&self, block: &[u8]) -> Result<u64, Error>;
+    /// Put `entry` in the leaf INDX block `block` (clean bytes), in
+    /// collation order. Fails with "INDX block has no room" when the block
+    /// cannot hold it.
+    fn insert_into_block(&self, block: &mut [u8], entry: &[u8]) -> Result<(), Error>;
+    /// Put `entry` in the leaf `node`, in collation order.
+    fn insert_sorted(&self, node: &mut index_io::IndexNode, entry: &[u8]) -> Result<(), Error>;
+}
+
+/// A directory's `$I30`, ordered by `COLLATION_FILE_NAME`: the insert of
+/// the entry for `basename`, folded by `upcase`.
+struct FileNameOrder<'a> {
+    basename: &'a str,
+    upcase: Option<&'a crate::upcase::UpcaseTable>,
+}
+
+impl IndexOrder for FileNameOrder<'_> {
+    fn index(&self) -> &str {
+        crate::mkfs::stream::I30
+    }
+
+    fn keys(&self) -> index_io::NodeKeys {
+        index_io::NodeKeys::FileNames
+    }
+
+    fn insert_into_root(&self, record: &mut [u8], entry: &[u8]) -> Result<(), Error> {
+        index_io::insert_entry_into_index_root_with_collation(
+            record,
+            entry,
+            self.basename,
+            self.upcase,
+        )
+    }
+
+    fn root_child_vcn(&self, record: &[u8]) -> Result<u64, Error> {
+        index_io::index_root_child_vcn(record, self.basename, self.upcase)
+    }
+
+    fn block_child_vcn(&self, block: &[u8]) -> Result<u64, Error> {
+        index_io::indx_child_vcn(block, self.basename, self.upcase)
+    }
+
+    fn insert_into_block(&self, block: &mut [u8], entry: &[u8]) -> Result<(), Error> {
         index_io::insert_entry_into_indx_block_with_collation(
             block,
-            entry_bytes,
-            basename,
-            upcase.as_ref(),
+            entry,
+            self.basename,
+            self.upcase,
         )
-    });
+    }
+
+    fn insert_sorted(&self, node: &mut index_io::IndexNode, entry: &[u8]) -> Result<(), Error> {
+        node.insert_sorted(entry, self.upcase)
+    }
+}
+
+/// Insert `entry_bytes` into the index `order` names of the record
+/// `parent_rec`, which has spilled into INDX blocks: into the leaf its key
+/// routes to, splitting it when it is full; see [`plan_index_split_io`].
+///
+/// A `dry_run` works the insert out, refusals included, and writes
+/// nothing: the leaf is changed in memory and a split only planned.
+pub(crate) fn insert_routed_entry_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    entry_bytes: &[u8],
+    order: &dyn IndexOrder,
+    dry_run: bool,
+) -> Result<(), Error> {
+    let (_, root) = read_mft_record_io(io, parent_rec)?;
+    let (ia, vcn, mut leaf) = routed_leaf_io(io, parent_rec, &root, order)?;
+    let insert = if dry_run {
+        order.insert_into_block(&mut leaf, entry_bytes)
+    } else {
+        idx_block::update_indx_block_io(io, &ia, vcn, |block| {
+            order.insert_into_block(block, entry_bytes)
+        })
+    };
     match insert {
         Ok(()) => Ok(()),
         Err(e) if e.contains("INDX block has no room") => {
-            let plan = plan_index_split_io(
-                io,
-                parent_rec,
-                entry_bytes,
-                basename,
-                upcase.as_ref(),
-                false,
-            )?;
+            let plan = plan_index_split_io(io, parent_rec, entry_bytes, order, dry_run)?;
+            if dry_run {
+                return Ok(());
+            }
             commit_index_split_io(io, parent_rec, plan)
         }
         Err(e) => Err(e.context(
@@ -2503,10 +2581,9 @@ fn routed_leaf_io<T: BlockIo + ?Sized>(
     io: &mut T,
     parent_rec: u64,
     root: &[u8],
-    basename: &str,
-    upcase: Option<&crate::upcase::UpcaseTable>,
+    order: &dyn IndexOrder,
 ) -> Result<(idx_block::IndexAllocation, u64, Vec<u8>), Error> {
-    let (ia, mut path) = routed_path_io(io, parent_rec, root, basename, upcase)?;
+    let (ia, mut path) = routed_path_io(io, parent_rec, root, order)?;
     let (vcn, block) = path.pop().ok_or(Error::io("index has no leaf"))?;
     Ok((ia, vcn, block))
 }
@@ -2519,11 +2596,10 @@ fn routed_path_io<T: BlockIo + ?Sized>(
     io: &mut T,
     parent_rec: u64,
     root: &[u8],
-    basename: &str,
-    upcase: Option<&crate::upcase::UpcaseTable>,
+    order: &dyn IndexOrder,
 ) -> Result<(idx_block::IndexAllocation, RoutedPath), Error> {
-    let ia = idx_block::load_for_directory_io(io, parent_rec)?;
-    let mut vcn = index_io::index_root_child_vcn(root, basename, upcase)?;
+    let ia = idx_block::load_index_io(io, parent_rec, order.index())?;
+    let mut vcn = order.root_child_vcn(root)?;
     let allocated = ia.allocated_block_vcns();
     let mut path: RoutedPath = Vec::new();
     loop {
@@ -2536,7 +2612,7 @@ fn routed_path_io<T: BlockIo + ?Sized>(
         let flags = block[idx_block::INDX_INDEX_HEADER_OFFSET + index_io::IH_FLAGS_OFFSET];
         let interior = flags & index_io::IH_FLAG_HAS_SUBNODES != 0;
         let next = if interior {
-            Some(index_io::indx_child_vcn(&block, basename, upcase)?)
+            Some(order.block_child_vcn(&block)?)
         } else {
             None
         };
@@ -2559,33 +2635,35 @@ fn preflight_parent_insert_io<T: BlockIo + ?Sized>(
     upcase: &crate::upcase::UpcaseTable,
 ) -> Result<(), Error> {
     let entry = index_io::build_file_name_index_entry(0, 0, basename, 0, is_dir)?;
-    let (_, _, mut leaf) = routed_leaf_io(io, parent_rec, root, basename, Some(upcase))?;
-    match index_io::insert_entry_into_indx_block_with_collation(
-        &mut leaf,
-        &entry,
+    let order = FileNameOrder {
         basename,
-        Some(upcase),
-    ) {
+        upcase: Some(upcase),
+    };
+    let (_, _, mut leaf) = routed_leaf_io(io, parent_rec, root, &order)?;
+    match order.insert_into_block(&mut leaf, &entry) {
         Ok(()) => Ok(()),
         Err(e) if e.contains("INDX block has no room") => {
-            plan_index_split_io(io, parent_rec, &entry, basename, Some(upcase), true).map(|_| ())
+            plan_index_split_io(io, parent_rec, &entry, &order, true).map(|_| ())
         }
         Err(e) => Err(e),
     }
 }
 
-/// Where the new INDX blocks of one `$I30` insert come from.
+/// Where the new INDX blocks of one insert come from, into `$I30` or a
+/// view index (#571).
 ///
-/// A block the index already maps but marks free in `$Bitmap:$I30` is
+/// A block the index already maps but marks free in its `$Bitmap` is
 /// reused first; otherwise the allocation grows by one block at its end,
 /// taking clusters from the volume. In a dry run (the preflight) clusters are
 /// found but not taken, so nothing on the volume changes.
 struct IndexBlockAllocator {
     ia: idx_block::IndexAllocation,
+    /// The index's name: `$I30`, `$R`, `$O`.
+    index: String,
     clusters: u64,
     volume_bitmap: crate::bitmap::BitmapLocation,
-    /// Blocks `$Bitmap:$I30` can describe where it lives now, resident in
-    /// the directory's record. `None` when it is non-resident, which this
+    /// Blocks the index's `$Bitmap` can describe where it lives now,
+    /// resident in the index's record. `None` when it is non-resident, which this
     /// writer does not grow.
     bitmap_blocks: Option<u64>,
     /// Cluster runs taken from the volume for this insert.
@@ -2599,12 +2677,12 @@ impl IndexBlockAllocator {
         io: &mut T,
         record: &[u8],
         ia: idx_block::IndexAllocation,
+        index: &str,
         dry_run: bool,
     ) -> Result<Self, Error> {
         let clusters = ia.block_size.div_ceil(ia.params.cluster_size);
-        let bitmap =
-            attr_io::find_attribute(record, AttrType::Bitmap, Some(crate::mkfs::stream::I30))
-                .ok_or(Error::io("$Bitmap:$I30 missing"))?;
+        let bitmap = attr_io::find_attribute(record, AttrType::Bitmap, Some(index))
+            .ok_or_else(|| Error::io(format!("$Bitmap:{index} missing")))?;
         let bitmap_blocks = if bitmap.is_resident {
             Some(u64::from(bitmap.resident_value_length.unwrap_or(0)) * 8)
         } else {
@@ -2612,6 +2690,7 @@ impl IndexBlockAllocator {
         };
         Ok(Self {
             ia,
+            index: index.to_string(),
             clusters,
             volume_bitmap: crate::bitmap::locate_bitmap_io(io)?,
             bitmap_blocks,
@@ -2634,7 +2713,10 @@ impl IndexBlockAllocator {
         let reused = (0..mapped_blocks).find(|&b| !self.block_in_use(b));
         let block = reused.unwrap_or(mapped_blocks);
         let capacity = self.bitmap_blocks.ok_or_else(|| {
-            Error::no_space("index capacity: growing a non-resident $Bitmap:$I30 is not supported")
+            Error::no_space(format!(
+                "index capacity: growing a non-resident $Bitmap:{} is not supported",
+                self.index
+            ))
         })?;
         if block >= capacity || block as usize / 8 >= self.ia.bitmap.len() {
             return Err(Error::no_space(
@@ -2682,23 +2764,20 @@ impl IndexBlockAllocator {
         Ok(vcn)
     }
 
-    /// Write the grown `$INDEX_ALLOCATION:$I30` and `$Bitmap:$I30` into
-    /// `record`.
+    /// Write the grown `$INDEX_ALLOCATION` and `$Bitmap` of the index
+    /// into `record`.
     fn finish_record(&self, record: &mut [u8]) -> Result<(), Error> {
         if !self.changed {
             return Ok(());
         }
+        let index = self.index.as_str();
         let runs_end = self.ia.runs.last().map_or(0, |r| r.starting_vcn + r.length);
         let mapping = crate::data_runs::encode_runs(&self.ia.runs)?;
-        let allocation = attr_io::find_attribute(
-            record,
-            AttrType::IndexAllocation,
-            Some(crate::mkfs::stream::I30),
-        )
-        .ok_or(Error::io("$INDEX_ALLOCATION:$I30 disappeared"))?;
+        let allocation = attr_io::find_attribute(record, AttrType::IndexAllocation, Some(index))
+            .ok_or_else(|| Error::io(format!("$INDEX_ALLOCATION:{index} disappeared")))?;
         let replacement = crate::record_build::build_nonresident_attribute(
             AttrType::IndexAllocation as u32,
-            Some(crate::mkfs::stream::I30),
+            Some(index),
             allocation.attribute_id,
             self.ia.data_length,
             runs_end * self.ia.params.cluster_size,
@@ -2707,12 +2786,13 @@ impl IndexBlockAllocator {
             &mapping,
         )?;
         crate::attr_resize::replace_attribute(record, allocation.attr_offset, &replacement)?;
-        let bitmap =
-            attr_io::find_attribute(record, AttrType::Bitmap, Some(crate::mkfs::stream::I30))
-                .ok_or(Error::io("$Bitmap:$I30 disappeared"))?;
+        let bitmap = attr_io::find_attribute(record, AttrType::Bitmap, Some(index))
+            .ok_or_else(|| Error::io(format!("$Bitmap:{index} disappeared")))?;
         let length = bitmap.resident_value_length.unwrap_or(0) as usize;
         if !bitmap.is_resident || length != self.ia.bitmap.len() {
-            return Err(Error::io("index capacity: unsupported $Bitmap:$I30 layout"));
+            return Err(Error::io(format!(
+                "index capacity: unsupported $Bitmap:{index} layout"
+            )));
         }
         let value = bitmap.attr_offset
             + bitmap
@@ -2739,8 +2819,8 @@ type CreatedBlocks = Vec<(u64, Vec<u8>)>;
 /// Blocks an insert rewrites in place: VCN, new clean bytes, old clean bytes.
 type RewrittenBlocks = Vec<(u64, Vec<u8>, Vec<u8>)>;
 
-/// An `$I30` insert that splits nodes, worked out in memory before any of
-/// it is written.
+/// An insert that splits nodes, worked out in memory before any of it is
+/// written.
 struct IndexSplitPlan {
     /// The directory's record with its new root and grown allocation.
     record: Vec<u8>,
@@ -2749,7 +2829,8 @@ struct IndexSplitPlan {
     allocator: IndexBlockAllocator,
 }
 
-/// Insert `entry_bytes` into a full leaf of the directory's B-tree.
+/// Insert `entry_bytes` into a full leaf of the B-tree of the index
+/// `order` names: a directory's `$I30`, or a view index (#571).
 ///
 /// The leaf splits around its middle entry, which moves up into the parent
 /// routing to the left half, while the entry that routed to the leaf now
@@ -2765,24 +2846,24 @@ fn plan_index_split_io<T: BlockIo + ?Sized>(
     io: &mut T,
     parent_rec: u64,
     entry_bytes: &[u8],
-    basename: &str,
-    upcase: Option<&crate::upcase::UpcaseTable>,
+    order: &dyn IndexOrder,
     dry_run: bool,
 ) -> Result<IndexSplitPlan, Error> {
     let (_, record) = read_mft_record_io(io, parent_rec)?;
-    let (ia, mut path) = routed_path_io(io, parent_rec, &record, basename, upcase)?;
+    let (ia, mut path) = routed_path_io(io, parent_rec, &record, order)?;
     let block_size = usize::try_from(ia.block_size)
         .map_err(|_| "index block size does not fit usize".to_string())?;
     let bytes_per_sector = ia.params.bytes_per_sector;
-    let mut allocator = IndexBlockAllocator::new(io, &record, ia, dry_run)?;
+    let (index, keys) = (order.index(), order.keys());
+    let mut allocator = IndexBlockAllocator::new(io, &record, ia, index, dry_run)?;
 
     let planned = (|| -> Result<(Vec<u8>, CreatedBlocks, RewrittenBlocks), Error> {
         let mut created = Vec::new();
         let mut rewritten = Vec::new();
 
         let (mut vcn, mut block) = path.pop().ok_or(Error::io("index has no leaf"))?;
-        let mut node = index_io::parse_indx_node(&block)?;
-        node.insert_sorted(entry_bytes, upcase)?;
+        let mut node = index_io::parse_indx_node_of(&block, keys)?;
+        order.insert_sorted(&mut node, entry_bytes)?;
         // The separator the root still has to take, if every level split.
         let mut carry = None;
         loop {
@@ -2802,7 +2883,7 @@ fn plan_index_split_io<T: BlockIo + ?Sized>(
             let split = (separator.key, vcn, right_vcn);
             match path.pop() {
                 Some((parent_vcn, parent_block)) => {
-                    node = index_io::parse_indx_node(&parent_block)?;
+                    node = index_io::parse_indx_node_of(&parent_block, keys)?;
                     node.route_split(split.0, split.1, split.2)?;
                     vcn = parent_vcn;
                     block = parent_block;
@@ -2814,12 +2895,12 @@ fn plan_index_split_io<T: BlockIo + ?Sized>(
             }
         }
 
-        let mut root = index_io::parse_index_root_node(&record)?;
+        let mut root = index_io::parse_index_root_node_of(&record, index, keys)?;
         if let Some((separator, left, right)) = carry {
             root.route_split(separator, left, right)?;
         }
         let mut out = record.clone();
-        let fitted = index_io::write_index_root_node(&mut out, &root)
+        let fitted = index_io::write_index_root_node_of(&mut out, index, &root)
             .and_then(|()| allocator.finish_record(&mut out));
         match fitted {
             Ok(()) => return Ok((out, created, rewritten)),
@@ -2859,7 +2940,7 @@ fn plan_index_split_io<T: BlockIo + ?Sized>(
             }
         };
         let mut out = record.clone();
-        index_io::write_index_root_node(&mut out, &root)?;
+        index_io::write_index_root_node_of(&mut out, index, &root)?;
         allocator.finish_record(&mut out)?;
         Ok((out, created, rewritten))
     })();
@@ -2930,16 +3011,22 @@ fn commit_index_split_io<T: BlockIo + ?Sized>(
     }))
 }
 
-/// Promote a full resident directory index into one allocated INDX leaf and
-/// insert the entry which triggered the promotion.
-fn promote_parent_index_io<T: BlockIo + ?Sized>(
+/// Promote a full resident index -- a directory's `$I30`, or a view index
+/// (#571) -- into one allocated INDX leaf and insert the entry which
+/// triggered the promotion. The record gains the index's
+/// `$INDEX_ALLOCATION` and `$Bitmap`, named as the index is.
+///
+/// A `dry_run` finds the block's clusters without taking them, builds the
+/// block and the record in memory, and writes nothing.
+pub(crate) fn promote_parent_index_io<T: BlockIo + ?Sized>(
     io: &mut T,
     parent_rec: u64,
     params: &crate::mft_io::BootParams,
     entry_bytes: &[u8],
-    basename: &str,
-    upcase: Option<&crate::upcase::UpcaseTable>,
+    order: &dyn IndexOrder,
+    dry_run: bool,
 ) -> Result<(), Error> {
+    let index = order.index();
     let block_size = usize::try_from(params.index_block_size)
         .map_err(|_| "index block size does not fit usize".to_string())?;
     let clusters = u64::from(params.index_block_size).div_ceil(params.cluster_size);
@@ -2950,21 +3037,19 @@ fn promote_parent_index_io<T: BlockIo + ?Sized>(
                 "no {clusters}-cluster run for the first INDX block"
             ))
         })?;
-    crate::bitmap::allocate_io(io, &volume_bitmap, lcn, clusters)?;
+    if !dry_run {
+        crate::bitmap::allocate_io(io, &volume_bitmap, lcn, clusters)?;
+    }
 
     let prepared = (|| -> Result<(Vec<u8>, Vec<u8>), Error> {
         let (_, mut parent) = read_mft_record_io(io, parent_rec)?;
         let mut block = index_io::promote_index_root_to_first_indx(
             &mut parent,
+            index,
             block_size,
             params.bytes_per_sector,
         )?;
-        index_io::insert_entry_into_indx_block_with_collation(
-            &mut block,
-            entry_bytes,
-            basename,
-            upcase,
-        )?;
+        order.insert_into_block(&mut block, entry_bytes)?;
 
         let mapping = crate::data_runs::encode_runs(&[DataRun {
             starting_vcn: 0,
@@ -2974,7 +3059,7 @@ fn promote_parent_index_io<T: BlockIo + ?Sized>(
         let allocation_id = crate::attr_resize::allocate_attribute_id(&mut parent);
         let allocation = crate::record_build::build_nonresident_attribute(
             AttrType::IndexAllocation as u32,
-            Some(crate::mkfs::stream::I30),
+            Some(index),
             allocation_id,
             u64::from(params.index_block_size),
             clusters * params.cluster_size,
@@ -2986,7 +3071,7 @@ fn promote_parent_index_io<T: BlockIo + ?Sized>(
         let bitmap_id = crate::attr_resize::allocate_attribute_id(&mut parent);
         let bitmap = build_named_resident_attribute(
             AttrType::Bitmap as u32,
-            crate::mkfs::stream::I30,
+            index,
             bitmap_id,
             &[1, 0, 0, 0, 0, 0, 0, 0],
         );
@@ -2997,10 +3082,15 @@ fn promote_parent_index_io<T: BlockIo + ?Sized>(
     let (parent, mut block) = match prepared {
         Ok(v) => v,
         Err(e) => {
-            crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
+            if !dry_run {
+                crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
+            }
             return Err(e);
         }
     };
+    if dry_run {
+        return Ok(());
+    }
 
     crate::mft_io::apply_fixup_on_write_magic(&mut block, params.bytes_per_sector, b"INDX")?;
     let block_offset = lcn
@@ -3487,44 +3577,30 @@ pub fn write_reparse_point_io<T: BlockIo + ?Sized>(
         Ok(())
     };
     // $Extend\$Reparse:$R gains the entry for the new tag and loses the
-    // old one's (#478). Both changes are tried on copies first, so a
+    // old one's (#478), in its root or its INDX blocks (#571). The record's
+    // change is tried on a copy and the index's worked out first, so a
     // refusal from either leaves the volume as it was.
     set_attribute(&mut before.clone())?;
-    let reindex = |r: &mut [u8]| -> Result<(), Error> {
-        if let Some(old) = old_tag {
-            view_index::remove(
-                r,
-                view_index::REPARSE_INDEX,
-                &view_index::reparse_key(old, file_ref),
-            )?;
-        }
-        view_index::put(
-            r,
-            view_index::REPARSE_INDEX,
-            &view_index::reparse_key(reparse_tag, file_ref),
-            &[],
-        )
-    };
-    edit_view_index_io(io, view_index::REPARSE_PATH, &reindex)?;
+    let new_key = view_index::reparse_key(reparse_tag, file_ref);
+    let old_key = old_tag.map(|old| view_index::reparse_key(old, file_ref));
+    let new_entry = Some((new_key.as_slice(), &[][..]));
+    let old_entry = old_key.as_deref().map(|k| (k, &[][..]));
+    rekey_view_entry_io(
+        io,
+        view_index::REPARSE_PATH,
+        view_index::REPARSE_INDEX,
+        old_entry,
+        new_entry,
+    )?;
     if let Err(e) = update_mft_record_io(io, rec, set_attribute) {
-        let undo = |r: &mut [u8]| -> Result<(), Error> {
-            view_index::remove(
-                r,
-                view_index::REPARSE_INDEX,
-                &view_index::reparse_key(reparse_tag, file_ref),
-            )?;
-            if let Some(old) = old_tag {
-                view_index::put(
-                    r,
-                    view_index::REPARSE_INDEX,
-                    &view_index::reparse_key(old, file_ref),
-                    &[],
-                )?;
-            }
-            Ok(())
-        };
         return Err(
-            match edit_view_index_io(io, view_index::REPARSE_PATH, &undo) {
+            match rekey_view_entry_io(
+                io,
+                view_index::REPARSE_PATH,
+                view_index::REPARSE_INDEX,
+                new_entry,
+                old_entry,
+            ) {
                 Ok(()) => e,
                 Err(u) => e.context(format!("and putting $Reparse:$R back failed: {u}")),
             },
@@ -3561,20 +3637,53 @@ fn object_id_of(record: &[u8]) -> Option<([u8; 16], Option<[u8; 48]>)> {
     Some((id, births))
 }
 
-/// Apply `edit` to the resident root of the `$Extend` view index whose
-/// record is at `path` (#478). The edit is tried on a copy first, so one
-/// the index refuses -- it has spilled into INDX blocks, or its record is
-/// full -- leaves the volume unchanged.
-fn edit_view_index_io<T: BlockIo + ?Sized>(
+/// A view-index entry as its key and its data.
+type ViewEntry<'a> = (&'a [u8], &'a [u8]);
+
+/// Move a file's entry in the `$Extend` view index `index` of the record
+/// at `path` from `from` to `to` (#478): the entry `from` names leaves, and
+/// the one `to` names goes in, in the root or an INDX block (#571). The
+/// same key in both is the entry rewritten with `to`'s data; `None` on
+/// either side is an entry only put or only taken out.
+///
+/// The new entry's insert is worked out first, so one the index refuses
+/// leaves the volume unchanged. When it then fails, the entry taken out is
+/// put back.
+fn rekey_view_entry_io<T: BlockIo + ?Sized>(
     io: &mut T,
     path: &str,
-    edit: &dyn Fn(&mut [u8]) -> Result<(), Error>,
+    index: &str,
+    from: Option<ViewEntry<'_>>,
+    to: Option<ViewEntry<'_>>,
 ) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, path)
         .map_err(|e| e.context(format!("{path}, the index this attribute is entered in")))?;
-    let (_, record) = read_mft_record_io(io, rec)?;
-    edit(&mut record.clone()).map_err(|e| e.context(path.to_string()))?;
-    update_mft_record_io(io, rec, edit)
+    let at_path = |e: Error| e.context(path.to_string());
+    if let Some((key, data)) = to {
+        view_index::check_put_io(io, rec, index, key, data).map_err(at_path)?;
+    }
+    let taken_out = match from {
+        Some((old, old_data)) if to.map(|(key, _)| key) != Some(old) => {
+            view_index::remove_io(io, rec, index, old)
+                .map_err(at_path)?
+                .then_some((old, old_data))
+        }
+        _ => None,
+    };
+    let Some((key, data)) = to else {
+        return Ok(());
+    };
+    let Err(e) = view_index::put_io(io, rec, index, key, data) else {
+        return Ok(());
+    };
+    let e = at_path(e);
+    Err(match taken_out {
+        None => e,
+        Some((old, old_data)) => match view_index::put_io(io, rec, index, old, old_data) {
+            Ok(()) => e,
+            Err(u) => e.context(format!("and putting the old entry back failed: {u}")),
+        },
+    })
 }
 
 /// Take the file whose record is `record` out of the `$Extend` view
@@ -3649,9 +3758,14 @@ pub fn remove_reparse_point_io<T: BlockIo + ?Sized>(
         &key,
     )?;
     if let Err(e) = update_mft_record_io(io, rec, clear) {
-        let undo = |r: &mut [u8]| view_index::put(r, view_index::REPARSE_INDEX, &key, &[]);
         return Err(
-            match edit_view_index_io(io, view_index::REPARSE_PATH, &undo) {
+            match rekey_view_entry_io(
+                io,
+                view_index::REPARSE_PATH,
+                view_index::REPARSE_INDEX,
+                None,
+                Some((&key, &[])),
+            ) {
                 Ok(()) => e,
                 Err(u) => e.context(format!("and putting $Reparse:$R back failed: {u}")),
             },
@@ -4442,12 +4556,12 @@ fn write_object_id_inner<T: BlockIo + ?Sized>(
     let old = object_id_of(&before);
     // An object id names one file on the volume: $Extend\$ObjId:$O is
     // keyed by it, and Windows refuses a second file the same id.
+    // The whole index is searched, its root and its INDX blocks (#571).
     let objid_rec = resolve_path_to_record_number_io(io, view_index::OBJID_PATH)?;
-    let (_, objid_record) = read_mft_record_io(io, objid_rec)?;
-    let taken = view_index::keys(&objid_record, view_index::OBJID_INDEX)
+    let taken = view_index::keys_io(io, objid_rec, view_index::OBJID_INDEX)
         .map_err(|e| e.context(view_index::OBJID_PATH))?
         .iter()
-        .any(|k| k.as_slice() == object_id.as_slice());
+        .any(|(k, _)| k.as_slice() == object_id.as_slice());
     if taken && old.map(|(id, _)| id) != Some(*object_id) {
         return Err(Error::exists(format!(
             "write_object_id {file_path}: another file already has that object id"
@@ -4461,13 +4575,15 @@ fn write_object_id_inner<T: BlockIo + ?Sized>(
         b
     });
     let entry_data = view_index::objid_data(file_ref, object_id, births.as_ref());
-    // The file's entry in $O moves to the new id (#478).
-    let reindex = |r: &mut [u8]| -> Result<(), Error> {
-        if let Some((old_id, _)) = old {
-            view_index::remove(r, view_index::OBJID_INDEX, &old_id)?;
-        }
-        view_index::put(r, view_index::OBJID_INDEX, object_id, &entry_data)
-    };
+    let old_data = old
+        .map(|(old_id, old_births)| view_index::objid_data(file_ref, &old_id, old_births.as_ref()));
+    // The file's entry in $O moves to the new id (#478), in the root or an
+    // INDX block (#571).
+    let new_entry = Some((object_id.as_slice(), entry_data.as_slice()));
+    let old_entry = old
+        .as_ref()
+        .zip(old_data.as_ref())
+        .map(|((old_id, _), data)| (old_id.as_slice(), data.as_slice()));
     let set_attribute = |record: &mut [u8]| -> Result<(), Error> {
         if let Some(loc) = attr_io::find_attribute(record, AttrType::ObjectId, None) {
             let attr_id = loc.attribute_id;
@@ -4485,18 +4601,22 @@ fn write_object_id_inner<T: BlockIo + ?Sized>(
         Ok(())
     };
     set_attribute(&mut before.clone())?;
-    edit_view_index_io(io, view_index::OBJID_PATH, &reindex)?;
+    rekey_view_entry_io(
+        io,
+        view_index::OBJID_PATH,
+        view_index::OBJID_INDEX,
+        old_entry,
+        new_entry,
+    )?;
     if let Err(e) = update_mft_record_io(io, rec, set_attribute) {
-        let undo = |r: &mut [u8]| -> Result<(), Error> {
-            view_index::remove(r, view_index::OBJID_INDEX, object_id)?;
-            if let Some((old_id, old_births)) = old {
-                let data = view_index::objid_data(file_ref, &old_id, old_births.as_ref());
-                view_index::put(r, view_index::OBJID_INDEX, &old_id, &data)?;
-            }
-            Ok(())
-        };
         return Err(
-            match edit_view_index_io(io, view_index::OBJID_PATH, &undo) {
+            match rekey_view_entry_io(
+                io,
+                view_index::OBJID_PATH,
+                view_index::OBJID_INDEX,
+                new_entry,
+                old_entry,
+            ) {
                 Ok(()) => e,
                 Err(u) => e.context(format!("and putting $ObjId:$O back failed: {u}")),
             },
@@ -4525,7 +4645,6 @@ pub fn remove_object_id_io<T: BlockIo + ?Sized>(
         // or an INDX block (#571).
         remove_view_entry_io(io, view_index::OBJID_PATH, view_index::OBJID_INDEX, &id)?;
         let data = view_index::objid_data(file_reference_of(rec, &before), &id, births.as_ref());
-        let undo = |r: &mut [u8]| view_index::put(r, view_index::OBJID_INDEX, &id, &data);
         let mut removed = false;
         let result = update_mft_record_io(io, rec, |record| {
             let Some(loc) = attr_io::find_attribute(record, AttrType::ObjectId, None) else {
@@ -4537,7 +4656,13 @@ pub fn remove_object_id_io<T: BlockIo + ?Sized>(
         });
         if let Err(e) = result {
             return Err(
-                match edit_view_index_io(io, view_index::OBJID_PATH, &undo) {
+                match rekey_view_entry_io(
+                    io,
+                    view_index::OBJID_PATH,
+                    view_index::OBJID_INDEX,
+                    None,
+                    Some((&id, &data)),
+                ) {
                     Ok(()) => e,
                     Err(u) => e.context(format!("and putting $ObjId:$O back failed: {u}")),
                 },
