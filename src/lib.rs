@@ -61,6 +61,7 @@ pub mod fs_core_bridge;
 pub mod fsck;
 pub mod idx_block;
 pub mod index_io;
+mod index_slack;
 pub mod logfile;
 pub mod logfile_replay;
 pub mod mft_bitmap;
