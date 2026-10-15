@@ -414,11 +414,19 @@ jobs:
       - name: Measure what Windows does with a change journal
         shell: pwsh
         run: pwsh -File test-disks/measure-usn-journal.ps1
+      # Real USN_RECORD_V2 records, checked against fsutil's file ID (#609).
+      - name: Capture and decode Windows USN_RECORD_V2 records
+        shell: pwsh
+        run: |
+          pwsh -File test-disks/capture-usn-v2-records.ps1
+          cargo test --locked --test usn_windows_capture
       - name: Upload Windows-authored fixtures
         uses: actions/upload-artifact@v4
         with:
           name: ntfs-windows-native-read-fixtures
           path: |
+            test-disks/usn-v2-capture.bin
+            test-disks/usn-v2-capture.tsv
             test-disks/ntfs-attrlist.img
             test-disks/ntfs-compressed.img
             test-disks/ntfs-symlink.img
