@@ -5,7 +5,7 @@
 //! Windows CI job. A missing capture fails, naming that script.
 #![cfg(windows)]
 
-use rust_fs_ntfs::usn::decode_usn_record_v2;
+use fs_ntfs::usn::decode_usn_record_v2;
 
 #[test]
 fn windows_usn_v2_records_match_fsutil() {
