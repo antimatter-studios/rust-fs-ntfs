@@ -22,8 +22,7 @@ jobs:
           NTFS_SD_CAPTURE: security-descriptor-windows.tsv
         run: |
           set -euo pipefail
-          core_manifest="$(cargo metadata --locked --format-version 1 | python -c 'import json,sys; print(next(p["manifest_path"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rust-fs-core"))')"
-          core_dir="$(dirname "$core_manifest")"
+          core_dir="$(cargo metadata --locked --format-version 1 | python -c 'import json,sys; from pathlib import Path; print(Path(next(p["manifest_path"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rust-fs-core")).parent.as_posix())')"
           bash "$core_dir/scripts/tier.sh" --refuse-skips --refuse-ignored unit -- cargo test --locked --test security_descriptor_windows_oracle
           grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' tmp/logs/unit.log
       - uses: actions/upload-artifact@v4
