@@ -108,6 +108,23 @@ pub fn mft_slot_count_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<(BootParams,
     Ok((params, slots))
 }
 
+/// How a cancellable batch ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InventoryOutcome {
+    /// The batch reached its bound or the end of the table, exactly as
+    /// [`inventory_batch_io`] reports it.
+    Complete(InventoryBatch),
+    /// The caller cancelled. `resume` is the first slot not read; nothing
+    /// before it is lost and nothing from it on was examined. `partial` is
+    /// `None` when the cancellation came before the first metadata read,
+    /// otherwise it holds the records read so far, with `next` equal to
+    /// `Some(resume)`.
+    Interrupted {
+        partial: Option<InventoryBatch>,
+        resume: InventoryCursor,
+    },
+}
+
 /// Examine at most `max_slots` MFT slots from `cursor` and return the
 /// in-use records among them.
 pub fn inventory_batch_io<T: BlockIo + ?Sized>(
@@ -115,8 +132,33 @@ pub fn inventory_batch_io<T: BlockIo + ?Sized>(
     cursor: InventoryCursor,
     max_slots: u64,
 ) -> Result<InventoryBatch, Error> {
+    match inventory_batch_cancellable_io(io, cursor, max_slots, &|| false)? {
+        InventoryOutcome::Complete(batch) => Ok(batch),
+        InventoryOutcome::Interrupted { .. } => {
+            unreachable!("a batch that cannot be cancelled was interrupted")
+        }
+    }
+}
+
+/// [`inventory_batch_io`], asking `cancelled` before the first metadata
+/// read and again before each record read. A `true` answer stops the batch
+/// at once and reports [`InventoryOutcome::Interrupted`] with the first
+/// unread slot, so an interrupted batch is never mistaken for a finished
+/// table.
+pub fn inventory_batch_cancellable_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    cursor: InventoryCursor,
+    max_slots: u64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<InventoryOutcome, Error> {
     if max_slots == 0 {
         return Err(Error::invalid("inventory bound must be at least one slot"));
+    }
+    if cancelled() {
+        return Ok(InventoryOutcome::Interrupted {
+            partial: None,
+            resume: cursor,
+        });
     }
     let (params, total_slots) = mft_slot_count_io(io)?;
     if cursor.next_record > total_slots {
@@ -141,6 +183,16 @@ pub fn inventory_batch_io<T: BlockIo + ?Sized>(
     };
     let mut buf = vec![0u8; size];
     for record_number in cursor.next_record..end {
+        if cancelled() {
+            let resume = InventoryCursor {
+                next_record: record_number,
+            };
+            batch.next = Some(resume);
+            return Ok(InventoryOutcome::Interrupted {
+                partial: Some(batch),
+                resume,
+            });
+        }
         batch.slots_visited += 1;
         let offset = mft_io::mft_record_offset_io(io, &params, record_number)?;
         io.read_exact_at(offset, &mut buf)
@@ -175,7 +227,7 @@ pub fn inventory_batch_io<T: BlockIo + ?Sized>(
     if end < total_slots {
         batch.next = Some(InventoryCursor { next_record: end });
     }
-    Ok(batch)
+    Ok(InventoryOutcome::Complete(batch))
 }
 
 #[cfg(test)]
@@ -308,6 +360,98 @@ mod tests {
             file_reference(MAX_RECORD_NUMBER, 0xFFFF).expect("fits"),
             u64::MAX
         );
+    }
+
+    /// Counts every read and refuses every write.
+    struct CountingIo {
+        inner: PathIo,
+        reads: std::rc::Rc<std::cell::Cell<u64>>,
+    }
+
+    impl BlockIo for CountingIo {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            self.reads.set(self.reads.get() + 1);
+            self.inner.read_exact_at(offset, buf)
+        }
+        fn write_all_at(&mut self, _offset: u64, _buf: &[u8]) -> Result<(), String> {
+            Err("inventory must not write".into())
+        }
+        fn size(&self) -> u64 {
+            self.inner.size()
+        }
+    }
+
+    fn counting(path: &Path) -> (CountingIo, std::rc::Rc<std::cell::Cell<u64>>) {
+        let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+        let io = CountingIo {
+            inner: PathIo::open_ro(path).expect("open"),
+            reads: reads.clone(),
+        };
+        (io, reads)
+    }
+
+    #[test]
+    fn cancel_before_io_reads_nothing_and_keeps_the_cursor() {
+        let path = image("cancel-first");
+        let (mut io, reads) = counting(&path);
+        let cursor = InventoryCursor { next_record: 7 };
+        let outcome = inventory_batch_cancellable_io(&mut io, cursor, 4, &|| true).expect("cancel");
+        assert_eq!(
+            outcome,
+            InventoryOutcome::Interrupted {
+                partial: None,
+                resume: cursor,
+            }
+        );
+        assert_eq!(reads.get(), 0, "cancelled before the first metadata read");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cancel_mid_batch_resumes_without_loss_or_duplication() {
+        let path = image("cancel-mid");
+        let (expected, _) = full_scan(&path, u64::MAX);
+        // Answer "go on" for the pre-I/O check and five record checks, then
+        // cancel before the sixth record read.
+        let asked = std::cell::Cell::new(0u32);
+        let cancel_after_five = || {
+            asked.set(asked.get() + 1);
+            asked.get() > 6
+        };
+        let (mut io, reads) = counting(&path);
+        let outcome = inventory_batch_cancellable_io(
+            &mut io,
+            InventoryCursor::START,
+            u64::MAX,
+            &cancel_after_five,
+        )
+        .expect("batch");
+        let InventoryOutcome::Interrupted {
+            partial: Some(partial),
+            resume,
+        } = outcome
+        else {
+            panic!("expected a mid-batch interruption, got {outcome:?}");
+        };
+        assert_eq!(resume, InventoryCursor { next_record: 5 });
+        assert_eq!(partial.next, Some(resume), "interrupted is not finished");
+        assert_eq!(partial.slots_visited, 5);
+        let reads_at_cancel = reads.get();
+        assert_eq!(asked.get(), 7, "no check after the cancel");
+
+        let mut entries = partial.entries.clone();
+        let mut cursor = resume;
+        loop {
+            let batch = inventory_batch_io(&mut io, cursor, 3).expect("resume");
+            entries.extend(batch.entries.iter().copied());
+            match batch.next {
+                Some(next) => cursor = next,
+                None => break,
+            }
+        }
+        assert!(reads.get() > reads_at_cancel);
+        assert_eq!(entries, expected, "no record lost or repeated");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
