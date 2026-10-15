@@ -64,6 +64,7 @@ pub mod index_io;
 pub mod logfile;
 pub mod logfile_replay;
 pub mod mft_bitmap;
+pub mod mft_inventory;
 pub mod mft_io;
 pub mod mkfs;
 pub mod read;

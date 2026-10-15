@@ -429,6 +429,8 @@ jobs:
             test-disks/ntfs-usnjrnl.img
             test-disks/ntfs-usnjrnl.query.txt
             test-disks/ntfs-usnjrnl.records.csv
+            test-disks/ntfs-inventory.img
+            test-disks/ntfs-inventory.fileids.txt
           if-no-files-found: error
           retention-days: 1
       - name: Upload the change journal measurements
