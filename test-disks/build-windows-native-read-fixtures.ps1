@@ -310,7 +310,11 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-inventory.img' -Label 'INVENTORY'
         [System.IO.File]::WriteAllText((Join-Path $root "reused-$i.txt"), 'r')
     }
     New-Item -ItemType Directory -Path (Join-Path $root 'dir') | Out-Null
-    $lines = foreach ($name in (Get-ChildItem -LiteralPath $root -Force -Name | Sort-Object)) {
+    # Only the names created above are queried: a forced root listing also
+    # returns System Volume Information, which Windows refuses to open for
+    # fsutil (Error 5: Access is denied).
+    $created = @(1..8 | ForEach-Object { "reused-$_.txt" }) + 'dir'
+    $lines = foreach ($name in ($created | Sort-Object)) {
         $o = & fsutil.exe file queryfileid (Join-Path $root $name) 2>&1
         if ($LASTEXITCODE -ne 0) { throw "fsutil file queryfileid ${name}: $o" }
         "$name`t$(($o | Out-String).Trim())"
