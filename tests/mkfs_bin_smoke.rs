@@ -260,15 +260,15 @@ fn mkfs_ntfs_version_names_the_tool_and_the_crate_version() {
     );
     let entry = env!("CARGO_BIN_EXE_rust-fs-ntfs");
     for flag in ["--version", "-V"] {
-        let mut invocations = vec![
+        let invocations = [
             Command::new(entry).args(["mkfs", flag]).output(),
             Command::new(entry).args(["mkfs.ntfs", flag]).output(),
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                Command::new(entry).arg0("mkfs.ntfs").arg(flag).output()
+            },
         ];
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            invocations.push(Command::new(entry).arg0("mkfs.ntfs").arg(flag).output());
-        }
         for (i, out) in invocations.into_iter().enumerate() {
             let out = out.expect("spawn mkfs.ntfs");
             assert!(
