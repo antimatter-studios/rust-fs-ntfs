@@ -13,9 +13,10 @@
 //! checks the read against the `ntfs` crate, a parser that is not this
 //! one.
 //!
-//! The fixture is assembled by hand because nothing in this crate writes
-//! an `$ATTRIBUTE_LIST` — only Windows does — so no self-generated
-//! volume can reach the path. A real 8 KiB file is split down the
+//! The fixture is assembled by hand because nothing in this crate splits
+//! one attribute across records -- it moves whole named streams to
+//! extension records (#480) -- so no self-generated volume can reach the
+//! path. A real 8 KiB file is split down the
 //! middle: the base record keeps VCN 0 and a genuine extension record,
 //! allocated in `$MFT:$Bitmap` and pointing back at the base through its
 //! `base_file_record_reference`, holds VCN 1.

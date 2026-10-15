@@ -48,6 +48,7 @@ use crate::block_io::{BlockIo as BlockIoTrait, CallbackBlockIo, PathIo as RwPath
 use crate::error::Error;
 
 pub mod attr_io;
+mod attr_list;
 pub mod attr_resize;
 pub mod bitmap;
 pub mod block_io;

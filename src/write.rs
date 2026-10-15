@@ -3477,6 +3477,17 @@ pub(crate) fn remove_attribute_at(
     attr_length: usize,
 ) -> Result<(), Error> {
     crate::attr_resize::refuse_if_attribute_list(record, "remove an attribute")?;
+    remove_listed_attribute_at(record, attr_offset, attr_length)
+}
+
+/// [`remove_attribute_at`] without the `$ATTRIBUTE_LIST` refusal, for
+/// [`crate::attr_list`], which takes the attribute's entry out of the
+/// file's list itself (#480).
+pub(crate) fn remove_listed_attribute_at(
+    record: &mut [u8],
+    attr_offset: usize,
+    attr_length: usize,
+) -> Result<(), Error> {
     let bytes_used =
         u32::from_le_bytes([record[0x18], record[0x19], record[0x1A], record[0x1B]]) as usize;
     if attr_length == 0
@@ -5100,6 +5111,19 @@ fn write_named_stream_unstamped_io<T: BlockIo + ?Sized>(
     data: &[u8],
 ) -> Result<(), Error> {
     let stream_name = &stored_stream_name_io(io, file_path, stream_name)?;
+    // A STREAM THE BASE RECORD CANNOT HOLD GOES THROUGH THE FILE'S LIST.
+    //
+    // A third or fourth stream on a file whose record was full was refused
+    // with "no room for new attribute", where Windows moves attributes to
+    // extension records and names them in an `$ATTRIBUTE_LIST` (#480). A
+    // file that has a list already is written through it too, so its
+    // streams in extension records are found and the list stays true.
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    if !stream_name.is_empty() && named_stream_takes_list_io(io, rec, stream_name, data)? {
+        validate_stream_name(stream_name)?;
+        refuse_metafile_io(io, rec, &format!("write_named_stream {file_path}"))?;
+        return write_listed_named_stream_io(io, rec, stream_name, data);
+    }
     match write_named_stream_resident_attempt_io(io, file_path, stream_name, data) {
         Ok(()) => Ok(()),
         Err(ResidentWriteError::NeedsPromotion(_)) => {
@@ -5131,6 +5155,133 @@ fn write_named_stream_unstamped_io<T: BlockIo + ?Sized>(
         }
         Err(ResidentWriteError::Other(error)) => Err(error),
     }
+}
+
+/// Whether writing `data` to the stream `stream_name` of the file whose
+/// base record is `rec` takes the file's `$ATTRIBUTE_LIST` (#480): the file
+/// has one, or its base record has room for the stream neither resident
+/// nor as the non-resident header the promotion would write.
+///
+/// The header's mapping pairs are those of the run the promotion would be
+/// given, found the same way and before anything changes, so this agrees
+/// with it to the byte. With no such run the promotion is left to report
+/// that the volume is full.
+fn named_stream_takes_list_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    stream_name: &str,
+    data: &[u8],
+) -> Result<bool, Error> {
+    let (params, record) = read_mft_record_io(io, rec)?;
+    if attr_io::find_attribute(&record, AttrType::AttributeList, None).is_some() {
+        return Ok(true);
+    }
+    let existing = attr_io::find_attribute(&record, AttrType::Data, Some(stream_name));
+    let used = u32::from_le_bytes(record[0x18..0x1C].try_into().expect("4 bytes")) as usize;
+    let allocated = u32::from_le_bytes(record[0x1C..0x20].try_into().expect("4 bytes")) as usize;
+    let room = allocated.saturating_sub(used) + existing.as_ref().map_or(0, |l| l.attr_length);
+    let name_bytes = 2 * stream_name.encode_utf16().count();
+    let align8 = crate::record_build::align8;
+    let resident = align8(align8(0x18 + name_bytes) + data.len());
+    if existing.as_ref().is_none_or(|l| l.is_resident) && room >= resident {
+        return Ok(false);
+    }
+    let clusters = (data.len() as u64).div_ceil(params.cluster_size).max(1);
+    let bm = bitmap::locate_bitmap_io(io)?;
+    let Some(lcn) = bitmap::find_free_run_io(io, &bm, clusters, params.mft_lcn)? else {
+        return Ok(false);
+    };
+    let mapping = data_runs::encode_runs(&[DataRun {
+        starting_vcn: 0,
+        length: clusters,
+        lcn: Some(lcn),
+    }])?;
+    let nonresident = align8(align8(0x40 + name_bytes) + mapping.len());
+    Ok(room < nonresident)
+}
+
+/// Write `data` to the stream `stream_name` of the file whose base record
+/// is `rec`, through the file's `$ATTRIBUTE_LIST`, which is made when the
+/// file has none (#480); see [`crate::attr_list`].
+///
+/// The stream is resident when it fits in an empty extension record and
+/// was not already non-resident, as Windows never moves a stream back into
+/// its record; otherwise its clusters are allocated and written first. A
+/// rewrite frees the old stream's clusters only once the records no
+/// longer name them, and a write refused before then gives back what it
+/// allocated.
+fn write_listed_named_stream_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    stream_name: &str,
+    data: &[u8],
+) -> Result<(), Error> {
+    let mut file = crate::attr_list::ListedFile::open(io, rec)?;
+    let found = file.find(AttrType::Data, stream_name)?;
+    let (old_runs, was_nonresident) = match &found {
+        Some(found) => (file.runs(found)?, !found.loc.is_resident),
+        None => (Vec::new(), false),
+    };
+    let resident = crate::record_build::build_named_resident_data_attribute(0, stream_name, data)?;
+    let attr = if !was_nonresident && resident.len() <= file.max_attribute_len() {
+        resident
+    } else {
+        match listed_nonresident_stream_io(io, &mut file, stream_name, data) {
+            Ok(attr) => attr,
+            Err(e) => return Err(file.abandon(io, e)),
+        }
+    };
+    let placed = match found {
+        Some(_) => file.replace(io, AttrType::Data, stream_name, attr),
+        None => file.add(io, attr),
+    };
+    if let Err(e) = placed {
+        return Err(file.abandon(io, e));
+    }
+    file.commit(io)?;
+    free_named_stream_runs_io(io, stream_name, "rewritten", old_runs)
+}
+
+/// A non-resident `$DATA` named `stream_name` holding `data`, in clusters
+/// allocated and written here and counted among those `file` gives back if
+/// the change is abandoned.
+fn listed_nonresident_stream_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file: &mut crate::attr_list::ListedFile,
+    stream_name: &str,
+    data: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let params = *file.params();
+    let size = data.len() as u64;
+    let clusters = size.div_ceil(params.cluster_size).max(1);
+    let bm = bitmap::locate_bitmap_io(io)?;
+    let lcn = bitmap::find_free_run_io(io, &bm, clusters, params.mft_lcn)?
+        .ok_or_else(|| Error::no_space(format!("no contiguous free run of {clusters} clusters")))?;
+    bitmap::allocate_io(io, &bm, lcn, clusters)?;
+    file.adopt_clusters(lcn, clusters);
+    let allocated = clusters * params.cluster_size;
+    let at = crate::mft_io::cluster_span(&params, lcn, 0, 0, allocated, io.size())
+        .map_err(|e| e.context("write data"))?;
+    let mut bytes = data.to_vec();
+    bytes.resize(allocated as usize, 0);
+    io.write_all_at(at, &bytes)
+        .map_err(|e| Error::io(format!("write data: {e}")))?;
+    io.sync()?;
+    let mapping = data_runs::encode_runs(&[DataRun {
+        starting_vcn: 0,
+        length: clusters,
+        lcn: Some(lcn),
+    }])?;
+    crate::record_build::build_nonresident_attribute(
+        AttrType::Data as u32,
+        Some(stream_name),
+        0,
+        size,
+        allocated,
+        size,
+        clusters as i64 - 1,
+        &mapping,
+    )
 }
 
 /// Enumerate the names of every *named* `$DATA` stream on a file
@@ -5236,9 +5387,21 @@ fn delete_named_stream_unstamped_io<T: BlockIo + ?Sized>(
     // clusters marked allocated that nothing owns, never a live
     // attribute pointing at free space.
     let (_params, record_bytes) = read_mft_record_io(io, rec)?;
-    // Before the lookup: on such a file the stream may live in an
-    // extension record, where the base record's walk would call it missing.
-    crate::attr_resize::refuse_if_attribute_list(&record_bytes, "delete a named stream")?;
+    // Before the lookup: on a file with an $ATTRIBUTE_LIST the stream may
+    // live in an extension record, where the base record's walk would call
+    // it missing. The list finds it, and loses its entry with it (#480).
+    if attr_io::find_attribute(&record_bytes, AttrType::AttributeList, None).is_some() {
+        let mut file = crate::attr_list::ListedFile::open(io, rec)?;
+        let found = file
+            .find(AttrType::Data, stream_name)?
+            .ok_or_else(|| Error::not_found(format!("named stream '{stream_name}' not found")))?;
+        let runs_to_free = file.runs(&found)?;
+        if let Err(e) = file.remove(AttrType::Data, stream_name) {
+            return Err(file.abandon(io, e));
+        }
+        file.commit(io)?;
+        return free_named_stream_runs_io(io, stream_name, "removed", runs_to_free);
+    }
     let runs_to_free = named_stream_runs(&record_bytes, stream_name)?;
 
     update_mft_record_io(io, rec, |record| {

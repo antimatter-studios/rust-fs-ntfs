@@ -334,6 +334,17 @@ pub(crate) fn insert_attribute_collated_typed(
     upcase: Option<&crate::upcase::UpcaseTable>,
 ) -> Result<(), ResidentResizeError> {
     refuse_if_attribute_list(record, "insert an attribute").map_err(ResidentResizeError::Other)?;
+    insert_attribute_listed_typed(record, new_attr, upcase)
+}
+
+/// [`insert_attribute_collated_typed`] without the `$ATTRIBUTE_LIST`
+/// refusal, for [`crate::attr_list`], which enters every attribute it puts
+/// in a record in the file's list itself (#480).
+pub(crate) fn insert_attribute_listed_typed(
+    record: &mut [u8],
+    new_attr: &[u8],
+    upcase: Option<&crate::upcase::UpcaseTable>,
+) -> Result<(), ResidentResizeError> {
     let new_len = new_attr.len();
     if new_len == 0 || !new_len.is_multiple_of(8) {
         return Err(ResidentResizeError::Other(Error::io(format!(

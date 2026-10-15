@@ -1928,6 +1928,177 @@
       "image": "nfs-win-format-win-write-streams-mac-delete-win-chkdsk.img",
       "_notes": "Windows writes one file with forty non-resident named streams, which overflow its base record, so Windows moves attributes to extension records behind an $ATTRIBUTE_LIST. This crate unlinks the file's last name, and chkdsk grades that the extension records and the clusters their attributes map were freed with the base record, not left in use with no base (#565)."
     },
+    "mac-format-mac-write-streams-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "ALSMALL",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "many.bin"
+        },
+        {
+          "op": "mac-write",
+          "path": "/many.bin",
+          "content": "unnamed"
+        },
+        {
+          "op": "mac-write-streams",
+          "path": "/many.bin",
+          "count": "130",
+          "size_bytes": "16",
+          "delete_every": "0"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-verify-streams",
+          "path": "/many.bin",
+          "count": "130",
+          "size_bytes": "16",
+          "delete_every": "0",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-mac-format-mac-write-streams-win-chkdsk.img",
+      "_notes": "130 small resident streams on one file outgrow its base record, so this crate gives the file an $ATTRIBUTE_LIST and moves streams to extension records; the list itself outgrows the base record and goes to a cluster, then to a run of two. chkdsk grades the records and the list, and Windows must read back every stream (#480)."
+    },
+    "mac-format-mac-write-big-streams-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "ALBIG",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "many.bin"
+        },
+        {
+          "op": "mac-write",
+          "path": "/many.bin",
+          "content": "unnamed"
+        },
+        {
+          "op": "mac-write-streams",
+          "path": "/many.bin",
+          "count": "40",
+          "size_bytes": "2000",
+          "delete_every": "2"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-verify-streams",
+          "path": "/many.bin",
+          "count": "40",
+          "size_bytes": "2000",
+          "delete_every": "2",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-mac-format-mac-write-big-streams-win-chkdsk.img",
+      "_notes": "Forty non-resident streams on one file spread over extension records behind an $ATTRIBUTE_LIST this crate makes, then every second one is deleted, which takes its entry out of the list and empties records. chkdsk grades the records, the list and the clusters, and Windows must read back the twenty left (#480)."
+    },
+    "win-format-win-write-streams-mac-write-streams-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "ALWIN",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-streams",
+          "path": "/many.bin",
+          "count": "40",
+          "size_bytes": "2000",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "mac-write-streams",
+          "path": "/many.bin",
+          "count": "60",
+          "size_bytes": "2000",
+          "delete_every": "5"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-verify-streams",
+          "path": "/many.bin",
+          "count": "60",
+          "size_bytes": "2000",
+          "delete_every": "5",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-win-format-win-write-streams-mac-write-streams-win-chkdsk.img",
+      "_notes": "Windows writes one file with forty non-resident named streams and spreads its attributes over extension records behind its own $ATTRIBUTE_LIST. This crate rewrites those forty in place, adds twenty more and deletes every fifth, through Windows' list. chkdsk grades the result and Windows must read back every stream left (#480)."
+    },
     "win-format-win-write-views-mac-write-views-win-chkdsk": {
       "status": "pending",
       "volume_params": {

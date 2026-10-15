@@ -969,6 +969,21 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      # Streams a file's base record cannot hold, written here: the file
+      # gets an $ATTRIBUTE_LIST and extension records, or Windows' own
+      # list is kept true. chkdsk grades them and Windows reads every
+      # stream back (#480).
+      - name: Validate streams written through an attribute list on Windows
+        shell: bash
+        run: |
+          for scenario in mac-format-mac-write-streams-win-chkdsk \
+            mac-format-mac-write-big-streams-win-chkdsk \
+            win-format-win-write-streams-mac-write-streams-win-chkdsk; do
+            bash scripts/run-matrix.sh "$scenario" \
+              --vm-host=runneradmin@localhost \
+              --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+              --vm-workdir=C:/rust-fs-ntfs-matrix
+          done
       - name: Validate enumeration without required paths on Windows
         shell: bash
         run: |

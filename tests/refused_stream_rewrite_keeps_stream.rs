@@ -39,16 +39,25 @@ fn stream<T: BlockIo + ?Sized>(io: &mut T, rec: u64, name: &str) -> Option<Vec<u
         .expect("read the stream")
 }
 
-/// #469's reproduction: an `$EA` fills most of the record, so the
-/// non-resident header for `zz` does not fit, and the refused rewrite
-/// must leave the empty resident `zz` in place.
+/// #469's path: the record has room for neither the resident nor the
+/// non-resident `zz`, and the refused rewrite must leave the empty
+/// resident `zz` in place.
+///
+/// #469's reproduction was a file whose `$EA` filled the record. A file's
+/// stream now moves to an extension record instead (#480), so the record
+/// here is a directory's, whose attributes are not moved between records,
+/// filled with small streams until the next is refused.
 #[test]
 fn a_rewrite_refused_for_want_of_record_space_keeps_the_resident_stream() {
-    let (mut io, rec) = volume_with_a_file("record");
-    write::write_ea_io(&mut io, "/f", b"PAD", &[7u8; 600], 0).expect("write the padding EA");
-    write::write_named_stream_io(&mut io, "/f", "zz", b"").expect("create zz, empty");
+    let (mut io, _) = volume_with_a_file("record");
+    let rec = write::mkdir_io(&mut io, "/", "d").expect("mkdir /d");
+    write::write_named_stream_io(&mut io, "/d", "zz", b"").expect("create zz, empty");
+    let filled = (0..64).any(|i| {
+        write::write_named_stream_io(&mut io, "/d", &format!("f{i:02}"), &[7u8; 8]).is_err()
+    });
+    assert!(filled, "64 small streams fitted in a directory's record");
 
-    let got = write::write_named_stream_io(&mut io, "/f", "zz", &[5u8; 556]);
+    let got = write::write_named_stream_io(&mut io, "/d", "zz", &[5u8; 556]);
     assert!(
         got.is_err(),
         "the rewrite was expected to be refused for want of record space, and succeeded; \

@@ -214,6 +214,45 @@ pub fn build_regular_file_record(
     )
 }
 
+/// Build an empty extension record of the file whose base record
+/// `base_reference` names: in use, no links, no attributes yet, the end
+/// marker where the first attribute will go (#480).
+///
+/// Measured on the extension records Windows made for a file whose named
+/// streams outgrew its base record (`test-disks/ntfs-attrlist.img`): the
+/// header is a base record's, with the hard-link count 0, the flags
+/// IN_USE alone, `base_file_record_reference` naming the base record and
+/// its sequence, and `next_attribute_id` counting the record's own
+/// attributes from 0. Returned without the fixup applied.
+pub(crate) fn build_extension_record(
+    record_size: usize,
+    record_number: u32,
+    sequence: u16,
+    base_reference: u64,
+    bytes_per_sector: u16,
+) -> Result<Vec<u8>, Error> {
+    if record_size < 512 || !record_size.is_multiple_of(bytes_per_sector as usize) {
+        return Err(Error::invalid(format!("invalid record_size {record_size}")));
+    }
+    let mut rec = vec![0u8; record_size];
+    let attrs_offset = write_file_record_header(
+        &mut rec,
+        record_size,
+        record_number,
+        sequence,
+        bytes_per_sector,
+        FILE_FLAG_IN_USE,
+    );
+    rec[REC_OFF_LINK_COUNT..REC_OFF_LINK_COUNT + 2].copy_from_slice(&0u16.to_le_bytes());
+    rec[REC_OFF_BASE_FILE_REF..REC_OFF_BASE_FILE_REF + 8]
+        .copy_from_slice(&base_reference.to_le_bytes());
+    rec[REC_OFF_NEXT_ATTR_ID..REC_OFF_NEXT_ATTR_ID + 2].copy_from_slice(&0u16.to_le_bytes());
+    rec[attrs_offset..attrs_offset + 4].copy_from_slice(&ATTR_END_MARKER.to_le_bytes());
+    let bytes_used = (attrs_offset + 8) as u32;
+    rec[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4].copy_from_slice(&bytes_used.to_le_bytes());
+    Ok(rec)
+}
+
 /// Write the fixed-layout FILE_RECORD_SEGMENT_HEADER into a zeroed `rec`
 /// buffer. Returns `attrs_offset` — the cursor where attribute writing begins.
 ///

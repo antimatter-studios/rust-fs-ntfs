@@ -84,6 +84,7 @@ fn every_verb_documents_itself_on_stdout() {
         "symlink",
         "objid",
         "layout",
+        "stream",
     ] {
         let out = run(&[verb, "--help"]);
         assert_eq!(code(&out), 0, "`{verb} --help` exit status");
@@ -145,6 +146,14 @@ fn the_verbs_that_change_a_volume_report_success() {
         ])),
         0
     );
+    assert_eq!(
+        code(&run(&["stream", &img, "/f.txt", "notes", "--content", "x"])),
+        0
+    );
+    assert_eq!(
+        code(&run(&["stream", &img, "/f.txt", "notes", "--delete"])),
+        0
+    );
     assert_eq!(code(&run(&["set-dirty", &img])), 0);
 
     // `layout` reads the file `write` left resident, and prints it.
@@ -201,6 +210,14 @@ fn the_verbs_fail_when_the_target_is_wrong() {
                 "00112233445566778899aabbccddeeff",
             ],
         ),
+        (
+            "a stream of a file that is not there",
+            vec!["stream", &img, "/nope.txt", "s", "--content", "x"],
+        ),
+        (
+            "deleting a stream that is not there",
+            vec!["stream", &img, "/f.txt", "nope", "--delete"],
+        ),
         ("ls of an image that is not there", vec!["ls", "/nope.img"]),
     ] {
         let out = run(&args);
@@ -251,6 +268,16 @@ fn a_usage_error_and_a_failure_have_different_exit_codes() {
         code(&run(&["objid", &img, "/f.txt", "not-hexadecimal"])),
         2,
         "an object id that is not 32 hexadecimal digits is a usage error"
+    );
+    assert_eq!(
+        code(&run(&["stream", &img, "/f.txt", "s"])),
+        2,
+        "a stream with neither data nor --delete is a usage error"
+    );
+    assert_eq!(
+        code(&run(&["stream", &img, "/f.txt", "s", "--bogus"])),
+        2,
+        "a stream with an unknown flag is a usage error"
     );
     assert_eq!(code(&run(&["rm", &img, "/f.txt"])), 0);
 }
