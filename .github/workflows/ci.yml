@@ -30,6 +30,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python3 scripts/check-interrupted-bootstrap.py
+      - run: python3 tests/interrupted_bootstrap_guard.py
+      - name: Fetch the original fixture blobs for byte preservation checks
+        run: |
+          original=$(python3 -c 'import json; print(json.load(open("test-disks/windows-interrupted-bootstrap.json"))["original_commit"])')
+          git fetch --no-tags --depth=1 origin "$original"
+      - run: python3 tests/interrupted_bootstrap_preservation.py
+      - name: Capture scrub preserves fixed-VHD framing and refuses invalid BPBs
+        shell: pwsh
+        run: ./tests/scripts/scrub-bootstrap.ps1
 
   test:
     name: test-${{ matrix.os }}

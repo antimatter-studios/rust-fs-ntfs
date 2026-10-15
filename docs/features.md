@@ -43,6 +43,7 @@ States:
 | Unicode names, `$UpCase` collation | Supported | 0.1.0 | | `unicode.rs`, `upcase.rs`, `index_name_collation.rs`, `long_names.rs` |
 | Volume statistics, label, version | Supported | 0.1.0 | | `volume_stats.rs`, `volume_info_v2.rs`, `volume_label.rs` |
 | Volumes Windows was writing to when captured | Supported | 0.6.0 | | `windows_interrupted_fixture.rs` |
+| Interrupted-write fixture bootstrap removal | Partial: all 26 Windows interrupted partitions and their capture builder are scrubbed; other fixture families remain | Unreleased (#619) | #487 | `check-interrupted-bootstrap.py`, `interrupted_bootstrap_guard.py`, `scrub-bootstrap.ps1`; existing Windows replay and manifest assertions |
 | Corrupt or hostile structures | Refused, without panicking | 0.1.0 | | `corruption_fuzz.rs`, `corruption_resistance.rs`, `read_run_bounds.rs`, `index_root_bounds.rs`, `fuzz_decoders.rs` |
 
 ## Checking and recovery
