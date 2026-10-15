@@ -416,10 +416,50 @@ jobs:
         run: pwsh -File test-disks/measure-usn-journal.ps1
       # Real USN_RECORD_V2 records, checked against fsutil's file ID (#609).
       - name: Capture and decode Windows USN_RECORD_V2 records
+        id: usn_v2_capture
         shell: pwsh
         run: |
           pwsh -File test-disks/capture-usn-v2-records.ps1
           cargo test --locked --test usn_windows_capture
+      # The fixtures upload below runs only on success, so a failed grade
+      # would otherwise discard the bytes it graded. This keeps the raw
+      # capture, fsutil's manifest and the tested head on every outcome, and
+      # names the capture stage that left a file absent.
+      - name: Record the USN_RECORD_V2 capture diagnostics
+        if: always() && steps.usn_v2_capture.outcome != 'skipped'
+        shell: pwsh
+        env:
+          CAPTURE_OUTCOME: ${{ steps.usn_v2_capture.outcome }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $lines = @(
+            "github.sha: $env:GITHUB_SHA",
+            "pull_request.head.sha: $env:PR_HEAD_SHA",
+            "git HEAD: $(git rev-parse HEAD)",
+            "capture and decode step outcome: $env:CAPTURE_OUTCOME"
+          )
+          foreach ($f in 'test-disks/usn-v2-capture.bin', 'test-disks/usn-v2-capture.tsv') {
+            if (Test-Path -LiteralPath $f) {
+              $len = (Get-Item -LiteralPath $f).Length
+              $hash = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash
+              $lines += "${f}: $len bytes, sha256 $hash"
+            } else {
+              $lines += "${f}: ABSENT - capture-usn-v2-records.ps1 failed before writing it"
+            }
+          }
+          $lines | Set-Content -LiteralPath test-disks/usn-v2-capture.diagnostics.txt
+          $lines | ForEach-Object { Write-Output $_ }
+      - name: Upload the USN_RECORD_V2 capture diagnostics
+        if: always() && steps.usn_v2_capture.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-usn-v2-capture-diagnostics
+          path: |
+            test-disks/usn-v2-capture.diagnostics.txt
+            test-disks/usn-v2-capture.bin
+            test-disks/usn-v2-capture.tsv
+          if-no-files-found: error
+          retention-days: 7
       - name: Upload Windows-authored fixtures
         uses: actions/upload-artifact@v4
         with:
