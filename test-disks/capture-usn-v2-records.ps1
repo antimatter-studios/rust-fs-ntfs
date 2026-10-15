@@ -1,9 +1,12 @@
 # Captures real USN_RECORD_V2 records written by Windows, for the decoder's
 # cross-validation (#609).
 #
-# On the volume holding the runner's temp directory, creates a marker file
-# with a non-ASCII name, then reads the change journal with
-# FSCTL_READ_USN_JOURNAL (READ_USN_JOURNAL_DATA_V0, which Windows answers with
+# Formats a disposable NTFS volume (a VHD attached from an image in the
+# runner's temp directory), creates a change journal on it with `fsutil usn
+# createjournal`, and creates a marker file with a non-ASCII name there. The
+# runner's own volumes are never touched: their journals may be inactive, and
+# a system journal is not ours to create or reset. The script then reads the
+# change journal with FSCTL_READ_USN_JOURNAL (READ_USN_JOURNAL_DATA_V0, which Windows answers with
 # version 2.0 records) from the USN that FSCTL_QUERY_USN_JOURNAL reported
 # before the file was created. Every returned record naming the marker is
 # kept, byte for byte, in test-disks/usn-v2-capture.bin.
@@ -14,9 +17,12 @@
 # it, and the SHA-256 of the capture. tests/usn_windows_capture.rs decodes the
 # capture and must agree with fsutil.
 #
-# Run from the repository root on an elevated Windows host.
+# Run from the repository root on an elevated Windows host. rust-img-vhd must be
+# on PATH; CI installs the pinned rust-img-vhd release before invoking this.
 
 $ErrorActionPreference = 'Stop'
+
+. "$PSScriptRoot\..\scripts\fs-windows-test-harness\_lib.ps1"
 
 Add-Type -TypeDefinition @'
 using System;
@@ -62,11 +68,26 @@ public static class UsnCapture {
 '@
 
 $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
-$drive = [System.IO.Path]::GetPathRoot($tempRoot).TrimEnd('\')
 $name = "usn-v2-$([guid]::NewGuid().ToString('N').Substring(0, 8))-é.txt"
-$marker = Join-Path $tempRoot $name
 $out = [System.IO.Path]::GetFullPath('test-disks/usn-v2-capture.bin')
 $manifest = [System.IO.Path]::GetFullPath('test-disks/usn-v2-capture.tsv')
+$image = Join-Path $tempRoot 'usn-v2-capture-volume.img'
+$diag = Join-Path $tempRoot 'usn-v2-capture-volume'
+New-Item -ItemType Directory -Path $diag -Force | Out-Null
+Remove-Item -LiteralPath $image -Force -ErrorAction SilentlyContinue
+$stream = [System.IO.File]::Create($image)
+try { $stream.SetLength(256MB) } finally { $stream.Close() }
+
+$rows = @()
+$state = Initialize-VhdFromImg -ImagePath $image -Diag $diag
+try {
+$letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
+Format-Volume -DriveLetter $letter -FileSystem NTFS -NewFileSystemLabel 'USNCAPTURE' `
+    -Force -Confirm:$false | Out-Null
+$drive = "${letter}:"
+$o = & fsutil.exe usn createjournal m=8388608 a=1048576 $drive 2>&1
+if ($LASTEXITCODE -ne 0) { throw "fsutil usn createjournal on $drive failed: $o" }
+$marker = Join-Path "$drive\" $name
 
 $h = [UsnCapture]::Open($drive)
 try {
@@ -78,7 +99,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "fsutil file queryfileid $marker failed" }
 
     $kept = New-Object System.IO.MemoryStream
-    $rows = @()
     for ($pass = 0; $pass -lt 64; $pass++) {
         $buf = [UsnCapture]::Read($h, $journalId, $usn)
         if ($buf.Length -le 8) { break }
@@ -98,6 +118,13 @@ try {
     }
 } finally {
     $h.Dispose()
+}
+} finally {
+    Get-DiskImage -ImagePath $state.Vhd -ErrorAction SilentlyContinue |
+        Where-Object Attached |
+        Dismount-DiskImage -ErrorAction SilentlyContinue | Out-Null
+    Remove-Item -LiteralPath $state.Vhd -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $image -Force -ErrorAction SilentlyContinue
 }
 if ($rows.Count -eq 0) { throw "no USN record named $name was returned from $drive" }
 
