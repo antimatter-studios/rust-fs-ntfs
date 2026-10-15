@@ -4,9 +4,11 @@
 //! values are arbitrary bytes. On disk they're stored in `$EA` as a
 //! packed list of FILE_FULL_EA_INFORMATION entries, 4-byte aligned.
 //!
-//! References: MS-FSCC 2.4.15 FILE_FULL_EA_INFORMATION; the
-//! `$EA_INFORMATION` field order is independently corroborated by ntfs-3g's
-//! `layout.h` and Linux ntfs3's `ntfs.h`.
+//! Reference: Microsoft's [FILE_FULL_EA_INFORMATION] documents the EA entry
+//! buffer. The separate eight-byte `$EA_INFORMATION` summary is checked
+//! against Windows-authored bytes in `tests/ea_information_windows_oracle.rs`.
+//!
+//! [FILE_FULL_EA_INFORMATION]: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_file_full_ea_information
 
 use crate::attr_io::{self, AttrType};
 use crate::error::Error;

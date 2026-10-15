@@ -13,12 +13,10 @@ make its scope obvious.
 
 **Guiding constraints** (still in force for any new work below):
 
-- **No GPL code consulted.** Use MS-FSCC, Windows Internals 7th ed.,
-  and upstream `ntfs` (MIT/Apache-2.0) only. GPL'd NTFS reimplementations
-  are off-limits. If an
-  implementation gets stuck without consulting GPL, pause and write a
-  scoped question to `docs/wip-notes/` (gitignored) for discussion
-  instead of committing a GPL-tainted shortcut.
+- **Check source licenses before reading implementation code.** Do not inspect
+  copyleft NTFS implementations or headers. Use documentation that actually
+  covers the field, or retain a Windows byte-comparison experiment. Follow
+  the [source policy](../AGENTS.md#source-material-and-format-evidence).
 - **Tests against real disk images.** Fixtures live in `test-disks/`
   and are produced by `test-disks/build-ntfs-feature-images.sh` (a
   qemu+Alpine VM running `NTFS formatter` + `NTFS driver`
@@ -208,12 +206,12 @@ If a bug is discovered only after subsequent work lands on top:
 
 ---
 
-## Audit trail (chat-only, not in git)
+## Verifiable format evidence
 
-Per owner's request: sources consulted for each phase are logged
-**only in the conversation that produced the code**, not in commit
-messages or source comments. Source citations in code point at public
-docs (MS-FSCC, Windows Internals, upstream ntfs) — never at GPL'd NTFS reimplementations.
+Source citations must support the exact field or structure described. Keep
+Windows experiments reproducible in tests, and report their actual results
+with the work. Do not make broad historical guarantees about source use or
+replace missing evidence with an unrelated documentation link.
 
 ---
 

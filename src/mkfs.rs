@@ -10,9 +10,11 @@
 //!   LCN cluster_count/2 — $MFTMirr (single cluster)
 //!   LCN cluster_count-1 — backup boot sector
 //!
-//! References (no GPL code consulted): NTFS boot sector / BPB and
-//! $MFT layout per Windows Internals 7th ed. ch. "NTFS On-Disk
-//! Structure"; MS-FSCC for system files and attribute definitions.
+//! Format evidence: volume geometry and system records observed from
+//! Windows `format.com`, compared by the Windows chkdsk matrix. Microsoft's
+//! [Master File Table notes] describe the role of the MFT and its attributes.
+//!
+//! [Master File Table notes]: https://learn.microsoft.com/en-us/windows/win32/devnotes/master-file-table
 
 use crate::block_io::BlockIo;
 use crate::data_runs::{encode_runs, DataRun};
@@ -124,9 +126,8 @@ const SD_SYSFILE_RW: &[u8] = &[
 //                               lsn 0x104408 resolves
 //   * everything else         — 0xFF
 //
-// References: MS-FSCC (system files / log structure), Windows Internals
-// 7th ed. ch. "NTFS Logging" (RSTR / RCRD page taxonomy). No GPL'd
-// NTFS reimplementations consulted.
+// Format evidence: Windows-authored RSTR/RCRD pages and the retained
+// Windows chkdsk and replay matrix results.
 //
 const LOGFILE_CANONICAL: &[u8] = include_bytes!("logfile-canonical-12k.bin");
 

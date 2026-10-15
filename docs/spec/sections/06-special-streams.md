@@ -201,6 +201,12 @@ the encoded query entries and is not identical to compact length.
 The writer rebuilds both attributes and removes both when the list becomes empty.
 **IMPLEMENTED:** `packed_ea_length`, `build_ea_information_value`, `commit_eas`.
 
+[The Windows summary oracle](../../../tests/ea_information_windows_oracle.rs)
+reads raw summary bytes from files created with `NtSetEaFile`: compact length
+19, query length 32, and zero, one or two NEED_EA flags. The fixture generator
+runs on Windows in CI; the image is generated on demand. This comparison
+checks the on-disk summary separately from the documented API entry buffer.
+
 The decoder checks value and next-offset buffer bounds, but does not implement
 all conceivable NUL, alignment, overlap, trailing-partial-entry, flag, and summary
 consistency checks. Do not turn proposed validation rules into claims about it.

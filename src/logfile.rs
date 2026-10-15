@@ -31,9 +31,9 @@
 //! Windows' log above, restart LSN `0x184415` resolves to `0x220a8`, and
 //! the record found there carries exactly that LSN.
 //!
-//! References: MS-FSCC and Windows Internals 7th ed., "NTFS Logging" (the
-//! `RSTR` / `RCRD` taxonomy and the restart area). No GPL implementation
-//! was consulted; ntfs-3g is used only as a program, in the tests.
+//! Format evidence: the Windows-authored restart areas and record pages
+//! exercised in `tests/windows_interrupted_fixture.rs`. The external
+//! filesystem programs used by tests run as subprocess oracles.
 
 use crate::error::Error;
 use crate::mft_io::{apply_fixup_on_read_magic, apply_fixup_on_write_magic};

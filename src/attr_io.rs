@@ -5,12 +5,14 @@
 //! through upstream parsers. Upstream is used for path → record-number
 //! resolution; once inside the RMW callback, we walk attributes here.
 //!
-//! References (no GPL code consulted): NTFS attribute-header layout
-//! and FILE_RECORD_SEGMENT_HEADER per Windows Internals 7th ed.
-//! ch. "NTFS On-Disk Structure" and MS-FSCC.
+//! References: Microsoft's [ATTRIBUTE_RECORD_HEADER] and
+//! [FILE_RECORD_SEGMENT_HEADER] describe the headers used here.
+//!
+//! [ATTRIBUTE_RECORD_HEADER]: https://learn.microsoft.com/en-us/windows/win32/devnotes/attribute-record-header
+//! [FILE_RECORD_SEGMENT_HEADER]: https://learn.microsoft.com/en-us/windows/win32/devnotes/file-record-segment-header
 
 /// NTFS attribute type codes we care about. Values match upstream's
-/// `NtfsAttributeType` and MS-FSCC.
+/// `NtfsAttributeType` and the attribute type codes observed in Windows volumes.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttrType {
@@ -160,7 +162,7 @@ pub struct AttrDescription {
 }
 
 /// Human-readable name for a small set of well-known NTFS attribute
-/// type codes per MS-FSCC §2.4.
+/// type codes observed in Windows volumes and exposed by `NtfsAttributeType`.
 fn attr_type_name(type_code: u32) -> String {
     match type_code {
         0x10 => "$STANDARD_INFORMATION".to_string(),

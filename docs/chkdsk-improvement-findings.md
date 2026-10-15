@@ -182,15 +182,17 @@ fixed" exception in the `dev-loop` skill:
   was `assert!(names.is_empty())` (asserting the empty-root bug);
   now asserts the populated 12-entry sorted root index.
 
-### 1.6 Public-spec-only citation rule
+### 1.6 Published documentation and Windows observations
 
 For each fix, "Justification" cites one of:
 
-- **Microsoft MS-FSCC** — `[MS-FSCC]: File System Algorithms`. The
-  primary public spec. Authoritative for attribute layouts, BPB fields,
-  `$FILE_NAME` body, `$STANDARD_INFORMATION` body, `$INDEX_ROOT` /
-  `$INDEX_HEADER` / `INDEX_ENTRY`, the `MFT_RECORD_*` flags
-  (`IN_USE` / `IS_DIRECTORY` / `IS_VIEW_INDEX`).
+- **Microsoft MS-FSCC** — [File System Control Codes](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/).
+  Covers protocol and API information; it is not a specification of every
+  NTFS on-disk structure. Published structure references include
+  [ATTRIBUTE_RECORD_HEADER](https://learn.microsoft.com/en-us/windows/win32/devnotes/attribute-record-header),
+  [FILE_RECORD_SEGMENT_HEADER](https://learn.microsoft.com/en-us/windows/win32/devnotes/file-record-segment-header)
+  and [MULTI_SECTOR_HEADER](https://learn.microsoft.com/en-us/windows/win32/devnotes/multi-sector-header).
+  Use Windows byte comparisons for fields these pages do not describe.
 - **Microsoft MS-DTYP** — `[MS-DTYP]: Windows Data Types`. Defines
   `SECURITY_DESCRIPTOR_RELATIVE`, `ACL` / `ACE`, `SID`, well-known SID
   values (`S-1-5-18` = NT AUTHORITY\SYSTEM, `S-1-5-32-544` =
@@ -203,13 +205,14 @@ For each fix, "Justification" cites one of:
   messages. These are emitted by Microsoft's binaries; using them to
   triangulate which structure is wrong is observational, not
   reverse-engineering.
-- **Windows Internals (Russinovich/Solomon)** — qualitative reference
-  for what each NTFS system file is for and which records chkdsk
-  treats as special (e.g. why `$Secure` carries the view-index bit).
+- **Windows Internals (Russinovich/Solomon)** — qualitative background;
+  a precise field claim still needs a specific supporting passage or a
+  reproducible Windows observation.
 
-The "no GPL tool name-drops" rule applies project-wide, including this
-audit doc. The actual fixes shipped consulted no GPL'd NTFS
-reimplementations.
+Future source use follows the
+[source policy](../AGENTS.md#source-material-and-format-evidence).
+Naming a subprocess oracle is allowed; a tool's name is not a substitute
+for a license check or evidence supporting a field layout.
 
 ### 1.7 What this contract does NOT certify
 
@@ -312,11 +315,10 @@ backup-boot sector be counted? — and resolved it the wrong way. The
 broken understanding came from interpreting "total sectors in volume"
 literally as N, rather than as N-minus-the-reserved-trailing-sector.
 
-**New (corrected) understanding**: per the publicly documented NTFS
-BPB convention (MS-FSCC and reproduced in Windows Internals), the
-trailing 512-byte sector is reserved for the backup boot copy and is
-not a "data sector" for NumberSectors purposes. Microsoft's
-`format.com` writes N − 1 in every reference dump.
+**New (corrected) understanding**: Microsoft's `format.com` writes N − 1
+in the reference dumps below, leaving the trailing 512-byte backup boot
+sector outside that count. This conclusion comes from the captured bytes;
+MS-FSCC is not a supporting BPB-layout reference.
 
 **Evidence the new understanding is real**: byte-diff in
 agent-840e-2026-05-02 diag dir
@@ -470,13 +472,12 @@ description of the marker as "the type code 0xFFFFFFFF" and missing
 the followup that says the length field is also part of the marker
 record's 8-byte attribute-record header.
 
-**New (corrected) understanding**: per MS-FSCC, every NTFS attribute
-record begins with an 8-byte common header (4-byte type, 4-byte
-length). The end-marker is itself an attribute record with type
-`0xFFFFFFFF`, and like every other attribute it carries the 4-byte
-length field after the type. So the marker's footprint is 8 bytes,
-and `bytes_used` (BPB-relative offset to first free byte) must include
-both halves.
+**New (corrected) understanding**: the captured Windows records account
+for eight bytes at the end marker in `bytes_used`. Microsoft's
+[Master File Table notes](https://learn.microsoft.com/en-us/windows/win32/devnotes/master-file-table)
+publish the `0xFFFFFFFF` terminator, but do not establish the additional
+four bytes as an ordinary attribute length field. The eight-byte footprint
+used here is supported by the byte comparison below.
 
 **Evidence**: byte-diff in iter9 (run id 25234929879) showed
 reference's bytes_used always equals end_marker_offset + 8, ours
@@ -609,9 +610,10 @@ record's other fields. The flag must be set even when the view-index
 attributes themselves haven't yet been written.
 
 **Evidence**: the byte-diff was uninformative because reference's
-slot 9 is structurally a different file. Citation here is the public
-spec (MS-FSCC `_FILE_RECORD_SEGMENT_HEADER.Flags` field reference)
-plus chkdsk's behaviour: it tolerates `flags=0x0001` on `$Quota`
+slot 9 is structurally a different file. The published
+[FILE_RECORD_SEGMENT_HEADER](https://learn.microsoft.com/en-us/windows/win32/devnotes/file-record-segment-header)
+describes the flags field. The `$Secure` requirement recorded here comes
+from chkdsk's behaviour: it tolerates `flags=0x0001` on `$Quota`
 (reference's slot 9) but rejects it on `$Secure` (ours). The fix
 satisfies chkdsk; no further "Flags for file record segment 9"
 errors.
@@ -691,9 +693,11 @@ sectors * 2)`. This is the same formula `mkfs.rs` already used. The
 old hardcoded constant only happened to be correct for one specific
 record-size/sector-size combination.
 
-**Evidence**: pure layout arithmetic, derivable from MS-FSCC's USA
-(Update Sequence Array) layout description. Verified end-to-end on
-Mac:
+**Evidence**: the
+[MULTI_SECTOR_HEADER](https://learn.microsoft.com/en-us/windows/win32/devnotes/multi-sector-header)
+documents the update sequence array's offset and size. The sector-count
+arithmetic above still needs the volume's actual record and sector geometry;
+see Q01 in the open questions. The recorded Mac exercise was:
 
 ```
 mkfs → write_ntfs create /hello.txt → write 'hi' → mkdir /docs →
@@ -782,13 +786,10 @@ form with extension fields zero-padded.
 This is actually allowed by spec — both forms are legal on NTFS 3.x
 volumes. The broken belief was that "more recent form = better".
 
-**New (corrected) understanding**: per MS-FSCC §2.4.2.6, the 24-byte
-3.x extension is "if and only if the volume is NTFS 3.0 or later
-AND the implementation chooses to write them". Microsoft's `format.com`
-chooses NOT to write them on system records, because system records
-don't participate in user-quota tracking and their security comes
-from the per-record `$SECURITY_DESCRIPTOR` (attribute 0x50), not from
-a `$Secure` lookup. The 48-byte form is the canonical Microsoft choice.
+**New (corrected) understanding**: the captured `format.com` system
+records use a 48-byte value, whereas ours used 72 bytes. That observation
+supports matching these fixtures. It does not establish why Windows chose
+the shorter value, or a general rule for every file and Windows version.
 
 **Evidence**: byte-diff. Every reference system record has
 `content_size = 48`; ours had 72. Reference is the canonical
@@ -1166,7 +1167,7 @@ implementation that wants chkdsk to be quiet must ship the same
 exact bytes Microsoft shipped in NT 3.x — derived from `format.com`'s
 output, not from any modern Unicode case-folding library.
 
-**Evidence — extraction recipe** (no GPL involvement):
+**Evidence — extraction recipe**:
 
 1. SSH to Windows VM, mount the freshly `format.com`-formatted
    `reference.vhdx`, assign drive letter to the Basic partition.
@@ -1313,11 +1314,10 @@ listing. It must list every system file plus `.` (root's self-link),
 sorted by `COLLATION_FILE_NAME` (case-insensitive UTF-16 with NTFS
 upcase folding).
 
-**Evidence**: reference's `$I30` carries 12 entries; ours carries
-the LAST sentinel only; spec (MS-FSCC) says any record whose
-`$FILE_NAME.parent_reference` points at a directory **must** appear
-in that directory's `$I30`. Reference is the canonical Microsoft
-output.
+**Evidence**: the captured Windows root `$I30` carries 12 entries;
+ours carries the LAST sentinel only. The comparison establishes this
+fixture's missing entries, without attributing an on-disk directory
+index rule to MS-FSCC.
 
 **Fix** ([`src/mkfs.rs:1220-1356`](../src/mkfs.rs#L1220-L1356)):
 
@@ -1976,12 +1976,14 @@ needed.
 should pass immediately — they don't depend on our writer producing a
 writable volume.
 
-### 4.6 Pre-existing GPL tooling references in source / docs (resolved)
+### 4.6 Reference validation
 
-**Status**: resolved in the license-scrub commit that replaced all
-GPL-tainted citations across `src/*.rs` and `docs/*.md` with
-Microsoft MS-FSCC and Windows Internals references. No GPL'd NTFS
-reimplementations are referenced anywhere in the published tree.
+Check that each linked document contains the claimed field or rule. If it
+does not, use a reproducible Windows byte comparison and identify its scope.
+API information classes and NTFS on-disk records must be checked separately.
+`chore check:sources` guards known implementation-source links and unsupported
+historical claims; source-license preflight follows the
+[source policy](../AGENTS.md#source-material-and-format-evidence).
 
 ---
 
@@ -2104,11 +2106,12 @@ Windows-write resource error in one change.
 opens `\Device\HarddiskVolume*\$Secure:$SDS` during `/scan` and gets
 an object-not-found error. No longer a speculative hypothesis.
 
-**Public references**:
-- MS-FSCC `$Secure` system file description (security descriptor
-  caching mechanism).
-- MS-DTYP `SECURITY_DESCRIPTOR` layout (for the SDs that go into
-  `$SDS`).
+**Evidence to retain**:
+- Captured Windows `$Secure` records and stream bytes, including their
+  index and catalog headers.
+- [MS-DTYP](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/)
+  `SECURITY_DESCRIPTOR` layout for the descriptor payloads in `$SDS`;
+  this does not specify the surrounding NTFS catalog.
 
 **Effort**: 300–500 LOC. Includes hash computation matching whatever
 Microsoft uses (probably MD4 per Windows Internals, but worth
@@ -2140,8 +2143,8 @@ check transaction-log consistency.
 
 **Patch the pipeline first** to dump `$LogFile` content from both
 ours and reference (currently not dumped — needs
-`run-windows-test.ps1` patch). Then byte-diff and implement minimal
-valid `$LogFile` initialisation per MS-FSCC.
+`run-windows-test.ps1` patch). Then compare the Windows restart and log
+pages, implement the required initialization and validate it with chkdsk.
 
 **Open question**: even if this isn't the cause of `frs.cxx 60f`,
 it's likely needed for the Windows-write path (the volume needs to
@@ -2312,8 +2315,8 @@ scan stdout:
    given two named complaints land on `$SDH` and `$SII` together;
    if both are wrong in the same way, the shared INDEX_ENTRY
    builder (`build_view_index_entry` per S2's report) is the
-   suspect. Investigate INDEX_ENTRY header byte-layout +
-   alignment + LAST-entry framing per MS-FSCC §2.4.9.
+   suspect. Compare INDEX_ENTRY header bytes, alignment and LAST-entry
+   framing with the captured Windows index.
 2. **`$INDEX_ROOT` `total_size_of_entries` /
    `allocated_size_of_entries` mismatch.** chkdsk validates the
    index-header byte counts against the actual content length;
@@ -2321,10 +2324,9 @@ scan stdout:
    `header_size + sum(entry_lengths)`.
 3. **Collation constant value is wrong.** S2 used
    `COLLATION_NTOFS_SECURITY_HASH = 0x12` (`$SDH`) and
-   `COLLATION_NTOFS_ULONG = 0x10` (`$SII`). MS-FSCC §2.4.9 lists
-   these in a different order than the find-in-spec lookup S2's
-   agent reported. Re-verify by byte-diff against
-   `Format-Volume`'s `$Secure` rec 9.
+   `COLLATION_NTOFS_ULONG = 0x10` (`$SII`). Re-verify these values
+   by byte-diff against `Format-Volume`'s `$Secure` rec 9 rather
+   than attributing the on-disk collation values to MS-FSCC.
 
 **Productive next move**:
 
@@ -2451,11 +2453,10 @@ a fix is invented can run the same pipeline, dump the same byte
 ranges, and check whether the post-fix byte matches reference. If it
 matches, the fix is corroborated; if it doesn't, we have a new bug.
 
-This is why the "no GPL tooling references" rule matters for upstream
-contribution: every claim must trace to either a Microsoft public
-spec, a `format.com` byte-diff, or our own observed chkdsk output.
-The provenance chain is short, checkable, and free of murky
-dependencies on third-party reverse-engineered Linux NTFS source.
+Each claim must trace to documentation that supports it, a retained
+`format.com` byte comparison, or observed chkdsk output. Name tools
+accurately and keep their role explicit; a matching byte range does not
+prove unrelated fields or runtime behavior.
 
 ---
 
@@ -2607,8 +2608,8 @@ Survives ssh-agent outages.
   4 MFT records, for crash recovery.
 - **MS-DTYP** — Microsoft Open Specifications: Windows Data Types.
   Defines `SECURITY_DESCRIPTOR`, `ACL`, `ACE`, `SID`.
-- **MS-FSCC** — Microsoft Open Specifications: File System Algorithms.
-  Authoritative for NTFS attribute layouts.
+- **MS-FSCC** — Microsoft Open Specifications: File System Control Codes.
+  Protocol and API information; not a complete NTFS on-disk specification.
 - **`$Quota`** — system file (rec 9 in modern format.com layout)
   containing user-quota tracking, indexed by `$O` and `$Q`.
 - **`$SDH` / `$SII` / `$SDS`** — `$Secure`'s view-index machinery.

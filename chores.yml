@@ -442,7 +442,13 @@ tasks:
       # or a call to a local copy.
       - bash ../rust-fs-core/scripts/family-check.sh
       - task: check:ci-gate
+      - task: check:sources
       - bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness,kernel -- -D warnings
+
+  check:sources:
+    desc: Format references and source-policy claims use verifiable evidence
+    cmds:
+      - python3 scripts/check-source-policy.py
 
   check:ci-gate:
     desc: ci-ok needs every gating job in ci.yml, and .github-guard requires ci-ok alone

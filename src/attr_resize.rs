@@ -7,9 +7,11 @@
 //! [`mft_io::update_mft_record`](crate::mft_io::update_mft_record)
 //! mutator so fixup is re-applied and the record is fsync'd atomically.
 //!
-//! References (no GPL code consulted): FILE_RECORD_SEGMENT_HEADER
-//! and NTFS attribute-header layout per Windows Internals 7th ed.
-//! ch. "NTFS On-Disk Structure" and MS-FSCC.
+//! References: Microsoft's [FILE_RECORD_SEGMENT_HEADER] and
+//! [ATTRIBUTE_RECORD_HEADER] document the record and attribute headers.
+//!
+//! [FILE_RECORD_SEGMENT_HEADER]: https://learn.microsoft.com/en-us/windows/win32/devnotes/file-record-segment-header
+//! [ATTRIBUTE_RECORD_HEADER]: https://learn.microsoft.com/en-us/windows/win32/devnotes/attribute-record-header
 
 use crate::attr_io::attr_off;
 use crate::error::Error;

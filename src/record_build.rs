@@ -8,9 +8,11 @@
 //! The caller then writes the bytes to disk (raw) and separately flips
 //! the `$MFT:$Bitmap` bit + inserts a parent-directory index entry.
 //!
-//! References (no GPL code consulted): FILE_RECORD_SEGMENT_HEADER and
-//! the $STANDARD_INFORMATION / $FILE_NAME / $DATA attribute layouts per
-//! Windows Internals 7th ed. ch. "NTFS On-Disk Structure" and MS-FSCC.
+//! Reference: Microsoft's [FILE_RECORD_SEGMENT_HEADER] documents the record
+//! header. Attribute payloads are checked by the Windows chkdsk matrix and
+//! Windows-authored read fixtures.
+//!
+//! [FILE_RECORD_SEGMENT_HEADER]: https://learn.microsoft.com/en-us/windows/win32/devnotes/file-record-segment-header
 
 /// Encode an NTFS file-reference from (record_number, sequence_number).
 /// The low 48 bits are the record number; the high 16 are the sequence.
