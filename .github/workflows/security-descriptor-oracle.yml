@@ -12,6 +12,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check out rust-fs-core at the sibling pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          core_ref="$(sed -n 's/^  FS_CORE_REF: *//p' chores.yml | tr -d '\r')"
+          git clone --quiet --depth 1 --branch "$core_ref" \
+            https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.95.0
@@ -22,8 +29,7 @@ jobs:
           NTFS_SD_CAPTURE: security-descriptor-windows.tsv
         run: |
           set -euo pipefail
-          core_dir="$(cargo metadata --locked --format-version 1 | python -c 'import json,sys; from pathlib import Path; print(Path(next(p["manifest_path"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rust-fs-core")).parent.as_posix())')"
-          bash "$core_dir/scripts/tier.sh" --refuse-skips --refuse-ignored unit -- cargo test --locked --test security_descriptor_windows_oracle
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored unit -- cargo test --locked --test security_descriptor_windows_oracle
           grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' tmp/logs/unit.log
       - uses: actions/upload-artifact@v4
         if: always()
