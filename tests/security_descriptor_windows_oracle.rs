@@ -187,6 +187,6 @@ fn windows_authored_descriptors_match_security_apis_and_are_captured() {
     }
     let path = std::env::var_os("NTFS_SD_CAPTURE")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("ntfs-security-descriptors.tsv"));
+        .unwrap_or_else(|| std::path::PathBuf::from("security-descriptor-windows.tsv"));
     std::fs::write(path, capture).expect("retain Windows oracle capture");
 }

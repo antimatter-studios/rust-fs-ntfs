@@ -10,6 +10,7 @@ permissions:
 jobs:
   descriptor-oracle:
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Check out rust-fs-core at the sibling pin
