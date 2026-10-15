@@ -907,9 +907,12 @@ jobs:
   validate-mkfs-windows-run:
     name: Windows chkdsk execution
     runs-on: windows-latest
-    # Measured at 9.3 to 12.4 minutes. Without a bound, a step that hangs holds
-    # the runner for GitHub's six hours and prints nothing (#388).
-    timeout-minutes: 40
+    # Run 38738194039 at d8d8d9c hit the 40-minute job limit while the CLI
+    # matrix was still progressing (12/22 done). Earlier scenarios and builds
+    # took 32 minutes before the CLI matrix even started. Allow the expanded
+    # oracle suite and trailing chkdsk/round-trip checks to finish, while
+    # retaining a finite bound for a hung runner (#388).
+    timeout-minutes: 75
     needs: [changes]
     if: needs.changes.outputs.mkfs == 'true'
     steps:
