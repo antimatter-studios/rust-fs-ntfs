@@ -460,6 +460,9 @@ jobs:
             test-disks/usn-v2-capture.tsv
           if-no-files-found: error
           retention-days: 7
+      - name: Capture Windows-authored $I30 create/delete/reuse evidence
+        shell: pwsh
+        run: pwsh -File test-disks/capture-i30-slack.ps1
       - name: Upload Windows-authored fixtures
         uses: actions/upload-artifact@v4
         with:
@@ -482,6 +485,8 @@ jobs:
             test-disks/ntfs-usnjrnl.records.csv
             test-disks/ntfs-inventory.img
             test-disks/ntfs-inventory.fileids.txt
+            test-disks/ntfs-i30-slack.img
+            test-disks/ntfs-i30-slack.manifest.json
           if-no-files-found: error
           retention-days: 1
       - name: Upload the change journal measurements
