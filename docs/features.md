@@ -40,7 +40,7 @@ States:
 | Reparse points: symlinks, junctions, generic | Supported | 0.1.0; readlink contract 0.5.0 | | `readlink.rs`, `symlink_variants.rs`, `readlink_windows_oracle.rs` |
 | Extended attributes (`$EA`, `$EA_INFORMATION`) | Supported | 0.1.0 | | `ea_combinatorics.rs`, `list_ea_keys.rs` |
 | `$OBJECT_ID`, security ids, every `$STANDARD_INFORMATION` field | Supported | 0.1.0 | | `object_id.rs`, `security_id.rs`, `read_si_full.rs` |
-| Bounded self-relative descriptor header and optional owner/group SIDs, raw control and 48-bit authority; ACL bytes retained but not decoded | Supported | Unreleased (#615) | #606 | `security_descriptor.rs`, `security_descriptor_windows_oracle.rs` |
+| Bounded self-relative descriptor header and optional owner/group SIDs, raw control and 48-bit authority; ACL/ACE framing validated with raw payloads retained, without policy evaluation | Supported | Unreleased (#615) | #606 | `security_descriptor.rs`, `security_descriptor_windows_oracle.rs` |
 | Unicode names, `$UpCase` collation | Supported | 0.1.0 | | `unicode.rs`, `upcase.rs`, `index_name_collation.rs`, `long_names.rs` |
 | Volume statistics, label, version | Supported | 0.1.0 | | `volume_stats.rs`, `volume_info_v2.rs`, `volume_label.rs` |
 | Volumes Windows was writing to when captured | Supported | 0.6.0 | | `windows_interrupted_fixture.rs` |

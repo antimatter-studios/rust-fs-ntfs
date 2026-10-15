@@ -1,4 +1,4 @@
-//! Bounded, read-only SELF_RELATIVE descriptor header and owner/group SID views.
+//! Bounded, read-only SELF_RELATIVE descriptor, SID and ACL framing views.
 //!
 //! Layout sources: Microsoft [MS-DTYP] 2.4.6 and 2.4.2.2:
 //! <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/7d4dac05-9cef-4563-a058-f108abecce1d>.
@@ -193,7 +193,8 @@ pub struct Header {
     pub dacl_offset: u32,
 }
 
-/// Header plus optional owner/group. Success does not validate ACLs or policy.
+/// Header, optional owner/group SIDs and validated ACL/ACE framing.
+/// Success does not evaluate ACE payload semantics or authorization policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SecurityDescriptor<'a> {
     bytes: &'a [u8],
