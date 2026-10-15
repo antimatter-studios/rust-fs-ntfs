@@ -293,5 +293,31 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-usnjrnl.img' -Label 'USNJRNL' -Po
         (New-Object System.Text.UTF8Encoding($false)))
 }
 
-Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img,test-disks/ntfs-format-64k.img,test-disks/ntfs-usnjrnl.img |
+# A volume whose MFT slots Windows allocated, freed and reused, plus the
+# file reference Windows reports for each surviving file:
+# ntfs-inventory.fileids.txt holds one `fsutil file queryfileid` answer per
+# line. Deleting a file and creating another reuses the freed slot with a
+# bumped sequence number, so the references carry sequences above one
+# (#609).
+$inventoryIds = [System.IO.Path]::GetFullPath('test-disks/ntfs-inventory.fileids.txt')
+New-WindowsFixture -ImagePath 'test-disks/ntfs-inventory.img' -Label 'INVENTORY' -Populate {
+    param($root)
+    foreach ($i in 1..8) {
+        [System.IO.File]::WriteAllText((Join-Path $root "gone-$i.txt"), 'g')
+    }
+    foreach ($i in 1..8) { Remove-Item -LiteralPath (Join-Path $root "gone-$i.txt") }
+    foreach ($i in 1..8) {
+        [System.IO.File]::WriteAllText((Join-Path $root "reused-$i.txt"), 'r')
+    }
+    New-Item -ItemType Directory -Path (Join-Path $root 'dir') | Out-Null
+    $lines = foreach ($name in (Get-ChildItem -LiteralPath $root -Force -Name | Sort-Object)) {
+        $o = & fsutil.exe file queryfileid (Join-Path $root $name) 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "fsutil file queryfileid ${name}: $o" }
+        "$name`t$(($o | Out-String).Trim())"
+    }
+    [System.IO.File]::WriteAllText($inventoryIds, (($lines -join "`n") + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+
+Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img,test-disks/ntfs-format-64k.img,test-disks/ntfs-usnjrnl.img,test-disks/ntfs-inventory.img |
     Format-Table Name,Length
