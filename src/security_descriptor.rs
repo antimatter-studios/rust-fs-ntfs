@@ -348,4 +348,18 @@ mod tests {
         assert_eq!(d.owner.unwrap().as_bytes(), &b[24..36]);
         assert_eq!(d.group.unwrap().as_bytes(), &b[20..32]);
     }
+
+    #[test]
+    fn ace_extending_past_declared_acl_size_is_an_error() {
+        // DACL at 32: AclSize 8, AceCount 1, but the ACE claims 16 bytes at 40.
+        let mut b = descriptor();
+        b[3] = 0x84;
+        b[16..20].copy_from_slice(&32u32.to_le_bytes());
+        b.resize(56, 0);
+        b[32] = 2;
+        b[34..36].copy_from_slice(&8u16.to_le_bytes());
+        b[36..38].copy_from_slice(&1u16.to_le_bytes());
+        b[42..44].copy_from_slice(&16u16.to_le_bytes());
+        assert!(SecurityDescriptor::parse(&b).is_err());
+    }
 }
