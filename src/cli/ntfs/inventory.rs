@@ -11,7 +11,30 @@ use clap::{value_parser, Arg, ArgMatches, Command as Cmd};
 
 use fs_core::cli::{CliError, Json, Outcome};
 use fs_ntfs::block_io::BlockIo;
-use fs_ntfs::mft_inventory::{inventory_batch_io, InventoryBatch, InventoryCursor};
+use fs_ntfs::mft_inventory::{
+    inventory_batch_cancellable_io, InventoryBatch, InventoryCursor, InventoryOutcome,
+};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set by SIGINT or SIGTERM; the batch stops before its next record read.
+static CANCELLED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn on_cancel_signal(_: libc::c_int) {
+    CANCELLED.store(true, Ordering::Relaxed);
+}
+
+/// Route Ctrl-C and SIGTERM to the cancellation flag, so an interrupted
+/// batch still prints its records and a cursor that resumes it.
+fn install_cancel_handler() {
+    #[cfg(unix)]
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    unsafe {
+        let handler = on_cancel_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGTERM, handler);
+    }
+}
 
 pub fn command() -> Cmd {
     Cmd::new("inventory")
@@ -53,8 +76,10 @@ pub fn command() -> Cmd {
 pub fn run<T: BlockIo + ?Sized>(io: &mut T, sub: &ArgMatches) -> Result<Outcome, CliError> {
     let max_slots = *sub.get_one::<u64>("max-slots").expect("clap requires it");
     let cursor = *sub.get_one::<u64>("cursor").expect("clap defaults it");
+    install_cancel_handler();
+    let cancelled = || CANCELLED.load(Ordering::Relaxed);
     let mut out = String::new();
-    for line in lines(io, cursor, max_slots)? {
+    for line in lines_cancellable(io, cursor, max_slots, &cancelled)? {
         out.push_str(&line.to_compact());
         out.push('\n');
     }
@@ -73,18 +98,54 @@ pub fn lines<T: BlockIo + ?Sized>(
     cursor: u64,
     max_slots: u64,
 ) -> Result<Vec<Json>, CliError> {
-    let batch = inventory_batch_io(
-        io,
-        InventoryCursor {
-            next_record: cursor,
-        },
-        max_slots,
-    )
-    .map_err(|e| CliError::failed(format!("inventory from slot {cursor}: {e}")))?;
-    Ok(render(&batch))
+    lines_cancellable(io, cursor, max_slots, &|| false)
+}
+
+/// As [`lines`], but `cancelled` is polled before every record read. A
+/// cancelled batch prints what it read and a batch line with
+/// `"interrupted": true`, `"finished": false` and the first unread slot as
+/// `next_cursor`, so resuming from it loses and repeats nothing.
+pub fn lines_cancellable<T: BlockIo + ?Sized>(
+    io: &mut T,
+    cursor: u64,
+    max_slots: u64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Json>, CliError> {
+    let start = InventoryCursor {
+        next_record: cursor,
+    };
+    let outcome = inventory_batch_cancellable_io(io, start, max_slots, cancelled)
+        .map_err(|e| CliError::failed(format!("inventory from slot {cursor}: {e}")))?;
+    Ok(match outcome {
+        InventoryOutcome::Complete(batch) => render(&batch),
+        InventoryOutcome::Interrupted { partial, resume } => {
+            // Cancelled before any read: the table's size is not known.
+            let total_known = partial.is_some();
+            let batch = partial.unwrap_or(InventoryBatch {
+                entries: Vec::new(),
+                slots_visited: 0,
+                unused_slots: 0,
+                damaged_records: Vec::new(),
+                next: None,
+                total_slots: 0,
+            });
+            render_with(
+                &InventoryBatch {
+                    next: Some(resume),
+                    ..batch
+                },
+                true,
+                total_known,
+            )
+        }
+    })
 }
 
 fn render(batch: &InventoryBatch) -> Vec<Json> {
+    render_with(batch, false, true)
+}
+
+fn render_with(batch: &InventoryBatch, interrupted: bool, total_known: bool) -> Vec<Json> {
     let text = |n: u64| Json::from(n.to_string());
     let mut out: Vec<Json> = batch
         .entries
@@ -110,8 +171,16 @@ fn render(batch: &InventoryBatch) -> Vec<Json> {
         ("type", Json::from("batch")),
         ("slots_visited", Json::from(batch.slots_visited)),
         ("unused_slots", Json::from(batch.unused_slots)),
-        ("total_slots", text(batch.total_slots)),
+        (
+            "total_slots",
+            if total_known {
+                text(batch.total_slots)
+            } else {
+                Json::Null
+            },
+        ),
         ("finished", Json::from(batch.next.is_none())),
+        ("interrupted", Json::from(interrupted)),
         (
             "next_cursor",
             batch.next.map_or(Json::Null, |c| text(c.next_record)),
@@ -281,6 +350,74 @@ mod tests {
     }
 
     const MAX_PAST: u64 = 1 << 40;
+
+    /// Records plus the batch line, from a run that may be cancelled.
+    fn records_of(out: &[Json]) -> Vec<String> {
+        out.iter()
+            .filter(|l| kind(l) == "record")
+            .map(|l| str_field(l, "file_reference").to_string())
+            .collect()
+    }
+
+    /// A cancellation that is already pending when the batch starts reads
+    /// nothing, reports it was interrupted, and resumes at the same cursor.
+    #[test]
+    fn a_batch_cancelled_before_it_starts_reads_nothing_and_resumes_in_place() {
+        let mut io = fixture();
+        let polls = std::cell::Cell::new(0u32);
+        let out = lines_cancellable(&mut io, 4, 8, &|| {
+            polls.set(polls.get() + 1);
+            true
+        })
+        .expect("an interrupted batch is not an error");
+        assert_eq!(polls.get(), 1, "polled once, before any read");
+        assert_eq!(out.len(), 1, "only the batch line: {out:?}");
+        let last = &out[0];
+        assert_eq!(kind(last), "batch");
+        assert_eq!(last.get("interrupted"), Some(&Json::Bool(true)));
+        assert_eq!(last.get("finished"), Some(&Json::Bool(false)));
+        assert_eq!(last.get("slots_visited"), Some(&Json::UInt(0)));
+        assert_eq!(last.get("total_slots"), Some(&Json::Null));
+        assert_eq!(str_field(last, "next_cursor"), "4");
+    }
+
+    /// A batch cancelled part-way, then resumed from its `next_cursor`,
+    /// lists exactly the records one uncancelled batch lists: none lost,
+    /// none repeated. The image is not written.
+    #[test]
+    fn a_batch_cancelled_mid_way_resumes_without_loss_or_repeat() {
+        let before = std::fs::read(WINDOWS_IMG).expect("read image");
+        let mut io = fixture();
+        let whole = lines(&mut io, 0, 40).expect("uncancelled batch");
+        assert_eq!(
+            whole.last().and_then(|l| l.get("interrupted")),
+            Some(&Json::Bool(false))
+        );
+        let polls = std::cell::Cell::new(0u32);
+        let first = lines_cancellable(&mut io, 0, 40, &|| {
+            polls.set(polls.get() + 1);
+            polls.get() > 12
+        })
+        .expect("interrupted batch");
+        let stop = first.last().expect("a batch line");
+        assert_eq!(stop.get("interrupted"), Some(&Json::Bool(true)));
+        assert_eq!(stop.get("finished"), Some(&Json::Bool(false)));
+        let resume: u64 = str_field(stop, "next_cursor").parse().expect("decimal");
+        assert!(resume > 0 && resume < 40, "stopped mid-batch at {resume}");
+        let Some(Json::UInt(visited)) = stop.get("slots_visited") else {
+            panic!("slots_visited is a number");
+        };
+        assert_eq!(
+            *visited, resume,
+            "every slot before the cursor was examined"
+        );
+        let rest = lines(&mut io, resume, 40 - resume).expect("resumed batch");
+        let mut joined = records_of(&first);
+        joined.extend(records_of(&rest));
+        assert_eq!(joined, records_of(&whole), "lost or repeated records");
+        drop(io);
+        assert_eq!(before, std::fs::read(WINDOWS_IMG).expect("read image"));
+    }
 
     #[test]
     fn damaged_records_are_reported_as_lines() {
