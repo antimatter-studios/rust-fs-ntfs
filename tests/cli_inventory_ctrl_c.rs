@@ -3,6 +3,7 @@
 //! Send a real console Ctrl-C to the installed CLI process. The fixture is
 //! authored on Windows and downloaded by CI before the CLI integration tier.
 
+use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -11,12 +12,17 @@ const CTRL_C_EVENT: u32 = 0;
 
 #[link(name = "kernel32")]
 extern "system" {
+    fn AttachConsole(process_id: u32) -> i32;
+    fn FreeConsole() -> i32;
     fn GenerateConsoleCtrlEvent(ctrl_event: u32, process_group_id: u32) -> i32;
     fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
 }
 
-// Keep the test runner alive when the Ctrl-C event is broadcast to the
-// shared CI console. The child CLI has its own registered handler.
+const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+
+// Keep this test process alive while attached to the child's private
+// console. Cargo and the test host stay attached to their own console.
 extern "system" fn keep_test_runner_alive(_: u32) -> i32 {
     1
 }
@@ -39,15 +45,29 @@ fn ctrl_c_to_inventory_child_prints_a_resumable_batch_line() {
         .args(["fs.ntfs", image, "inventory", "--max-slots", "1000000000"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .creation_flags(CREATE_NEW_CONSOLE)
         .spawn()
         .expect("spawn actual inventory CLI");
 
     // Let the CLI open the image and register its console handler before
-    // broadcasting Ctrl-C. The large bound keeps the real scan in progress.
+    // sending Ctrl-C to its new console. The large bound keeps its scan in
+    // progress. Detaching first keeps the Cargo/test-host console untouched.
     thread::sleep(Duration::from_millis(20));
-    // SAFETY: group zero targets processes attached to this console; the
-    // runner handler above consumes the same event without exiting.
+    // SAFETY: attach only to the console just created for this child, send
+    // Ctrl-C to its attached processes, then restore the parent console.
+    assert_ne!(unsafe { FreeConsole() }, 0, "detach from the test console");
+    assert_ne!(
+        unsafe { AttachConsole(child.id()) },
+        0,
+        "attach to the CLI console"
+    );
     assert_ne!(unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }, 0);
+    assert_ne!(unsafe { FreeConsole() }, 0, "detach from the CLI console");
+    assert_ne!(
+        unsafe { AttachConsole(ATTACH_PARENT_PROCESS) },
+        0,
+        "restore the test console"
+    );
     let output = child.wait_with_output().expect("wait for inventory CLI");
     assert!(
         output.status.success(),

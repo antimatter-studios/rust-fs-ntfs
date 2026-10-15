@@ -403,6 +403,9 @@ jobs:
       - name: Build Windows-authored fixtures
         shell: pwsh
         run: pwsh -File test-disks/build-windows-native-read-fixtures.ps1
+      - name: Ctrl-C interrupts the inventory CLI process
+        shell: pwsh
+        run: cargo test --locked --features cli --test cli_inventory_ctrl_c
       - name: Measure which names Win32 can create as files
         shell: pwsh
         run: pwsh -File test-disks/measure-win32-names.ps1
