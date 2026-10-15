@@ -1,0 +1,36 @@
+name: Security descriptor Windows oracle
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  descriptor-oracle:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - name: Compare Windows-authored descriptor headers and SIDs
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: 2
+          NTFS_SD_CAPTURE: security-descriptor-windows.tsv
+        run: |
+          set -euo pipefail
+          core_manifest="$(cargo metadata --locked --format-version 1 | python -c 'import json,sys; print(next(p["manifest_path"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rust-fs-core"))')"
+          core_dir="$(dirname "$core_manifest")"
+          bash "$core_dir/scripts/tier.sh" --refuse-skips --refuse-ignored unit -- cargo test --locked --test security_descriptor_windows_oracle
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' tmp/logs/unit.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-descriptor-windows-${{ github.sha }}
+          path: |
+            security-descriptor-windows.tsv
+            tmp/logs/unit.log
+          if-no-files-found: error

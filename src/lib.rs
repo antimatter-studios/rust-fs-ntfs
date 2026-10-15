@@ -69,6 +69,7 @@ pub mod mkfs;
 pub mod read;
 pub mod record_build;
 pub mod sds;
+pub mod security_descriptor;
 pub mod sparse;
 pub mod upcase;
 pub mod view_index;
