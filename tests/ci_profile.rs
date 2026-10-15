@@ -862,7 +862,8 @@ fn ci_ok_covers_every_gating_job_and_preserves_windows_filter() {
             "validate-mkfs-windows",
             "cli",
             "kernel",
-            "semver"
+            "semver",
+            "interrupted-bootstrap"
         ]
     );
     assert_eq!(
