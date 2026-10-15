@@ -3,8 +3,9 @@
 //! Layout sources: Microsoft [MS-DTYP] 2.4.6 and 2.4.2.2:
 //! <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/7d4dac05-9cef-4563-a058-f108abecce1d>.
 //! SID layout: <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/f992ad60-0fe4-4b87-9fed-beb478836861>.
-//! ACL offsets are checked, but ACL contents and absent/null/empty ACL semantics
-//! are deliberately NOT decoded. `as_bytes` preserves all bytes for later decoders.
+//! ACL headers and ACE framing are bounded by AclSize. ACE meaning (masks,
+//! SIDs, callback data) and absent/null/empty ACL semantics are deliberately NOT
+//! decoded. `as_bytes` preserves all bytes for later decoders.
 
 use std::fmt;
 
@@ -29,6 +30,7 @@ pub enum ErrorKind {
     AclOffsetWithoutPresentBit,
     SidRevision,
     SidSubauthorityCount,
+    AclSize,
     LengthOverflow,
 }
 
@@ -103,6 +105,81 @@ impl<'a> Sid<'a> {
     }
 }
 
+/// A validated ACL, borrowing exactly its declared AclSize bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Acl<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> Acl<'a> {
+    fn at(bytes: &'a [u8], offset: usize) -> Result<Self, DecodeError> {
+        let h = bounded(bytes, offset, 8)?;
+        let size = usize::from(u16::from_le_bytes([h[2], h[3]]));
+        let count = usize::from(u16::from_le_bytes([h[4], h[5]]));
+        if size < 8 {
+            return Err(error(offset + 2, ErrorKind::AclSize));
+        }
+        let acl = Self {
+            bytes: bounded(bytes, offset, size)?,
+        };
+        // Every ACE header and its declared size must lie inside AclSize.
+        let mut at = 8;
+        for _ in 0..count {
+            if at + 4 > size {
+                return Err(error(offset + at, ErrorKind::AclSize));
+            }
+            let ace_size = usize::from(u16::from_le_bytes([acl.bytes[at + 2], acl.bytes[at + 3]]));
+            if ace_size < 4 || at + ace_size > size {
+                return Err(error(offset + at + 2, ErrorKind::AclSize));
+            }
+            at += ace_size;
+        }
+        Ok(acl)
+    }
+
+    pub fn revision(self) -> u8 {
+        self.bytes[0]
+    }
+
+    pub fn ace_count(self) -> u16 {
+        u16::from_le_bytes([self.bytes[4], self.bytes[5]])
+    }
+
+    pub fn as_bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// ACEs in stored order. Framing was validated by `SecurityDescriptor::parse`.
+    pub fn aces(self) -> impl Iterator<Item = Ace<'a>> + 'a {
+        let bytes = self.bytes;
+        let mut at = 8;
+        (0..self.ace_count()).map(move |_| {
+            let size = usize::from(u16::from_le_bytes([bytes[at + 2], bytes[at + 3]]));
+            let ace = Ace {
+                ace_type: bytes[at],
+                flags: bytes[at + 1],
+                bytes: &bytes[at..at + size],
+            };
+            at += size;
+            ace
+        })
+    }
+}
+
+/// One ACE: type and flags are raw; the payload bytes are preserved unmodified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ace<'a> {
+    pub ace_type: u8,
+    pub flags: u8,
+    bytes: &'a [u8],
+}
+
+impl<'a> Ace<'a> {
+    pub fn as_bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+}
+
 /// Validated header fields. Control is raw, including all reserved/unknown bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
@@ -123,6 +200,8 @@ pub struct SecurityDescriptor<'a> {
     pub header: Header,
     pub owner: Option<Sid<'a>>,
     pub group: Option<Sid<'a>>,
+    sacl: Option<Acl<'a>>,
+    dacl: Option<Acl<'a>>,
 }
 
 impl<'a> SecurityDescriptor<'a> {
@@ -157,14 +236,11 @@ impl<'a> SecurityDescriptor<'a> {
             if offset < HEADER_BYTES || offset >= bytes.len() {
                 return Err(error(at, ErrorKind::RelativeOffset));
             }
-            // Only the ACL's fixed header must fit here; its size, revision,
-            // ACEs and relationship to other targets remain opaque.
             if i >= 2 {
                 let present = if i == 2 { 0x10 } else { 0x4 };
                 if control & present == 0 {
                     return Err(error(at, ErrorKind::AclOffsetWithoutPresentBit));
                 }
-                bounded(bytes, offset, 8)?;
             }
         }
         let sid = |offset: u32| {
@@ -174,7 +250,18 @@ impl<'a> SecurityDescriptor<'a> {
                 Sid::at(bytes, offset as usize).map(Some)
             }
         };
+        let acl = |offset: u32| {
+            if offset == 0 {
+                Ok(None)
+            } else {
+                Acl::at(bytes, offset as usize).map(Some)
+            }
+        };
+        let sacl = acl(offsets[2])?;
+        let dacl = acl(offsets[3])?;
         Ok(Self {
+            sacl,
+            dacl,
             bytes,
             header: Header {
                 revision: h[0],
@@ -188,6 +275,16 @@ impl<'a> SecurityDescriptor<'a> {
             owner: sid(offsets[0])?,
             group: sid(offsets[1])?,
         })
+    }
+
+    /// None when the SACL is absent or null (offset zero).
+    pub fn sacl(&self) -> Option<Acl<'a>> {
+        self.sacl
+    }
+
+    /// None when the DACL is absent or null (offset zero).
+    pub fn dacl(&self) -> Option<Acl<'a>> {
+        self.dacl
     }
 
     pub fn as_bytes(self) -> &'a [u8] {
@@ -332,6 +429,7 @@ mod tests {
             error(84, ErrorKind::Truncated)
         );
         b[16..20].copy_from_slice(&80u32.to_le_bytes());
+        b[82..84].copy_from_slice(&8u16.to_le_bytes());
         assert!(SecurityDescriptor::parse(&b).is_ok());
     }
 
@@ -360,6 +458,15 @@ mod tests {
         b[34..36].copy_from_slice(&8u16.to_le_bytes());
         b[36..38].copy_from_slice(&1u16.to_le_bytes());
         b[42..44].copy_from_slice(&16u16.to_le_bytes());
-        assert!(SecurityDescriptor::parse(&b).is_err());
+        assert_eq!(
+            SecurityDescriptor::parse(&b).unwrap_err(),
+            error(40, ErrorKind::AclSize)
+        );
+        // A correctly framed ACE is retained byte-for-byte.
+        b[34..36].copy_from_slice(&24u16.to_le_bytes());
+        let d = SecurityDescriptor::parse(&b).unwrap();
+        let aces: Vec<_> = d.dacl().unwrap().aces().collect();
+        assert_eq!(aces.len(), 1);
+        assert_eq!(aces[0].as_bytes(), &b[40..56]);
     }
 }

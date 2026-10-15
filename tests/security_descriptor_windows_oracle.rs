@@ -4,6 +4,7 @@
 #![cfg(windows)]
 
 use fs_ntfs::security_descriptor::{SecurityDescriptor, Sid};
+// Windows reads of the DACL: the presence flag, the ACL pointer, and per-ACE pointers.
 use std::ffi::c_void;
 use std::ptr;
 
@@ -30,6 +31,14 @@ extern "system" {
         control: *mut u16,
         revision: *mut u32,
     ) -> i32;
+    fn GetSecurityDescriptorDacl(
+        sd: *const c_void,
+        present: *mut i32,
+        acl: *mut *mut c_void,
+        defaulted: *mut i32,
+    ) -> i32;
+    fn GetAclInformation(acl: *const c_void, info: *mut c_void, length: u32, class: u32) -> i32;
+    fn GetAce(acl: *const c_void, index: u32, ace: *mut *mut c_void) -> i32;
     fn GetLengthSid(sid: *const c_void) -> u32;
     fn GetSidIdentifierAuthority(sid: *const c_void) -> *const u8;
     fn IsValidSecurityDescriptor(sd: *const c_void) -> i32;
@@ -65,10 +74,52 @@ unsafe fn compare_sid(sid: *const c_void, decoded: Option<Sid<'_>>) -> String {
     hex(bytes)
 }
 
+/// Compares the decoded DACL with Windows' ACL bytes, ACE count and each ACE.
+/// Returns the Windows ACL as hex, or "-" for an absent or null DACL.
+unsafe fn compare_dacl(sd: *const c_void, decoded: &SecurityDescriptor<'_>) -> String {
+    let mut present = 0;
+    let mut acl = ptr::null_mut();
+    let mut defaulted = 0;
+    assert_ne!(
+        GetSecurityDescriptorDacl(sd, &mut present, &mut acl, &mut defaulted),
+        0
+    );
+    let Some(ours) = decoded.dacl() else {
+        assert!(
+            present == 0 || acl.is_null(),
+            "decoder omitted a Windows DACL"
+        );
+        return "-".into();
+    };
+    assert_ne!(present, 0);
+    let header = std::slice::from_raw_parts(acl.cast::<u8>(), 8);
+    let acl_size = usize::from(u16::from_le_bytes([header[2], header[3]]));
+    let acl_bytes = std::slice::from_raw_parts(acl.cast::<u8>(), acl_size);
+    assert_eq!(ours.as_bytes(), acl_bytes);
+    assert_eq!(ours.revision(), header[0]);
+    let mut info = [0u32; 3];
+    assert_ne!(GetAclInformation(acl, info.as_mut_ptr().cast(), 12, 2), 0);
+    assert_eq!(usize::from(ours.ace_count()), info[0] as usize);
+    assert_eq!(ours.aces().count(), info[0] as usize);
+    for (i, ace_ours) in ours.aces().enumerate() {
+        let mut ace = ptr::null_mut();
+        assert_ne!(GetAce(acl, i as u32, &mut ace), 0);
+        let head = std::slice::from_raw_parts(ace.cast::<u8>(), 4);
+        let size = usize::from(u16::from_le_bytes([head[2], head[3]]));
+        assert_eq!(
+            ace_ours.as_bytes(),
+            std::slice::from_raw_parts(ace.cast::<u8>(), size)
+        );
+        assert_eq!(ace_ours.ace_type, head[0]);
+        assert_eq!(ace_ours.flags, head[1]);
+    }
+    hex(acl_bytes)
+}
+
 #[test]
 fn windows_authored_descriptors_match_security_apis_and_are_captured() {
     let mut capture = String::from(
-        "# Windows Advapi32 capture: sddl\tdescriptor_hex\tcontrol\towner_hex\tgroup_hex\n",
+        "# Windows Advapi32 capture: sddl\tdescriptor_hex\tcontrol\towner_hex\tgroup_hex\tdacl_hex\n",
     );
     // Windows authors these bytes; ACL contents are only preserved by this slice.
     let cases = [
@@ -78,6 +129,7 @@ fn windows_authored_descriptors_match_security_apis_and_are_captured() {
         "O:SYG:SYD:",
         "O:SYG:BAD:P(A;;FA;;;SY)",
         "O:SYG:BAD:AI(A;ID;FR;;;WD)S:(AU;SAFA;FR;;;WD)",
+        "O:SYG:BAD:(A;;FA;;;SY)(D;OICI;FR;;;WD)",
         "O:S-1-0x010000000005-21G:S-1-0xffffffffffff-4294967295",
     ];
     for sddl in cases {
@@ -125,9 +177,10 @@ fn windows_authored_descriptors_match_security_apis_and_are_captured() {
             );
             let owner_hex = compare_sid(owner, decoded.owner);
             let group_hex = compare_sid(group, decoded.group);
+            let dacl_hex = compare_dacl(sd.0, &decoded);
             assert_eq!(decoded.as_bytes(), bytes);
             capture.push_str(&format!(
-                "{sddl}\t{}\t{control}\t{owner_hex}\t{group_hex}\n",
+                "{sddl}\t{}\t{control}\t{owner_hex}\t{group_hex}\t{dacl_hex}\n",
                 hex(bytes)
             ));
         }
