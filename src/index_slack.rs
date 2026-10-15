@@ -164,9 +164,96 @@ pub(crate) fn scan_index_slack(
     Ok(scan)
 }
 
+/// Slack candidates from one allocated `$INDEX_ALLOCATION:$I30` block.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct BlockSlack {
+    pub vcn: u64,
+    /// Offset of the scanned region (the block's index header) in the block.
+    pub region_start: usize,
+    pub scan: SlackScan,
+}
+
+/// Scans the unused tail of every allocated INDX block of a directory.
+///
+/// Blocks come through `idx_block::load_for_directory_io` and
+/// `read_indx_block_io`, so the runlist, block size and update sequence array
+/// are the reader's own checked values. Used and allocated lengths are read
+/// from each block's index header and handed to [`scan_index_slack`]
+/// unchanged, which refuses impossible ones rather than clamping. A directory
+/// with no allocated block is an error, not an empty result: a caller that
+/// claims allocation coverage must not pass on a resident-only index.
+pub(crate) fn scan_directory_allocation_slack_io<T: crate::block_io::BlockIo + ?Sized>(
+    io: &mut T,
+    directory_record: u64,
+    budget: SlackBudget,
+) -> Result<Vec<BlockSlack>, Error> {
+    let ia = crate::idx_block::load_for_directory_io(io, directory_record)?;
+    let vcns = ia.allocated_block_vcns();
+    if vcns.is_empty() {
+        return Err(Error::io(format!(
+            "directory record {directory_record} has no allocated INDX block"
+        )));
+    }
+    let start = crate::idx_block::INDX_INDEX_HEADER_OFFSET;
+    let mut out = Vec::with_capacity(vcns.len());
+    for vcn in vcns {
+        let block = crate::idx_block::read_indx_block_io(io, &ia, vcn)?;
+        let region = block.get(start..).ok_or_else(|| {
+            Error::io(format!(
+                "INDX block at VCN {vcn} is shorter than its header"
+            ))
+        })?;
+        let header_u32 = |at: usize| -> Result<usize, Error> {
+            region
+                .get(at..at + 4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+                .ok_or_else(|| Error::io(format!("INDX block at VCN {vcn} header truncated")))
+        };
+        let used = header_u32(0x04)?;
+        let allocated = header_u32(0x08)?;
+        let scan = scan_index_slack(region, used, allocated, budget)?;
+        out.push(BlockSlack {
+            vcn,
+            region_start: start,
+            scan,
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ZeroDev(Vec<u8>);
+
+    impl crate::block_io::BlockIo for ZeroDev {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+            let start = offset as usize;
+            let src = self
+                .0
+                .get(start..start + buf.len())
+                .ok_or_else(|| "read past end".to_string())?;
+            buf.copy_from_slice(src);
+            Ok(())
+        }
+        fn write_all_at(&mut self, _offset: u64, _buf: &[u8]) -> Result<(), String> {
+            Err("read-only".to_string())
+        }
+        fn size(&self) -> u64 {
+            self.0.len() as u64
+        }
+    }
+
+    #[test]
+    fn bridge_refuses_a_volume_without_checked_geometry() {
+        let mut dev = ZeroDev(vec![0u8; 1 << 20]);
+        let budget = SlackBudget {
+            max_offsets: 64,
+            max_candidates: 4,
+        };
+        assert!(scan_directory_allocation_slack_io(&mut dev, 5, budget).is_err());
+    }
 
     const WIDE: SlackBudget = SlackBudget {
         max_offsets: 4096,
