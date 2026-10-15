@@ -16,7 +16,8 @@ use fs_ntfs::mft_inventory::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Set by SIGINT or SIGTERM; the batch stops before its next record read.
+/// Set by SIGINT or SIGTERM, or by Ctrl-C or Ctrl-Break on a Windows
+/// console; the batch stops before its next record read.
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(unix)]
@@ -24,8 +25,39 @@ extern "C" fn on_cancel_signal(_: libc::c_int) {
     CANCELLED.store(true, Ordering::Relaxed);
 }
 
-/// Route Ctrl-C and SIGTERM to the cancellation flag, so an interrupted
-/// batch still prints its records and a cursor that resumes it.
+/// `CTRL_C_EVENT` and `CTRL_BREAK_EVENT` from the Windows SDK's wincon.h.
+const CTRL_C_EVENT: u32 = 0;
+const CTRL_BREAK_EVENT: u32 = 1;
+
+/// Whether a console control event cancels the batch. Ctrl-C and
+/// Ctrl-Break do; close, logoff and shutdown terminate the process once
+/// the handler returns whatever it answers, so they keep the default.
+fn console_ctrl_cancels(ctrl_type: u32) -> bool {
+    matches!(ctrl_type, CTRL_C_EVENT | CTRL_BREAK_EVENT)
+}
+
+/// A `PHANDLER_ROUTINE`: Windows runs it on a thread of its own, and a
+/// nonzero answer means the event is handled, so the process is not ended.
+#[cfg(windows)]
+extern "system" fn on_console_ctrl(ctrl_type: u32) -> i32 {
+    if console_ctrl_cancels(ctrl_type) {
+        CANCELLED.store(true, Ordering::Relaxed);
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    /// `BOOL SetConsoleCtrlHandler(PHANDLER_ROUTINE, BOOL)` from kernel32.
+    fn SetConsoleCtrlHandler(handler: extern "system" fn(u32) -> i32, add: i32) -> i32;
+}
+
+/// Route Ctrl-C and SIGTERM, or a Windows console's Ctrl-C and Ctrl-Break,
+/// to the cancellation flag, so an interrupted batch still prints its
+/// records and a cursor that resumes it.
 fn install_cancel_handler() {
     #[cfg(unix)]
     // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
@@ -33,6 +65,13 @@ fn install_cancel_handler() {
         let handler = on_cancel_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
+    }
+    #[cfg(windows)]
+    // SAFETY: the routine only stores to an atomic and lives for the
+    // whole process. Without a console the call fails and Ctrl-C keeps
+    // its default, which is the behaviour before this handler existed.
+    unsafe {
+        SetConsoleCtrlHandler(on_console_ctrl, 1);
     }
 }
 
@@ -200,6 +239,32 @@ mod tests {
     use std::path::Path;
 
     const WINDOWS_IMG: &str = "test-disks/ntfs-inventory.img";
+
+    #[test]
+    fn console_ctrl_c_and_break_cancel_and_close_keeps_the_default() {
+        assert!(console_ctrl_cancels(CTRL_C_EVENT));
+        assert!(console_ctrl_cancels(CTRL_BREAK_EVENT));
+        // CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT.
+        for other in [2, 5, 6] {
+            assert!(!console_ctrl_cancels(other));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_console_ctrl_c_interrupts_with_the_first_unread_slot() {
+        let mut io = fixture();
+        assert_eq!(on_console_ctrl(CTRL_C_EVENT), 1, "Ctrl-C must be handled");
+        let flagged = CANCELLED.swap(false, Ordering::Relaxed);
+        assert!(flagged, "Ctrl-C must set the cancellation flag");
+        let lines = lines_cancellable(&mut io, 7, 64, &|| flagged).unwrap();
+        let batch = lines.last().unwrap().to_compact();
+        assert!(batch.contains("\"interrupted\":true"), "{batch}");
+        assert!(batch.contains("\"next_cursor\":\"7\""), "{batch}");
+        assert_eq!(on_console_ctrl(2), 0, "close keeps the default handler");
+        assert!(!CANCELLED.load(Ordering::Relaxed));
+    }
+
     const WINDOWS_IDS: &str = "test-disks/ntfs-inventory.fileids.txt";
 
     fn fixture() -> PathIo {
