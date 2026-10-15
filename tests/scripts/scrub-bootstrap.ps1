@@ -25,7 +25,7 @@ try {
     if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) -ne [Convert]::ToBase64String($expected)) {
         throw 'scrub is not idempotent'
     }
-    foreach ($badOffset in @($offset + 3, $offset + 510, $offset + 8192 + 510)) {
+    foreach ($badOffset in @(($offset + 3), ($offset + 510), ($offset + 8192 + 510))) {
         $bad = [byte[]]$bytes.Clone()
         $bad[$badOffset] = 0
         [IO.File]::WriteAllBytes($path, $bad)
