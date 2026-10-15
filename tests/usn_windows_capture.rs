@@ -18,10 +18,13 @@ fn windows_usn_v2_records_match_fsutil() {
         let f: Vec<&str> = line.split('\t').collect();
         let offset: usize = f[0].parse().unwrap();
         let length: u32 = f[1].parse().unwrap();
-        let file_id = u64::from_str_radix(f[2].trim_start_matches("0x"), 16).unwrap();
+        // fsutil reports the 128-bit FILE_ID_128; an NTFS file reference is
+        // its low 64 bits with the high 64 bits zero.
+        let file_id = u128::from_str_radix(f[2].trim_start_matches("0x"), 16)
+            .unwrap_or_else(|e| panic!("row {line}: file ID {:?}: {e}", f[2]));
         let rec = decode_usn_record_v2(&bin[offset..]).unwrap();
         assert_eq!(rec.record_length, length, "row {line}");
-        assert_eq!(rec.file_reference, file_id, "row {line}");
+        assert_eq!(u128::from(rec.file_reference), file_id, "row {line}");
         assert_eq!(rec.file_name_lossy(), f[3], "row {line}");
         assert_ne!(rec.reason, 0, "row {line}");
         rows += 1;

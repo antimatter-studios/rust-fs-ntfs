@@ -95,8 +95,13 @@ try {
     $journalId = $q[0]; $usn = $q[1]
     Set-Content -LiteralPath $marker -Value 'usn capture' -NoNewline
     Add-Content -LiteralPath $marker -Value ' appended' -NoNewline
-    $fileId = ((fsutil file queryfileid $marker) -replace '^.*:\s*', '').Trim()
+    # fsutil prints "File ID is 0x<32 hex digits>": the 128-bit FILE_ID_128,
+    # kept whole so the test, not this script, decides how it relates to the
+    # record's 64-bit file reference.
+    $queryFileId = (fsutil file queryfileid $marker) -join ' '
     if ($LASTEXITCODE -ne 0) { throw "fsutil file queryfileid $marker failed" }
+    if ($queryFileId -notmatch '0x[0-9A-Fa-f]+') { throw "fsutil file queryfileid printed no file ID: $queryFileId" }
+    $fileId = $Matches[0]
 
     $kept = New-Object System.IO.MemoryStream
     for ($pass = 0; $pass -lt 64; $pass++) {
