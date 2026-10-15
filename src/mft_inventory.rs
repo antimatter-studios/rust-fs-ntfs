@@ -239,8 +239,9 @@ mod tests {
     const SIZE: u64 = 16 * 1024 * 1024;
 
     fn image(stem: &str) -> PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("mft-inventory-{stem}-{}.img", std::process::id()));
+        let path = PathBuf::from(crate::test_scratch::temp_image_path(format!(
+            "mft_inventory_{stem}"
+        )));
         let file = std::fs::File::create(&path).expect("create image");
         file.set_len(SIZE).expect("size image");
         drop(file);
