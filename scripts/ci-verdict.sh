@@ -4,9 +4,12 @@
 # deliberately not among the aggregate's dependencies: it carries
 # `continue-on-error: true` and is declared non-gating to ci-gate.
 #
-# CODE is the changes job's `code` output. Only when it is `false`, a change
-# to documentation alone, is a skipped job expected rather than red: the
-# Windows fixtures and the jobs that read them are skipped then.
+# CODE is the changes job's `code` output, decided by scripts/ci-plan.sh. It
+# must be `true` (the full pipeline) or `false` (a quick run: a pull request
+# or a push to main); anything else, an absent decision included, is red.
+# Only on a quick run is a skipped job expected rather than red, and only one
+# of the full jobs named below: the Windows fixtures, the jobs that read
+# them, and the kernel oracle. A quick job is never excused a skip.
 set -euo pipefail
 
 case "${1:-}" in
@@ -24,13 +27,19 @@ case "${1:-}" in
         # The list once left out `semver`, and a failing semver job left
         # ci-ok green (#409). rust-fs-core's ci-gate holds `needs:` to every
         # job in ci.yml.
-        filter='def ok: . == "success" or ($code == "false" and . == "skipped");
+        filter='def full: ["windows-native-read-fixtures", "integration",
+                "cli", "kernel"];
+            def ok($job): .result == "success" or
+                ($code == "false" and .result == "skipped" and
+                 (full | index($job)) != null);
+            ($code == "true" or $code == "false") and
             (.changes.result == "success") and
-            ([.[] | .result] | all(ok)) and
-            ([.test.result, .["windows-native-read-fixtures"].result,
-              .integration.result, .changes.result,
-              .["validate-mkfs-windows"].result, .cli.result,
-              .kernel.result, .semver.result] | all(ok))'
+            (to_entries | all(.value | type == "object") and
+                all(.value as $v | .key as $k | $v | ok($k))) and
+            (["test", "windows-native-read-fixtures", "integration",
+              "changes", "validate-mkfs-windows", "cli", "kernel",
+              "semver"] | all(. as $k | $needs | has($k) and
+                (.[$k] | ok($k))))'
         ;;
     *)
         echo 'usage: ci-verdict.sh windows|aggregate' >&2
@@ -38,7 +47,7 @@ case "${1:-}" in
         ;;
 esac
 
-if ! printf '%s' "${GATE_NEEDS_JSON:-}" | jq -e --arg code "${CODE:-}" "$filter" >/dev/null; then
+if ! printf '%s' "${GATE_NEEDS_JSON:-}" | jq -e --arg code "${CODE:-}" ". as \$needs | $filter" >/dev/null; then
     echo "CI $1 verdict failed: a required job failed, was cancelled, or was unexpectedly skipped" >&2
     exit 1
 fi

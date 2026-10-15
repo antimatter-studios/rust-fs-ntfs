@@ -765,13 +765,13 @@ jobs:
   # the merge base, and a filter action would be another unpinned
   # dependency in front of the gate it decides.
   #
-  # `code` is false only when every path is documentation (rust-fs-core's
-  # scripts/code-changed.sh): the pull request's diff, the merge queue
-  # group's (its base_sha to its head_sha: what the queue is about to land),
-  # or a push to main's (before to after). A tag, a dispatch, or a push it
-  # cannot diff runs everything. The ARM64 and macOS legs, the Windows
-  # fixtures and what reads them, and ASan run only when it is true, and
-  # ci-ok accepts their skip when, and only when, it is false.
+  # `code` is the run's depth, decided from its event by scripts/ci-plan.sh.
+  # Pull requests, every layer of a stack included, and pushes to main run
+  # the quick checks (unit, scripts, lint, semver): it is false. The merge
+  # queue, tags, manual dispatches and anything unexpected run everything:
+  # it is true. The ARM64 and macOS legs, the Windows fixtures and what reads
+  # them, the kernel oracle and ASan run only when it is true, and ci-ok
+  # accepts those jobs' skip when, and only when, it is false.
   changes:
     name: what this pull request touches
     runs-on: ubuntu-latest
@@ -792,38 +792,13 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          MQ_BASE: ${{ github.event.merge_group.base_sha }}
-          MQ_HEAD: ${{ github.event.merge_group.head_sha }}
-          PUSH_BEFORE: ${{ github.event.before }}
-          PUSH_AFTER: ${{ github.event.after }}
-        run: |
-          set -euo pipefail
-          range=
-          case "$EVENT" in
-            pull_request) range="$PR_BASE...$PR_HEAD" ;;
-            merge_group) range="$MQ_BASE...$MQ_HEAD" ;;
-            push)
-              case "$REF" in
-                refs/heads/*)
-                  if [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != 0000000000000000000000000000000000000000 ] &&
-                    git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then
-                    range="$PUSH_BEFORE...$PUSH_AFTER"
-                  fi ;;
-              esac ;;
-          esac
-          if [ -n "$range" ]; then
-            code="$(git diff --name-only "$range" | bash ../rust-fs-core/scripts/code-changed.sh)"
-          else
-            code=true
-          fi
-          echo "code=$code ($EVENT${range:+ $range})"
-          echo "code=$code" >> "$GITHUB_OUTPUT"
+        run: bash scripts/ci-plan.sh
+      # The merge queue runs the Windows gate when its group changes
+      # format-relevant code; a quick pull request run never does.
       - id: filter
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        if: github.event_name == 'merge_group'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
           # The code that decides bytes on disk, the workflow that validates
@@ -837,10 +812,10 @@ jobs:
           else
               echo "mkfs=false" >> "$GITHUB_OUTPUT"
           fi
-      # Tags, main pushes and manual dispatches validate on Windows, except a
-      # push to main that changes documentation alone.
+      # Tags and manual dispatches validate on Windows; pull requests and
+      # pushes to main, the quick runs, do not.
       - id: unfiltered
-        if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+        if: github.event_name != 'merge_group'
         env:
           CODE: ${{ steps.code.outputs.code }}
         run: echo "mkfs=$CODE" >> "$GITHUB_OUTPUT"
@@ -1515,7 +1490,7 @@ jobs:
       - name: Check every gating job
         env:
           GATE_NEEDS_JSON: ${{ toJSON(needs) }}
-          # false only for a change to documentation alone: then, and only
-          # then, a skipped job is not a failed one.
+          # false only for a quick run (a pull request or a push to main):
+          # then, and only then, a full job's skip is not a failed one.
           CODE: ${{ needs.changes.outputs.code }}
         run: bash scripts/ci-verdict.sh aggregate
