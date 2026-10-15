@@ -32,14 +32,14 @@ check windows-filter-failed windows fail "$(jq -c '.changes.result="failure"' <<
 check windows-missing-run windows fail '{"changes":{"result":"success","outputs":{"mkfs":"true"}}}'
 check windows-missing-decision windows fail '{"changes":{"result":"success"},"validate-mkfs-windows-run":{"result":"skipped"}}'
 
-check aggregate-green aggregate pass "$aggregate"
+check aggregate-green aggregate pass "$aggregate" true
 # semver and windows-native-read-fixtures are in ci-ok's `needs:` and were
 # once absent from the verdict's list, so a failing semver job left ci-ok
 # green (#409).
 for job in test windows-native-read-fixtures integration changes validate-mkfs-windows cli kernel semver; do
     for result in failure cancelled skipped; do
         check "aggregate-$job-$result" aggregate fail \
-            "$(jq -c --arg job "$job" --arg result "$result" '.[$job].result=$result' <<< "$aggregate")"
+            "$(jq -c --arg job "$job" --arg result "$result" '.[$job].result=$result' <<< "$aggregate")" true
     done
 done
 # A change to documentation alone skips the Windows fixtures and what reads
@@ -51,13 +51,33 @@ check aggregate-code-skips aggregate fail "$docs_only" true
 check aggregate-unknown-code-skips aggregate fail "$docs_only"
 check aggregate-docs-only-failure aggregate fail "$(jq -c '.cli.result="failure"' <<< "$docs_only")" false
 check aggregate-docs-only-changes-skipped aggregate fail "$(jq -c '.changes.result="skipped"' <<< "$docs_only")" false
-check aggregate-missing-integration aggregate fail '{"test":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"},"cli":{"result":"success"}}'
-check aggregate-missing-cli aggregate fail '{"test":{"result":"success"},"integration":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"}}'
-check aggregate-missing-semver aggregate fail "$(jq -c 'del(.semver)' <<< "$aggregate")"
-check aggregate-missing-kernel aggregate fail "$(jq -c 'del(.kernel)' <<< "$aggregate")"
+check aggregate-missing-integration aggregate fail '{"test":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"},"cli":{"result":"success"}}' true
+check aggregate-missing-cli aggregate fail '{"test":{"result":"success"},"integration":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"}}' true
+check aggregate-missing-semver aggregate fail "$(jq -c 'del(.semver)' <<< "$aggregate")" true
+check aggregate-missing-kernel aggregate fail "$(jq -c 'del(.kernel)' <<< "$aggregate")" true
 # A job added to ci-ok's `needs:` is judged even before this list learns it.
-check aggregate-extra-need-failed aggregate fail "$(jq -c '.["new-job"].result="failure"' <<< "$aggregate")"
-check aggregate-invalid-json aggregate fail '{'
+check aggregate-extra-need-failed aggregate fail "$(jq -c '.["new-job"].result="failure"' <<< "$aggregate")" true
+check aggregate-invalid-json aggregate fail '{' true
+# The run's depth comes from scripts/ci-plan.sh and is true or false. A
+# missing or invalid decision is red even when every job succeeded.
+check aggregate-missing-plan aggregate fail "$aggregate"
+check aggregate-invalid-plan aggregate fail "$aggregate" maybe
+check aggregate-quick-green aggregate pass "$aggregate" false
+# A quick run (a pull request or a push to main) excuses only the full
+# jobs' skip. A quick job skipped, and any job failed or cancelled, is red.
+for job in test changes validate-mkfs-windows semver; do
+    check "aggregate-quick-$job-skipped" aggregate fail \
+        "$(jq -c --arg job "$job" '.[$job].result="skipped"' <<< "$docs_only")" false
+done
+for job in test windows-native-read-fixtures integration changes validate-mkfs-windows cli kernel semver; do
+    for result in failure cancelled; do
+        check "aggregate-quick-$job-$result" aggregate fail \
+            "$(jq -c --arg job "$job" --arg result "$result" '.[$job].result=$result' <<< "$docs_only")" false
+    done
+done
+check aggregate-quick-extra-need-skipped aggregate fail "$(jq -c '.["new-job"].result="skipped"' <<< "$docs_only")" false
+check aggregate-quick-missing-kernel aggregate fail "$(jq -c 'del(.kernel)' <<< "$docs_only")" false
+check aggregate-full-run-skips aggregate fail "$docs_only" true
 
 printf 'ci verdict: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
