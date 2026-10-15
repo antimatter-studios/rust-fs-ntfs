@@ -23,6 +23,14 @@ permissions:
   contents: read
 
 jobs:
+  interrupted-bootstrap:
+    name: interrupted fixture bootstrap guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/check-interrupted-bootstrap.py
+
   test:
     name: test-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -1509,7 +1517,7 @@ jobs:
     name: ci-ok
     runs-on: ubuntu-latest
     if: always()
-    needs: [test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, kernel, semver]
+    needs: [test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap]
     steps:
       - uses: actions/checkout@v4
       - name: Check every gating job
