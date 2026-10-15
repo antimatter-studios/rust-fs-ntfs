@@ -2,9 +2,8 @@
 //! post-fixup MFT record buffer — used from inside `update_mft_record`
 //! mutator closures.
 //!
-//! References (no GPL code consulted): NTFS index B-tree layout,
-//! $INDEX_ROOT, and $FILE_NAME attribute formats per Windows Internals
-//! 7th ed. ch. "NTFS On-Disk Structure" and MS-FSCC.
+//! Format evidence: Windows-authored directory indexes, checked by
+//! `tests/fragmented_indx_fixture.rs`, and the Windows chkdsk matrix.
 
 use crate::attr_io::{self, read_u32_le, AttrType};
 use crate::error::Error;

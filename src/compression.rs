@@ -8,8 +8,11 @@
 //! the caller — this module is the pure codec so it can be unit-tested
 //! without any I/O.
 //!
-//! ## Stream layout (clean-room, from the documented LZNT1 format — no
-//! GPL source consulted)
+//! ## Stream layout
+//!
+//! Reference: Microsoft [MS-XCA, section 2.5] describes the LZNT1 format.
+//!
+//! [MS-XCA, section 2.5]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xca/5655f4a3-6ba4-489b-959f-e1f407c52f15
 //!
 //! A stream is a sequence of **chunks**. Each chunk starts with a 16-bit
 //! little-endian header:

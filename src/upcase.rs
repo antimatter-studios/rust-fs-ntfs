@@ -23,8 +23,7 @@
 //! and the iter16 entry in `docs/chkdsk-findings.md` for the
 //! extraction recipe.
 //!
-//! No GPL/LGPL code or NTFS-on-Linux table was consulted — the bytes
-//! are Microsoft's own output, captured via `fsutil file queryextents`
+//! The bytes are Windows formatter output, captured via `fsutil file queryextents`
 //! + raw volume read on a clean format.com-formatted VHDX.
 
 use crate::error::Error;

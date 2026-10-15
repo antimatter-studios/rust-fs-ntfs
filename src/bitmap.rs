@@ -10,8 +10,11 @@
 //! `data_runs::decode_runs` walker to translate cluster-range VCNs to
 //! on-disk byte offsets, then reads / writes the bits directly.
 //!
-//! References (no GPL code consulted): $Bitmap layout per Windows
-//! Internals 7th ed. ch. "NTFS On-Disk Structure" and MS-FSCC.
+//! Reference: Microsoft's [Master File Table notes] identify `$Bitmap`'s
+//! unnamed data stream as the cluster-use bitmap. Allocation changes are
+//! checked by the Windows chkdsk matrix.
+//!
+//! [Master File Table notes]: https://learn.microsoft.com/en-us/windows/win32/devnotes/master-file-table
 //!
 //! **Scope.** Allocate / free contiguous cluster ranges, find the first
 //! contiguous free run of `N` clusters. No best-fit or locality

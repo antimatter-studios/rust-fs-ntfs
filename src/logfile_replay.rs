@@ -104,9 +104,8 @@
 //! # Formats
 //!
 //! LFS restart and record pages, the NTFS client record header, and the
-//! restart tables, from MS-FSCC and Windows Internals 7th ed. ("NTFS
-//! Logging"), with field meanings confirmed on the captured logs. No GPL
-//! implementation was consulted.
+//! restart tables are checked against captured Windows logs in
+//! `tests/windows_interrupted_fixture.rs` and the Windows replay matrix.
 
 use std::collections::{BTreeMap, HashMap};
 

@@ -231,8 +231,8 @@ pattern.
 `Cargo.toml` declares `license = "MIT OR Apache-2.0"`.
 `deny.toml` enforces a permissive-only allowlist (MIT, Apache-2.0,
 BSD-2-Clause, BSD-3-Clause, ISC, Unicode, CC0-1.0, Zlib, 0BSD)
-across every transitive dep — no GPL / LGPL / MPL / AGPL ever
-enters the dependency graph.
+across transitive dependencies. CI checks that allowlist with
+`cargo deny --all-features check`.
 
 ## Building
 
@@ -471,9 +471,10 @@ in-house and supersedes it; the read, write, recovery, mkfs, and FFI
 code here is all original work. Colin Finck's crate remains as a
 **dev-dependency oracle** — tests cross-check that what this crate
 parses and generates matches what the upstream parser sees — but it
-is not part of the shipping library. Citations throughout are
-Microsoft MS-FSCC and Windows Internals 7th ed. only; no GPL'd NTFS
-reimplementation was consulted at any point.
+is not part of the shipping library. Format evidence combines published
+Microsoft structure documentation with Windows-written fixtures and
+independent readers. Each citation must support the particular structure
+or field it accompanies; see the [source policy](AGENTS.md#source-material-and-format-evidence).
 
 ## Disclaimer — use at your own risk
 

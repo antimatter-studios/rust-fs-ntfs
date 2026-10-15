@@ -817,9 +817,11 @@ writer producing a writable volume.
 
 For every bug above, "Justification" links to one of:
 
-- **Microsoft MS-FSCC** ([MS-FSCC]: File System Algorithms) — the
-  primary public spec. Authoritative for attribute layouts, BPB
-  fields, $FILE_NAME body, security descriptors.
+- **Microsoft MS-FSCC** ([File System Control Codes](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/))
+  documents file-system protocol and API information, not every NTFS
+  on-disk layout. Use the published
+  [NTFS structure notes](https://learn.microsoft.com/en-us/windows/win32/devnotes/master-file-table)
+  for the structures they describe, and MS-DTYP for security descriptors.
 - **Microsoft `format.com /FS:NTFS`** output, dumped per-pipeline-run
   on the Windows ARM 11 VM. The actual byte stream a sanctioned
   Microsoft tool produces; differences from ours that affect chkdsk
@@ -830,11 +832,10 @@ For every bug above, "Justification" links to one of:
   to triangulate which structure is wrong is observational, not
   reverse-engineering.
 
-Sources NOT consulted (per project policy): any GPL-licensed
-reverse-engineered Linux NTFS implementation, any Linux NTFS
-project's documentation pages, any leaked or pirated Microsoft
-internal source. Citations cite either Microsoft published material
-or our own observed byte-diff against `format.com`.
+Each citation must support its accompanying claim. Undocumented field
+choices need retained Windows byte comparisons, rather than an assumed
+specification reference. Future source use follows the
+[source policy](../AGENTS.md#source-material-and-format-evidence).
 
 ## Cross-agent observations (per-worktree work-list survey)
 

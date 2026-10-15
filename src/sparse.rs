@@ -13,9 +13,10 @@
 //! handled by [`crate::data_runs::encode_runs`] (it emits `lcn_bytes == 0`
 //! for `lcn == None`).
 //!
-//! References (no GPL code consulted): NTFS sparse-file layout and the
-//! `FILE_ATTRIBUTE_SPARSE_FILE` / attribute SPARSE flag per Windows
-//! Internals 7th ed. ch. "NTFS On-Disk Structure" and MS-FSCC §2.4.
+//! Reference: Microsoft's [ATTRIBUTE_RECORD_HEADER] documents the on-disk
+//! sparse flag. Sparse stream behavior is checked by the Windows matrix.
+//!
+//! [ATTRIBUTE_RECORD_HEADER]: https://learn.microsoft.com/en-us/windows/win32/devnotes/attribute-record-header
 
 use crate::data_runs::DataRun;
 use crate::error::Error;

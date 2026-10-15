@@ -4,8 +4,11 @@
 //! `mapping_pairs_offset` and runs until the first 0x00 byte (or the
 //! attribute's length).
 //!
-//! Reference (no GPL code consulted): NTFS data-run / mapping-pair
-//! encoding per Windows Internals 7th ed. ch. "NTFS On-Disk Structure".
+//! Reference: the Remarks section of Microsoft's
+//! [ATTRIBUTE_RECORD_HEADER] documents the count-byte nibbles, little-endian
+//! values and cumulative LCN deltas.
+//!
+//! [ATTRIBUTE_RECORD_HEADER]: https://learn.microsoft.com/en-us/windows/win32/devnotes/attribute-record-header
 //!
 //! Run-list encoding:
 //!   byte 0     header = (lcn_bytes << 4) | length_bytes

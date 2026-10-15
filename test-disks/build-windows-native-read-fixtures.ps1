@@ -6,7 +6,8 @@
 #   * ntfs-cli-read.img: files Windows wrote, plus ntfs-cli-read.sha256.tsv,
 #     each file's path, size and the SHA-256 Windows itself computes
 #   * ntfs-ea.img: extended attributes Windows set through NtSetEaFile, plus
-#     ntfs-ea.names.tsv, each name and value as it was handed to Windows
+#     ntfs-ea.names.tsv, each name and value as it was handed to Windows;
+#     ea-summary-{0,1,2}.bin distinguish compact/query sizes and NEED_EA counts
 #   * ntfs-format-64k.img: an empty volume Windows formatted with 64 KiB
 #     clusters, whose $MFTMirr the formatter is held to
 #   * ntfs-usnjrnl.img: a volume with an active change journal, plus
@@ -205,6 +206,37 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-ea.img' -Label 'EA' -Populate {
     $lines = foreach ($name in $eas.Keys) { "$name`t$($eas[$name])" }
     [System.IO.File]::WriteAllText($eaReport, (($lines -join "`n") + "`n"),
         (New-Object System.Text.UTF8Encoding($false)))
+
+    # Two independently specified entries: compact 9 + 10 bytes, query
+    # 16 + 16 bytes. Windows writes the eight-byte on-disk summary itself.
+    foreach ($needCount in 0..2) {
+        $file = Join-Path $root "ea-summary-$needCount.bin"
+        [System.IO.File]::WriteAllBytes($file, [byte[]](0x45))
+        $entries = @(
+            @{ Name = 'A'; Value = 'aaa'; Flags = $(if ($needCount -eq 2) { 0x80 } else { 0 }) },
+            @{ Name = 'LONG'; Value = 'x'; Flags = $(if ($needCount -gt 0) { 0x80 } else { 0 }) }
+        )
+        $handle = [WindowsEa]::CreateFileW($file, [uint32]0x100018, [uint32]7, [IntPtr]::Zero,
+            [uint32]3, [uint32]0x80, [IntPtr]::Zero)
+        if ($handle.IsInvalid) {
+            throw "open ea-summary-$needCount.bin for EAs: Win32 error $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+        }
+        try {
+            foreach ($entry in $entries) {
+                $n = [System.Text.Encoding]::ASCII.GetBytes($entry.Name)
+                $v = [System.Text.Encoding]::ASCII.GetBytes($entry.Value)
+                $buf = New-Object byte[] (8 + $n.Length + 1 + $v.Length)
+                $buf[4] = [byte]$entry.Flags
+                $buf[5] = [byte]$n.Length
+                [BitConverter]::GetBytes([uint16]$v.Length).CopyTo($buf, 6)
+                $n.CopyTo($buf, 8)
+                $v.CopyTo($buf, 8 + $n.Length + 1)
+                $status = New-Object WindowsEa+IoStatusBlock
+                $rc = [WindowsEa]::NtSetEaFile($handle, [ref]$status, $buf, [uint32]$buf.Length)
+                if ($rc -ne 0) { throw ("NtSetEaFile {0}: NTSTATUS 0x{1:X8}" -f $entry.Name, $rc) }
+            }
+        } finally { $handle.Dispose() }
+    }
 }
 
 # What Windows' formatter writes into $MFTMirr when a cluster holds more than

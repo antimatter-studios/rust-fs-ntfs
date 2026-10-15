@@ -224,6 +224,30 @@ a fragment until it ships and a line of `CHANGELOG.md` after, never both.
   application in the README, the source, or CLI help.
 <!-- END SHARED BLOCK: agent-core v6 -->
 
+## Source material and format evidence
+
+- Check a source's license from its metadata or license file **before opening
+  external implementation code or headers**. Do not inspect GPL, LGPL or AGPL
+  implementation source, including through search snippets, browser pages,
+  raw URLs, command-line downloads or local file reads. If the license is
+  uncertain, use published format documentation or a Windows experiment.
+- A citation must describe the exact structure and field being implemented.
+  Windows API buffers and on-disk records are different evidence. Where
+  published documentation does not cover a field, compare its bytes with a
+  Windows-generated fixture and retain the experiment as an oracle test.
+  Do not substitute a plausible citation for a verified one.
+- Executing and naming a copyleft CLI as a subprocess test oracle is allowed
+  by the shared rule above. This does not permit linking it or copying its
+  implementation into the crate.
+- Generate new disk fixtures on demand. Do not commit disk images, formatter
+  executable boot code or unexplained binary tables. A proposed binary asset
+  needs a documented generator and a reviewed redistribution basis.
+- Run `chore check:sources` before committing. Its regression tests also run
+  in the existing scripts tier. The guard rejects known implementation-source
+  links and unsupported historical source guarantees; it cannot determine the
+  license of every URL or enforce what an external tool opens. License
+  preflight remains required, alongside CI's dependency allowlist check.
+
 ## Skills specific to this repository
 
 - **`windows-test-skill`** — the 42-scenario Windows matrix: tiered gates

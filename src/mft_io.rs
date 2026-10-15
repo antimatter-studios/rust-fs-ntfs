@@ -28,10 +28,12 @@
 //! that belongs in the device-owning layer if/when it's needed — not in
 //! this primitive, which never sees the fd.
 //!
-//! References (no GPL code consulted): Multi-sector update sequence
-//! ("fixup"), boot sector / BPB layout, and FILE_RECORD_SEGMENT_HEADER
-//! per Windows Internals 7th ed. ch. "NTFS On-Disk Structure" and
-//! MS-FSCC.
+//! References: Microsoft's [MULTI_SECTOR_HEADER] describes update-sequence
+//! protection; [FILE_RECORD_SEGMENT_HEADER] describes the record header.
+//! Volume geometry is exercised by the Windows-authored fixture tests.
+//!
+//! [MULTI_SECTOR_HEADER]: https://learn.microsoft.com/en-us/windows/win32/devnotes/multi-sector-header
+//! [FILE_RECORD_SEGMENT_HEADER]: https://learn.microsoft.com/en-us/windows/win32/devnotes/file-record-segment-header
 //!
 //! **Why fixup matters.** NTFS stores multi-sector records (MFT records,
 //! INDEX_ALLOCATION blocks) with the last 2 bytes of every 512-byte sector

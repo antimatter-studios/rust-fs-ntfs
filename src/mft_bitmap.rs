@@ -15,8 +15,10 @@
 //! A read that could not see the preceding write turned every one of
 //! those rollbacks into a no-op and leaked the MFT record.
 //!
-//! References (no GPL code consulted): $Bitmap and $MFT layout per
-//! Windows Internals 7th ed. ch. "NTFS On-Disk Structure" and MS-FSCC.
+//! Reference: Microsoft's [Master File Table notes] distinguish `$Mft`'s
+//! record-use bitmap from `$Bitmap`'s cluster-use bitmap.
+//!
+//! [Master File Table notes]: https://learn.microsoft.com/en-us/windows/win32/devnotes/master-file-table
 
 use crate::attr_io::{self, AttrType};
 use crate::block_io::{BlockIo, PathIo};

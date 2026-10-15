@@ -213,8 +213,10 @@ Tracking: Windows-syntax symlink targets landed with #505.
 ### Q18 — Strict EA parsing and summaries
 
 **Integrity and implementation gaps.** Resident packing is implemented; the reader
-does not validate every NUL/alignment/overlap/trailer/summary invariant. Obtain
-independent EAs with differing compact/query sizes and NEED_EA flags. Mutate the
+does not validate every NUL/alignment/overlap/trailer/summary invariant. The
+[Windows summary oracle](../../../tests/ea_information_windows_oracle.rs) covers
+differing compact/query sizes and zero, one or two NEED_EA flags; its generated
+Windows fixtures must pass CI before that evidence is accepted. Mutate the
 name terminator, entry-local length, next offset, flags, and summary independently.
 Require explicit malformed-input outcomes; determine which trailing padding is
 valid. Nonresident EA storage and Windows byte-name comparison beyond ASCII require

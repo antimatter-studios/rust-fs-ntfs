@@ -64,9 +64,9 @@ Every agent instance MUST follow these three skills before starting work:
   be made from "this probably is the issue." Every change must cite
   either (a) a byte-level diff between our output and Microsoft's
   reference (the matrix-baseline pipeline produces these in
-  `test-diagnostics/`), or (b) a public spec citation (Microsoft
-  MS-FSCC, Windows Internals, IETF RFCs — never permissively-relicensed
-  reverse-engineered NTFS implementations).
+  `test-diagnostics/`), or (b) a published specification that actually
+  describes the field. Upstream `ntfs` remains a permissively licensed
+  independent test reader; our own round trips are not an independent oracle.
 
 - **`documentation-protocol`** — per-iteration findings log. Every
   agent appends its iteration to
@@ -293,14 +293,13 @@ for the next class of bugs.
   --all-targets -- -D warnings` must pass. The pre-commit hook
   enforces this; an agent that bypasses the hook with `--no-verify`
   has violated the protocol.
-- **GPL-tooling rule** (project memory, hard rule): no mention of
-  `ntfs-3g`, `mkntfs`, `ntfsfix`, `ntfsinfo`, `Tuxera`, `e2fsprogs`,
-  `mke2fs`, or any GPL'd reverse-engineered NTFS implementation
-  anywhere -- not in source, not in comments, not in docs, not in CI,
-  not in commit messages. Use generic phrasing only ("the canonical
-  Linux NTFS reimplementation", "publicly documented NTFS layout").
-  Citations come from Microsoft MS-FSCC, Windows Internals, or our
-  own byte-diff observations -- never from Linux NTFS project docs.
+- **Source-license rule**: establish the license before opening external
+  implementation code or headers. Do not inspect GPL, LGPL or AGPL
+  implementation source. Published documentation must cover the exact field;
+  otherwise use a reproducible Windows byte comparison. Named subprocess
+  test oracles remain allowed; hiding a tool's name does not establish its
+  license or provide format evidence. Follow the
+  [source policy](../AGENTS.md#source-material-and-format-evidence).
 - **No bundled changes**: one fix per commit, one bug per iteration.
   The skill explicitly forbids "I'll change A and B then run." If
   one fixes the symptom, you don't know which.

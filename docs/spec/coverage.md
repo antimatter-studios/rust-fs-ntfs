@@ -22,7 +22,7 @@ A formatter, reader, mutator, and independent oracle are separate evidence types
 | [read.rs](../../src/read.rs) | §1–§7 | Native resolution, values/ranges/stat/listing, attribute lists, WOF refusal, protection discovery | [native fixtures](../../tests/native_read_fixtures.rs), [split refusal](../../tests/attribute_list_split.rs), [stale entries](../../tests/stale_index_entry.rs) |
 | [compression.rs](../../src/compression.rs) | §6 | LZNT1 chunks/tokens/bounds; decode only | Module tests; [native compressed fixture](../../tests/native_read_fixtures.rs) |
 | [sparse.rs](../../src/sparse.rs) | §3, §7 | Whole-content zero/data segment planner | [sparse write](../../tests/sparse_write.rs) |
-| [ea_io.rs](../../src/ea_io.rs) | §6 | EA packing, compact/query lengths, summary, byte-name matching | [EA combinatorics](../../tests/ea_combinatorics.rs), [EA exhaustion](../../tests/field_exhaustion_ea.rs) |
+| [ea_io.rs](../../src/ea_io.rs) | §6 | EA packing, compact/query lengths, summary, byte-name matching | [EA combinatorics](../../tests/ea_combinatorics.rs), [EA exhaustion](../../tests/field_exhaustion_ea.rs), [Windows summary oracle](../../tests/ea_information_windows_oracle.rs) |
 | [sds.rs](../../src/sds.rs) | §6 | Descriptor hash/header/padding/mirror; small catalog serialization | Module vectors; [mkfs round trip](../../tests/mkfs_roundtrip.rs) |
 | [mkfs.rs](../../src/mkfs.rs) | §1–§6 | Initial metadata, system records, boot reservation, clean log, view indexes, quota defaults, AttrDef | [mkfs round trip](../../tests/mkfs_roundtrip.rs); retained Windows matrix |
 | [logfile.rs](../../src/logfile.rs) | §5 | Empty/clean/pending state, restart/page/checkpoint inspection | [logfile state](../../tests/logfile_state.rs) |
