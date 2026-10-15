@@ -16,6 +16,10 @@ use fs_ntfs::mft_inventory::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(all(windows, feature = "harness"))]
+#[path = "inventory_console_test.rs"]
+mod console_test;
+
 /// Set by SIGINT or SIGTERM, or by Ctrl-C or Ctrl-Break on a Windows
 /// console; the batch stops before its next record read.
 static CANCELLED: AtomicBool = AtomicBool::new(false);
@@ -26,12 +30,15 @@ extern "C" fn on_cancel_signal(_: libc::c_int) {
 }
 
 /// `CTRL_C_EVENT` and `CTRL_BREAK_EVENT` from the Windows SDK's wincon.h.
+#[cfg(any(windows, test))]
 const CTRL_C_EVENT: u32 = 0;
+#[cfg(any(windows, test))]
 const CTRL_BREAK_EVENT: u32 = 1;
 
 /// Whether a console control event cancels the batch. Ctrl-C and
 /// Ctrl-Break do; close, logoff and shutdown terminate the process once
 /// the handler returns whatever it answers, so they keep the default.
+#[cfg(any(windows, test))]
 fn console_ctrl_cancels(ctrl_type: u32) -> bool {
     matches!(ctrl_type, CTRL_C_EVENT | CTRL_BREAK_EVENT)
 }
@@ -116,6 +123,8 @@ pub fn run<T: BlockIo + ?Sized>(io: &mut T, sub: &ArgMatches) -> Result<Outcome,
     let max_slots = *sub.get_one::<u64>("max-slots").expect("clap requires it");
     let cursor = *sub.get_one::<u64>("cursor").expect("clap defaults it");
     install_cancel_handler();
+    #[cfg(all(windows, feature = "harness"))]
+    console_test::wait_for_cancel(&CANCELLED)?;
     let cancelled = || CANCELLED.load(Ordering::Relaxed);
     let mut out = String::new();
     for line in lines_cancellable(io, cursor, max_slots, &cancelled)? {
@@ -132,6 +141,7 @@ pub fn run<T: BlockIo + ?Sized>(io: &mut T, sub: &ArgMatches) -> Result<Outcome,
 }
 
 /// The batch's lines, in output order: records, damaged records, the batch.
+#[cfg(test)]
 pub fn lines<T: BlockIo + ?Sized>(
     io: &mut T,
     cursor: u64,
@@ -140,7 +150,7 @@ pub fn lines<T: BlockIo + ?Sized>(
     lines_cancellable(io, cursor, max_slots, &|| false)
 }
 
-/// As [`lines`], but `cancelled` is polled before every record read. A
+/// The batch's lines, with `cancelled` polled before every record read. A
 /// cancelled batch prints what it read and a batch line with
 /// `"interrupted": true`, `"finished": false` and the first unread slot as
 /// `next_cursor`, so resuming from it loses and repeats nothing.
