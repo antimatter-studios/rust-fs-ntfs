@@ -1,0 +1,348 @@
+{
+  "original_commit": "bdca94a84b9e495f470075f11cff3d4bec92944a",
+  "regions": [
+    "[84,510)",
+    "[512,8192)",
+    "[backup+84,backup+510)"
+  ],
+  "partitions": [
+    {
+      "name": "windows-interrupted-1.img.gz",
+      "original_sha256": "7236ffe64f5532b6f5cd976c1fa81c66e6be6cd31cfb8c22bc0bb588e8fad54f",
+      "scrubbed_sha256": "c45659e95104eca5f793c3f21061f42705a01783e62d1c7a46c63e4089db0b9a",
+      "unchanged_sha256": "b36d4324345851e35e4d229a95cacff55440732bd082beaa282b49152f2ce947",
+      "changed_bytes": [
+        365,
+        3825,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-1.recovered.img.gz",
+      "original_sha256": "ba2efd60cf3de25f5e87e1adf11581826ccb3d3cfbb6c0fd5ac015bf8c308d2b",
+      "scrubbed_sha256": "16beeb97f2177b8abd02287c8803bf4faa460a7ee701ab842f8ef552ef3bc14a",
+      "unchanged_sha256": "a3c777110a34edd5d12c715fd17c9dc9216cd83827a814a49a0954d0fdcebd3e",
+      "changed_bytes": [
+        365,
+        3877,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-6.img.gz",
+      "original_sha256": "5899daffd9e67bff8446c24647a4712092611cb00e20818ee771c20d63374238",
+      "scrubbed_sha256": "7393334b8b7c1faba047d8fd4081d0cd07e9c9de0d59d9e21e6b954845170442",
+      "unchanged_sha256": "c4cc4a41e17bc89bb2bf7da926712b5403372b5f9fa8e4241657057dca2f0d6b",
+      "changed_bytes": [
+        365,
+        3825,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-6.recovered.img.gz",
+      "original_sha256": "b6f8928649ec6239ac3e6fb40646c9bcd7128dca033a2da14d761a2f90fdc797",
+      "scrubbed_sha256": "c4b18810f6aa6130073583d8343b355c31a9f4f94cf1740cb59b76af10b50308",
+      "unchanged_sha256": "8417a01cfbedb4ea0dc88ae60ce53f04110d0856ea08911251270353043c981e",
+      "changed_bytes": [
+        365,
+        3877,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-fresh-log.img.gz",
+      "original_sha256": "053034bc24eeefacdd5942bc36582e4cf41458776c2d299e42978c7d88fa2ef1",
+      "scrubbed_sha256": "e5d5b35e83ca2f14656f24806b39af9bf4313a9013a69eb9a74a59a4e8103470",
+      "unchanged_sha256": "a28e42f400d48bb94394734c7b6e03c24f62e34af89de925e436b9f54a0a566d",
+      "changed_bytes": [
+        365,
+        3825,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-fresh-log.recovered.img.gz",
+      "original_sha256": "82ec1c217ae55a204a2ca762a15141154d0f3ba19cb974d7208c5a4320742fed",
+      "scrubbed_sha256": "1c8f516f0396e53ac9051dac2e37db00b816f37677d644cd6349156bc4751426",
+      "unchanged_sha256": "285e63f6735d9e7d3697fa8ed6640baaf931ded16c869f58eecafcede2354acf",
+      "changed_bytes": [
+        365,
+        3877,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-index-vcn.img.gz",
+      "original_sha256": "4aca41ada0fe8b14cb582dd3f5e5f8b99e77cf526168a0e74bb50c3989c99262",
+      "scrubbed_sha256": "b47ab06b0397e86b2076e49560c68f70556fb13140a239c0167795e91d6204bc",
+      "unchanged_sha256": "2ec7027d9d26ba50cb0141992dd4fe51e39d4e01cc2818c62440ab693d12be2c",
+      "changed_bytes": [
+        365,
+        3825,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-index-vcn.recovered.img.gz",
+      "original_sha256": "16e5e62ae6719c45eef010a3d3d5823fec1a1ab2e7f252b32dd125263cd77063",
+      "scrubbed_sha256": "7e57ee7cbf5b7ec111df94b840b43e3b31fe5641c98e96d7907aecb87602386e",
+      "unchanged_sha256": "e3c931dc3b3d92511c8ac8248213fa13d1e20d0aad76427b735587b53ebe8995",
+      "changed_bytes": [
+        365,
+        3825,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-open-at-checkpoint.img.gz",
+      "original_sha256": "ac44ac703ff18e0b7fe7849931b6cb951cc68d6434d292f8916f97de5ec01281",
+      "scrubbed_sha256": "8f0e24cf12cec66a5cd723baba9ab0cebd29b537d6f4bfc6a32c7dbe9766f6c2",
+      "unchanged_sha256": "c9ba503589b4b315320464ecd30c0abe5f2ba8e626e02c82ec539efc3e150661",
+      "changed_bytes": [
+        365,
+        3825,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-open-at-checkpoint.recovered.img.gz",
+      "original_sha256": "635dc0df81c9fa4db5acc7e6ccf82fbba02fcf4dd22fa3e495e25d9db9774b8a",
+      "scrubbed_sha256": "3d5e4d5c2527736d8fadbe89fd06324361cd4335f5c4f4fc3305a4985f05b214",
+      "unchanged_sha256": "65df4d9ed4cae75e521ff46b8232763880f4bd2672573f4debaa496c87a5f495",
+      "changed_bytes": [
+        365,
+        3825,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-quota-spilled.img.gz",
+      "original_sha256": "ac136b999efadf505021501b616312c692ab9ca0b7a4d1b1219f6e5be09aaf2c",
+      "scrubbed_sha256": "f1ce96af31cb69afe1f7b1c4c8592738fb7486c2cd454cfd2968ebb55d9168b0",
+      "unchanged_sha256": "88bf9561f53933b33ea8e6e740ce393d0b2ac106cc47d7cc4d33ce299697285c",
+      "changed_bytes": [
+        365,
+        3825,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-quota-spilled.recovered.img.gz",
+      "original_sha256": "3d66170a0ec7815d6ea698a2c52d27591cae29483ba376b30606072afc0fb19b",
+      "scrubbed_sha256": "6c3caf4281b34494f05a661a1895059473f6b0d3a542d888516d69423437e2db",
+      "unchanged_sha256": "82fe3fb581378f8351d9d604861812cd0f5e4eb59de17272573e636c885a9933",
+      "changed_bytes": [
+        365,
+        3877,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-quota.img.gz",
+      "original_sha256": "0bb4b12579241f5d2cf0f771054d6d9239d9100d793cec30333daea0354b3256",
+      "scrubbed_sha256": "10e4128f474961b9e00a55b106ccd9ec431813f6ab901b4006dda2261e06feb4",
+      "unchanged_sha256": "68f3448dc8fe27adc0777b2e561c9b2bf6ccedc459977f40068a7a35eb0bbadf",
+      "changed_bytes": [
+        365,
+        3825,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-quota.recovered.img.gz",
+      "original_sha256": "acada3119e1f84168b984ad59cbdf6185a9c947d532ed63e4f83b76534c2c426",
+      "scrubbed_sha256": "579b728110d674e37eaa4a97ba31843a3f08ac56a0ee7cb66624d46fb195c74b",
+      "unchanged_sha256": "63590bacc1d5cb47ecec859cb8e458c39d4c05cd84d9fd6bd7e6f2c889a979b2",
+      "changed_bytes": [
+        365,
+        3877,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-small-cluster.img.gz",
+      "original_sha256": "ca6cd15abc881a93baad190ef7ba646932c3a1d6d4f32f42c9ff05fd58ca04ce",
+      "scrubbed_sha256": "683ed42d2481c01ea65c9db36ff01b77075b2c7d7502746cc8b4e9119749e98e",
+      "unchanged_sha256": "2b3accf000fa40570fb572ce4b242243732a7708c54ea02b18f471624d63cddd",
+      "changed_bytes": [
+        365,
+        3825,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-small-cluster.recovered.img.gz",
+      "original_sha256": "39d1d61546f12d02ad9d0669a623d65ce9b66dc9f1cd5e87b6d4e3aff5fa313d",
+      "scrubbed_sha256": "239e26b581b120d88d212bd3cba6ebc87c21949d6f6b10bec55c3ba49b312d23",
+      "unchanged_sha256": "89cb8f9a100f3435c24995bf67d3f1f34c127596b6bd25606b4d813905da03f4",
+      "changed_bytes": [
+        365,
+        3877,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-tail-continuation.img.gz",
+      "original_sha256": "049ff866eeff7b855d4e3f39628809808eaac99fb270cc26c151ab03ddca2920",
+      "scrubbed_sha256": "786c75d7c15b37a38dd965cc1145cea7cdf9c326d493c0530c9310c8d9630223",
+      "unchanged_sha256": "9ae386043eae70f690ab2b641b54344f51bd7768329425d5347d9373f80d3648",
+      "changed_bytes": [
+        365,
+        3825,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-tail-continuation.recovered.img.gz",
+      "original_sha256": "8e91b7aafcb0f2491ebaa479a5130b8595253e4184168e184e1e32b744af92b9",
+      "scrubbed_sha256": "ebfa2421bbdb56adc33f870f795f710ede3aea8d89c4714405262b839f4df0af",
+      "unchanged_sha256": "d2fb4338ed9aedfc85b531bfa66c00fd89be6f40c96d97beb03c7053b6733d61",
+      "changed_bytes": [
+        365,
+        3877,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-undo.img.gz",
+      "original_sha256": "a4a50342be08fded5b654f2bac6424f3ee59eb3152ad8861aaf709ebd8fc3a2a",
+      "scrubbed_sha256": "a46c9285fbaacbd1253b14e01444ea4764df5f43696dda7630d7a6b0ca6272e7",
+      "unchanged_sha256": "1b2c5d18557bc76b894327cead32d4facdd5ad46672630e6a3f48b498c19bd4f",
+      "changed_bytes": [
+        365,
+        3825,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-undo.recovered.img.gz",
+      "original_sha256": "7641f2ab679eb2ba55dac19dd77a34209efd94dcc11c84cdc442679cd73eedb7",
+      "scrubbed_sha256": "8799d511bc4d776d410b2e3c50e1c147a518de980e4ff0c72b0e1f13d4d9c667",
+      "unchanged_sha256": "00ba617103fd41a9622f96ae8c4b636c73a0b27cd4d31be724058ee95e96bfed",
+      "changed_bytes": [
+        365,
+        3877,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-wrap-boundary.img.gz",
+      "original_sha256": "c787d580c09d56dccd74a0de0ee05fbb2124cabfbe6dac56039b2eb870403480",
+      "scrubbed_sha256": "12d76f82972eb091b00b29efa89cb61f93563fbf3b7125bd2a22095d85985bc6",
+      "unchanged_sha256": "8e583c66cef0b9f9dba78856ea91bd9a7d5fd1bb14f1574b5b449a9c3a9598eb",
+      "changed_bytes": [
+        365,
+        3825,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-wrap-boundary.recovered.img.gz",
+      "original_sha256": "e5c6bf187a7241a9094562ec8d8ac5a514e72e8b1a80240e8c3d99e532336676",
+      "scrubbed_sha256": "31130affa16175885d8f4d886e5221d315e6a1b0aec8c485e977e9eb4ec719c3",
+      "unchanged_sha256": "412f2f066b201b75ba568e8cc5975fd605b8414dc10ee873ff6b2d96a2f91628",
+      "changed_bytes": [
+        365,
+        3875,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-wrap-mft-grows.img.gz",
+      "original_sha256": "141da94cd9d750f78a62396b1c776592aa7cd493d7ad3f6a0635643e14e183a2",
+      "scrubbed_sha256": "5e04c86858dd03495d7d2127ffe90c9baa74c22eac8614c838874e33b053e02b",
+      "unchanged_sha256": "b0d1cb799afb73ca62f4eeb363eca78e2e7b5f360b11bef03d43d2da274a79e5",
+      "changed_bytes": [
+        365,
+        3825,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-wrap-mft-grows.recovered.img.gz",
+      "original_sha256": "4159123653da5b98eb16774db10b01626c2106a8ba54e5511ac99b3de0047a59",
+      "scrubbed_sha256": "70bae65f266631ec8bc301a02dcaa88f9122f7cf9f0487da9fd22bfc0e796b3f",
+      "unchanged_sha256": "b75822b9d6bcbaf747a69acca87d4b7d59a27f805affd3ed6b59d6988691fa44",
+      "changed_bytes": [
+        365,
+        3875,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-wrap-span.img.gz",
+      "original_sha256": "589c38c13024a1404379c62441cb5f3d5fe6fb8f2432ab71ae8f682bcc98c600",
+      "scrubbed_sha256": "4fd202e11e53453f7b00a9f89a9984bc1ad2224a3c2245df8916b9e24a75ac17",
+      "unchanged_sha256": "76293b208ba2ad80b6e3bb4a8e9b4ca0cf178e8661e0bee94c06f9a87e8989c5",
+      "changed_bytes": [
+        365,
+        3825,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    },
+    {
+      "name": "windows-interrupted-wrap-span.recovered.img.gz",
+      "original_sha256": "d9a60e5fe56a03951e9fb2b739155f73bd45767da5f3eb016028486bd1952d41",
+      "scrubbed_sha256": "ac543acf876dbd75eef55c62f456cbeab9d26bef72a628d5cbf01fcbe8d9e005",
+      "unchanged_sha256": "ccf5a5555116e080cde5b83657217fb197d2509b36f47455aeddbfc6686ebd24",
+      "changed_bytes": [
+        365,
+        3875,
+        365
+      ],
+      "backup_offset": 133103104,
+      "size": 133103616
+    }
+  ]
+}

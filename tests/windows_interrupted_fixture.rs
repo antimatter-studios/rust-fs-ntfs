@@ -9,7 +9,11 @@
 //! host volume were taken: point-in-time images of every block the inner
 //! volume had written, and nothing it still held in memory -- what a power
 //! cut at that instant leaves. Nothing was synthesised; no byte here was
-//! written by this crate.
+//! written by this crate. Formatter bootstrap code was subsequently zeroed
+//! in primary/backup boot code and `$Boot` sectors 1–15 (#487); BPBs,
+//! signatures and every byte of filesystem state remain as captured.
+//! `windows-interrupted-bootstrap.json` records original and scrubbed hashes;
+//! CI compares the original git blobs byte for byte outside those regions.
 //!
 //! * `windows-interrupted-{1,6}.img.gz`: the NTFS partition of snapshots 1
 //!   (after 244 workload operations) and 6 (after 1,982), cut from the
@@ -94,111 +98,111 @@ use std::os::raw::{c_int, c_void};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
-/// The SHA-256 of each decompressed partition, as captured.
+/// The SHA-256 of each decompressed partition after bootstrap-only removal.
 const PARTITIONS: [(&str, &str); 26] = [
     (
         "windows-interrupted-1",
-        "7236ffe64f5532b6f5cd976c1fa81c66e6be6cd31cfb8c22bc0bb588e8fad54f",
+        "c45659e95104eca5f793c3f21061f42705a01783e62d1c7a46c63e4089db0b9a",
     ),
     (
         "windows-interrupted-1.recovered",
-        "ba2efd60cf3de25f5e87e1adf11581826ccb3d3cfbb6c0fd5ac015bf8c308d2b",
+        "16beeb97f2177b8abd02287c8803bf4faa460a7ee701ab842f8ef552ef3bc14a",
     ),
     (
         "windows-interrupted-6",
-        "5899daffd9e67bff8446c24647a4712092611cb00e20818ee771c20d63374238",
+        "7393334b8b7c1faba047d8fd4081d0cd07e9c9de0d59d9e21e6b954845170442",
     ),
     (
         "windows-interrupted-6.recovered",
-        "b6f8928649ec6239ac3e6fb40646c9bcd7128dca033a2da14d761a2f90fdc797",
+        "c4b18810f6aa6130073583d8343b355c31a9f4f94cf1740cb59b76af10b50308",
     ),
     (
         "windows-interrupted-wrap-span",
-        "589c38c13024a1404379c62441cb5f3d5fe6fb8f2432ab71ae8f682bcc98c600",
+        "4fd202e11e53453f7b00a9f89a9984bc1ad2224a3c2245df8916b9e24a75ac17",
     ),
     (
         "windows-interrupted-wrap-span.recovered",
-        "d9a60e5fe56a03951e9fb2b739155f73bd45767da5f3eb016028486bd1952d41",
+        "ac543acf876dbd75eef55c62f456cbeab9d26bef72a628d5cbf01fcbe8d9e005",
     ),
     (
         "windows-interrupted-wrap-boundary",
-        "c787d580c09d56dccd74a0de0ee05fbb2124cabfbe6dac56039b2eb870403480",
+        "12d76f82972eb091b00b29efa89cb61f93563fbf3b7125bd2a22095d85985bc6",
     ),
     (
         "windows-interrupted-wrap-boundary.recovered",
-        "e5c6bf187a7241a9094562ec8d8ac5a514e72e8b1a80240e8c3d99e532336676",
+        "31130affa16175885d8f4d886e5221d315e6a1b0aec8c485e977e9eb4ec719c3",
     ),
     (
         "windows-interrupted-wrap-mft-grows",
-        "141da94cd9d750f78a62396b1c776592aa7cd493d7ad3f6a0635643e14e183a2",
+        "5e04c86858dd03495d7d2127ffe90c9baa74c22eac8614c838874e33b053e02b",
     ),
     (
         "windows-interrupted-wrap-mft-grows.recovered",
-        "4159123653da5b98eb16774db10b01626c2106a8ba54e5511ac99b3de0047a59",
+        "70bae65f266631ec8bc301a02dcaa88f9122f7cf9f0487da9fd22bfc0e796b3f",
     ),
     (
         "windows-interrupted-index-vcn",
-        "4aca41ada0fe8b14cb582dd3f5e5f8b99e77cf526168a0e74bb50c3989c99262",
+        "b47ab06b0397e86b2076e49560c68f70556fb13140a239c0167795e91d6204bc",
     ),
     (
         "windows-interrupted-index-vcn.recovered",
-        "16e5e62ae6719c45eef010a3d3d5823fec1a1ab2e7f252b32dd125263cd77063",
+        "7e57ee7cbf5b7ec111df94b840b43e3b31fe5641c98e96d7907aecb87602386e",
     ),
     (
         "windows-interrupted-small-cluster",
-        "ca6cd15abc881a93baad190ef7ba646932c3a1d6d4f32f42c9ff05fd58ca04ce",
+        "683ed42d2481c01ea65c9db36ff01b77075b2c7d7502746cc8b4e9119749e98e",
     ),
     (
         "windows-interrupted-open-at-checkpoint",
-        "ac44ac703ff18e0b7fe7849931b6cb951cc68d6434d292f8916f97de5ec01281",
+        "8f0e24cf12cec66a5cd723baba9ab0cebd29b537d6f4bfc6a32c7dbe9766f6c2",
     ),
     (
         "windows-interrupted-open-at-checkpoint.recovered",
-        "635dc0df81c9fa4db5acc7e6ccf82fbba02fcf4dd22fa3e495e25d9db9774b8a",
+        "3d5e4d5c2527736d8fadbe89fd06324361cd4335f5c4f4fc3305a4985f05b214",
     ),
     (
         "windows-interrupted-undo",
-        "a4a50342be08fded5b654f2bac6424f3ee59eb3152ad8861aaf709ebd8fc3a2a",
+        "a46c9285fbaacbd1253b14e01444ea4764df5f43696dda7630d7a6b0ca6272e7",
     ),
     (
         "windows-interrupted-undo.recovered",
-        "7641f2ab679eb2ba55dac19dd77a34209efd94dcc11c84cdc442679cd73eedb7",
+        "8799d511bc4d776d410b2e3c50e1c147a518de980e4ff0c72b0e1f13d4d9c667",
     ),
     (
         "windows-interrupted-tail-continuation",
-        "049ff866eeff7b855d4e3f39628809808eaac99fb270cc26c151ab03ddca2920",
+        "786c75d7c15b37a38dd965cc1145cea7cdf9c326d493c0530c9310c8d9630223",
     ),
     (
         "windows-interrupted-tail-continuation.recovered",
-        "8e91b7aafcb0f2491ebaa479a5130b8595253e4184168e184e1e32b744af92b9",
+        "ebfa2421bbdb56adc33f870f795f710ede3aea8d89c4714405262b839f4df0af",
     ),
     (
         "windows-interrupted-small-cluster.recovered",
-        "39d1d61546f12d02ad9d0669a623d65ce9b66dc9f1cd5e87b6d4e3aff5fa313d",
+        "239e26b581b120d88d212bd3cba6ebc87c21949d6f6b10bec55c3ba49b312d23",
     ),
     (
         "windows-interrupted-quota",
-        "0bb4b12579241f5d2cf0f771054d6d9239d9100d793cec30333daea0354b3256",
+        "10e4128f474961b9e00a55b106ccd9ec431813f6ab901b4006dda2261e06feb4",
     ),
     (
         "windows-interrupted-quota.recovered",
-        "acada3119e1f84168b984ad59cbdf6185a9c947d532ed63e4f83b76534c2c426",
+        "579b728110d674e37eaa4a97ba31843a3f08ac56a0ee7cb66624d46fb195c74b",
     ),
     (
         "windows-interrupted-fresh-log",
-        "053034bc24eeefacdd5942bc36582e4cf41458776c2d299e42978c7d88fa2ef1",
+        "e5d5b35e83ca2f14656f24806b39af9bf4313a9013a69eb9a74a59a4e8103470",
     ),
     (
         "windows-interrupted-fresh-log.recovered",
-        "82ec1c217ae55a204a2ca762a15141154d0f3ba19cb974d7208c5a4320742fed",
+        "1c8f516f0396e53ac9051dac2e37db00b816f37677d644cd6349156bc4751426",
     ),
     (
         "windows-interrupted-quota-spilled",
-        "ac136b999efadf505021501b616312c692ab9ca0b7a4d1b1219f6e5be09aaf2c",
+        "f1ce96af31cb69afe1f7b1c4c8592738fb7486c2cd454cfd2968ebb55d9168b0",
     ),
     (
         "windows-interrupted-quota-spilled.recovered",
-        "3d66170a0ec7815d6ea698a2c52d27591cae29483ba376b30606072afc0fb19b",
+        "6c3caf4281b34494f05a661a1895059473f6b0d3a542d888516d69423437e2db",
     ),
 ];
 
@@ -231,7 +235,7 @@ fn unpack(name: &str) -> String {
     assert_eq!(
         hex_sha256(&std::fs::read(&path).unwrap()),
         want,
-        "{name} is not the partition that was captured"
+        "{name} is not the captured partition with only bootstrap code removed"
     );
     path
 }

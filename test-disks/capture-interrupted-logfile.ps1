@@ -75,6 +75,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/_capture-chkdsk.ps1"
+. "$PSScriptRoot/_scrub-ntfs-bootstrap.ps1"
 $root = 'C:\oracle366'
 Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory $root -Force | Out-Null
@@ -274,6 +275,7 @@ for ($k = 1; $k -le $Candidates; $k++) {
         cmd /c rmdir "$link" | Out-Null
         $shadow | Remove-CimInstance
     }
+    Clear-NtfsBootstrap (Join-Path $Out "pre-$k.vhd") $part.Offset $part.Size
     (Get-FileHash (Join-Path $Out "pre-$k.vhd") -Algorithm SHA256).Hash.ToLower() |
         Set-Content (Join-Path $Out "pre-$k.sha256")
     $snapshots += "$k`t$at`t$count"
@@ -308,7 +310,8 @@ for ($k = 1; $k -le $Candidates; $k++) {
     } finally {
         Dismount-DiskImage -ImagePath $post | Out-Null
     }
-    Write-Host "post $k recovered and detached"
+    Clear-NtfsBootstrap $post $part.Offset $part.Size
+    Write-Host "post $k recovered, detached and bootstrap scrubbed"
 }
 
 Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Ntfs'; StartTime = $started } `

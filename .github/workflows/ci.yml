@@ -23,6 +23,23 @@ permissions:
   contents: read
 
 jobs:
+  interrupted-bootstrap:
+    name: interrupted fixture bootstrap guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/check-interrupted-bootstrap.py
+      - run: python3 tests/interrupted_bootstrap_guard.py
+      - name: Fetch the original fixture blobs for byte preservation checks
+        run: |
+          original=$(python3 -c 'import json; print(json.load(open("test-disks/windows-interrupted-bootstrap.json"))["original_commit"])')
+          git fetch --no-tags --depth=1 origin "$original"
+      - run: python3 tests/interrupted_bootstrap_preservation.py
+      - name: Capture scrub preserves fixed-VHD framing and refuses invalid BPBs
+        shell: pwsh
+        run: ./tests/scripts/scrub-bootstrap.ps1
+
   test:
     name: test-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -1509,7 +1526,7 @@ jobs:
     name: ci-ok
     runs-on: ubuntu-latest
     if: always()
-    needs: [test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, kernel, semver]
+    needs: [test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap]
     steps:
       - uses: actions/checkout@v4
       - name: Check every gating job
