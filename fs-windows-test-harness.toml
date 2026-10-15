@@ -205,6 +205,15 @@ host = "host"
 command = "{binary} write {image_dir}/{run_id}/{scenario.image} {step.path} --content '{step.content}'"
 expect_exit = 0
 
+[ops.mac-write-bytes]
+# rust-ntfs write with `--bytes`: replace an existing file's `$DATA` with
+# `{step.bytes}` bytes of an incrementing pattern, so its allocation grows
+# or shrinks to fit. Quota tracking charges the change to the file's owner
+# (#510).
+host = "host"
+command = "{binary} write {image_dir}/{run_id}/{scenario.image} {step.path} --bytes {step.bytes} --pattern incrementing"
+expect_exit = 0
+
 [ops.mac-write-sparse]
 # rust-ntfs sparse writes an existing file's $DATA as a SPARSE stream:
 # cluster-aligned all-zero regions become holes (no clusters allocated).
@@ -565,6 +574,28 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write-sparse.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Files '{step.files}' -Mode '{step.mode}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
+[ops.win-quota-track]
+# Turn quota tracking on, as `fsutil quota track` does, and wait until
+# Windows' scan has charged every file to its owner in $Extend\$Quota (#510).
+#
+# Step fields:
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-quota-track.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
+[ops.win-quota-verify]
+# Read each owner's quota usage as the volume holds it, then have Windows
+# count every file again (tracking off and on) and read it again: the two
+# must agree. A write that changed a file's allocation without moving its
+# owner's usage shows as a difference (#510).
+#
+# Step fields:
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-quota-verify.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-delete]
