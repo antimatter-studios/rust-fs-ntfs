@@ -1,0 +1,12 @@
+[package]
+name = "logfile-record-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+fs_ntfs = { package = "rust-fs-ntfs", path = "../.." }
+# Independent, test-only reader; license checked before its API was inspected.
+ntfslog = { package = "sootmark-ntfslog", git = "https://github.com/Sootmark/ntfslog", rev = "b88585646801ee2c1e2acf91a078da6ab57af778" }
+sha2 = "0.10"

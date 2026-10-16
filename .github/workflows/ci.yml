@@ -123,6 +123,26 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo fmt --check
 
+      - name: Retain independent physical positions in the immutable Windows log
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 8
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: nice -n 10 cargo test --locked --manifest-path scripts/logfile-record-oracle/Cargo.toml --test physical_position -- --nocapture
+      - name: Diagnose immutable raw locations and reject pointer and torn-page controls
+        if: always() && matrix.os == 'ubuntu-latest'
+        timeout-minutes: 8
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: nice -n 10 cargo test --locked --manifest-path scripts/logfile-record-oracle/Cargo.toml --test raw_location -- --nocapture
+      - name: Upload raw Windows record-position evidence
+        if: always() && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: logfile-physical-position
+          path: tmp/logfile-physical-position/
+          if-no-files-found: error
+
       # cargo-deny — fail the build if any dep license drifts outside
       # the MIT / Apache / BSD / ISC / Unicode / Zlib / CC0 / 0BSD
       # allowlist in deny.toml, or if a yanked / advisory-flagged
@@ -143,6 +163,11 @@ jobs:
       - name: cargo-deny check
         if: matrix.os == 'ubuntu-latest'
         run: cargo deny --all-features check
+      - name: Independent decoder licence allowlist and formatting
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo deny --manifest-path scripts/logfile-record-oracle/Cargo.toml check licenses
+          cargo fmt --manifest-path scripts/logfile-record-oracle/Cargo.toml --check
 
       # THE ONE REQUIRED CHECK STANDS FOR EVERY JOB (#409). rust-fs-core's
       # family-check (no copy of a family script, every call in place)
@@ -618,6 +643,36 @@ jobs:
         with:
           name: ntfs-windows-native-read-fixtures
           path: test-disks
+      # The Windows checkpoint captures these two steps read are pinned
+      # (test-disks/logfile-checkpoint-captures.json): snapshots of a volume
+      # Windows is writing hold whatever the timing gave them, so a live
+      # capture cannot gate a merge. logfile-checkpoint-drift.yml takes fresh
+      # ones on a schedule and runs the same comparisons over them.
+      - name: Compare checkpoint headers and current-record length with the independent decoder
+        timeout-minutes: 10
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: |
+          nice -n 10 cargo test --locked --manifest-path scripts/logfile-record-oracle/Cargo.toml --test checkpoint_identity
+          bash scripts/compare-logfile-record-type.sh
+      - name: Compare independently varied native records and explicit checkpoint length
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: bash scripts/compare-logfile-native-metadata.sh
+      - name: Retain independent checkpoint header evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logfile-record-type-oracle
+          path: |
+            tmp/logfile-record-oracle/*.tsv
+            tmp/logfile-record-oracle/*.bin
+            tmp/logfile-record-oracle/*.stderr
+            tmp/logfile-record-oracle/*.json
+            tmp/logfile-record-oracle/identity-controls/
+          if-no-files-found: error
       # FULL suite — every unit AND integration test, then clippy: a true
       # mirror of release.yml's crates-test, so the release gate never sees
       # a failure CI didn't — including a clippy lint that only a fixture-

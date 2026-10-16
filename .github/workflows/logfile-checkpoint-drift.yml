@@ -1,0 +1,96 @@
+name: logfile checkpoint drift
+
+# The $LogFile comparisons in ci.yml read Windows checkpoint captures that
+# are pinned in the repository (test-disks/logfile-checkpoint-captures.json):
+# the merge gate gives a commit the same verdict on every run. This workflow
+# is the other half. It takes fresh captures the way the pinned ones were
+# taken -- VSS snapshots of a volume Windows is still writing to -- and runs
+# the same two comparisons over them (LOGFILE_CHECKPOINTS=live).
+#
+# It gates nothing. What a snapshot taken mid-write holds depends on timing:
+# ntfs-3g refused the first one with "Failed to open $Secure" in four of
+# five merge-group runs, and a fresh capture can lack a record of the shape
+# a comparison selects. A red run here means Windows, ntfs-3g or the
+# producer has moved: read its evidence, and if a fresh capture is the
+# better fixture, pin it from this run's artifact.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  capture:
+    name: fresh Windows checkpoint captures
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Capture three mounted Windows checkpoint candidates and a flushed probe
+        timeout-minutes: 10
+        shell: pwsh
+        run: pwsh -File test-disks/build-windows-logfile-checkpoints.ps1
+      - name: Upload the captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logfile-checkpoint-captures
+          path: |
+            test-disks/logfile-checkpoint-*.img
+            test-disks/logfile-checkpoint-provenance.json
+          if-no-files-found: error
+          retention-days: 30
+
+  compare:
+    name: the pinned comparisons over fresh captures
+    needs: capture
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LOGFILE_CHECKPOINTS: live
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - name: Install ntfs-3g
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ntfs-3g
+      - name: Download the fresh captures
+        uses: actions/download-artifact@v4
+        with:
+          name: logfile-checkpoint-captures
+          path: test-disks
+      - name: Compare checkpoint headers and current-record length with the independent decoder
+        timeout-minutes: 10
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: |
+          nice -n 10 cargo test --locked --manifest-path scripts/logfile-record-oracle/Cargo.toml --test checkpoint_identity
+          bash scripts/compare-logfile-record-type.sh
+      - name: Compare independently varied native records and explicit checkpoint length
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: bash scripts/compare-logfile-native-metadata.sh
+      - name: Retain the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logfile-checkpoint-drift-evidence
+          path: |
+            tmp/logfile-record-oracle/*.tsv
+            tmp/logfile-record-oracle/*.bin
+            tmp/logfile-record-oracle/*.stderr
+            tmp/logfile-record-oracle/*.json
+          if-no-files-found: error
+          retention-days: 30
