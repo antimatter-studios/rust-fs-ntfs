@@ -468,7 +468,12 @@ jobs:
         env:
           NTFS_I30_SLACK_IMAGE: test-disks/ntfs-i30-slack.img
           NTFS_I30_SLACK_MANIFEST: test-disks/ntfs-i30-slack.manifest.json
-        run: cargo test --release --locked --lib --features windows-i30-oracle index_slack::windows_capture
+        run: |
+          $m = Get-Content -Raw $env:NTFS_I30_SLACK_MANIFEST | ConvertFrom-Json
+          $h = (Get-FileHash $env:NTFS_I30_SLACK_IMAGE -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($h -ne $m.image_sha256) { throw "image $h is not the captured $($m.image_sha256)" }
+          cargo test --release --locked --lib --features windows-i30-oracle index_slack::windows_capture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload Windows-authored fixtures
         uses: actions/upload-artifact@v4
         with:

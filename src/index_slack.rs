@@ -448,6 +448,43 @@ mod windows_capture {
         let blocks = scan_directory_allocation_slack_io(&mut io, directory_record, budget)
             .expect("Windows allocated INDX blocks for the capture directory");
         assert!(!blocks.is_empty(), "no allocated INDX block was scanned");
+        // The positive control: entries the capture script observed in the
+        // raw INDX bytes, bound to Windows' name and native ID. The script
+        // refuses to produce a fixture without one, so none here is a fault.
+        let attested: Vec<(String, u64, u64)> = manifest["raw_deleted_evidence"]
+            .as_array()
+            .expect("raw_deleted_evidence")
+            .iter()
+            .map(|e| {
+                (
+                    e["name"].as_str().expect("name").to_string(),
+                    e["record_number"].as_u64().expect("record_number"),
+                    e["vcn"].as_u64().expect("vcn"),
+                )
+            })
+            .collect();
+        assert!(
+            !attested.is_empty(),
+            "PRECONDITION i30-raw-deleted-candidate: the manifest attests no deleted entry"
+        );
+        for (name, record, _) in &attested {
+            let ids = native
+                .get(name)
+                .expect("attested name was created by Windows");
+            assert!(
+                ids.iter()
+                    .any(|(id, role)| role == "deleted" && id & 0xFFFF_FFFF_FFFF == *record),
+                "attested {name:?} record {record} is not a deleted native ID"
+            );
+            // Wrong-ID control: a neighbouring record is not this name's.
+            assert!(
+                !ids.iter()
+                    .any(|(id, _)| id & 0xFFFF_FFFF_FFFF == record ^ 1),
+                "wrong-ID control {} is a native ID of {name:?}",
+                record ^ 1
+            );
+        }
+        let mut recovered = vec![false; attested.len()];
         let (mut matched, mut deleted_matched) = (0usize, 0usize);
         for block in &blocks {
             for c in &block.scan.candidates {
@@ -470,6 +507,11 @@ mod windows_capture {
                         )
                     });
                     matched += 1;
+                    for (i, (n, rec, vcn)) in attested.iter().enumerate() {
+                        if *n == name && *rec == r.record_number && *vcn == block.vcn {
+                            recovered[i] = true;
+                        }
+                    }
                     if role == "deleted" {
                         deleted_matched += 1;
                     }
@@ -483,5 +525,11 @@ mod windows_capture {
             "windows_capture: blocks={} matched={matched} deleted={deleted_matched}",
             blocks.len()
         );
+        for ((name, record, vcn), hit) in attested.iter().zip(&recovered) {
+            assert!(
+                hit,
+                "Windows left {name:?} (record {record}) in INDX VCN {vcn}, but the reader did not recover it"
+            );
+        }
     }
 }
