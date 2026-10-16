@@ -460,6 +460,36 @@ jobs:
             test-disks/usn-v2-capture.tsv
           if-no-files-found: error
           retention-days: 7
+      - name: Capture Windows-authored $I30 create/delete/reuse evidence
+        shell: pwsh
+        run: pwsh -File test-disks/capture-i30-slack.ps1
+      - name: Compare $I30 slack candidates with the Windows manifest
+        shell: pwsh
+        env:
+          NTFS_I30_SLACK_IMAGE: test-disks/ntfs-i30-slack.img
+          NTFS_I30_SLACK_MANIFEST: test-disks/ntfs-i30-slack.manifest.json
+        run: |
+          $m = Get-Content -Raw $env:NTFS_I30_SLACK_MANIFEST | ConvertFrom-Json
+          $h = (Get-FileHash $env:NTFS_I30_SLACK_IMAGE -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($h -ne $m.image_sha256) { throw "image $h is not the captured $($m.image_sha256)" }
+          cargo test --release --locked --lib --features windows-i30-oracle index_slack::windows_capture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # The capture writes its manifest and raw-scan diagnostic before it
+      # judges PRECONDITION i30-raw-deleted-candidate, so a failed capture or
+      # comparison still uploads them here. Both are small text bound to the
+      # image by image_sha256; the 256 MB image itself is never retained on a
+      # failure. A missing file warns rather than fails: the step that failed
+      # already makes the job red, and this upload must not replace its error.
+      - name: Upload $I30 capture diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-i30-slack-diagnostics
+          path: |
+            test-disks/ntfs-i30-slack.manifest.json
+            test-disks/ntfs-i30-slack.diagnostic.txt
+          if-no-files-found: warn
+          retention-days: 7
       - name: Upload Windows-authored fixtures
         uses: actions/upload-artifact@v4
         with:
@@ -482,6 +512,8 @@ jobs:
             test-disks/ntfs-usnjrnl.records.csv
             test-disks/ntfs-inventory.img
             test-disks/ntfs-inventory.fileids.txt
+            test-disks/ntfs-i30-slack.img
+            test-disks/ntfs-i30-slack.manifest.json
           if-no-files-found: error
           retention-days: 1
       - name: Upload the change journal measurements
@@ -902,9 +934,12 @@ jobs:
   validate-mkfs-windows-run:
     name: Windows chkdsk execution
     runs-on: windows-latest
-    # Measured at 9.3 to 12.4 minutes. Without a bound, a step that hangs holds
-    # the runner for GitHub's six hours and prints nothing (#388).
-    timeout-minutes: 40
+    # Run 38738194039 at d8d8d9c hit the 40-minute job limit while the CLI
+    # matrix was still progressing (12/22 done). Earlier scenarios and builds
+    # took 32 minutes before the CLI matrix even started. Allow the expanded
+    # oracle suite and trailing chkdsk/round-trip checks to finish, while
+    # retaining a finite bound for a hung runner (#388).
+    timeout-minutes: 75
     needs: [changes]
     if: needs.changes.outputs.mkfs == 'true'
     steps:
