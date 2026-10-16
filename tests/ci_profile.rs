@@ -863,7 +863,9 @@ fn ci_ok_covers_every_gating_job_and_preserves_windows_filter() {
             "cli",
             "kernel",
             "semver",
-            "interrupted-bootstrap"
+            "interrupted-bootstrap",
+            "python-abi",
+            "python-volume-info-windows"
         ]
     );
     assert_eq!(

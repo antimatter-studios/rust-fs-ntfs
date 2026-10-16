@@ -78,6 +78,14 @@ done
 check aggregate-quick-extra-need-skipped aggregate fail "$(jq -c '.["new-job"].result="skipped"' <<< "$docs_only")" false
 check aggregate-quick-missing-kernel aggregate fail "$(jq -c 'del(.kernel)' <<< "$docs_only")" false
 check aggregate-full-run-skips aggregate fail "$docs_only" true
+# python-volume-info-windows reads the Windows-authored fixtures, so a quick
+# run skips it with them, as ci-ok saw on every pull request once it joined
+# `needs:`. python-abi is a quick job and is never excused a skip.
+python_quick="$(jq -c '.["python-abi"].result="success" | .["python-volume-info-windows"].result="skipped"' <<< "$docs_only")"
+check aggregate-quick-python-windows-skipped aggregate pass "$python_quick" false
+check aggregate-full-python-windows-skipped aggregate fail "$(jq -c '.["python-volume-info-windows"].result="skipped"' <<< "$aggregate")" true
+check aggregate-quick-python-windows-failure aggregate fail "$(jq -c '.["python-volume-info-windows"].result="failure"' <<< "$python_quick")" false
+check aggregate-quick-python-abi-skipped aggregate fail "$(jq -c '.["python-abi"].result="skipped"' <<< "$python_quick")" false
 
 printf 'ci verdict: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
