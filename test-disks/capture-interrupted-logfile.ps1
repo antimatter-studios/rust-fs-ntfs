@@ -70,6 +70,7 @@ param(
     [int]$LogKB = 0,
     [ValidateSet('files', 'views')]
     [string]$Mix = 'files',
+    [switch]$CheckpointProbe,
     [string]$Out = 'logfile-oracle'
 )
 
@@ -287,6 +288,47 @@ $snapshots | Set-Content (Join-Path $Out 'snapshots.tsv')
 $procs | ForEach-Object { $_.WaitForExit() }
 $failed = @($procs | Where-Object { $_.ExitCode -ne 0 })
 if ($failed.Count -gt 0) { throw "$($failed.Count) of $Writers workload writers failed" }
+if ($CheckpointProbe) {
+    # Native experiment, not an assertion about Windows behavior: after the
+    # workload closes every file, flush the still-mounted inner volume, then
+    # freeze its VHD through VSS. The independent reader must establish whether
+    # current_lsn actually identifies the checkpoint. No clean dismount first.
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class CheckpointVolumeFlush {
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool FlushFileBuffers(SafeFileHandle handle);
+    public static void Run(string path) {
+        using (var handle = CreateFile(path, 0x40000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero)) {
+            if (handle.IsInvalid || !FlushFileBuffers(handle)) throw new Win32Exception();
+        }
+    }
+}
+'@
+    [CheckpointVolumeFlush]::Run("\\.\$($part.DriveLetter):")
+    $probeIndex = $Candidates + 1
+    $created = Invoke-CimMethod -ClassName Win32_ShadowCopy -MethodName Create `
+        -Arguments @{ Volume = 'C:\'; Context = 'ClientAccessible' }
+    if ($created.ReturnValue -ne 0) { throw "checkpoint probe VSS failed: $($created.ReturnValue)" }
+    $shadow = Get-CimInstance Win32_ShadowCopy | Where-Object ID -eq $created.ShadowID
+    $link = Join-Path $root 'checkpoint-probe'
+    cmd /c mklink /d "$link" "$($shadow.DeviceObject)\" | Out-Null
+    try {
+        Copy-Item (Join-Path $link 'oracle366\disk.vhd') (Join-Path $Out "pre-$probeIndex.vhd")
+    } finally {
+        cmd /c rmdir "$link" | Out-Null
+        $shadow | Remove-CimInstance
+    }
+    (Get-FileHash (Join-Path $Out "pre-$probeIndex.vhd") -Algorithm SHA256).Hash.ToLower() |
+        Set-Content (Join-Path $Out "pre-$probeIndex.sha256")
+    "volume-flush`t$([DateTime]::UtcNow.ToString('o'))`t$(Get-MarkerCount)" |
+        Set-Content (Join-Path $Out 'checkpoint-probe.tsv')
+}
 Dismount-DiskImage -ImagePath $vhd | Out-Null
 
 # ---- Windows recovers a copy of each ------------------------------------

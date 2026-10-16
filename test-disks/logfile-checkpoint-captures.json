@@ -1,0 +1,63 @@
+{
+  "source": "merge-group run 38923190267 (rust-fs-ntfs), job \"Windows-authored native read fixtures\": test-disks/build-windows-logfile-checkpoints.ps1 on Windows, then $LogFile (inode 2) extracted from each image on Linux by ntfs-3g's `ntfscat -f -i 2`, as scripts/compare-logfile-native-metadata.sh does",
+  "producer": "capture-interrupted-logfile.ps1",
+  "windows": "Microsoft Windows NT 10.0.26100.0",
+  "snapshots": [
+    "1\t2026-10-16T15:26:43.8105867Z\t484",
+    "2\t2026-10-16T15:26:51.0747806Z\t1388",
+    "3\t2026-10-16T15:26:58.0726543Z\t2209"
+  ],
+  "checkpoint_probe_workload": [
+    "volume-flush\t2026-10-16T15:27:06.3397221Z\t2557"
+  ],
+  "captures": [
+    {
+      "candidate": 1,
+      "role": "workload",
+      "logfile": "logfile-checkpoint-1.logfile.gz",
+      "logfile_bytes": 2097152,
+      "logfile_sha256": "08a408ba75b597af55c5cc9d304b9eaa0af7a2b07c5c95f65a5d42cc8aac5703",
+      "image": "logfile-checkpoint-1.img",
+      "image_sha256": "44b96ff0c7c712ee81e78cbd04e0d901f0f9669293ff3063caedc13219684f54",
+      "partition_offset": 65536,
+      "partition_bytes": 133103616,
+      "vhd_sha256": "0632466a3951e91e56fd5409b1cffb800942c7dbd59722551deb4076dae148fc"
+    },
+    {
+      "candidate": 2,
+      "role": "workload",
+      "logfile": "logfile-checkpoint-2.logfile.gz",
+      "logfile_bytes": 2097152,
+      "logfile_sha256": "1ecd9695557bf3b9d27cf55019ddd4c1d85a34d80a29957eba72ac4303075bb5",
+      "image": "logfile-checkpoint-2.img",
+      "image_sha256": "eba3f6a7db3d865972b98d7f452baf130162ea43c44470c53049f2cddf138b05",
+      "partition_offset": 65536,
+      "partition_bytes": 133103616,
+      "vhd_sha256": "dbaad68667201341ae86551e1e2872b1bad1416569a4315db8e7c39ba8eee962"
+    },
+    {
+      "candidate": 3,
+      "role": "workload",
+      "logfile": "logfile-checkpoint-3.logfile.gz",
+      "logfile_bytes": 2097152,
+      "logfile_sha256": "e50bc0a996b766cb3149dced1bb9b44792e2c90ac2bbc2d7bc76bfa7920b27af",
+      "image": "logfile-checkpoint-3.img",
+      "image_sha256": "e5b783e33e7988cf4ef256f09efb29f648a958fe472c3bc064f6dcd207930d37",
+      "partition_offset": 65536,
+      "partition_bytes": 133103616,
+      "vhd_sha256": "fa089f62069269a0bd9a082edb8e6547670df5396a30ffbe60cc051e163998a6"
+    },
+    {
+      "candidate": 4,
+      "role": "checkpoint_probe",
+      "logfile": "logfile-checkpoint-4.logfile.gz",
+      "logfile_bytes": 2097152,
+      "logfile_sha256": "dc211e05cbc08be366188e994e59858928cd69a90f3adc170e8f996cd48ffe40",
+      "image": "logfile-checkpoint-4.img",
+      "image_sha256": "836e6b09e302e82a8e4bd4f2a1ee6f458c22fde279521a5b12de3e9b3ab6529d",
+      "partition_offset": 65536,
+      "partition_bytes": 133103616,
+      "vhd_sha256": "f1c6fc57ac576d12e2bdb8f78c733d06a0ca270ba9c5bbba10e849e8b6072337"
+    }
+  ]
+}

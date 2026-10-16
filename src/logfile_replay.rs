@@ -378,9 +378,26 @@ impl Log<'_> {
     /// The record at `lsn`: its header and its client data, and the LSN
     /// of the record after it.
     fn record(&self, lsn: u64) -> Result<([u8; RECORD_HEADER], Vec<u8>, u64), Error> {
+        self.record_bounded(lsn, self.bytes.len())
+    }
+
+    fn record_bounded(
+        &self,
+        lsn: u64,
+        max_record_bytes: usize,
+    ) -> Result<([u8; RECORD_HEADER], Vec<u8>, u64), Error> {
         let at = self.offset(lsn);
         let lps = self.log_page;
         let (mut home, within) = (at - at % lps, at % lps);
+        if lsn == 0
+            || at >= self.bytes.len()
+            || within < self.data_offset
+            || within + RECORD_HEADER > lps
+        {
+            return Err(refuse(format!(
+                "LSN {lsn:#x} is outside a record data area"
+            )));
+        }
         let page = self.page(home, lsn)?;
         if u64_at(page, within)? != lsn || within + RECORD_HEADER > lps {
             return Err(refuse(format!(
@@ -390,9 +407,9 @@ impl Log<'_> {
         let mut header = [0u8; RECORD_HEADER];
         header.copy_from_slice(&page[within..within + RECORD_HEADER]);
         let len = u32_at(&header, 0x18)? as usize;
-        if len > self.bytes.len() {
+        if len > self.bytes.len() || len > max_record_bytes {
             return Err(refuse(format!(
-                "the record at LSN {lsn:#x} claims {len} bytes"
+                "the record at LSN {lsn:#x} claims {len} bytes, exceeding the log or record budget {max_record_bytes}"
             )));
         }
         let mut data =
@@ -559,9 +576,8 @@ fn undone_lsn(last_lsn: u64) -> u64 {
     last_lsn + 1
 }
 
-/// Plan the replay of `log` -- the whole of `$LogFile`'s `$DATA` -- over
-/// the volume `read` reads, whose geometry is `params`. Writes nothing.
-pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Result<Plan, Error> {
+/// Shared read-only page selection and fixup validation for replay and inspection.
+fn read_log(log: &[u8]) -> Result<(Log<'_>, Option<u64>), Error> {
     // ---- the restart area ------------------------------------------------
     let sps = u32_at(log, 0x10)? as usize;
     if !(512..=65536).contains(&sps) || !sps.is_power_of_two() {
@@ -585,9 +601,6 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
             ra.major
         )));
     }
-    let checkpoint = ra
-        .checkpoint
-        .ok_or_else(|| refuse("no client has the log open"))?;
     let lps = ra.log_page;
     if !(512..=65536).contains(&lps)
         || !lps.is_power_of_two()
@@ -675,7 +688,12 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
         else {
             continue;
         };
-        let on_start = lps - l.offset(last) % lps - RECORD_HEADER;
+        if len as usize > log.len() {
+            continue;
+        }
+        let Some(on_start) = lps.checked_sub(l.offset(last) % lps + RECORD_HEADER) else {
+            continue;
+        };
         let rest = (len as usize).saturating_sub(on_start);
         let mut home = start;
         for _ in 0..rest.div_ceil(lps - l.data_offset).max(1) {
@@ -689,7 +707,14 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
     for (home, last, page) in placed {
         l.copies.entry(home).or_default().push((last, false, page));
     }
+    Ok((l, ra.checkpoint))
+}
 
+/// Plan the replay of `log` -- the whole of `$LogFile`'s `$DATA` -- over
+/// the volume `read` reads, whose geometry is `params`. Writes nothing.
+pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Result<Plan, Error> {
+    let (l, checkpoint) = read_log(log)?;
+    let checkpoint = checkpoint.ok_or_else(|| refuse("no client has the log open"))?;
     // ---- the checkpoint and the tables it dumped -------------------------
     let (header, body, _) = l.record(checkpoint)?;
     if u32_at(&header, 0x20)? != LFS_CLIENT_RESTART || body.len() < 0x40 {
@@ -1622,5 +1647,151 @@ mod tests {
         };
         let err = plan(&vec![0u8; 65536], &params, &mut read).unwrap_err();
         assert!(err.contains("$LogFile"), "{err}");
+    }
+}
+
+/// A read-only view of one `$LogFile` client record: the fields replay
+/// already decodes from the record header and the start of its client data,
+/// exposed for inspection. Nothing here is replay authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordView {
+    pub lsn: u64,
+    pub client_previous_lsn: u64,
+    pub client_undo_next_lsn: u64,
+    pub client_data_length: u32,
+    pub seq_number: u16,
+    pub client_index: u16,
+    pub record_type: u32,
+    pub transaction_id: u32,
+    pub flags: u16,
+    pub redo_operation: u16,
+    pub undo_operation: u16,
+    pub redo_offset: u16,
+    pub redo_length: u16,
+    pub undo_offset: u16,
+    pub undo_length: u16,
+}
+
+/// Read one record without changing the source, refusing client data larger
+/// than `max_record_bytes` before allocating its assembled buffer.
+///
+/// Uses replay's LFS 2.x geometry, fixups, tail-copy selection and continuation
+/// handling. Scans the supplied log once, retaining at most a constant multiple
+/// of its length in page copies; callers must bound the input slice size too.
+/// This is strict lookup, not a forensic walk or replay authority. For client
+/// restart records, only header fields have record-header meaning: the operation
+/// fields are raw words from checkpoint data, not NTFS operation codes. Full-field
+/// independent decoding remains unmet (#607).
+pub fn record_at_lsn(log: &[u8], lsn: u64, max_record_bytes: usize) -> Result<RecordView, Error> {
+    let (pages, _) = read_log(log)?;
+    let (header, data, _) = pages.record_bounded(lsn, max_record_bytes)?;
+    RecordView::parse(&header, &data)
+}
+
+impl RecordView {
+    /// Decodes a record header (`0x30` bytes) and its client data. Refuses
+    /// a header or client data too short to hold the fields.
+    pub fn parse(header: &[u8], data: &[u8]) -> Result<Self, Error> {
+        if header.len() < RECORD_HEADER {
+            return Err(refuse(format!(
+                "a record header holds {} bytes",
+                header.len()
+            )));
+        }
+        Ok(Self {
+            lsn: u64_at(header, 0x00)?,
+            client_previous_lsn: u64_at(header, 0x08)?,
+            client_undo_next_lsn: u64_at(header, 0x10)?,
+            client_data_length: u32_at(header, 0x18)?,
+            seq_number: u16_at(header, 0x1C)?,
+            client_index: u16_at(header, 0x1E)?,
+            record_type: u32_at(header, 0x20)?,
+            transaction_id: u32_at(header, 0x24)?,
+            flags: u16_at(header, 0x28)?,
+            redo_operation: u16_at(data, 0x00)?,
+            undo_operation: u16_at(data, 0x02)?,
+            redo_offset: u16_at(data, 0x04)?,
+            redo_length: u16_at(data, 0x06)?,
+            undo_offset: u16_at(data, 0x08)?,
+            undo_length: u16_at(data, 0x0A)?,
+        })
+    }
+
+    /// The operation's name, `"unknown"` for a code replay does not know.
+    pub fn redo_name(&self) -> &'static str {
+        op_name(self.redo_operation)
+    }
+}
+
+#[cfg(test)]
+mod record_view_tests {
+    use super::*;
+
+    #[test]
+    fn windows_checkpoint_record_matches_its_restart_lsn() {
+        use sha2::{Digest, Sha256};
+        // LFS 2.0 capture, independently graded by the checkpoint oracle CI.
+        // Windows provenance and its restart LSN: tests/logfile_state.rs.
+        let out = std::process::Command::new("gzip")
+            .args(["-dc", "test-disks/windows-interrupted-logfile-1.bin.gz"])
+            .output()
+            .expect("install gzip to read the Windows capture");
+        assert!(out.status.success(), "gzip: {:?}", out.stderr);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&out.stdout)),
+            "e6a36b92ace6fa15378af53d9239b1df0aacdf931e4c721d10ce287259d638eb"
+        );
+        let before = out.stdout.clone();
+        let view = record_at_lsn(&out.stdout, 0x33e791, out.stdout.len())
+            .expect("Windows checkpoint must be inspectable");
+        assert_eq!(view.lsn, 0x33e791);
+        assert_eq!(view.record_type, 2);
+        assert_eq!(out.stdout, before);
+    }
+
+    #[test]
+    fn windows_lfs1_checkpoint_is_still_refused() {
+        use sha2::{Digest, Sha256};
+        let out = std::process::Command::new("gzip")
+            .args(["-dc", "test-disks/windows-clean-logfile.bin.gz"])
+            .output()
+            .expect("install gzip to read the Windows capture");
+        assert!(out.status.success(), "gzip: {:?}", out.stderr);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&out.stdout)),
+            "b5b8d7ed7dacde1c0a6a7304d8d13038706efedd78a066fc67f5c3c624ba8a54"
+        );
+        let before = out.stdout.clone();
+        let error = record_at_lsn(&out.stdout, 0x184415, out.stdout.len()).unwrap_err();
+        assert!(error.to_string().contains("LFS version 1"), "{error}");
+        assert_eq!(out.stdout, before);
+    }
+
+    #[test]
+    fn record_view_reads_header_and_operation_fields() {
+        let mut h = [0u8; RECORD_HEADER];
+        h[0x00..0x08].copy_from_slice(&0x1122u64.to_le_bytes());
+        h[0x08..0x10].copy_from_slice(&0x1100u64.to_le_bytes());
+        h[0x10..0x18].copy_from_slice(&0x10F0u64.to_le_bytes());
+        h[0x18..0x1C].copy_from_slice(&0x40u32.to_le_bytes());
+        h[0x20..0x24].copy_from_slice(&LFS_CLIENT_RECORD.to_le_bytes());
+        h[0x24..0x28].copy_from_slice(&0x18u32.to_le_bytes());
+        let mut d = [0u8; 0x40];
+        d[0..2].copy_from_slice(&0x07u16.to_le_bytes());
+        d[2..4].copy_from_slice(&0x07u16.to_le_bytes());
+        d[4..6].copy_from_slice(&0x28u16.to_le_bytes());
+        d[6..8].copy_from_slice(&0x08u16.to_le_bytes());
+        let v = RecordView::parse(&h, &d).unwrap();
+        assert_eq!(
+            (v.lsn, v.client_previous_lsn, v.client_undo_next_lsn),
+            (0x1122, 0x1100, 0x10F0)
+        );
+        assert_eq!((v.record_type, v.transaction_id), (LFS_CLIENT_RECORD, 0x18));
+        assert_eq!(
+            (v.redo_operation, v.redo_offset, v.redo_length),
+            (0x07, 0x28, 0x08)
+        );
+        assert!(RecordView::parse(&h[..0x20], &d).is_err());
+        assert!(RecordView::parse(&h, &d[..4]).is_err());
     }
 }

@@ -1,0 +1,35 @@
+name: LogFile nonzero links
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  nonzero-links:
+    name: immutable Windows nonzero link evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - name: Require independent nonzero link comparisons
+        run: cargo test --locked --manifest-path scripts/logfile-record-oracle/Cargo.toml --test nonzero_links -- --nocapture
+      - name: Retain independent Windows link evidence and refusals
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logfile-nonzero-links
+          path: |
+            tmp/logfile-nonzero-links/*.tsv
+            tmp/logfile-nonzero-links/*.txt
+            tmp/logfile-nonzero-links/*.stderr
+          if-no-files-found: error
