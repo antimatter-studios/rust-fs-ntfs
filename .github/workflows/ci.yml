@@ -463,6 +463,12 @@ jobs:
       - name: Capture Windows-authored $I30 create/delete/reuse evidence
         shell: pwsh
         run: pwsh -File test-disks/capture-i30-slack.ps1
+      - name: Compare $I30 slack candidates with the Windows manifest
+        shell: pwsh
+        env:
+          NTFS_I30_SLACK_IMAGE: test-disks/ntfs-i30-slack.img
+          NTFS_I30_SLACK_MANIFEST: test-disks/ntfs-i30-slack.manifest.json
+        run: cargo test --release --locked --lib --features windows-i30-oracle index_slack::windows_capture
       - name: Upload Windows-authored fixtures
         uses: actions/upload-artifact@v4
         with:

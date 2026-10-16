@@ -402,3 +402,86 @@ mod tests {
         assert!(!full.budget_exhausted);
     }
 }
+
+/// Compares bounded slack candidates with the Windows-authored capture made
+/// by test-disks/capture-i30-slack.ps1. Names and file IDs come from Windows
+/// (fsutil); nothing here is produced by this crate's writer.
+#[cfg(all(test, feature = "windows-i30-oracle"))]
+mod windows_capture {
+    use super::*;
+
+    fn env_path(var: &str) -> std::path::PathBuf {
+        std::env::var_os(var)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| panic!("{var} is unset; run test-disks/capture-i30-slack.ps1 first"))
+    }
+
+    #[test]
+    fn candidates_match_the_windows_manifest() {
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(env_path("NTFS_I30_SLACK_MANIFEST")).expect("manifest readable"),
+        )
+        .expect("manifest is JSON");
+        let directory_id = manifest["directory_file_id"]
+            .as_u64()
+            .expect("directory_file_id");
+        let directory_record = directory_id & 0xFFFF_FFFF_FFFF;
+        let control = manifest["never_created_control_name"]
+            .as_str()
+            .expect("control name");
+        let mut native: std::collections::HashMap<String, Vec<(u64, String)>> = Default::default();
+        for op in manifest["operations"].as_array().expect("operations") {
+            if op["operation"] == "create" {
+                let id = op["file_id"].as_u64().expect("native file_id");
+                native
+                    .entry(op["name"].as_str().unwrap().to_string())
+                    .or_default()
+                    .push((id, op["role"].as_str().unwrap().to_string()));
+            }
+        }
+        let mut io = crate::block_io::PathIo::open_ro(&env_path("NTFS_I30_SLACK_IMAGE"))
+            .expect("image opens");
+        let budget = SlackBudget {
+            max_offsets: 1 << 16,
+            max_candidates: 4096,
+        };
+        let blocks = scan_directory_allocation_slack_io(&mut io, directory_record, budget)
+            .expect("Windows allocated INDX blocks for the capture directory");
+        assert!(!blocks.is_empty(), "no allocated INDX block was scanned");
+        let (mut matched, mut deleted_matched) = (0usize, 0usize);
+        for block in &blocks {
+            for c in &block.scan.candidates {
+                let name = String::from_utf16(&c.name).expect("candidate name is UTF-16");
+                assert_ne!(name, control, "a never-created name was reported");
+                let ids = native.get(&name).unwrap_or_else(|| {
+                    panic!(
+                        "candidate {name:?} at VCN {} was never created by Windows",
+                        block.vcn
+                    )
+                });
+                if let Some(r) = c.file_reference {
+                    let hit = ids
+                        .iter()
+                        .find(|(id, _)| id & 0xFFFF_FFFF_FFFF == r.record_number);
+                    let (_, role) = hit.unwrap_or_else(|| {
+                        panic!(
+                            "candidate {name:?} names record {} that Windows never gave it",
+                            r.record_number
+                        )
+                    });
+                    matched += 1;
+                    if role == "deleted" {
+                        deleted_matched += 1;
+                    }
+                }
+            }
+        }
+        // Provenance and confidence: slack retention is Windows' choice, so
+        // the counts are reported, not required; every reported candidate is
+        // held to the names and IDs Windows recorded.
+        eprintln!(
+            "windows_capture: blocks={} matched={matched} deleted={deleted_matched}",
+            blocks.len()
+        );
+    }
+}

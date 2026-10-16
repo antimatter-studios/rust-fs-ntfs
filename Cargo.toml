@@ -83,6 +83,10 @@ harness = []
 # turns it on, so the tiers that run every test file on a runner with no VM
 # do not build it; that tier's test floor fails it if it ran nothing.
 kernel = []
+# Test-only: compares $I30 slack candidates with a Windows-authored capture
+# and its manifest (#608). Only the Windows CI job turns it on, after it
+# has produced the image; the test fails when either file is absent.
+windows-i30-oracle = []
 
 [dependencies]
 # `log` is the de-facto standard logging facade. Consumers (FSKit
