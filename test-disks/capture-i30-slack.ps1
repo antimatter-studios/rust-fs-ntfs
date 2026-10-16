@@ -1,9 +1,10 @@
 # Captures one Windows-authored NTFS directory index after create/delete/reuse.
-# The image is evidence for the future $I30 slack reader; this script does not
-# parse or claim to validate index slack.
+# Native handle IDs and raw index nodes retain independent identity evidence;
+# the bounded reader is graded separately against the manifest in CI.
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\scripts\fs-windows-test-harness\_lib.ps1"
 . "$PSScriptRoot\i30-slack-evidence.ps1"
+. "$PSScriptRoot\i30-native-identity.ps1"
 
 $image = [System.IO.Path]::GetFullPath('test-disks/ntfs-i30-slack.img')
 $manifestPath = [System.IO.Path]::GetFullPath('test-disks/ntfs-i30-slack.manifest.json')
@@ -25,16 +26,15 @@ try {
     $root = "${letter}:\index-slack"
     New-Item -ItemType Directory -Path $root | Out-Null
     $sequence = [System.Collections.Generic.List[object]]::new()
-    # Native file IDs come from Windows (fsutil), never from our reader.
+    # Native file IDs are checked against an independently opened Win32 handle.
     function Get-NativeFileId([string]$p) {
-        $out = (& fsutil file queryFileID $p) -join ' '
-        if ($out -notmatch '0x([0-9a-fA-F]+)') { throw "fsutil gave no file ID for ${p}: $out" }
-        return [Convert]::ToUInt64($Matches[1].Substring([Math]::Max(0, $Matches[1].Length - 16)), 16)
+        return Get-I30NativeIdentity $p
     }
     function Add-Created([string]$name, [string]$role) {
         $path = Join-Path $root $name
         [System.IO.File]::WriteAllText($path, "Windows-authored $name`n")
-        $sequence.Add([ordered]@{ operation = 'create'; name = $name; role = $role; file_id = (Get-NativeFileId $path) })
+        $identity = Get-NativeFileId $path
+        $sequence.Add([ordered]@{ operation = 'create'; name = $name; role = $role; file_id = $identity.file_id; native_identity = $identity })
     }
     function Remove-Created([string]$name) {
         Remove-Item -LiteralPath (Join-Path $root $name)
@@ -54,7 +54,8 @@ try {
     Add-Created 'reused-name.txt' 'deleted'
     Remove-Created 'reused-name.txt'
     Add-Created 'live-final.txt' 'live'
-    $directoryId = Get-NativeFileId $root
+    $directoryIdentity = Get-NativeFileId $root
+    $directoryId = $directoryIdentity.file_id
     $layout = (& fsutil file layout $root) -join "`n"
     if ($layout -notmatch 'INDEX_ALLOCATION') { throw "Windows did not allocate INDX blocks for ${root}:`n$layout" }
     Sync-VhdToImg -Vhd $state.Vhd -ImagePath $image
@@ -70,6 +71,7 @@ try {
     $deletedIds = @{}
     foreach ($op in $sequence) { if ($op.operation -eq 'create' -and $op.role -eq 'deleted') { $deletedIds[$op.file_id] = $op.name } }
     $evidence = [System.Collections.Generic.List[object]]::new()
+    $observations = [System.Collections.Generic.List[object]]::new()
     $indxBlocks = 0; $nameHits = 0
     for ($off = 0; $off -le $bytes.Length - 4096; $off += 4096) {
         if ($bytes[$off] -ne 0x49 -or $bytes[$off+1] -ne 0x4E -or $bytes[$off+2] -ne 0x44 -or $bytes[$off+3] -ne 0x58) { continue }
@@ -89,6 +91,16 @@ try {
                 $entry = $p - 0x52
                 $ref = [BitConverter]::ToUInt64($blk, $entry) -band 0xFFFFFFFFFFFF
                 $parent = [BitConverter]::ToUInt64($blk, $entry + 0x10) -band 0xFFFFFFFFFFFF
+                # Retain every hit, including mismatched identities. The full
+                # fixed-up node permits an anchored entry/terminator walk;
+                # bytes preceding the candidate were missing from the old red.
+                $observations.Add([ordered]@{
+                    name = $name; block_image_offset = $off
+                    vcn = [BitConverter]::ToUInt64($blk, 0x10)
+                    entry_offset_in_block = $entry
+                    raw_file_reference = [BitConverter]::ToUInt64($blk, $entry)
+                    fixed_up_block_hex = [Convert]::ToHexString($blk).ToLowerInvariant()
+                })
                 $native = $deletedIds.Keys | Where-Object { ($_ -band 0xFFFFFFFFFFFF) -eq $ref -and $deletedIds[$_] -eq $name }
                 if ($parent -eq $dirRecord -and $native) {
                     $evidence.Add([ordered]@{ name = $name; file_id = [uint64]@($native)[0]; record_number = $ref; block_image_offset = $off; vcn = [BitConverter]::ToUInt64($blk, 0x10); entry_offset_in_block = $entry })
@@ -109,6 +121,7 @@ try {
         cluster_size_bytes = 4096
         directory = '/index-slack'
         directory_file_id = $directoryId
+        directory_native_identity = $directoryIdentity
         directory_index_allocation = 'fsutil file layout reported $INDEX_ALLOCATION'
         never_created_control_name = 'never-created.txt'
         operations = $sequence
@@ -116,6 +129,7 @@ try {
         image_size_bytes = (Get-Item $image).Length
         image_sha256 = $imageSha
         raw_deleted_evidence = $evidence
+        raw_name_observations = $observations
         raw_scan = [ordered]@{ indx_blocks = $indxBlocks; deleted_name_hits = $nameHits }
         purpose = 'Raw Windows-authored volume evidence for $I30 create/delete/reuse slack analysis.'
         reader_status = 'compared by index_slack::windows_capture under the windows-i30-oracle feature'

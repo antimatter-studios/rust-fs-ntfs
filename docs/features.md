@@ -51,6 +51,7 @@ States:
 
 | Feature | State | Since | Tracking | Checked by |
 |---|---|---|---|---|
+| `$I30` allocation slack evidence | Partial: bounded internal scanner; native identity disagreement remains under investigation; Windows capture checks fsutil against live Win32 handles and retains every raw name hit | Unreleased (#616) | #608 | `index_slack::tests`, `index_slack::windows_capture`, `capture-i30-slack.ps1`, `i30-native-identity.ps1` |
 | `fsck.ntfs` / `fsck::check_io`: dirty flag, `$LogFile`, `$MFTMirr`, the header of every in-use MFT record | Supported | 0.6.0 | | `cli_fsck.rs`, `tests/cli/test-fsck.sh` |
 | Seeded operation sequences against an independent byte model and reader | Partial: create, offset write, truncate, duplicate-create refusal; broader operations and Windows grading remain | Unreleased (#578) | #484 | `op_sequence_readback.rs`, `chore test:op-sequence-oracle` |
 | `fsck.ntfs` / `fsck::check_io`: each in-use record's attribute chain: lengths, types and their order, names, ids, resident values, run lists against their VCNs and allocated size, the end marker | Supported | 0.10.0 (#515) | | `check_io_reads_attribute_structure.rs` |

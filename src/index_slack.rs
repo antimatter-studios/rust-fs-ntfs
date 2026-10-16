@@ -318,6 +318,39 @@ mod tests {
     }
 
     #[test]
+    fn the_captured_disputed_reference_is_preserved_without_identity_rewriting() {
+        // Completed Windows job 116773503420, run 38838441340, dbefdc5:
+        // VCN 6, block offset 3104, image SHA-256
+        // 5ea078fe5d11fba96cb9fb56a7b93829b73fe0ef136a2e399e2ab51b3d064c22.
+        // This is observed metadata, not a valid native identity assertion.
+        let hex = "10000000020000007000600000000000260000000000010045b4bdfb135ddd0145b4bdfb135ddd0145b4bdfb135ddd0145b4bdfb135ddd012800000000000000210000000000000020000000000000000f007200650075007300650064002d006e0061006d0065002e00740078007400";
+        let bytes: Vec<u8> = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect();
+        let scan = scan_index_slack(&bytes, 0, bytes.len(), WIDE).unwrap();
+        assert_eq!(scan.candidates.len(), 1);
+        let c = &scan.candidates[0];
+        assert_eq!(c.name, name("reused-name.txt"));
+        assert_eq!(c.entry_length, 112);
+        assert_eq!(
+            c.file_reference,
+            Some(SlackReference {
+                record_number: 8_589_934_608,
+                sequence: 0,
+            })
+        );
+        assert_eq!(
+            c.parent_reference,
+            Some(SlackReference {
+                record_number: 38,
+                sequence: 1,
+            })
+        );
+    }
+
+    #[test]
     fn live_entries_before_the_used_length_are_not_slack() {
         let live = entry(40, 5, 1, "live.txt");
         let r = region(&live, &[], 256);
@@ -409,6 +442,73 @@ mod tests {
 #[cfg(all(test, feature = "windows-i30-oracle"))]
 mod windows_capture {
     use super::*;
+
+    #[test]
+    fn fsutil_ids_match_independent_live_handle_ids() {
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(env_path("NTFS_I30_SLACK_MANIFEST")).expect("manifest readable"),
+        )
+        .expect("manifest is JSON");
+        let check = |identity: &serde_json::Value, expected: u64| {
+            assert_eq!(identity["handle_file_id"].as_u64(), Some(expected));
+            assert_eq!(identity["file_id"].as_u64(), Some(expected));
+            let hex = identity["fsutil_hex"].as_str().expect("full fsutil hex");
+            assert_eq!(u64::from_str_radix(hex, 16).unwrap(), expected);
+            let basic: Vec<u8> = identity["by_handle_information_hex"]
+                .as_str()
+                .unwrap()
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
+                .collect();
+            assert_eq!(basic.len(), 52);
+            let high = u32::from_le_bytes(basic[44..48].try_into().unwrap());
+            let low = u32::from_le_bytes(basic[48..52].try_into().unwrap());
+            assert_eq!((u64::from(high) << 32) | u64::from(low), expected);
+            // These retain complete API buffers for layout/representation
+            // comparison; FILE_ID_INFO is not treated as an on-disk format.
+            assert_eq!(
+                identity["by_handle_information_hex"]
+                    .as_str()
+                    .unwrap()
+                    .len(),
+                104
+            );
+            assert_eq!(identity["file_id_info_hex"].as_str().unwrap().len(), 48);
+        };
+        check(
+            &manifest["directory_native_identity"],
+            manifest["directory_file_id"].as_u64().unwrap(),
+        );
+        let operations = manifest["operations"].as_array().unwrap();
+        for op in operations.iter().filter(|op| op["operation"] == "create") {
+            check(&op["native_identity"], op["file_id"].as_u64().unwrap());
+        }
+        let observations = manifest["raw_name_observations"]
+            .as_array()
+            .expect("all raw name hits retained");
+        assert_eq!(
+            observations.len() as u64,
+            manifest["raw_scan"]["deleted_name_hits"].as_u64().unwrap()
+        );
+        assert!(!observations.is_empty());
+        for observation in observations {
+            let hex = observation["fixed_up_block_hex"]
+                .as_str()
+                .expect("full fixed-up node");
+            assert_eq!(hex.len(), 8192);
+            let at = observation["entry_offset_in_block"].as_u64().unwrap() as usize;
+            let raw: Vec<u8> = hex
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
+                .collect();
+            assert_eq!(
+                read_u64(&raw, at),
+                observation["raw_file_reference"].as_u64()
+            );
+        }
+    }
 
     fn env_path(var: &str) -> std::path::PathBuf {
         std::env::var_os(var)
