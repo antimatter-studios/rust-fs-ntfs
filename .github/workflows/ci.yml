@@ -40,6 +40,82 @@ jobs:
         shell: pwsh
         run: ./tests/scripts/scrub-bootstrap.ps1
 
+  python-abi:
+    name: Python ctypes client over the shared C ABI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: The aggregate gate requires every Python oracle job
+        run: python3 -m unittest -v tests/python/test_ci_gate.py
+      - name: The fsutil record binding refuses a wrong image or revision
+        if: ${{ !cancelled() }}
+        run: python3 -m unittest -v tests/python/test_record_binding.py
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - name: Build the shared library without changing the declared crate types
+        run: cargo rustc --release --lib --crate-type cdylib
+      - name: Compile the independent C layout and call probe
+        run: cc -std=c11 -Wall -Werror -Iinclude tests/python/abi_volume_info.c -Ltarget/release -lfs_ntfs -Wl,-rpath,"$PWD/target/release" -o target/abi_volume_info
+      - name: Decompress the Windows-recovered fixture
+        run: gunzip -c test-disks/windows-interrupted-1.recovered.img.gz > target/python-abi.img
+      - name: Python client agrees with the C ABI
+        env:
+          FS_NTFS_SHARED_LIB: ${{ github.workspace }}/target/release/libfs_ntfs.so
+          FS_NTFS_ABI_PROBE: ${{ github.workspace }}/target/abi_volume_info
+          FS_NTFS_FIXTURE: ${{ github.workspace }}/target/python-abi.img
+        run: python3 -m unittest -v tests/python/test_volume_info.py
+      - name: Compile the independent C directory-listing probe
+        run: cc -std=c11 -Wall -Werror -Iinclude tests/python/abi_dir_listing.c -Ltarget/release -lfs_ntfs -Wl,-rpath,"$PWD/target/release" -o target/abi_dir_listing
+      - name: Install the independent raw-directory reference
+        run: sudo apt-get update && sudo apt-get install -y ntfs-3g
+      - name: Python directory iterator agrees with the C ABI
+        env:
+          FS_NTFS_SHARED_LIB: ${{ github.workspace }}/target/release/libfs_ntfs.so
+          FS_NTFS_DIR_PROBE: ${{ github.workspace }}/target/abi_dir_listing
+          FS_NTFS_FIXTURE: ${{ github.workspace }}/target/python-abi.img
+        run: python3 -m unittest -v tests/python/test_dir_listing.py
+
+  # The same Python client graded against Windows' own fsutil record of the
+  # volume it formatted, bound to that image's SHA-256.
+  python-volume-info-windows:
+    name: Python volume info matches Windows fsutil
+    needs: [windows-native-read-fixtures]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - name: Build the shared library without changing the declared crate types
+        run: cargo rustc --release --lib --crate-type cdylib
+      - name: Download Windows-authored native read fixtures
+        uses: actions/download-artifact@v4
+        with:
+          name: ntfs-windows-native-read-fixtures
+          path: test-disks
+      - name: Python client agrees with fsutil fsinfo ntfsinfo
+        env:
+          FS_NTFS_SHARED_LIB: ${{ github.workspace }}/target/release/libfs_ntfs.so
+          FS_NTFS_WINDOWS_IMAGE: ${{ github.workspace }}/test-disks/ntfs-cli-read.img
+          FS_NTFS_WINDOWS_RECORD: ${{ github.workspace }}/test-disks/ntfs-cli-read.ntfsinfo.txt
+          FS_NTFS_WRONG_IMAGE: ${{ github.workspace }}/test-disks/ntfs-attrlist.img
+          FS_NTFS_EXPECTED_HEAD: ${{ github.sha }}
+        run: python3 -m unittest -v tests/python/test_volume_info_windows.py
+      - name: Compile the C directory caller for the same Windows image
+        run: cc -std=c11 -Wall -Werror -Iinclude tests/python/abi_dir_listing.c -Ltarget/release -lfs_ntfs -Wl,-rpath,"$PWD/target/release" -o target/abi_dir_listing
+      - name: Python and C directory iterators agree with native Windows, zero skipped
+        env:
+          FS_NTFS_SHARED_LIB: ${{ github.workspace }}/target/release/libfs_ntfs.so
+          FS_NTFS_DIR_PROBE: ${{ github.workspace }}/target/abi_dir_listing
+          FS_NTFS_WINDOWS_IMAGE: ${{ github.workspace }}/test-disks/ntfs-cli-read.img
+          FS_NTFS_DIRECTORY_RECORD: ${{ github.workspace }}/test-disks/ntfs-cli-read.directory.json
+          FS_NTFS_WRONG_IMAGE: ${{ github.workspace }}/test-disks/ntfs-attrlist.img
+          FS_NTFS_EXPECTED_HEAD: ${{ github.sha }}
+        run: python3 tests/python/test_dir_listing_windows.py
+
   test:
     name: test-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -527,6 +603,8 @@ jobs:
             test-disks/ntfs-symlink.img
             test-disks/ntfs-symlink.targets.tsv
             test-disks/ntfs-cli-read.img
+            test-disks/ntfs-cli-read.ntfsinfo.txt
+            test-disks/ntfs-cli-read.directory.json
             test-disks/ntfs-cli-read.sha256.tsv
             test-disks/win32-name-verdicts.tsv
             test-disks/ntfs-ea.img
@@ -1653,7 +1731,7 @@ jobs:
     name: ci-ok
     runs-on: ubuntu-latest
     if: always()
-    needs: [test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap]
+    needs: [test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows]
     steps:
       - uses: actions/checkout@v4
       - name: Check every gating job
