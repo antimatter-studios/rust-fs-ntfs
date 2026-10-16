@@ -1,0 +1,59 @@
+name: Hard-link read-only index Windows observation
+on:
+  pull_request:
+    paths:
+      - .github/workflows/hardlink-readonly-index-oracle.yml
+      - tests/scripts/hardlink-readonly-index-capture.ps1
+      - tests/scripts/hardlink-readonly-index-capture.legacy.ps1
+      - tests/scripts/hardlink-capture-lifecycle-controls.ps1
+      - tests/hardlink_readonly_index_windows.rs
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  hardlink-readonly-index:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - name: Reproduce the completed capture red and check native lifecycle controls
+        shell: pwsh
+        run: ./tests/scripts/hardlink-capture-lifecycle-controls.ps1
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - name: Freeze a Windows image after each hard-link stage
+        shell: pwsh
+        run: ./tests/scripts/hardlink-readonly-index-capture.ps1 -OutDir tmp/hardlink-oracle
+      - name: Decode every FILE_NAME copy with ntfs 0.4
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: 2
+          NTFS_HARDLINK_CAPTURE: tmp/hardlink-oracle
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(awk -F '\t' '$1 == "head" {print $2}' tmp/hardlink-oracle/manifest.tsv)"
+          cargo test --locked --test hardlink_readonly_index_windows -- --nocapture
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hardlink-readonly-index-${{ github.sha }}
+          path: |
+            tmp/hardlink-oracle/manifest.tsv
+            tmp/hardlink-oracle/observations.tsv
+            tmp/hardlink-oracle/lifecycle/**/*.tsv
+            tmp/hardlink-oracle/lifecycle/*.log
+          if-no-files-found: error
+      - name: Only the four stage images this job created are removed
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          for s in s0-created s1-readonly s2-reopen s3-rename; do
+            rm -f "tmp/hardlink-oracle/$s.img"
+            test ! -e "tmp/hardlink-oracle/$s.img"
+          done
+          test ! -e tmp/hardlink-oracle/hardlink-oracle.vhd

@@ -1012,6 +1012,29 @@ pub(crate) fn set_entry_namespace(entry: &mut [u8], namespace: u8) -> Result<(),
 const FN_ALLOCATED_SIZE_OFFSET: usize = 0x28;
 const FN_DATA_SIZE_OFFSET: usize = 0x30;
 
+/// Set only READONLY in an index key, returning its previous bit for undo.
+/// The native six-stage FILE_NAME capture establishes this eager bit (#629).
+pub(crate) fn set_index_entry_readonly(
+    buf: &mut [u8],
+    entry: &IndexEntryLocation,
+    readonly: bool,
+) -> Result<bool, Error> {
+    const ATTRIBUTES: usize = 0x38;
+    let start = entry.record_offset + IE_KEY_START + ATTRIBUTES;
+    let end = start + 4;
+    if entry.key_length < ATTRIBUTES + 4
+        || IE_KEY_START + ATTRIBUTES + 4 > entry.length
+        || end > buf.len()
+    {
+        return Err(Error::io("index key too short for FILE_NAME attributes"));
+    }
+    let old = u32::from_le_bytes(buf[start..end].try_into().unwrap());
+    let bit = crate::write::file_attr::READONLY;
+    let new = if readonly { old | bit } else { old & !bit };
+    buf[start..end].copy_from_slice(&new.to_le_bytes());
+    Ok(old & bit != 0)
+}
+
 /// Write `allocated` and `data_size` into the duplicated information of
 /// the `$FILE_NAME` key of the entry at `entry` in `buf` (#506). Returns
 /// whether that changed anything, so a caller can skip writing back an

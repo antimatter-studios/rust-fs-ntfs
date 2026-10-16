@@ -78,6 +78,30 @@ fn command() -> Cmd {
         .args(fs_core::cli::format_args().map(|a| a.global(true)))
         .subcommand_required(true)
         .subcommand(
+            Cmd::new("acl")
+                .about("Inspect a file's persisted security descriptor (read-only)")
+                .subcommand_required(true)
+                .subcommand(
+                    Cmd::new("show")
+                        .about("Owner, group, DACL and SACL as stored, ACEs in on-disk order")
+                        .arg(
+                            Arg::new("path")
+                                .value_name("PATH")
+                                .default_value("/")
+                                .value_parser(value_parser!(OsString)),
+                        )
+                        .after_help(
+                            "Examples:\n  fs.ntfs disk.img acl show /Users\n  \
+                             fs.ntfs disk.img acl show /notes.txt | jq '.dacl'\n  \
+                             fs.ntfs disk.img acl show --text /",
+                        ),
+                )
+                .after_help(
+                    "Examples:\n  fs.ntfs disk.img acl show /Users\n  \
+                     fs.ntfs disk.img acl show /notes.txt | jq '.dacl'",
+                ),
+        )
+        .subcommand(
             Cmd::new("ls")
                 .about("List a directory: name, type, size, mode, mtime (and a link's target)")
                 .arg(
@@ -258,6 +282,16 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         .copied()
         .unwrap_or(0);
     match verb {
+        "acl" => {
+            let (_, show) = sub.subcommand().expect("clap requires an acl verb");
+            let path = path_arg(show)?;
+            let (mut dev, _) = device::mount(target, offset, false)?;
+            let bytes =
+                super::acl::file_descriptor(&mut dev, path).map_err(|e| ntfs_error(path, e))?;
+            let json = super::acl::descriptor_json(&bytes)
+                .map_err(|e| CliError::failed(format!("{path}: {e}")))?;
+            Ok(Outcome::report(json))
+        }
         "ls" => {
             let (mut dev, _) = device::mount(target, offset, false)?;
             ls(&mut dev, path_arg(sub)?, sub.get_flag("all"))

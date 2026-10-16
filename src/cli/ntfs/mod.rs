@@ -2,6 +2,7 @@
 //! with. Everything filesystem-specific lives here, and nothing here is
 //! plumbing (that is `fs_core::cli`, in rust-fs-core).
 
+pub mod acl;
 pub mod device;
 pub mod fs;
 pub mod fsck;

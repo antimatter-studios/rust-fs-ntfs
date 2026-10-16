@@ -38,3 +38,38 @@ jobs:
             security-descriptor-zero-flag.bin
             tmp/logs/unit.log
           if-no-files-found: error
+  acl-show-oracle:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - name: The INHERITED_ACE transformation passes its captured controls
+        shell: pwsh
+        run: ./tests/scripts/acl-logical-flags-controls.ps1
+      - name: Build the release CLI
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: cargo build --locked --release --features cli --bin rust-fs-ntfs
+      - name: Compare fs acl show with Windows Get-Acl on a Windows-formatted image
+        shell: pwsh
+        run: >-
+          ./tests/scripts/acl-show-windows-oracle.ps1
+          -Cli target/release/rust-fs-ntfs.exe
+          -OutDir tmp/acl-oracle
+      - name: The oracle image was deleted and only JSON is retained
+        if: always()
+        shell: bash
+        run: |
+          test ! -e tmp/acl-oracle/acl-oracle.vhd
+          test -z "$(find tmp/acl-oracle -type f ! -name '*.json')"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acl-show-windows-${{ github.sha }}
+          path: |
+            tmp/acl-oracle/*.json
+          if-no-files-found: error
