@@ -87,6 +87,8 @@ kernel = []
 # and its manifest (#608). Only the Windows CI job turns it on, after it
 # has produced the image; the test fails when either file is absent.
 windows-i30-oracle = []
+# Issue #629: reads the FILE_NAME images the elevated Windows job captures.
+fn-fields-oracle = []
 
 [dependencies]
 # `log` is the de-facto standard logging facade. Consumers (FSKit
@@ -152,6 +154,10 @@ criterion = { version = "0.5", default-features = false, features = ["plotters",
 [[test]]
 name = "kernel_ntfs3"
 required-features = ["kernel"]
+
+[[test]]
+name = "filename_fields_windows_oracle"
+required-features = ["fn-fields-oracle"]
 
 # Criterion benchmarks for the three byte-decoders most likely to
 # regress as the crate evolves. Run with `cargo bench`; not part of

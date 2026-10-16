@@ -10,6 +10,14 @@
 //! absent (`SE_DACL_PRESENT` clear), null (present with offset zero, which
 //! grants everyone everything) and empty (present with zero ACEs, which
 //! grants nobody anything).
+//!
+//! The two basic ACE types, ACCESS_ALLOWED_ACE (0) and ACCESS_DENIED_ACE (1),
+//! are also decoded: `mask` is the stored 32-bit ACCESS_MASK, `rights` lists
+//! the documented bits it sets by their exact, case-sensitive Windows constant
+//! names (one per bit, never a composite such as FILE_ALL_ACCESS),
+//! `unknown_mask` is every set bit no name covers, and `sid` is the trustee.
+//! Every other ACE type reports those four fields as null; `bytes` stays the
+//! lossless record for all of them. No effective access is computed.
 
 use fs_core::cli::Json;
 use fs_ntfs::attr_io::AttrType;
@@ -57,6 +65,66 @@ fn ace_type_name(ace_type: u8) -> Option<&'static str> {
     })
 }
 
+/// The file access rights bits, by the constant names Windows documents.
+const RIGHTS: [(u32, &str); 20] = [
+    (0x0000_0001, "FILE_READ_DATA"),
+    (0x0000_0002, "FILE_WRITE_DATA"),
+    (0x0000_0004, "FILE_APPEND_DATA"),
+    (0x0000_0008, "FILE_READ_EA"),
+    (0x0000_0010, "FILE_WRITE_EA"),
+    (0x0000_0020, "FILE_EXECUTE"),
+    (0x0000_0040, "FILE_DELETE_CHILD"),
+    (0x0000_0080, "FILE_READ_ATTRIBUTES"),
+    (0x0000_0100, "FILE_WRITE_ATTRIBUTES"),
+    (0x0001_0000, "DELETE"),
+    (0x0002_0000, "READ_CONTROL"),
+    (0x0004_0000, "WRITE_DAC"),
+    (0x0008_0000, "WRITE_OWNER"),
+    (0x0010_0000, "SYNCHRONIZE"),
+    (0x0100_0000, "ACCESS_SYSTEM_SECURITY"),
+    (0x0200_0000, "MAXIMUM_ALLOWED"),
+    (0x1000_0000, "GENERIC_ALL"),
+    (0x2000_0000, "GENERIC_EXECUTE"),
+    (0x4000_0000, "GENERIC_WRITE"),
+    (0x8000_0000, "GENERIC_READ"),
+];
+
+/// The named rights a mask sets, low bit first, and the bits left unnamed.
+fn rights(mask: u32) -> (Vec<&'static str>, u32) {
+    let names = RIGHTS
+        .iter()
+        .filter(|(bit, _)| mask & bit != 0)
+        .map(|(_, name)| *name)
+        .collect();
+    let known = RIGHTS.iter().fold(0, |all, (bit, _)| all | bit);
+    (names, mask & !known)
+}
+
+/// Mask and trustee of an ACCESS_ALLOWED_ACE or ACCESS_DENIED_ACE: the mask
+/// at offset 4 and a SID at offset 8 that must fit inside the ACE. Trailing
+/// bytes past the SID are allowed and stay only in the raw bytes.
+fn basic_ace(ace_type: u8, bytes: &[u8]) -> Option<(u32, String)> {
+    if ace_type > 0x01 {
+        return None;
+    }
+    let mask = u32::from_le_bytes(bytes.get(4..8)?.try_into().ok()?);
+    let sid = bytes.get(8..)?;
+    let count = usize::from(*sid.get(1)?);
+    if *sid.first()? != 1 || count > 15 || sid.len() < 8 + 4 * count {
+        return None;
+    }
+    let authority = sid[2..8].iter().fold(0u64, |a, b| (a << 8) | u64::from(*b));
+    let mut text = if authority >= 1 << 32 {
+        format!("S-1-0x{authority:012X}")
+    } else {
+        format!("S-1-{authority}")
+    };
+    for sub in sid[8..8 + 4 * count].chunks_exact(4) {
+        text.push_str(&format!("-{}", u32::from_le_bytes(sub.try_into().unwrap())));
+    }
+    Some((mask, text))
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -81,11 +149,23 @@ fn acl_json(control: u16, present_bit: u16, offset: u32, acl: Option<Acl<'_>>) -
             .enumerate()
             .map(|(index, ace)| {
                 let bytes = ace.as_bytes();
+                let basic = basic_ace(ace.ace_type, bytes);
+                let decoded = basic.as_ref().map(|(mask, _)| rights(*mask));
                 Json::object([
                     ("index", Json::from(index as u64)),
                     ("type", Json::from(u64::from(ace.ace_type))),
                     ("type_name", Json::from(ace_type_name(ace.ace_type))),
                     ("flags", Json::from(u64::from(ace.flags))),
+                    ("mask", Json::from(basic.as_ref().map(|(mask, _)| *mask))),
+                    (
+                        "rights",
+                        Json::from(decoded.as_ref().map(|(names, _)| names.clone())),
+                    ),
+                    (
+                        "unknown_mask",
+                        Json::from(decoded.as_ref().map(|(_, unknown)| *unknown)),
+                    ),
+                    ("sid", Json::from(basic.map(|(_, sid)| sid))),
                     ("bytes", Json::from(hex(bytes))),
                 ])
             })
@@ -245,6 +325,92 @@ mod tests {
             text.contains(&hex(&aces[2])),
             "unknown ACE bytes kept: {text}"
         );
+    }
+
+    fn ace_field(json: &Json, index: usize, field: &str) -> Json {
+        let Some(Json::Arr(aces)) = json.get("dacl").unwrap().get("aces") else {
+            panic!("no aces: {json:?}");
+        };
+        aces[index].get(field).unwrap().clone()
+    }
+
+    fn names(json: &Json) -> Vec<String> {
+        let Json::Arr(items) = json else {
+            panic!("rights is not an array: {json:?}");
+        };
+        items.iter().map(Json::to_text).collect()
+    }
+
+    #[test]
+    fn basic_aces_report_mask_rights_and_trustee() {
+        let aces = [
+            ace(0x00, 0x03, 0x001F_01FF, &SYSTEM),
+            ace(0x01, 0x00, 0x8012_0089, &EVERYONE),
+        ];
+        let json = descriptor_json(&descriptor(SE_DACL_PRESENT, Some(&acl(&aces)))).unwrap();
+        assert_eq!(ace_field(&json, 0, "mask"), Json::UInt(0x001F_01FF));
+        assert_eq!(ace_field(&json, 0, "sid"), Json::from("S-1-5-18"));
+        assert_eq!(ace_field(&json, 0, "unknown_mask"), Json::UInt(0));
+        let full = names(&ace_field(&json, 0, "rights"));
+        assert_eq!(full.len(), 14, "{full:?}");
+        assert_eq!(full.first().map(String::as_str), Some("FILE_READ_DATA"));
+        assert_eq!(full.last().map(String::as_str), Some("SYNCHRONIZE"));
+        assert_eq!(
+            names(&ace_field(&json, 1, "rights")),
+            [
+                "FILE_READ_DATA",
+                "FILE_READ_EA",
+                "FILE_READ_ATTRIBUTES",
+                "READ_CONTROL",
+                "SYNCHRONIZE",
+                "GENERIC_READ"
+            ]
+        );
+        assert_eq!(ace_field(&json, 1, "mask"), Json::UInt(0x8012_0089));
+        assert_eq!(ace_field(&json, 1, "sid"), Json::from("S-1-1-0"));
+    }
+
+    #[test]
+    fn unknown_mask_bits_are_kept_and_unnamed() {
+        let (names, unknown) = rights(0x0C60_FE00 | 0x0000_0001);
+        assert_eq!(names, ["FILE_READ_DATA"]);
+        assert_eq!(unknown, 0x0C60_FE00);
+        let (all, rest) = rights(u32::MAX);
+        assert_eq!(all.len(), RIGHTS.len());
+        assert_eq!(rest, 0x0CE0_FE00);
+    }
+
+    #[test]
+    fn other_types_and_short_sids_have_null_semantics() {
+        // An audit ACE has a mask too, but only allow/deny are decoded here.
+        let audit = ace(0x02, 0x40, 0x0001_0000, &SYSTEM);
+        let mut short = ace(0x00, 0x00, 0x1, &SYSTEM);
+        short[9] = 2; // SID claims two subauthorities; the ACE holds one.
+        let unknown = ace(0x13, 0x00, 0x1, &SYSTEM);
+        let aces = [audit, short, unknown];
+        let json = descriptor_json(&descriptor(SE_DACL_PRESENT, Some(&acl(&aces)))).unwrap();
+        for (index, raw) in aces.iter().enumerate() {
+            for field in ["mask", "rights", "unknown_mask", "sid"] {
+                assert_eq!(
+                    ace_field(&json, index, field),
+                    Json::Null,
+                    "ace {index} {field}"
+                );
+            }
+            assert_eq!(ace_field(&json, index, "bytes"), Json::from(hex(raw)));
+        }
+    }
+
+    #[test]
+    fn a_sid_shorter_than_the_ace_keeps_its_own_width() {
+        let mut padded = ace(0x00, 0x00, 0x1, &EVERYONE);
+        padded.extend_from_slice(&[0xAA; 4]);
+        let size = padded.len() as u16;
+        padded[2..4].copy_from_slice(&size.to_le_bytes());
+        let json =
+            descriptor_json(&descriptor(SE_DACL_PRESENT, Some(&acl(&[padded.clone()])))).unwrap();
+        assert_eq!(ace_field(&json, 0, "sid"), Json::from("S-1-1-0"));
+        assert_eq!(ace_field(&json, 0, "bytes"), Json::from(hex(&padded)));
     }
 
     #[test]
