@@ -92,3 +92,4 @@ __pycache__/
 .vm-share/
 test-disks/usn-v2-capture.bin
 test-disks/usn-v2-capture.tsv
+test-disks/usn-journal-data.tsv
