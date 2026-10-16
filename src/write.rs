@@ -432,7 +432,79 @@ pub fn set_file_attributes_io<T: BlockIo + ?Sized>(
     change: FileAttributesChange,
 ) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    set_file_attributes_by_record_number_io(io, rec, change)
+    if (change.add | change.remove) & file_attr::READONLY == 0 {
+        return set_file_attributes_by_record_number_io(io, rec, change);
+    }
+    // Windows capture 38839252064: readonly is eager in the addressed
+    // directory entry, while the record's own FILE_NAME stays lazy (#629).
+    // Do not refresh other names or copy unrelated SI fields into the key.
+    let parent = resolve_path_to_record_number_io(io, &parent_path_of(file_path))?;
+    let name = file_path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    let upcase = crate::upcase::UpcaseTable::load_io(io)?;
+    let (_, before) = read_mft_record_io(io, rec)?;
+    let (_, parent_record) = read_mft_record_io(io, parent)?;
+    let flags = index_io::index_root_flags(&parent_record)
+        .ok_or_else(|| Error::io("parent has no $I30 index"))?;
+    let (mut node, entry) = index_entry_io(io, parent, Some(rec), flags, name, &upcase)?
+        .ok_or_else(|| Error::io("readonly directory entry not found"))?;
+    let readonly = change.add & file_attr::READONLY != 0;
+    let old_readonly = index_io::set_index_entry_readonly(&mut node, &entry, readonly)?;
+    set_file_attributes_by_record_number_io(io, rec, change)?;
+    if let Err(cause) = set_entry_readonly_io(io, parent, rec, name, readonly, &upcase) {
+        // Restore both words even if the index write failed after partial I/O.
+        // Report a failed undo rather than silently publishing inconsistent SI.
+        let index_undo = set_entry_readonly_io(io, parent, rec, name, old_readonly, &upcase);
+        let record_undo = update_mft_record_io(io, rec, |record| {
+            record.copy_from_slice(&before);
+            Ok(())
+        });
+        return Err(cause.map_message(|m| {
+            format!("readonly index update failed: {m}; index rollback: {index_undo:?}; record rollback: {record_undo:?}")
+        }));
+    }
+    Ok(())
+}
+
+/// Change only the addressed key's readonly bit, without moving any index
+/// entry, changing a child pointer, or updating another hard-link name.
+fn set_entry_readonly_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent: u64,
+    rec: u64,
+    name: &str,
+    readonly: bool,
+    upcase: &crate::upcase::UpcaseTable,
+) -> Result<(), Error> {
+    let patch = |node: &mut [u8], entry: index_io::IndexEntryLocation| {
+        if entry.file_record_number != rec {
+            return Err(Error::io("readonly index entry points at another record"));
+        }
+        index_io::set_index_entry_readonly(node, &entry, readonly).map(|_| ())
+    };
+    let (_, record) = read_mft_record_io(io, parent)?;
+    if index_io::find_index_entry(&record, name, Some(upcase))?.is_some() {
+        return update_mft_record_io(io, parent, |node| {
+            let entry = index_io::find_index_entry(node, name, Some(upcase))?
+                .ok_or_else(|| Error::io("readonly $INDEX_ROOT entry vanished"))?;
+            patch(node, entry)
+        });
+    }
+    let ia = idx_block::load_for_directory_io(io, parent)?;
+    for vcn in ia.allocated_block_vcns() {
+        let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+        if index_io::find_entry_in_indx_block(&block, name, Some(upcase))?.is_some() {
+            return idx_block::update_indx_block_io(io, &ia, vcn, |node| {
+                let entry = index_io::find_entry_in_indx_block(node, name, Some(upcase))?
+                    .ok_or_else(|| Error::io("readonly INDX entry vanished"))?;
+                patch(node, entry)
+            });
+        }
+    }
+    Err(Error::io("readonly directory entry vanished"))
 }
 
 /// See [`set_file_attributes`].

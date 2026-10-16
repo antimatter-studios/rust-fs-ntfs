@@ -855,6 +855,7 @@ fn ci_ok_covers_every_gating_job_and_preserves_windows_filter() {
     assert_eq!(
         needs(job("ci-ok")),
         [
+            "readonly-file-name",
             "test",
             "windows-native-read-fixtures",
             "integration",

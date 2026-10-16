@@ -116,6 +116,62 @@ jobs:
           FS_NTFS_EXPECTED_HEAD: ${{ github.sha }}
         run: python3 tests/python/test_dir_listing_windows.py
 
+  readonly-file-name:
+    name: focused readonly FILE_NAME regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_TERM_COLOR: never
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    # No fixture-job dependency: this unchanged test formats its own image.
+    # The focused red is evidence for #629, while the full suite and native
+    # Windows validation remain required independently.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Record and verify the exact source head
+        run: |
+          mkdir -p tmp/logs
+          git rev-parse HEAD | tee tmp/logs/readonly-head.txt
+          test "$(cat tmp/logs/readonly-head.txt)" = "$EXPECTED_HEAD"
+          sha256sum tests/field_exhaustion_fn.rs > tmp/logs/readonly-test.sha256
+      - name: Check out the pinned existing tier runner
+        run: |
+          core_ref="$(sed -n 's/^  FS_CORE_REF: *//p' chores.yml | tr -d '\r')"
+          test -n "$core_ref"
+          git clone --quiet --depth 1 --branch "$core_ref" \
+            https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run the unchanged readonly test through the existing suite tier
+        run: |
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- \
+            nice -n 10 cargo test --release --locked --features cli,harness \
+            --test field_exhaustion_fn readonly_attribute_reflected_in_file_name -- --exact --nocapture
+          grep -Fxq 'test readonly_attribute_reflected_in_file_name ... ok' tmp/logs/suite.log
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' tmp/logs/suite.log
+          sha256sum --check tmp/logs/readonly-test.sha256
+      - name: Retain focused verdict and exact-head evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: readonly-file-name-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            tmp/logs/suite.log
+            tmp/logs/readonly-head.txt
+            tmp/logs/readonly-test.sha256
+          if-no-files-found: error
+
   test:
     name: test-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -1757,7 +1813,7 @@ jobs:
     name: ci-ok
     runs-on: ubuntu-latest
     if: always()
-    needs: [test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows]
+    needs: [readonly-file-name, test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows]
     steps:
       - uses: actions/checkout@v4
       - name: Check every gating job
