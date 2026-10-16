@@ -73,3 +73,72 @@ jobs:
           path: |
             tmp/acl-oracle/*.json
           if-no-files-found: error
+  filename-fields-capture:
+    # Issue #629: runs the six-step FILE_NAME producer on an elevated hosted
+    # Windows runner. It records what Windows reports; it grades nothing, so
+    # the three ignored probes stay ignored until a decoder compares them.
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - name: Install rust-img-vhd
+        shell: pwsh
+        run: |
+          $vhd = (Select-String -Path chores.yml -Pattern '^\s*IMG_VHD_REF:\s*(\S+)').Matches[0].Groups[1].Value
+          if (-not $vhd) { throw 'IMG_VHD_REF is missing from chores.yml' }
+          git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
+          cargo install --locked --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
+      - name: The runner is elevated
+        shell: pwsh
+        run: |
+          $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'capture-filename-fields.ps1 needs an elevated session'
+          }
+      - name: New-WindowsFixture releases only its own VHD on success and on failure
+        shell: pwsh
+        run: pwsh -NoProfile -File tests/scripts/windows-fixture-lifecycle.ps1
+      - name: Capture the six FILE_NAME steps
+        shell: pwsh
+        run: ./test-disks/capture-filename-fields.ps1
+      - name: Every step left an image and a manifest row bound to this commit
+        shell: pwsh
+        run: |
+          $manifest = 'test-disks/ntfs-fn-fields.manifest.tsv'
+          if (-not (Test-Path $manifest)) { throw "$manifest was not written" }
+          $out = New-Item -ItemType Directory -Force tmp/fn-fields
+          "commit`t${{ github.sha }}" | Set-Content "$out/provenance.tsv" -Encoding ascii
+          Copy-Item $manifest $out
+          for ($step = 1; $step -le 6; $step++) {
+            $image = "test-disks/ntfs-fn-fields-step$step.img"
+            if (-not (Test-Path $image)) { throw "$image was not written" }
+            if (-not (Test-Path "$out/chkdsk-step$step.txt")) { throw "step $step has no chkdsk log" }
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $image).Hash.ToLowerInvariant()
+            if (-not (Select-String -Path $manifest -SimpleMatch "`t$hash`t" -Quiet)) {
+              throw "step $step image hash $hash is absent from the manifest"
+            }
+          }
+      - name: The three FILE_NAME fields are decoded raw for all six steps
+        shell: pwsh
+        run: cargo test --locked --features fn-fields-oracle --test filename_fields_windows_oracle
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: filename-fields-${{ github.sha }}
+          path: |
+            tmp/fn-fields/
+            test-disks/ntfs-fn-fields-step*.img
+          if-no-files-found: error
+          retention-days: 14
+      - name: The six generated stage images are removed after the artifact handoff
+        if: always()
+        shell: pwsh
+        run: |
+          # Only the images this job generated; diagnostics stay in tmp/fn-fields.
+          for ($step = 1; $step -le 6; $step++) {
+            Remove-Item -LiteralPath "test-disks/ntfs-fn-fields-step$step.img" -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath "test-disks/ntfs-fn-fields-step$step.img") { throw "step $step image survived cleanup" }
+          }
