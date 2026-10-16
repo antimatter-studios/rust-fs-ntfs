@@ -9,6 +9,10 @@
 # volume is formatted. Each case asserts that only the VHD the fixture owns
 # is dismounted and removed, that an unrelated VHD beside it survives, and
 # that an injected failure still reaches the caller.
+#
+# The state the mocks share is global: New-WindowsFixture runs each phase as
+# a nested pipeline, where $script: would name the global scope, not this
+# script's.
 
 $ErrorActionPreference = 'Stop'
 
@@ -22,8 +26,8 @@ New-Item -ItemType Directory -Path $sandbox | Out-Null
 $env:RUNNER_TEMP = Join-Path $sandbox 'runner-temp'
 New-Item -ItemType Directory -Path $env:RUNNER_TEMP | Out-Null
 
-$script:calls = [System.Collections.Generic.List[string]]::new()
-$script:failSync = $false
+$global:calls = [System.Collections.Generic.List[string]]::new()
+$global:failSync = $false
 
 function Get-VhdPathFor {
     param([string]$ImagePath)
@@ -33,34 +37,35 @@ function Initialize-VhdFromImg {
     param([string]$ImagePath, [string]$Diag)
     $vhd = [System.IO.Path]::ChangeExtension($ImagePath, '.vhd')
     Set-Content -LiteralPath $vhd -Value 'owned vhd'
-    $script:calls.Add("initialize:$vhd")
+    $global:attached = $true
+    $global:calls.Add("initialize:$vhd")
     @{ Vhd = $vhd; Disk = 7 }
 }
 function Mount-VhdAndGetLetter {
     param([string]$Vhd)
-    $script:calls.Add("mount:$Vhd")
+    $global:calls.Add("mount:$Vhd")
     'Q'
 }
 function Format-Volume {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param($DriveLetter, $FileSystem, $AllocationUnitSize, $NewFileSystemLabel, [switch]$Force)
-    $script:calls.Add("format:${DriveLetter}:${FileSystem}:${AllocationUnitSize}:$NewFileSystemLabel")
+    $global:calls.Add("format:${DriveLetter}:${FileSystem}:${AllocationUnitSize}:$NewFileSystemLabel")
 }
 function Sync-VhdToImg {
     param([string]$Vhd, [string]$ImagePath)
-    $script:calls.Add("sync:$Vhd")
-    if ($script:failSync) { throw 'injected sync failure' }
+    $global:calls.Add("sync:$Vhd")
+    if ($global:failSync) { throw 'injected sync failure' }
 }
 function Get-DiskImage {
     [CmdletBinding()]
     param([string]$ImagePath)
-    $script:calls.Add("get-disk-image:$ImagePath")
-    [pscustomobject]@{ ImagePath = $ImagePath; Attached = $true }
+    $global:calls.Add("get-disk-image:$ImagePath")
+    [pscustomobject]@{ ImagePath = $ImagePath; Attached = $global:attached }
 }
 function Dismount-DiskImage {
     [CmdletBinding()]
     param([Parameter(ValueFromPipelineByPropertyName = $true)] [string]$ImagePath)
-    process { $script:calls.Add("dismount:$ImagePath") }
+    process { $global:calls.Add("dismount:$ImagePath") }
 }
 
 # Loading the helper defines the function and touches nothing.
@@ -68,8 +73,16 @@ $before = @(Get-ChildItem -LiteralPath $sandbox -Recurse -Force | ForEach-Object
 . "$PSScriptRoot/../../test-disks/windows-fixture.ps1"
 $after = @(Get-ChildItem -LiteralPath $sandbox -Recurse -Force | ForEach-Object FullName)
 Check ($null -ne (Get-Command New-WindowsFixture -CommandType Function -ErrorAction SilentlyContinue)) 'loading the helper defines New-WindowsFixture'
-Check ($script:calls.Count -eq 0) "loading the helper calls no disk command (calls: $($script:calls -join ', '))"
+Check ($global:calls.Count -eq 0) "loading the helper calls no disk command (calls: $($global:calls -join ', '))"
 Check ($null -eq (Compare-Object $before $after)) 'loading the helper creates no file'
+
+# The helper detaches through diskpart; record the detach instead. Defined
+# after loading the helper, which defines the real one.
+function Dismount-ScratchVhd {
+    param([string]$Vhd, [int]$TimeoutSeconds)
+    $global:calls.Add("dismount:$Vhd")
+    $global:attached = $false
+}
 
 function Invoke-Case {
     param([string]$Name, [scriptblock]$Populate, [bool]$FailSync)
@@ -79,9 +92,10 @@ function Invoke-Case {
     $owned = [System.IO.Path]::ChangeExtension($image, '.vhd')
     $sentinel = Join-Path $dir 'unrelated.vhd'
     Set-Content -LiteralPath $sentinel -Value 'not ours'
-    $script:calls.Clear()
-    $script:failSync = $FailSync
-    $script:populatedRoot = $null
+    $global:calls.Clear()
+    $global:attached = $false
+    $global:failSync = $FailSync
+    $global:populatedRoot = $null
     $err = $null
     try {
         New-WindowsFixture -ImagePath $image -Label 'LIFECYCLE' -Populate $Populate
@@ -93,8 +107,8 @@ function Invoke-Case {
         Owned     = $owned
         Image     = $image
         Sentinel  = $sentinel
-        Calls     = @($script:calls)
-        Dismounts = @($script:calls | Where-Object { $_ -like 'dismount:*' })
+        Calls     = @($global:calls)
+        Dismounts = @($global:calls | Where-Object { $_ -like 'dismount:*' })
     }
 }
 
@@ -108,10 +122,10 @@ function Check-Cleanup($case, $name) {
 
 $ok = Invoke-Case -Name 'success' -FailSync $false -Populate {
     param($root)
-    $script:populatedRoot = $root
+    $global:populatedRoot = $root
 }
 Check ($null -eq $ok.Error) "success: no error reaches the caller ($($ok.Error))"
-Check ($script:populatedRoot -eq 'Q:\') "success: Populate receives the mounted root ($script:populatedRoot)"
+Check ($global:populatedRoot -eq 'Q:\') "success: Populate receives the mounted root ($global:populatedRoot)"
 Check ($ok.Calls -contains 'format:Q:NTFS:4096:LIFECYCLE') 'success: the mounted letter is formatted NTFS with the default cluster size'
 Check (@($ok.Calls | Where-Object { $_ -eq "sync:$($ok.Owned)" }).Count -eq 1) 'success: the owned VHD is synced back once'
 Check ((Test-Path -LiteralPath $ok.Image) -and ((Get-Item -LiteralPath $ok.Image).Length -eq 256MB)) 'success: the raw image is 256 MiB'

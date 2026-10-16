@@ -75,6 +75,7 @@ pub mod security_descriptor;
 pub mod sparse;
 pub mod upcase;
 pub mod usn;
+pub mod usn_cursor;
 pub mod view_index;
 pub mod write;
 

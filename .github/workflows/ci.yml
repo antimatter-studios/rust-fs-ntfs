@@ -349,6 +349,21 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -File tests/scripts/capture-chkdsk.ps1
 
+      # The Windows harness's image sync, run through the real function with
+      # the storage cmdlets mocked: dismount, then offline, then copy, and a
+      # failed dismount stops the copy. Linux only: the test stands an
+      # ordinary file in for \\.\PhysicalDriveN, which is a device on Windows.
+      - name: Sync-VhdToImg order test
+        if: matrix.os == 'ubuntu-latest'
+        shell: pwsh
+        run: pwsh -NoProfile -File tests/scripts/sync-vhd-order.ps1
+
+      - name: Windows fixture lifecycle test
+        if: matrix.os == 'ubuntu-latest'
+        shell: pwsh
+        timeout-minutes: 5
+        run: pwsh -NoProfile -File tests/scripts/windows-fixture-phases.ps1
+
       # Test scope is intentionally narrow: only tests that DON'T need
       # the out-of-tree `test-disks/*.img` fixtures. The fixture-driven
       # integration tests (tests/ads.rs, tests/file_data.rs, etc.)
@@ -577,6 +592,17 @@ jobs:
             security-descriptor-zero-flag.bin
             tmp/logs/unit.log
           if-no-files-found: error
+      # A syntax error in the USN journal scripts fails here, by name, before
+      # any fixture is built (#609).
+      - name: Parse the USN journal PowerShell scripts
+        shell: pwsh
+        run: |
+          foreach ($f in 'test-disks/capture-usn-journal-data.ps1', 'test-disks/probe-usn-read-cursors.ps1') {
+            $errs = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errs) | Out-Null
+            if ($errs) { $errs | ForEach-Object { Write-Output "${f}: $_" }; throw "$f does not parse" }
+            Write-Output "${f}: parses"
+          }
       - name: Install rust-img-vhd
         shell: pwsh
         run: |
@@ -673,6 +699,36 @@ jobs:
             test-disks/ntfs-i30-slack.diagnostic.txt
           if-no-files-found: warn
           retention-days: 7
+      # A disposable volume's real USN_JOURNAL_DATA admits cursors (#609). The
+      # capture script also runs the read probe on that volume before removing it.
+      - name: Capture Windows USN journal data and admit cursors against it
+        id: usn_journal_capture
+        shell: pwsh
+        run: |
+          pwsh -File test-disks/capture-usn-journal-data.ps1
+          cargo test --locked --test usn_cursor_windows_capture
+      # What FSCTL_READ_USN_JOURNAL answers for the current, a future and a
+      # wrong-identity cursor on that same journal, read-only (#609). The probe
+      # ran inside the capture step, while the disposable volume was attached.
+      - name: Probe Windows USN journal reads and grade cursor admission
+        shell: pwsh
+        run: |
+          cargo test --locked --test usn_cursor_read_probe_windows
+      # The journal identity controls' verdicts, the actual and control IDs and
+      # the control's failure reason, kept on every outcome.
+      - name: Upload the USN journal identity controls
+        if: always() && steps.usn_journal_capture.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-usn-journal-identity-controls
+          path: |
+            test-disks/usn-journal-identity-controls.txt
+            test-disks/usn-journal-data.tsv
+            test-disks/usn-read-probe.tsv
+            test-disks/usn-journal-data.wrong-id-control.tsv
+            test-disks/usn-read-probe.wrong-id-control.tsv
+          if-no-files-found: warn
+          retention-days: 7
       - name: Upload Windows-authored fixtures
         uses: actions/upload-artifact@v4
         with:
@@ -680,6 +736,8 @@ jobs:
           path: |
             test-disks/usn-v2-capture.bin
             test-disks/usn-v2-capture.tsv
+            test-disks/usn-journal-data.tsv
+            test-disks/usn-read-probe.tsv
             test-disks/ntfs-attrlist.img
             test-disks/ntfs-compressed.img
             test-disks/ntfs-symlink.img
