@@ -90,3 +90,5 @@ __pycache__/
 
 # The Linux test VM's shared directory (fs-linux-test-harness.toml).
 .vm-share/
+test-disks/usn-v2-capture.bin
+test-disks/usn-v2-capture.tsv
