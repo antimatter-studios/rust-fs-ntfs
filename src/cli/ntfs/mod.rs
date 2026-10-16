@@ -5,6 +5,7 @@
 pub mod device;
 pub mod fs;
 pub mod fsck;
+pub mod inventory;
 pub mod mkfs;
 
 // THE FORMATTER'S ONE IMPLEMENTATION, shared with `rust-ntfs format`, the

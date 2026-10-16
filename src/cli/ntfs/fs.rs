@@ -223,6 +223,7 @@ fn command() -> Cmd {
                      Answers `not implemented` (exit 3): the library cannot resize a volume.",
                 ),
         )
+        .subcommand(super::inventory::command())
         .after_help(
             "Examples:\n  fs.ntfs disk.img ls /\n  \
              fs.ntfs disk.img read /notes.txt > notes.txt\n  \
@@ -272,6 +273,10 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
                 &info,
                 sub.get_one::<String>("key").map(String::as_str),
             )
+        }
+        "inventory" => {
+            let (mut dev, _) = device::mount(target, offset, false)?;
+            super::inventory::run(&mut dev, sub)
         }
         "set" => set(target, offset, sub),
         "write" => write(target, offset, path_arg(sub)?),
