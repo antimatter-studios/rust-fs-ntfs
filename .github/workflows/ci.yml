@@ -474,6 +474,22 @@ jobs:
           if ($h -ne $m.image_sha256) { throw "image $h is not the captured $($m.image_sha256)" }
           cargo test --release --locked --lib --features windows-i30-oracle index_slack::windows_capture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # The capture writes its manifest and raw-scan diagnostic before it
+      # judges PRECONDITION i30-raw-deleted-candidate, so a failed capture or
+      # comparison still uploads them here. Both are small text bound to the
+      # image by image_sha256; the 256 MB image itself is never retained on a
+      # failure. A missing file warns rather than fails: the step that failed
+      # already makes the job red, and this upload must not replace its error.
+      - name: Upload $I30 capture diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-i30-slack-diagnostics
+          path: |
+            test-disks/ntfs-i30-slack.manifest.json
+            test-disks/ntfs-i30-slack.diagnostic.txt
+          if-no-files-found: warn
+          retention-days: 7
       - name: Upload Windows-authored fixtures
         uses: actions/upload-artifact@v4
         with:

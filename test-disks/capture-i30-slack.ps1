@@ -3,9 +3,12 @@
 # parse or claim to validate index slack.
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\scripts\fs-windows-test-harness\_lib.ps1"
+. "$PSScriptRoot\i30-slack-evidence.ps1"
 
 $image = [System.IO.Path]::GetFullPath('test-disks/ntfs-i30-slack.img')
 $manifestPath = [System.IO.Path]::GetFullPath('test-disks/ntfs-i30-slack.manifest.json')
+$diagnosticPath = [System.IO.Path]::GetFullPath('test-disks/ntfs-i30-slack.diagnostic.txt')
+Remove-Item -LiteralPath $manifestPath,$diagnosticPath -Force -ErrorAction SilentlyContinue
 $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
 $diag = Join-Path $tempRoot 'ntfs-i30-slack'
 New-Item -ItemType Directory -Path (Split-Path $image) -Force | Out-Null
@@ -117,11 +120,9 @@ try {
         purpose = 'Raw Windows-authored volume evidence for $I30 create/delete/reuse slack analysis.'
         reader_status = 'compared by index_slack::windows_capture under the windows-i30-oracle feature'
     }
-    $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding utf8
-    # The manifest and image are written first so the failure keeps them.
-    if ($evidence.Count -eq 0) {
-        throw "PRECONDITION i30-raw-deleted-candidate: Windows left no deleted entry in allocated INDX slack whose name, parent ($dirRecord) and native file ID all match (indx_blocks=$indxBlocks deleted_name_hits=$nameHits); see $manifestPath"
-    }
+    # The manifest and diagnostic are written before the precondition is
+    # judged, so a failing capture keeps them for the always-run upload.
+    Write-I30SlackEvidence -Manifest $manifest -ManifestPath $manifestPath -DiagnosticPath $diagnosticPath
 } finally {
     Get-DiskImage -ImagePath $state.Vhd -ErrorAction SilentlyContinue |
         Where-Object Attached | Dismount-DiskImage -ErrorAction SilentlyContinue | Out-Null
