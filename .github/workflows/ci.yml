@@ -495,6 +495,32 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
+      # Full manual, merge-group and tag runs share the dedicated oracle's
+      # descriptor/rights/hash contract. ci-ok directly needs this job.
+      - name: Check out rust-fs-core at the sibling pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          core_ref="$(sed -n 's/^  FS_CORE_REF: *//p' chores.yml | tr -d '\r')"
+          git clone --quiet --depth 1 --branch "$core_ref" \
+            https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+      - name: Compare Windows descriptors and verify retained evidence
+        shell: bash
+        timeout-minutes: 10
+        env:
+          NTFS_SD_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: bash scripts/security-descriptor-windows-oracle.sh
+      - name: Keep Windows descriptor evidence on every outcome
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-descriptor-windows-full-${{ github.sha }}
+          path: |
+            security-descriptor-windows.tsv
+            security-descriptor-zero-flag.tsv
+            security-descriptor-zero-flag.bin
+            tmp/logs/unit.log
+          if-no-files-found: error
       - name: Install rust-img-vhd
         shell: pwsh
         run: |

@@ -3,9 +3,12 @@
 //! Layout sources: Microsoft [MS-DTYP] 2.4.6 and 2.4.2.2:
 //! <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/7d4dac05-9cef-4563-a058-f108abecce1d>.
 //! SID layout: <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/f992ad60-0fe4-4b87-9fed-beb478836861>.
-//! ACL headers and ACE framing are bounded by AclSize. ACE meaning (masks,
-//! SIDs, callback data) and absent/null/empty ACL semantics are deliberately NOT
-//! decoded. `as_bytes` preserves all bytes for later decoders.
+//! ACL headers and ACE framing are bounded by AclSize. Only the object
+//! allow/deny ACE layout has an optional view (`Ace::object`); every other ACE
+//! kind and callback data are deliberately NOT decoded. `dacl_state` and
+//! `sacl_state` distinguish absent, null, empty and non-empty ACLs from the raw
+//! present bit and offset, as GetSecurityDescriptorDacl/Sacl report them; no
+//! access decision is evaluated. `as_bytes` preserves all bytes for later decoders.
 
 use std::fmt;
 
@@ -178,6 +181,74 @@ impl<'a> Ace<'a> {
     pub fn as_bytes(self) -> &'a [u8] {
         self.bytes
     }
+
+    /// The object allow/deny layout ([MS-DTYP] 2.4.4.3 and 2.4.4.4):
+    /// <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/c79a383c-2b3f-4655-abe7-dcbb7ce0cfbe>.
+    /// `Ok(None)` for every other ACE type, whose bytes stay opaque. Error
+    /// offsets are relative to the ACE start. No access policy is evaluated.
+    pub fn object(self) -> Result<Option<ObjectAce<'a>>, DecodeError> {
+        if self.ace_type != ACCESS_ALLOWED_OBJECT_ACE_TYPE
+            && self.ace_type != ACCESS_DENIED_OBJECT_ACE_TYPE
+        {
+            return Ok(None);
+        }
+        let fixed = bounded(self.bytes, 4, 8)?;
+        let mask = u32::from_le_bytes([fixed[0], fixed[1], fixed[2], fixed[3]]);
+        let object_flags = u32::from_le_bytes([fixed[4], fixed[5], fixed[6], fixed[7]]);
+        let mut at = 12;
+        let object_type = optional_guid(
+            self.bytes,
+            &mut at,
+            object_flags & ACE_OBJECT_TYPE_PRESENT != 0,
+        )?;
+        let inherited_object_type = optional_guid(
+            self.bytes,
+            &mut at,
+            object_flags & ACE_INHERITED_OBJECT_TYPE_PRESENT != 0,
+        )?;
+        let sid = Sid::at(self.bytes, at)?;
+        Ok(Some(ObjectAce {
+            ace: self,
+            mask,
+            object_flags,
+            object_type,
+            inherited_object_type,
+            sid,
+        }))
+    }
+}
+
+const ACCESS_ALLOWED_OBJECT_ACE_TYPE: u8 = 0x05;
+const ACCESS_DENIED_OBJECT_ACE_TYPE: u8 = 0x06;
+const ACE_OBJECT_TYPE_PRESENT: u32 = 0x1;
+const ACE_INHERITED_OBJECT_TYPE_PRESENT: u32 = 0x2;
+
+fn optional_guid(
+    bytes: &[u8],
+    at: &mut usize,
+    present: bool,
+) -> Result<Option<[u8; 16]>, DecodeError> {
+    if !present {
+        return Ok(None);
+    }
+    let guid = bounded(bytes, *at, 16)?;
+    *at += 16;
+    let mut out = [0; 16];
+    out.copy_from_slice(guid);
+    Ok(Some(out))
+}
+
+/// An object allow/deny ACE. Flags are raw, including unknown bits; GUIDs are
+/// the stored bytes and exist only when their flag bit is set. `ace.as_bytes()`
+/// keeps the whole ACE, including any bytes after the SID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectAce<'a> {
+    pub ace: Ace<'a>,
+    pub mask: u32,
+    pub object_flags: u32,
+    pub object_type: Option<[u8; 16]>,
+    pub inherited_object_type: Option<[u8; 16]>,
+    pub sid: Sid<'a>,
 }
 
 /// Validated header fields. Control is raw, including all reserved/unknown bits.
@@ -288,8 +359,48 @@ impl<'a> SecurityDescriptor<'a> {
         self.dacl
     }
 
+    /// Absent when SE_SACL_PRESENT (0x0010) is clear; null when it is set
+    /// with offset zero. The raw control and offset stay in `header`.
+    pub fn sacl_state(&self) -> AclState<'a> {
+        AclState::from_parts(self.header.control & 0x10 != 0, self.sacl)
+    }
+
+    /// Absent when SE_DACL_PRESENT (0x0004) is clear; null when it is set
+    /// with offset zero. The raw control and offset stay in `header`.
+    pub fn dacl_state(&self) -> AclState<'a> {
+        AclState::from_parts(self.header.control & 0x4 != 0, self.dacl)
+    }
+
     pub fn as_bytes(self) -> &'a [u8] {
         self.bytes
+    }
+}
+
+/// Presence of one ACL role. Empty and NonEmpty keep the ACL view, including
+/// the header bytes of an empty ACL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AclState<'a> {
+    Absent,
+    Null,
+    Empty(Acl<'a>),
+    NonEmpty(Acl<'a>),
+}
+
+impl<'a> AclState<'a> {
+    fn from_parts(present: bool, acl: Option<Acl<'a>>) -> Self {
+        match (present, acl) {
+            (false, _) => Self::Absent,
+            (true, None) => Self::Null,
+            (true, Some(acl)) if acl.ace_count() == 0 => Self::Empty(acl),
+            (true, Some(acl)) => Self::NonEmpty(acl),
+        }
+    }
+
+    pub fn acl(self) -> Option<Acl<'a>> {
+        match self {
+            Self::Empty(acl) | Self::NonEmpty(acl) => Some(acl),
+            Self::Absent | Self::Null => None,
+        }
     }
 }
 
@@ -469,5 +580,120 @@ mod tests {
         let aces: Vec<_> = d.dacl().unwrap().aces().collect();
         assert_eq!(aces.len(), 1);
         assert_eq!(aces[0].as_bytes(), &b[40..56]);
+    }
+
+    const GUID_A: [u8; 16] = [0x11; 16];
+    const GUID_B: [u8; 16] = [0x22; 16];
+    const SID: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 0x20, 0, 0, 0];
+
+    fn object_ace_bytes(ace_type: u8, object_flags: u32) -> Vec<u8> {
+        let mut b = vec![ace_type, 0x13, 0, 0];
+        b.extend_from_slice(&0x0012_019fu32.to_le_bytes());
+        b.extend_from_slice(&object_flags.to_le_bytes());
+        if object_flags & 1 != 0 {
+            b.extend_from_slice(&GUID_A);
+        }
+        if object_flags & 2 != 0 {
+            b.extend_from_slice(&GUID_B);
+        }
+        b.extend_from_slice(&SID);
+        b.extend_from_slice(&[0xca, 0xfe]);
+        let size = b.len() as u16;
+        b[2..4].copy_from_slice(&size.to_le_bytes());
+        b
+    }
+
+    fn ace(bytes: &[u8]) -> Ace<'_> {
+        Ace {
+            ace_type: bytes[0],
+            flags: bytes[1],
+            bytes,
+        }
+    }
+
+    #[test]
+    fn object_ace_guids_follow_each_flag_combination() {
+        for ace_type in [5u8, 6] {
+            for flags in 0u32..4 {
+                let b = object_ace_bytes(ace_type, flags);
+                let o = ace(&b).object().unwrap().unwrap();
+                assert_eq!(o.mask, 0x0012_019f);
+                assert_eq!(o.object_flags, flags);
+                assert_eq!(o.object_type, (flags & 1 != 0).then_some(GUID_A));
+                assert_eq!(o.inherited_object_type, (flags & 2 != 0).then_some(GUID_B));
+                assert_eq!(o.sid.as_bytes(), SID);
+                assert_eq!(o.ace.as_bytes(), b, "trailing bytes preserved");
+            }
+        }
+    }
+
+    #[test]
+    fn object_ace_unknown_flag_bits_stay_raw_and_add_no_guid() {
+        let b = object_ace_bytes(5, 0xffff_fffc);
+        let o = ace(&b).object().unwrap().unwrap();
+        assert_eq!(o.object_flags, 0xffff_fffc);
+        assert_eq!((o.object_type, o.inherited_object_type), (None, None));
+        assert_eq!(o.sid.as_bytes(), SID);
+    }
+
+    #[test]
+    fn object_ace_missing_or_truncated_fields_are_errors() {
+        // Fixed mask and flags fields cut short.
+        let b = object_ace_bytes(5, 0);
+        assert_eq!(ace(&b[..10]).object(), Err(error(4, ErrorKind::Truncated)));
+        // A flagged GUID that is absent or truncated.
+        let b = object_ace_bytes(5, 1);
+        assert_eq!(ace(&b[..12]).object(), Err(error(12, ErrorKind::Truncated)));
+        assert_eq!(ace(&b[..20]).object(), Err(error(12, ErrorKind::Truncated)));
+        let b = object_ace_bytes(6, 3);
+        assert_eq!(ace(&b[..28]).object(), Err(error(28, ErrorKind::Truncated)));
+        // The SID header or its subauthorities cut short.
+        let b = object_ace_bytes(5, 2);
+        assert_eq!(ace(&b[..32]).object(), Err(error(28, ErrorKind::Truncated)));
+        assert_eq!(ace(&b[..38]).object(), Err(error(28, ErrorKind::Truncated)));
+        // Flags 0 needs no GUID: the SID follows the flags directly.
+        let b = object_ace_bytes(5, 0);
+        assert_eq!(ace(&b[..24]).object().unwrap().unwrap().sid.as_bytes(), SID);
+        // A SID that is not a structurally valid SID.
+        let mut b = object_ace_bytes(5, 0);
+        b[13] = 16;
+        assert_eq!(
+            ace(&b).object(),
+            Err(error(13, ErrorKind::SidSubauthorityCount))
+        );
+        b[13] = 1;
+        b[12] = 2;
+        assert_eq!(ace(&b).object(), Err(error(12, ErrorKind::SidRevision)));
+    }
+
+    #[test]
+    fn non_object_ace_kinds_stay_opaque() {
+        for ace_type in [0u8, 1, 2, 3, 4, 7, 8, 9, 0x0b, 0x0c, 0x11, 0xff] {
+            let b = object_ace_bytes(ace_type, 3);
+            assert_eq!(ace(&b).object(), Ok(None));
+            assert_eq!(ace(&b).as_bytes(), b);
+        }
+        // Even an ACE too short for any object fields is opaque, not an error.
+        assert_eq!(ace(&[0, 0, 4, 0]).object(), Ok(None));
+    }
+
+    #[test]
+    fn object_ace_through_a_parsed_dacl() {
+        let mut b = descriptor();
+        b[2..4].copy_from_slice(&0x8004u16.to_le_bytes());
+        b[16..20].copy_from_slice(&32u32.to_le_bytes());
+        let entry = object_ace_bytes(6, 1);
+        let acl_size = (8 + entry.len()) as u16;
+        b.extend_from_slice(&[4, 0]);
+        b.extend_from_slice(&acl_size.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&[0, 0]);
+        b.extend_from_slice(&entry);
+        let d = SecurityDescriptor::parse(&b).unwrap();
+        let first = d.dacl().unwrap().aces().next().unwrap();
+        let o = first.object().unwrap().unwrap();
+        assert_eq!(o.object_type, Some(GUID_A));
+        assert_eq!(o.inherited_object_type, None);
+        assert_eq!(o.ace.as_bytes(), entry);
     }
 }
