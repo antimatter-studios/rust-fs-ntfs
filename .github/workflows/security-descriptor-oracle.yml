@@ -23,20 +23,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.95.0
-      - name: Compare Windows-authored descriptor headers and SIDs
+      - name: Compare Windows descriptors and verify retained evidence
         shell: bash
         env:
-          CARGO_BUILD_JOBS: 2
-          NTFS_SD_CAPTURE: security-descriptor-windows.tsv
-        run: |
-          set -euo pipefail
-          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored unit -- cargo test --locked --test security_descriptor_windows_oracle
-          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' tmp/logs/unit.log
+          NTFS_SD_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: bash scripts/security-descriptor-windows-oracle.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: security-descriptor-windows-${{ github.sha }}
           path: |
             security-descriptor-windows.tsv
+            security-descriptor-zero-flag.tsv
+            security-descriptor-zero-flag.bin
             tmp/logs/unit.log
           if-no-files-found: error
