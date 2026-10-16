@@ -501,9 +501,26 @@ mod windows_capture {
                         .iter()
                         .find(|(id, _)| id & 0xFFFF_FFFF_FFFF == r.record_number);
                     let (_, role) = hit.unwrap_or_else(|| {
+                        // Retain the candidate's own bytes, bounded to one
+                        // entry, so the mismatch can be judged against the
+                        // raw INDX rather than the parsed fields alone.
+                        let at = block.region_start + c.region_offset;
+                        let raw =
+                            crate::idx_block::load_for_directory_io(&mut io, directory_record)
+                                .and_then(|ia| {
+                                    crate::idx_block::read_indx_block_io(&mut io, &ia, block.vcn)
+                                })
+                                .ok()
+                                .and_then(|b| {
+                                    b.get(at..(at + c.entry_length.min(512)).min(b.len()))
+                                        .map(<[u8]>::to_vec)
+                                })
+                                .map(|b| b.iter().map(|x| format!("{x:02x}")).collect::<String>())
+                                .unwrap_or_else(|| "unreadable".into());
                         panic!(
-                            "candidate {name:?} names record {} that Windows never gave it",
-                            r.record_number
+                            "candidate {name:?} names record {} that Windows never gave it \
+                             (VCN {} block offset {at} length {} raw {raw})",
+                            r.record_number, block.vcn, c.entry_length
                         )
                     });
                     matched += 1;
