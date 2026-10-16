@@ -116,6 +116,16 @@ fn candidate_at(region: &[u8], at: usize, limit: usize) -> Option<SlackCandidate
     })
 }
 
+/// Recognize a complete, zero-reference leaf LAST entry. Its second half is
+/// length/key-length/flags/reserved, not a file reference. Windows can leave
+/// an older filename key immediately after this overwritten entry header.
+fn leaf_terminal_at(region: &[u8], at: usize, limit: usize) -> bool {
+    let Some(header) = region.get(at..limit).and_then(|tail| tail.get(..16)) else {
+        return false;
+    };
+    header == [0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 2, 0, 0, 0]
+}
+
 /// Scan `region[used..allocated]` for complete entries on 8-byte boundaries.
 ///
 /// `used` and `allocated` are the node's own checked lengths, measured from
@@ -151,6 +161,12 @@ pub(crate) fn scan_index_slack(
             break;
         }
         offsets += 1;
+        if leaf_terminal_at(region, at, allocated) {
+            // Consume the entire known structure, but keep looking after it:
+            // older complete entries beyond a LAST entry remain evidence.
+            at += IE_KEY_START;
+            continue;
+        }
         match candidate_at(region, at, allocated) {
             Some(candidate) => {
                 at = at
@@ -351,6 +367,46 @@ mod tests {
     }
 
     #[test]
+    fn a_native_terminal_header_is_not_a_filename_reference() {
+        // Extracted from the complete fixed-up VCN 6 node, block bytes
+        // 3096..3216, artifact 12021252806 of completed run 38840719674.
+        // ZIP SHA-256: 885e9bbe3b3ad6d44a56db723178b68b11bca7f01f615631d539c718d3242bc2.
+        // The live chain starts at 64, ends with live-final.txt at 2864
+        // (length 112), then LAST at 2976; used ends at 2992. A retained
+        // LAST at 3096 overwrote the next old entry's reference at 3104.
+        let hex = "0000000000000000100000000200000070006000000000002600000000000100bd729baa175ddd01bd729baa175ddd01bd729baa175ddd01bd729baa175ddd012800000000000000210000000000000020000000000000000f007200650075007300650064002d006e0061006d0065002e00740078007400";
+        let raw: Vec<u8> = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect();
+        // The isolated suffix remains unchanged and parseable; only the
+        // preceding complete structure establishes that it is overlapped.
+        assert_eq!(
+            candidate_at(&raw, 8, raw.len()).unwrap().file_reference,
+            Some(SlackReference {
+                record_number: 8_589_934_608,
+                sequence: 0
+            })
+        );
+        assert!(scan_index_slack(&raw, 0, raw.len(), WIDE)
+            .unwrap()
+            .candidates
+            .is_empty());
+        // A terminal does not end a slack scan or hide a later intact entry.
+        let before = entry(41, 38, 1, "before.txt");
+        let after = entry(42, 38, 1, "after.txt");
+        let mut bytes = before.clone();
+        bytes.extend_from_slice(&raw);
+        bytes.extend_from_slice(&after);
+        let scan = scan_index_slack(&bytes, 0, bytes.len(), WIDE).unwrap();
+        assert_eq!(scan.candidates.len(), 2);
+        assert_eq!(scan.candidates[0].name, name("before.txt"));
+        assert_eq!(scan.candidates[1].name, name("after.txt"));
+        assert_eq!(scan.candidates[1].region_offset, before.len() + raw.len());
+    }
+
+    #[test]
     fn live_entries_before_the_used_length_are_not_slack() {
         let live = entry(40, 5, 1, "live.txt");
         let r = region(&live, &[], 256);
@@ -442,6 +498,59 @@ mod tests {
 #[cfg(all(test, feature = "windows-i30-oracle"))]
 mod windows_capture {
     use super::*;
+
+    #[test]
+    fn complete_native_nodes_keep_attested_entries_and_exclude_terminal_overlaps() {
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(env_path("NTFS_I30_SLACK_MANIFEST")).expect("manifest readable"),
+        )
+        .expect("manifest is JSON");
+        let observations = manifest["raw_name_observations"].as_array().unwrap();
+        let attested = manifest["raw_deleted_evidence"].as_array().unwrap();
+        let mut terminal_overlaps = 0;
+        for observation in observations {
+            let raw: Vec<u8> = observation["fixed_up_block_hex"]
+                .as_str()
+                .unwrap()
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
+                .collect();
+            let used = u32::from_le_bytes(raw[28..32].try_into().unwrap()) as usize;
+            let allocated = u32::from_le_bytes(raw[32..36].try_into().unwrap()) as usize;
+            let scan = scan_index_slack(&raw[24..], used, allocated, tests_budget()).unwrap();
+            let at = observation["entry_offset_in_block"].as_u64().unwrap() as usize;
+            let hit = scan.candidates.iter().find(|c| c.region_offset + 24 == at);
+            // Native IDs and the producer's independent byte attestation
+            // establish positive entries, including ones after old sentinels.
+            if let Some(evidence) = attested.iter().find(|e| {
+                e["vcn"] == observation["vcn"]
+                    && e["entry_offset_in_block"] == observation["entry_offset_in_block"]
+                    && e["name"] == observation["name"]
+            }) {
+                let c = hit.expect("an independently attested native entry was lost");
+                assert_eq!(
+                    c.file_reference,
+                    reference(evidence["file_id"].as_u64().unwrap())
+                );
+            }
+            if at >= 32 + used && leaf_terminal_at(&raw[24..], at - 32, allocated) {
+                terminal_overlaps += 1;
+                assert!(
+                    hit.is_none(),
+                    "a terminal header was reported as a native identity"
+                );
+            }
+        }
+        eprintln!("native terminal-overlapped references excluded: {terminal_overlaps}");
+    }
+
+    fn tests_budget() -> SlackBudget {
+        SlackBudget {
+            max_offsets: 1 << 16,
+            max_candidates: 4096,
+        }
+    }
 
     #[test]
     fn fsutil_ids_match_independent_live_handle_ids() {
