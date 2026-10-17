@@ -26,14 +26,16 @@
 //!
 //! The same, with one difference. The attributes this moves are the named
 //! `$DATA` streams, and only those: this driver's other write paths --
-//! rename, link, the unnamed `$DATA` writes, reparse points, object ids,
-//! EAs -- edit the base record, so `$FILE_NAME`, the unnamed `$DATA` and
-//! the rest stay there, where those paths find them. Windows' own layout
-//! allows either; chkdsk grades both.
+//! rename, link, the unnamed `$DATA` writes, reparse points, object ids --
+//! edit the base record, so `$FILE_NAME`, the unnamed `$DATA` and the rest
+//! stay there, where those paths find them. Windows' own layout allows
+//! either; chkdsk grades both. EAs are written through the list too
+//! (#660): `$EA` and `$EA_INFORMATION` are added and replaced like a
+//! stream, but never moved to make room for one.
 //!
-//! - A file with no list whose base record has no room for a stream gets
-//!   one: an entry for every attribute, and the named streams moved to an
-//!   extension record.
+//! - A file with no list whose base record has no room for a stream or
+//!   an EA gets one: an entry for every attribute, and the named streams
+//!   moved to an extension record.
 //! - A new attribute goes in the base record while it and its entry fit
 //!   there, else in an extension record with room, else in a new one.
 //! - When the list no longer fits the base record, the named streams in
