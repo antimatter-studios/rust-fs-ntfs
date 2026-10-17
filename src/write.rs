@@ -5074,6 +5074,9 @@ pub fn remove_object_id_io<T: BlockIo + ?Sized>(
     Ok(removed)
 }
 
+/// The most names Windows gives one file; see [`link_io`].
+pub const MAX_HARD_LINKS: u16 = 1024;
+
 /// Add a new hard link to an existing file. The new link lives at
 /// `new_parent_path/new_basename`. The target file's MFT record gains
 /// a new `$FILE_NAME` attribute and its hard-link count is incremented;
@@ -5081,6 +5084,7 @@ pub fn remove_object_id_io<T: BlockIo + ?Sized>(
 ///
 /// Refuses directories (NTFS disallows hardlinked directories).
 /// Refuses if the new basename already exists in the target parent.
+/// Refuses a file whose record already counts [`MAX_HARD_LINKS`] links.
 pub fn link(
     image: &Path,
     existing_path: &str,
@@ -5124,6 +5128,16 @@ fn link_unstamped_io<T: BlockIo + ?Sized>(
     if target_flags & crate::mft_io::MFT_FLAG_DIRECTORY != 0 {
         return Err(Error::refused(format!(
             "link: refusing to hardlink directory '{existing_path}'"
+        )));
+    }
+    // Windows gives a file at most 1024 names: CreateHardLinkW's
+    // documentation allows 1023 links beyond the first. The record's own
+    // count is checked, so no name is added that Windows could not have
+    // made, and the count can never saturate below what is stored.
+    let links = u16::from_le_bytes([target_record_bytes[0x12], target_record_bytes[0x13]]);
+    if links >= MAX_HARD_LINKS {
+        return Err(Error::refused(format!(
+            "link: '{existing_path}' already has {links} links, the most Windows allows a file"
         )));
     }
 

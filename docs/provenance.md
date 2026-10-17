@@ -114,12 +114,12 @@ which shows only that the crate agrees with itself:
 | File record header, fixups | `mft_io`, `mft_inventory_windows_oracle`, `mftmirr_windows_oracle` |
 | Attribute header, resident and non-resident | `check_io_reads_attribute_structure`, `read_attributes`, `data_runs` |
 | `$STANDARD_INFORMATION` | `read_si_full`, `field_exhaustion_si`, `security_id`, `write_times`, `tests/cli-oracle/test-stat-windows.sh` (times and attributes against Windows) |
-| `$FILE_NAME`, namespaces | `filename_fields_windows_oracle`, `rename_rederives_namespace`, `read_file_names`, `tests/cli-oracle/test-stat-windows.sh` (link names and parents against `fsutil hardlink list`), the `cli-rename-win-verify-chkdsk` matrix scenario (names `fs.ntfs mv` gave, read back by Windows and graded by `chkdsk`) |
+| `$FILE_NAME`, namespaces | `filename_fields_windows_oracle`, `rename_rederives_namespace`, `read_file_names`, `tests/cli-oracle/test-stat-windows.sh` (link names and parents against `fsutil hardlink list`), the `cli-rename-win-verify-chkdsk` matrix scenario (names `fs.ntfs mv` gave, read back by Windows and graded by `chkdsk`), the `cli-link-win-verify-chkdsk` matrix scenario (hard links `fs.ntfs ln` added, against `fsutil hardlink list`) |
 | Indexes, collation | `index_name_collation`, `index_lookup_descent`, `fragmented_indx_fixture` and its matrix scenario (Windows enumeration and `chkdsk`); `tests/cli-oracle/test-ls-recursive-windows.sh` (paths, types, sizes and record numbers against Windows' `Get-ChildItem` and handles opened without following reparses) |
 | View indexes | `extend_view_indexes`, `view_index_spilled` |
 | `$Secure` | `security_descriptor_windows_oracle`, `security_id_must_exist` |
 | `$EA`, `$EA_INFORMATION` | `ea_information_windows_oracle`, `ea_names_windows_oracle` |
-| Reparse points | `readlink_windows_oracle`, `write_reparse` |
+| Reparse points | `readlink_windows_oracle`, `write_reparse`, the `cli-link-win-verify-chkdsk` matrix scenario (symbolic links `fs.ntfs ln -s` made, their targets read and followed by Windows) |
 | `$OBJECT_ID` | `object_id`, `field_exhaustion_objid` |
 | `$UsnJrnl` | `usn_journal_windows_oracle`, `usn_windows_capture` |
 | `$LogFile` | `windows_interrupted_fixture` (replay compared with Windows' own recovery), `logfile_state` |
