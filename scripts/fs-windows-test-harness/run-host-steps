@@ -26,6 +26,12 @@ Usage:
 --floor N fails a group of fewer than N scenarios: a group that shrank by
 accident reads as one that passed, so lowering it is a deliberate edit.
 
+--scenario NAME (repeatable) selects individual recipes instead of a group.
+--capture-dir DIR exports their pre-mount images and captures.tsv for the
+Slate oracle. DIR must not exist. Capture refuses recipes without a clean
+read-only win-chkdsk lane or with host work after the first VM step: those
+need a full matrix capture, not a prefix presented as the writer's result.
+
 Exit code:
   0  every host step exited as its op expects
   1  a step did not, or could not be built, or the group is under its floor
@@ -34,6 +40,8 @@ Exit code:
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
 import json
 import re
 import shutil
@@ -142,6 +150,8 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--group", default="cli", help="the harness group to run (default: cli)")
+    parser.add_argument("--scenario", action="append", help="select one matrix scenario (repeatable)")
+    parser.add_argument("--capture-dir", type=Path, help="export pre-mount images into a new directory")
     parser.add_argument("--floor", type=int, default=0,
                         help="fail a group of fewer scenarios than this")
     parser.add_argument("--matrix", default=str(repo_root / "test-matrix.json"))
@@ -154,7 +164,7 @@ def main() -> int:
     except (OSError, ValueError) as e:
         print(f"run-host-steps: {e}; `chore matrix:check` names what is wrong", file=sys.stderr)
         return 2
-    group = config.get("groups", {}).get(args.group)
+    group = args.scenario or config.get("groups", {}).get(args.group)
     if not group:
         print(f"run-host-steps: no group '{args.group}' in {args.harness}", file=sys.stderr)
         return 2
@@ -164,6 +174,18 @@ def main() -> int:
         print(f"FAIL group '{args.group}' has {len(group)} scenarios, under its floor of "
               f"{args.floor}: lower --floor if that is meant")
         return 1
+
+    captures: list[dict[str, str]] = []
+    if args.capture_dir:
+        if len(set(group)) != len(group) or any(not re.fullmatch(r"[A-Za-z0-9_-]+", n) for n in group):
+            print("FAIL capture: scenario names must be unique, plain file names")
+            return 1
+        try:
+            args.capture_dir.mkdir(parents=True, exist_ok=False)
+            (args.capture_dir / "images").mkdir()
+        except OSError as e:
+            print(f"FAIL capture: {e}")
+            return 1
 
     run_id = str(int(time.time() * 1000))
     image_dir = repo_root / "tmp" / "host-steps"
@@ -182,7 +204,15 @@ def main() -> int:
         steps = 0
         windows_from = None
         problem = None
-        for idx, step in enumerate(scenario.get("recipe", [])):
+        recipe = scenario.get("recipe", [])
+        if args.capture_dir and not any(
+            s.get("op") == "win-chkdsk" and s.get("verdict_shape", "Clean") == "Clean"
+            and "readonly" in s.get("modes", "readonly").split(",") for s in recipe
+        ):
+            problem = "capture needs a clean read-only win-chkdsk lane in the matrix recipe"
+        for idx, step in enumerate(recipe):
+            if problem:
+                break
             op = step.get("op", "")
             op_def = ops.get(op)
             if step_host(step, op_def) == "vm":
@@ -190,6 +220,9 @@ def main() -> int:
                     windows_from = idx
                 continue
             if windows_from is not None:
+                if args.capture_dir:
+                    problem = f"capture cannot omit host step {idx} ({op}) after Windows"
+                    break
                 print(f"windows {name}: step {idx} ({op}) runs after the VM's step "
                       f"{windows_from}, so the matrix job runs it")
                 continue
@@ -209,12 +242,26 @@ def main() -> int:
                 break
             want = op_def.get("expect_exit", 0)
             done = subprocess.run(["sh", "-c", command], cwd=repo_root,
-                                  capture_output=True, text=True)
+                                  capture_output=True, text=True, check=False)
             steps += 1
             if done.returncode != want:
                 problem = (f"step {idx} ({op}): exit {done.returncode}, expected {want}\n"
                            f"    $ {command}\n{tail(done.stdout + done.stderr)}")
                 break
+        if args.capture_dir and not problem:
+            missing = []
+            image_name = Context(flat, scenario, {}).expand(scenario.get("image", ""), missing)
+            image = run_dir / image_name
+            try:
+                if windows_from is None or steps == 0 or missing or not image_name or not image.is_file():
+                    raise ValueError("capture needs host writes, a pre-mount image and a Windows boundary")
+                dest = args.capture_dir / "images" / f"{name}.img"
+                shutil.copyfile(image, dest)
+                with dest.open("rb") as source:
+                    digest = hashlib.file_digest(source, "sha256").hexdigest()
+                captures.append({"case": name, "scenario": name, "image": dest.name, "sha256": digest})
+            except (OSError, ValueError) as e:
+                problem = f"capture: {e}"
         shutil.rmtree(run_dir, ignore_errors=True)
         ran += steps
         if problem:
@@ -223,6 +270,13 @@ def main() -> int:
         else:
             print(f"ok   {name}: {steps} host step{'s' if steps != 1 else ''}")
     shutil.rmtree(image_dir, ignore_errors=True)
+
+    if args.capture_dir and not failed:
+        with (args.capture_dir / "captures.tsv").open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["case", "scenario", "image", "sha256"],
+                                    delimiter="\t", lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(captures)
 
     # In cargo's form, which scripts/test-verdict.sh adds up: a scenario is
     # a test.
