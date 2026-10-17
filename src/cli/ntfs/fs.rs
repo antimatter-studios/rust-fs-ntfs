@@ -2062,3 +2062,40 @@ fn get(dev: &mut Device, info: &VolumeInfo, key: Option<&str>) -> Result<Outcome
     let text = value.to_text();
     Ok(Outcome::report(Json::object([(key, value.clone())])).with_text(text))
 }
+
+#[cfg(test)]
+mod xattr_tests {
+    use super::*;
+
+    #[test]
+    fn xattr_reports_native_names_sizes_and_need_ea() {
+        let row = xattr_entry(&fs_ntfs::ea_io::Ea {
+            name: b"USER.COMMENT".to_vec(),
+            value: vec![0, 255, 10],
+            flags: fs_ntfs::ea_io::FLAG_NEED_EA,
+        });
+        assert_eq!(row.get("name"), Some(&Json::from("USER.COMMENT")));
+        assert_eq!(row.get("size"), Some(&Json::from(3u64)));
+        assert_eq!(row.get("name_hex"), None);
+        assert_eq!(
+            row.get("ntfs").unwrap().get("need_ea"),
+            Some(&Json::Bool(true))
+        );
+    }
+
+    #[test]
+    fn xattr_preserves_non_utf8_name_bytes_in_hex() {
+        let row = xattr_entry(&fs_ntfs::ea_io::Ea {
+            name: vec![b'A', 255],
+            value: vec![],
+            flags: 0,
+        });
+        assert_eq!(row.get("name"), Some(&Json::from("A\u{fffd}")));
+        assert_eq!(row.get("name_hex"), Some(&Json::from("41ff")));
+        assert_eq!(row.get("size"), Some(&Json::from(0u64)));
+        assert_eq!(
+            row.get("ntfs").unwrap().get("need_ea"),
+            Some(&Json::Bool(false))
+        );
+    }
+}
