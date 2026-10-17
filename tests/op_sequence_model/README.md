@@ -34,8 +34,8 @@ Names use a supplied 65,536-entry UTF-16 `$UpCase` mapping, not Rust Unicode
 case conversion. The 1 MiB file bound is a workload limit, not an NTFS limit.
 Directory sizes are modeled as zero, and directory link counts count names,
 not POSIX dot entries. Timestamps, open handles, ADS and EAs are outside this
-slice. The model is not yet wired into disk execution: #682–#685 cover the
-fresh-reopen harness, explorer, regression capture and extensions.
+slice. `harness.rs` wires it into disk execution; #683–#685 cover the explorer,
+regression capture and extensions.
 These contracts prove expected-state semantics, not on-disk NTFS correctness;
 the existing independent readers below remain necessary for disk validation.
 
@@ -59,6 +59,24 @@ instructions. CI runs this hook on Ubuntu and retains traces, refusal counts
 and reference-tool reports as an artifact. It uses the existing mkfs budget;
 no budget or executed-case floor is lowered.
 
-This slice does not claim Windows chkdsk validation. The Windows matrix,
-disk execution of generated namespace operations, ADS and EAs, larger
-explorer seed ranges, script replay and minimization remain under #484.
+`harness.rs` executes every operation from the live byte generator or concrete
+JSON replay through the library. It commits a cloned model only after a full
+successful disk result. A refused operation must also refuse in the model,
+except the original gate's documented W2.1 mapping-capacity refusal. Full
+snapshots, including parent times/flags, references, names and bytes, must
+remain unchanged after every refusal. Expected bytes never come from a reader.
+Every step compares the whole tree on the synced writer and again through
+fresh read-only descriptors: names, kinds, sizes, link counts, alias identities
+and complete logical bytes. An independent `ntfs` parser checks names and
+metadata; it cannot check zero-filled uninitialized tails, which `ntfscat`
+checks in full at the end. Every eighth step and the end validate a fresh
+whole-image mount and run `check_io`. Final ntfs-3g checks include every modeled
+directory with `ntfsls -a -p` and every file with `ntfscat`.
+
+Four additional contracts cover all nine generated operation kinds, refusals,
+nested replay and deliberate persisted byte/name mutations. All eight readback
+tests run on each native CI host with an explicit floor, and the Ubuntu hook
+requires all three reference tools. Scratch images use the shared panic-safe
+owner. Concrete prefixes, input bytes, geometry and refusals are retained under
+`tmp/op-sequence-model/`. Windows chkdsk, ADS/EAs, explorer ranges and
+minimization remain under #484; this test-only slice changes no format code.
