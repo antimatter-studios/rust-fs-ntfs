@@ -3939,6 +3939,132 @@ fn drop_view_index_entries_io<T: BlockIo + ?Sized>(
     Ok(())
 }
 
+/// `$Q`'s quota control entry, under owner id 1, whose flags say whether
+/// the volume tracks quotas (Linux-NTFS documentation, `$Quota`).
+const QUOTA_CONTROL_OWNER: u32 = 1;
+const QUOTA_FLAG_TRACKING_ENABLED: u32 = 0x10;
+/// In a `$Q` entry's data: its flags, and the bytes its owner is charged.
+const QUOTA_DATA_FLAGS: usize = 0x04;
+const QUOTA_DATA_BYTES_USED: usize = 0x08;
+
+/// The owner a record is charged to and what it is charged, from its
+/// `$STANDARD_INFORMATION`; `None` for the 48-byte form, which has no quota
+/// fields.
+fn quota_charge_of(record: &[u8]) -> Option<(u32, u64)> {
+    let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)?;
+    let start = attr_io::resident_value_start(&loc)?;
+    if (loc.resident_value_length? as usize) < SI_QUOTA + 8 {
+        return None;
+    }
+    let owner = record.get(start + SI_OWNER_ID..start + SI_OWNER_ID + 4)?;
+    let charge = record.get(start + SI_QUOTA..start + SI_QUOTA + 8)?;
+    Some((
+        u32::from_le_bytes(owner.try_into().ok()?),
+        u64::from_le_bytes(charge.try_into().ok()?),
+    ))
+}
+
+/// The `$Q` entry a file's going leaves its owner with: the owner's usage
+/// less what the file was charged (#674).
+struct QuotaRefund {
+    quota_rec: u64,
+    owner: u32,
+    data: Vec<u8>,
+}
+
+/// What the file whose record is `record` gives back to its owner's quota
+/// usage when it goes, worked out with nothing written (#674).
+///
+/// With tracking on, Windows charges each file to the owner its
+/// `$STANDARD_INFORMATION` names, and each owner's usage in
+/// `$Extend\$Quota:$Q` is the sum of what its files are charged (measured
+/// on `test-disks/windows-interrupted-quota.recovered`). A file that goes
+/// takes its charge with it. Only the bytes used change: the entry's change
+/// time stays, as most of Windows' charges leave it, logged as a 16-byte
+/// update of version, flags and bytes used
+/// (`test-disks/windows-interrupted-quota`).
+///
+/// `None` when nothing is charged: a volume not tracking quotas, a file
+/// charged to owner 0 or charged nothing, or the 48-byte
+/// `$STANDARD_INFORMATION`. An owner with no entry, or one charged less
+/// than the file, is accounting this cannot follow: refused, so the delete
+/// writes nothing.
+fn quota_refund_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record: &[u8],
+) -> Result<Option<QuotaRefund>, Error> {
+    let Some((owner, charge)) = quota_charge_of(record).filter(|&(o, c)| o != 0 && c != 0) else {
+        return Ok(None);
+    };
+    let path = view_index::QUOTA_PATH;
+    let quota_rec = resolve_path_to_record_number_io(io, path).map_err(|e| {
+        e.context(format!(
+            "{path}, which holds the quota usage files are charged to"
+        ))
+    })?;
+    let entry = |io: &mut T, id: u32| {
+        view_index::data_io(io, quota_rec, view_index::QUOTA_INDEX, &id.to_le_bytes())
+            .map_err(|e| e.context(path))
+    };
+    // The little-endian field of `n` bytes at `at` of an entry's data.
+    let field = |data: &[u8], at: usize, n: usize| -> Result<u64, Error> {
+        let bytes = data
+            .get(at..at + n)
+            .ok_or_else(|| Error::io(format!("{path}: a $Q entry of {} bytes", data.len())))?;
+        let mut value = [0u8; 8];
+        value[..n].copy_from_slice(bytes);
+        Ok(u64::from_le_bytes(value))
+    };
+    let control = entry(io, QUOTA_CONTROL_OWNER)?
+        .ok_or_else(|| Error::io(format!("{path}: $Q has no quota control entry")))?;
+    if field(&control, QUOTA_DATA_FLAGS, 4)? & u64::from(QUOTA_FLAG_TRACKING_ENABLED) == 0 {
+        return Ok(None);
+    }
+    let mut data = entry(io, owner)?.ok_or_else(|| {
+        Error::io(format!(
+            "{path}: the file is charged {charge} bytes to owner {owner}, who has no $Q \
+             entry; chkdsk rebuilds the quota accounting"
+        ))
+    })?;
+    let used = field(&data, QUOTA_DATA_BYTES_USED, 8)?;
+    let left = used.checked_sub(charge).ok_or_else(|| {
+        Error::io(format!(
+            "{path}: owner {owner} is charged {used} bytes in $Q, less than the {charge} bytes \
+             the file is charged; chkdsk rebuilds the quota accounting"
+        ))
+    })?;
+    data[QUOTA_DATA_BYTES_USED..QUOTA_DATA_BYTES_USED + 8].copy_from_slice(&left.to_le_bytes());
+    Ok(Some(QuotaRefund {
+        quota_rec,
+        owner,
+        data,
+    }))
+}
+
+/// Write the `$Q` entry [`quota_refund_io`] worked out, in the root or the
+/// INDX block that holds it.
+fn give_back_quota_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    refund: Option<QuotaRefund>,
+) -> Result<(), Error> {
+    let Some(QuotaRefund {
+        quota_rec,
+        owner,
+        data,
+    }) = refund
+    else {
+        return Ok(());
+    };
+    view_index::put_io(
+        io,
+        quota_rec,
+        view_index::QUOTA_INDEX,
+        &owner.to_le_bytes(),
+        &data,
+    )
+    .map_err(|e| e.context(view_index::QUOTA_PATH))
+}
+
 /// Take the entry for `key` out of the `$Extend` view index `index` of the
 /// record at `path`, in its root or in an INDX block (#571).
 fn remove_view_entry_io<T: BlockIo + ?Sized>(
@@ -6795,8 +6921,11 @@ fn remove_dir_record_io<T: BlockIo + ?Sized>(
     }
 
     // A junction or a directory with an object id leaves the $Extend
-    // view indexes with it (#478).
+    // view indexes with it (#478), and its quota charge leaves its owner
+    // (#674), worked out before either is written.
+    let refund = quota_refund_io(io, &dir_record_bytes)?;
     drop_view_index_entries_io(io, dir_rec, &dir_record_bytes)?;
+    give_back_quota_io(io, refund)?;
 
     // Remove from parent's index. Parent's index may or may not be
     // overflowed — dispatch like unlink.
@@ -7560,10 +7689,13 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
     };
 
     // The last name takes the file's entries in the $Extend view indexes
-    // with it (#478). Tried before anything is written, so an index this
-    // cannot change refuses the unlink with nothing written.
+    // with it (#478), and its quota charge off its owner (#674). Tried
+    // before anything is written, so an index this cannot change refuses
+    // the unlink with nothing written.
     if hard_link_count <= 1 {
+        let refund = quota_refund_io(io, &file_record_bytes)?;
         drop_view_index_entries_io(io, file_rec, &file_record_bytes)?;
+        give_back_quota_io(io, refund)?;
     }
 
     remove_parent_index_entry_io(io, parent_rec, file_rec, basename)?;

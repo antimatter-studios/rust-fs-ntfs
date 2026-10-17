@@ -22,6 +22,11 @@
 //! holds it; a root that fills hands its entries down to a first INDX
 //! block, and a full leaf splits. [`remove_io`] cuts a leaf's entry from
 //! its node and replaces an interior one by its neighbour.
+//!
+//! `$Extend\$Quota:$Q` holds each owner's quota usage, one entry per owner
+//! id. [`data_io`] reads an owner's entry, and [`put_io`] rewrites it in
+//! place, in the root or an INDX block, when a file charged to the owner
+//! goes (#674).
 
 use crate::attr_io::{self, AttrType};
 use crate::block_io::BlockIo;
@@ -36,6 +41,11 @@ pub const REPARSE_INDEX: &str = "$R";
 /// `$Extend\$ObjId`'s index.
 pub const OBJID_PATH: &str = "/$Extend/$ObjId";
 pub const OBJID_INDEX: &str = "$O";
+/// `$Extend\$Quota`'s index of each owner's quota usage, keyed by owner id
+/// and collated `COLLATION_NTOFS_ULONG`, which a one-word key orders as
+/// [`ulongs_cmp`] does (#510).
+pub const QUOTA_PATH: &str = "/$Extend/$Quota";
+pub const QUOTA_INDEX: &str = "$Q";
 
 const IR_INDEX_HEADER_OFFSET: usize = 0x10;
 const INDEX_HEADER_SIZE: usize = 0x10;
@@ -577,6 +587,59 @@ fn replace_io<T: BlockIo + ?Sized>(
     )))
 }
 
+/// The data of the entry for `key` in the index named `index` of the record
+/// `rec`, in its root or in the INDX block the key routes to; `None` when
+/// the index holds no entry for it (#674).
+pub(crate) fn data_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    index: &str,
+    key: &[u8],
+) -> Result<Option<Vec<u8>>, Error> {
+    let (_, record) = crate::mft_io::read_mft_record_io(io, rec)?;
+    let root = crate::index_io::parse_index_root_node_of(&record, index, NodeKeys::View)?;
+    if let Some(e) = root.entries.iter().find(|e| node_key(e) == key) {
+        return entry_data(&e.key).map(Some);
+    }
+    let Some(mut vcn) = child_toward(&root, key) else {
+        return Ok(None);
+    };
+    let ia = crate::idx_block::load_index_io(io, rec, index)?;
+    for _ in 0..64 {
+        let block = crate::idx_block::read_indx_block_io(io, &ia, vcn)?;
+        let node = crate::index_io::parse_indx_node_of(&block, NodeKeys::View)?;
+        if let Some(e) = node.entries.iter().find(|e| node_key(e) == key) {
+            return entry_data(&e.key).map(Some);
+        }
+        match child_toward(&node, key) {
+            Some(child) => vcn = child,
+            None => return Ok(None),
+        }
+    }
+    Err(Error::io(format!(
+        "{index} is deeper than 64 levels, or has a cycle"
+    )))
+}
+
+/// The data the view-index entry `entry` holds, at the offset its first two
+/// bytes give, for the length the next two give.
+fn entry_data(entry: &[u8]) -> Result<Vec<u8>, Error> {
+    let u16_at = |at: usize| {
+        entry
+            .get(at..at + 2)
+            .map(|b| usize::from(u16::from_le_bytes([b[0], b[1]])))
+    };
+    let (Some(offset), Some(length)) = (u16_at(0), u16_at(2)) else {
+        return Err(Error::io(
+            "a view index entry too short for its data offset",
+        ));
+    };
+    entry
+        .get(offset..offset + length)
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| Error::io("a view index entry's data runs past the entry"))
+}
+
 /// Take the entry for `key` out of the index named `index` of the record
 /// `rec`, wherever it is (#571). Returns whether there was one.
 ///
@@ -736,5 +799,21 @@ mod tests {
             ulongs_cmp(&[1, 0, 0, 0], &[1, 0, 0, 0, 0, 0, 0, 0]),
             Ordering::Less
         );
+    }
+
+    #[test]
+    fn an_entry_gives_back_its_data_and_not_its_padding() {
+        // A `$Q` entry of 60 bytes of data pads to 80, as Windows writes
+        // owners whose SID is 12 bytes.
+        let data: Vec<u8> = (0..60).collect();
+        let e = entry(&256u32.to_le_bytes(), &data).unwrap();
+        assert_eq!(e.len(), 80);
+        assert_eq!(entry_data(&e).unwrap(), data);
+        // Data said to run past the entry is refused, not cut short.
+        let mut short = e.clone();
+        short[2..4].copy_from_slice(&61u16.to_le_bytes());
+        short.truncate(0x14 + 60);
+        assert!(entry_data(&short).is_err(), "61 bytes of data in 60");
+        assert!(entry_data(&e[..3]).is_err());
     }
 }
