@@ -79,6 +79,19 @@
 #                               still dirty, the shape behind
 #                               DeleteDirtyClusters, which no other mix
 #                               produced (#769).
+#   -Mix objids                 the files mix with an object id on every
+#                               file, so $ObjId's $O index outgrows its
+#                               root and its entries sit both in the root
+#                               and in index blocks. Each id then has its
+#                               extended information -- 48 bytes of the
+#                               entry's data -- rewritten in place, three
+#                               times when the file is made and three
+#                               more when a later file revisits it: the
+#                               data of an existing index entry changes
+#                               while its key and size do not, the shape
+#                               behind UpdateRelativeDataInIndex and
+#                               UpdateRelativeDataInIndex2, which no other
+#                               mix produced (#774).
 #
 # Run elevated on Windows (GitHub's windows-latest is). Windows PowerShell 5.1
 # or PowerShell 7.
@@ -89,7 +102,7 @@ param(
     [int]$ClusterSize = 4096,
     [int]$Writers = 1,
     [int]$LogKB = 0,
-    [ValidateSet('files', 'views', 'tails', 'freed')]
+    [ValidateSet('files', 'views', 'tails', 'freed', 'objids')]
     [string]$Mix = 'files',
     [switch]$CheckpointProbe,
     [string]$Out = 'logfile-oracle'
@@ -202,6 +215,25 @@ public static class CaptureToken {
 "@
     [CaptureToken]::Enable('SeRestorePrivilege')
 }
+if ($Mix -eq 'objids') {
+    Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class CaptureObjectId {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(SafeFileHandle device, int code, byte[] input, int inputLength, IntPtr output, int outputLength, out int returned, IntPtr overlapped);
+    // FSCTL_SET_OBJECT_ID_EXTENDED: replaces the 48 bytes that follow the
+    // object id (birth volume, birth object and domain ids) and leaves the
+    // id itself alone.
+    public static void SetExtended(SafeFileHandle file, byte[] extended) {
+        int returned;
+        if (!DeviceIoControl(file, 0x000900BC, extended, extended.Length, IntPtr.Zero, 0, out returned, IntPtr.Zero)) throw new Win32Exception();
+    }
+}
+"@
+}
 $rng = New-Object System.Random (366 + $Writer)
 $end = (Get-Date).AddSeconds($Seconds)
 $n = 0
@@ -302,6 +334,32 @@ while ((Get-Date) -lt $end) {
         if ($i % 5 -eq 0 -and $len -gt 8192) {
             $fs = [System.IO.File]::Open($file, 'Open', 'Write')
             try { $fs.SetLength([int]($len / 2)) } finally { $fs.Dispose() }
+        }
+    }
+    if ($Mix -eq 'objids') {
+        $o = & fsutil.exe objectid create $file 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "fsutil objectid create $file failed: $o" }
+        # The file 100 operations back is revisited too: its entry has had
+        # time to move from the root into an index block, or to sit in a
+        # block whose pages were already written. Deletes reach 400 back,
+        # so it still exists, under its name or its renamed one.
+        $targets = @($file)
+        if ($n -ge 100) {
+            $old = $i - 100 * $Writers
+            $prior = Join-Path $Vol ('d{0:D3}\f{1:D7}.bin' -f ($old % 64), $old)
+            foreach ($p in @($prior, "$prior.renamed")) {
+                if ([System.IO.File]::Exists($p)) { $targets += $p }
+            }
+        }
+        foreach ($t in $targets) {
+            $fs = [System.IO.File]::Open($t, 'Open', 'ReadWrite')
+            try {
+                for ($k = 0; $k -lt 3; $k++) {
+                    $ext = New-Object byte[] 48
+                    $rng.NextBytes($ext)
+                    [CaptureObjectId]::SetExtended($fs.SafeFileHandle, $ext)
+                }
+            } finally { $fs.Dispose() }
         }
     }
     if ($i % 3 -eq 0) { [System.IO.File]::Move($file, "$file.renamed") }
