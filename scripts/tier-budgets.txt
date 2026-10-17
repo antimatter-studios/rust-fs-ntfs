@@ -113,6 +113,11 @@
 # runner doctor adds a line per same-named program later on PATH (ntfs-3g's
 # /usr/sbin/mkfs.ntfs and /sbin/mkfs.ntfs), which is why both rows were
 # first estimated low and are now CI's measurement.
+#
+# THE CLI ROW MOVED for #645, from 36/1,380 to 39/1,460: tests/cli/test-mv.sh
+# is one more passing file, and a passing file prints exactly three lines --
+# `== test-mv`, its `test result: ok. 166 passed; 0 failed` and its
+# `test-mv: all checks passed` -- 76 bytes with their newlines.
 clippy        260   11500
 unit         1000   64000
 unit-debug   1000   64000
@@ -123,6 +128,6 @@ asan         1100   72000
 scripts       135    3500
 semver         40    4000
 matrix       1850  135000
-cli            36    1380
+cli            39    1460
 cli-oracle     21     990
 cli-host       28    2100

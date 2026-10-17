@@ -52,6 +52,55 @@ impl BlockIo for Device {
     }
 }
 
+/// A device that keeps every write to itself: reads see the writes made so
+/// far over the device's own bytes, and nothing reaches the device. An edit
+/// rehearsed over a read-only open decides exactly as it would for real, so
+/// whatever the library refuses is refused before the target is opened for
+/// writing, in the library's own words.
+pub struct Rehearsal<'a> {
+    dev: &'a mut Device,
+    writes: Vec<(u64, Vec<u8>)>,
+}
+
+impl<'a> Rehearsal<'a> {
+    pub fn over(dev: &'a mut Device) -> Self {
+        Rehearsal {
+            dev,
+            writes: Vec::new(),
+        }
+    }
+}
+
+impl BlockIo for Rehearsal<'_> {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        self.dev.read_exact_at(offset, buf)?;
+        let end = offset + buf.len() as u64;
+        // In order, so a later write to the same bytes wins.
+        for (at, bytes) in &self.writes {
+            let (from, to) = ((*at).max(offset), (at + bytes.len() as u64).min(end));
+            if from < to {
+                buf[(from - offset) as usize..(to - offset) as usize]
+                    .copy_from_slice(&bytes[(from - at) as usize..(to - at) as usize]);
+            }
+        }
+        Ok(())
+    }
+
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        self.dev.at(offset, buf.len())?;
+        self.writes.push((offset, buf.to_vec()));
+        Ok(())
+    }
+
+    fn size(&self) -> u64 {
+        self.dev.size()
+    }
+
+    fn can_sync(&self) -> bool {
+        self.dev.can_sync()
+    }
+}
+
 /// Open `target`, `offset` bytes in, read-only or read-write.
 pub fn open(target: &OsStr, offset: u64, writable: bool) -> Result<Device, CliError> {
     let name = target.to_string_lossy();
@@ -112,6 +161,31 @@ mod tests {
         assert!(
             dev.read_exact_at(3070, &mut buf).is_err(),
             "reads past the window"
+        );
+    }
+
+    #[test]
+    fn a_rehearsal_reads_its_own_writes_and_leaves_the_target_alone() {
+        let file =
+            std::path::PathBuf::from(crate::test_scratch::temp_image_path("cli_device_rehearsal"));
+        let bytes: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        std::fs::write(&file, &bytes).unwrap();
+
+        let mut dev = open(file.as_os_str(), 0, false).expect("open read-only");
+        let mut rehearsal = Rehearsal::over(&mut dev);
+        rehearsal.write_all_at(10, &[0xAA; 4]).unwrap();
+        rehearsal.write_all_at(12, &[0xBB; 4]).unwrap();
+        let mut buf = [0u8; 8];
+        rehearsal.read_exact_at(8, &mut buf).unwrap();
+        assert_eq!(buf, [8, 9, 0xAA, 0xAA, 0xBB, 0xBB, 0xBB, 0xBB]);
+        assert!(
+            rehearsal.write_all_at(4094, &[0; 4]).is_err(),
+            "a write past the end is refused as the target would refuse it"
+        );
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            bytes,
+            "the target is untouched"
         );
     }
 }
