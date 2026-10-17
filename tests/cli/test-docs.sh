@@ -56,4 +56,8 @@ check "fs.ntfs's zsh completion carries write --at" grep -q -- '--at' "${share:-
 check "fs.ntfs's bash completion carries write --at" grep -q -- '--at' "${share:-/nonexistent}/bash-completion/completions/fs.ntfs"
 check "fs.ntfs's fish completion carries write --at" grep -q -- '-l at' "${share:-/nonexistent}/fish/vendor_completions.d/fs.ntfs.fish"
 
+check "fs.ntfs's zsh completion carries streams" grep -q -- 'streams' "${share:-/nonexistent}/zsh/site-functions/_fs.ntfs"
+check "fs.ntfs's bash completion carries streams" grep -q -- 'streams' "${share:-/nonexistent}/bash-completion/completions/fs.ntfs"
+check "fs.ntfs's fish completion carries streams" grep -q -- 'streams' "${share:-/nonexistent}/fish/vendor_completions.d/fs.ntfs.fish"
+
 finish

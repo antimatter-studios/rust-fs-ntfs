@@ -44,9 +44,6 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-attrlist.img' -Label 'ATTRLIST' -
         $bytes = [System.Text.Encoding]::UTF8.GetBytes("payload-$name")
         [System.IO.File]::WriteAllBytes("${file}:$name", $bytes)
     }
-    [IO.File]::WriteAllBytes("${file}:empty", [byte[]]@())
-    [IO.File]::WriteAllBytes("${file}:large", [byte[]]::new(8193))
-    [IO.File]::WriteAllBytes("${file}:na$([char]0x00EF)ve", [byte[]](1, 2, 3))
     Write-NamedStreamOracle $file '/many.bin' $attrStreamsReport
 }
 
@@ -454,6 +451,9 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-stat.img' -Label 'STAT' -Populate
     [System.IO.File]::WriteAllText((& $at '/ads.txt'), 'main')
     [System.IO.File]::WriteAllText((& $at '/ads.txt') + ':one', 'first stream')
     [System.IO.File]::WriteAllText((& $at '/ads.txt') + ':two', 'second stream')
+    [IO.File]::WriteAllBytes((& $at '/ads.txt') + ':empty', [byte[]]@())
+    [IO.File]::WriteAllBytes((& $at '/ads.txt') + ':large', [byte[]]::new(8193))
+    [IO.File]::WriteAllBytes((& $at '/ads.txt') + ":na$([char]0x00EF)ve", [byte[]](1, 2, 3))
     [IO.File]::WriteAllBytes((& $at '/dir') + ':directory-data', [byte[]](7, 8, 9))
     Write-NamedStreamOracle (& $at '/ads.txt') '/ads.txt' $statStreamsReport
     Write-NamedStreamOracle (& $at '/dir') '/dir' $statStreamsReport
