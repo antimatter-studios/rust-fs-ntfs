@@ -1,4 +1,28 @@
-# Seeded operation readback: first slice of #484
+# Operation-sequence test support (#484)
+
+`generator.rs` adds #681's nine operations: create, mkdir, full write,
+write_at, truncate, same-directory rename, unlink, rmdir and link. It reuses
+the preserved engine's operation shapes and collision/UTF-16 name cases.
+`Generator::next(&model)` chooses from the live tree after each disk result;
+`decode(bytes, &initial_model)` instead advances a cloned model, retaining
+refused operations. Both need the same initial tree and injected name table.
+No driver API, host filesystem, RNG, clock or locale supplies decisions.
+
+Input uses eight-byte headers: opcode modulo 9 in the order above, target,
+parent, name, little-endian u16 length/size, little-endian u16 offset. Partial
+headers are zero-padded; writes consume at most `length % 4097` remaining
+payload bytes. Selectors modulo 4 choose missing (0), wrong type (1) or
+existing (2/3) paths; name selectors 19/20 choose an existing/fresh name.
+The opcode's high bit enables replacement rename. Truncate size 65535 means
+65536. Bounds are 120 operations, 4096 data bytes per write, 64 KiB file
+extents, four directory levels, 4096 path bytes and 256 UTF-16 name units
+(including deliberate invalid names). Extra input after 120 steps is ignored.
+
+`encode` / `decode_replay` store concrete operations in strict version-1 JSON,
+capped at 4 MiB. The named `reproducers/basic-write-v1.json` golden is consumed
+by `tests/op_sequence_generator.rs`; future libFuzzer replay targets can call
+the same decoder. Replay does not reselect paths when steps are removed.
+Eight fixture-free CI contracts run on every host leg with an executed floor.
 
 `model.rs` is the separate logical tree model from #680, with no dependency
 on the driver's readers, writers or record IDs. Its eight fixture-free
@@ -10,8 +34,8 @@ Names use a supplied 65,536-entry UTF-16 `$UpCase` mapping, not Rust Unicode
 case conversion. The 1 MiB file bound is a workload limit, not an NTFS limit.
 Directory sizes are modeled as zero, and directory link counts count names,
 not POSIX dot entries. Timestamps, open handles, ADS and EAs are outside this
-slice. The model is not yet wired into disk execution: #681–#685 cover the
-generator, fresh-reopen harness, explorer, regression capture and extensions.
+slice. The model is not yet wired into disk execution: #682–#685 cover the
+fresh-reopen harness, explorer, regression capture and extensions.
 These contracts prove expected-state semantics, not on-disk NTFS correctness;
 the existing independent readers below remain necessary for disk validation.
 
@@ -36,5 +60,5 @@ and reference-tool reports as an artifact. It uses the existing mkfs budget;
 no budget or executed-case floor is lowered.
 
 This slice does not claim Windows chkdsk validation. The Windows matrix,
-broader operation generation (rename, links, directories, ADS and EAs), larger
+disk execution of generated namespace operations, ADS and EAs, larger
 explorer seed ranges, script replay and minimization remain under #484.
