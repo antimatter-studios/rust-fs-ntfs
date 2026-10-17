@@ -272,6 +272,8 @@ fs.ntfs disk.img mkdir /backup
 fs.ntfs disk.img rm /notes.txt
 fs.ntfs disk.img rmdir /backup     # an empty directory
 fs.ntfs disk.img mv /notes.txt /notes-2026.txt   # a new name, same directory
+fs.ntfs disk.img ln /notes.txt /backup/notes.txt   # another name, a hard link
+fs.ntfs disk.img ln -s ../notes.txt /backup/latest.txt   # a symbolic link
 fs.ntfs disk.img set label "Backup Volume"
 fs.ntfs --offset 1048576 whole-disk.img info
 fsck.ntfs disk.img                 # dirty flag, $LogFile, $MFTMirr, MFT records; exit 0/1/4/8
@@ -303,6 +305,19 @@ SOURCE itself is allowed. Everything that can be refused -- a missing
 SOURCE, a name Windows cannot address, the root, `.`, `..`, a metafile, a
 dirty volume -- is refused before the image is opened for writing, so it
 stays byte-identical. The report is `{"path": ..., "moved": true}`.
+
+`ln TARGET PATH` gives the file at TARGET the further name PATH, in any
+directory; `ln -s TARGET PATH` makes PATH a symbolic link whose target is
+TARGET, the text as given: relative to PATH's directory, from the volume's
+root when it starts with `/`, or a drive path. The link is a file link, as
+`mklink` makes one without `/D`. A directory is given no second name, and a
+file no more than the 1024 Windows allows. A name already at PATH, compared
+as Windows compares names, a missing directory, a name Windows cannot
+address, a metafile, a file whose record has no room for another name and
+a dirty volume are all refused before the image is opened for writing, so
+it stays byte-identical. The report is `{"path": ..., "linked": true,
+"inode": N}`, N being the file's record for a hard link and the new link's
+for a symbolic one.
 
 Reports are JSON on stdout (`--text` for people); a failure is
 `{"error": "...", "code": N}` on stderr, `N` being the exit status. A
