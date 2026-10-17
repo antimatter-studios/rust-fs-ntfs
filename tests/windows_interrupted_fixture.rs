@@ -2375,3 +2375,173 @@ fn a_replay_stopped_after_any_write_reaches_the_same_volume_when_run_again() {
     }
     assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
+
+/// Every capture whose `$LogFile` holds work, with the last LSN it holds.
+fn captures_holding_work() -> Vec<(&'static str, u64)> {
+    [
+        &LOG_END[..],
+        &WRAPPED_LOG_END,
+        &INDEX_VCN_LOG_END,
+        &SMALL_CLUSTER_LOG_END,
+        &TAIL_CONTINUATION_LOG_END,
+        &UNDO_LOG_END,
+        &OPEN_AT_CHECKPOINT_LOG_END,
+        &QUOTA_LOG_END,
+        &FRESH_LOG_END,
+        &QUOTA_SPILLED_LOG_END,
+    ]
+    .concat()
+}
+
+/// One write as a plan reports it: offset, length, and the SHA-256 of the
+/// bytes there before it and of the bytes it leaves.
+type PlannedWrite = (u64, u64, String, String);
+
+/// A volume held in memory that records every write made to it, grouped
+/// into the units a flush closes, and makes each one.
+struct RecordedRepair {
+    bytes: Vec<u8>,
+    units: Vec<Vec<PlannedWrite>>,
+    open: Vec<PlannedWrite>,
+}
+
+impl fs_ntfs::block_io::BlockIo for RecordedRepair {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        let at = offset as usize;
+        let there = self
+            .bytes
+            .get(at..at + buf.len())
+            .ok_or("read past the end")?;
+        buf.copy_from_slice(there);
+        Ok(())
+    }
+
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        let at = offset as usize;
+        let there = self
+            .bytes
+            .get_mut(at..at + buf.len())
+            .ok_or("write past the end")?;
+        self.open
+            .push((offset, buf.len() as u64, hex_sha256(there), hex_sha256(buf)));
+        there.copy_from_slice(buf);
+        Ok(())
+    }
+
+    fn size(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn sync(&mut self) -> Result<(), String> {
+        if !self.open.is_empty() {
+            self.units.push(std::mem::take(&mut self.open));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_dry_run_plans_the_writes_that_reach_what_windows_recovered_and_makes_none() {
+    // `fsck.ntfs --dry-run` works out every write `fsck.ntfs -y` would
+    // make, and makes none of them (#709). A plan is only worth reading if
+    // it is the repair: the same writes, in the same order, each between
+    // the same flushes, over the same bytes, leaving the same bytes. The
+    // repair's own writes are recorded here, by this test, as it makes
+    // them; the volume they leave must be what Windows' own restart
+    // reached from the same capture.
+    for (k, log_end) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+
+        let mut repair = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        fsck::fsck_io(&mut repair, None).unwrap_or_else(|e| panic!("{k}: fsck: {e}"));
+        fs_ntfs::block_io::BlockIo::sync(&mut repair).unwrap();
+        // A replay writes its blocks, marks the log clean, then empties
+        // it, each step flushed before the next.
+        assert!(
+            repair.units.len() > 1,
+            "{k}: a replay is several durable steps; fsck made {}",
+            repair.units.len()
+        );
+        let repaired = format!("{src}.repaired");
+        std::fs::write(&repaired, &repair.bytes).unwrap();
+        let want = manifest(k);
+        let got = walk(&repaired);
+        assert!(
+            got == want,
+            "{k}: {} files after the repair, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+        let recovered = unpack(&format!("windows-interrupted-{k}.recovered"));
+        oracle::same_metadata_as_windows(
+            k,
+            &Image::read(&src),
+            &Image::read(&repaired),
+            &Image::read(&recovered),
+            log_end,
+        );
+        std::fs::remove_file(&recovered).unwrap();
+        std::fs::remove_file(&repaired).unwrap();
+
+        // The dry run, on a source it may not write to, exits as -n does,
+        // reports those writes, and leaves the file as it was.
+        let mut readonly = std::fs::metadata(&src).unwrap().permissions();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&src, readonly).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_rust-fs-ntfs"))
+            .args(["fsck", "--dry-run", &src])
+            .output()
+            .expect("spawn fsck.ntfs");
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "{k}: fsck.ntfs --dry-run printed no JSON report ({e}): stderr {}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+        assert_eq!(out.status.code(), Some(4), "{k}: exit as -n: {json}");
+        assert_eq!(json["mode"], "dry-run", "{k}: {json}");
+        let reported: Vec<Vec<PlannedWrite>> = json["plan"]["units"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{k}: no plan.units in {}", json["plan"]))
+            .iter()
+            .map(|unit| {
+                unit["writes"]
+                    .as_array()
+                    .expect("a unit's writes")
+                    .iter()
+                    .map(|w| {
+                        (
+                            w["offset"].as_u64().expect("offset"),
+                            w["length"].as_u64().expect("length"),
+                            w["before_sha256"].as_str().expect("before").to_string(),
+                            w["after_sha256"].as_str().expect("after").to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        let first_differing = reported.iter().zip(&repair.units).position(|(r, m)| r != m);
+        assert!(
+            reported == repair.units,
+            "{k}: fsck.ntfs --dry-run planned {} units, the repair made {}; first differing \
+             unit {first_differing:?}",
+            reported.len(),
+            repair.units.len()
+        );
+        assert!(
+            std::fs::read(&src).unwrap() == pristine,
+            "{k}: fsck.ntfs --dry-run wrote to the source"
+        );
+        // Windows refuses to delete a read-only file.
+        let mut writable = std::fs::metadata(&src).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        writable.set_readonly(false);
+        std::fs::set_permissions(&src, writable).unwrap();
+        std::fs::remove_file(&src).unwrap();
+    }
+}
