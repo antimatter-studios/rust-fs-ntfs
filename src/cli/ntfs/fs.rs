@@ -2,7 +2,7 @@
 //! without mounting it.
 //!
 //! The verbs include `ls`, `stat`, `streams`, `xattr`, `read`, `write`, `mkdir`,
-//! `truncate`, `rm`, `rmdir`, `mv`, `ln`, `get`/`info`, `set`, `resize`. Metadata is JSON
+//! `export`, `truncate`, `rm`, `rmdir`, `mv`, `ln`, `get`/`info`, `set`, `resize`. Metadata is JSON
 //! (or `--text`); file content is raw bytes. A verb the library cannot do
 //! yet still exists and answers `not implemented` with exit status 3, so a
 //! script moved between filesystems fails loudly instead of meaning
@@ -15,6 +15,7 @@ use std::io::Write;
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command as Cmd};
 
 use super::device::{self, Device};
+use fs_core::cli::transfer::{self, ExportRequest, FileSource};
 use fs_core::cli::{CliError, Format, Json, Outcome, Tool};
 use fs_ntfs::attr_io::{self, AttrType};
 use fs_ntfs::block_io::BlockIo;
@@ -219,6 +220,21 @@ fn command() -> Cmd {
                      --text. A missing name exits 1 before producing output. Directories \
                      and links are inspected themselves; links are never followed. The \
                      source is opened read-only, and -o uses FILE.partial then renames it.",
+                ),
+        )
+        .subcommand(
+            Cmd::new("export")
+                .about("Export a regular file in bounded chunks, publishing it only when complete")
+                .args(transfer::export_args())
+                .after_help(
+                    "Examples:\n  fs.ntfs disk.img export /notes.txt notes.txt\n  \
+                     fs.ntfs disk.img export /notes.txt notes.txt --replace\n  \
+                     fs.ntfs disk.img export /notes.txt - > notes.txt\n\n\
+                     Copies the unnamed data stream in fixed-size chunks. A local file is \
+                     published only when complete; an existing name needs --replace. \
+                     Directories and reparse points are refused. Compressed and encrypted \
+                     streams are unsupported by export. Use read for compressed files. \
+                     Only single files are supported.",
                 ),
         )
         .subcommand(
@@ -549,6 +565,11 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
             let (mut dev, _) = device::mount(target, offset, false)?;
             let path = path_arg(sub)?;
             stat(&mut dev, path).map_err(|e| ntfs_error(path, e))
+        }
+        "export" => {
+            let request = ExportRequest::from_matches(sub)?;
+            let (mut dev, _) = device::mount(target, offset, false)?;
+            export(&mut dev, &request)
         }
         "read" => {
             let (mut dev, _) = device::mount(target, offset, false)?;
@@ -1283,6 +1304,84 @@ fn xattr(
         }
     }
     Ok(Outcome::done())
+}
+
+/// A positioned reader for the unnamed stream. Native uncompressed ranged
+/// reads allocate at most the requested chunk, even across attribute extents.
+struct ExportFile<'a> {
+    dev: &'a mut Device,
+    record: u64,
+    size: u64,
+    path: &'a str,
+}
+
+impl FileSource for ExportFile<'_> {
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, CliError> {
+        let bytes = read::read_attribute_range(
+            self.dev,
+            self.record,
+            AttrType::Data,
+            None,
+            offset,
+            buf.len(),
+        )
+        .map_err(|e| ntfs_error(self.path, e))?;
+        buf[..bytes.len()].copy_from_slice(&bytes);
+        Ok(bytes.len())
+    }
+}
+
+fn export(dev: &mut Device, request: &ExportRequest) -> Result<Outcome, CliError> {
+    let path = request
+        .path
+        .to_str()
+        .ok_or_else(|| CliError::usage("PATH must be UTF-8 to name an NTFS file"))?;
+    let record = read::resolve_path(dev, path).map_err(|e| ntfs_error(path, e))?;
+    let st = read::read_stat(dev, record).map_err(|e| ntfs_error(path, e))?;
+    if st.is_dir {
+        return Err(CliError::failed(format!("{path}: is a directory")));
+    }
+    if read::read_attribute_value_if_present(dev, record, AttrType::ReparsePoint, None)
+        .map_err(|e| ntfs_error(path, e))?
+        .is_some()
+    {
+        return Err(CliError::failed(format!(
+            "{path}: is a reparse point; export does not follow links or transformed data"
+        )));
+    }
+    // The native compressed range reader materialises the whole stream.
+    // Check the actual attribute flags in every extent, not just SI's flags,
+    // so this adapter never silently falls back to a whole-file buffer.
+    for holder in records_holding(dev, record, AttrType::Data).map_err(|e| ntfs_error(path, e))? {
+        let (_, bytes) =
+            fs_ntfs::mft_io::read_mft_record_io(dev, holder).map_err(|e| ntfs_error(path, e))?;
+        for loc in attr_io::iter_attributes(&bytes) {
+            if loc.type_code != AttrType::Data as u32 || loc.name_length != 0 {
+                continue;
+            }
+            let flags = attr_io::attribute_flags(&bytes, &loc)
+                .ok_or_else(|| CliError::failed(format!("{path}: truncated $DATA flags")))?;
+            if flags & (attr_io::attr_flags::COMPRESSION_MASK | attr_io::attr_flags::ENCRYPTED) != 0
+            {
+                return Err(CliError::not_implemented(format!(
+                    "{path}: bounded export of compressed or encrypted data is not supported"
+                )));
+            }
+        }
+    }
+    transfer::export(
+        request,
+        &mut ExportFile {
+            dev,
+            record,
+            size: st.size,
+            path,
+        },
+    )
 }
 
 /// Stream a regular file's selected `$DATA`. Each chunk is read before it is
