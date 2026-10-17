@@ -32,8 +32,8 @@
 //! through the list too (#660): `$EA` and `$EA_INFORMATION` are added and
 //! replaced like a stream, but never moved to make room for one. So is the
 //! unnamed `$DATA`, rewritten whole (#788) or written in part by
-//! `write_at` (#789): it is written where the list keeps it and moves only
-//! when its record cannot hold it.
+//! `write_at` (#789) or resized by `truncate` (#790): it is written where
+//! the list keeps it and moves only when its record cannot hold it.
 //!
 //! - A file with no list whose base record has no room for a stream or
 //!   an EA gets one: an entry for every attribute, and the named streams
