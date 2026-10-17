@@ -271,15 +271,17 @@ fn eas_of_a_file_with_a_list_are_written_rewritten_and_removed_through_it() {
     clean(&img);
 }
 
-/// An EA no record can hold is refused, and the image is byte-for-byte
-/// what it was: nothing allocated for the attempt is left behind.
+/// An EA set over the 64 KiB a file's EAs may total is refused, and the
+/// image is byte-for-byte what it was: nothing allocated for the attempt
+/// is left behind. A set no record can hold resident, but within that
+/// limit, is stored non-resident (#661, `tests/non_resident_ea.rs`).
 #[test]
-fn an_ea_no_record_can_hold_is_refused_and_changes_nothing() {
+fn an_ea_set_over_64_kib_is_refused_and_changes_nothing() {
     let (img, _) = volume_with_a_listed_file("refused");
     let before = std::fs::read(&img).expect("read image");
     let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
-    let got = write::write_ea_io(&mut io, "/f", b"USER.HUGE", &value(2000), 0);
-    assert!(got.is_err(), "a 2000-byte EA on 1 KiB records was accepted");
+    let got = write::write_ea_io(&mut io, "/f", b"USER.HUGE", &value(65535), 0);
+    assert!(got.is_err(), "a 65535-byte EA was accepted");
     <PathIo as BlockIo>::sync(&mut io).expect("sync");
     drop(io);
     let after = std::fs::read(&img).expect("read image");
