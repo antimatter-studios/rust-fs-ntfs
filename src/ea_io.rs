@@ -5,7 +5,8 @@
 //! packed list of FILE_FULL_EA_INFORMATION entries, 4-byte aligned.
 //!
 //! Reference: Microsoft's [FILE_FULL_EA_INFORMATION] documents the EA entry
-//! buffer. The separate eight-byte `$EA_INFORMATION` summary is checked
+//! buffer. The on-disk entries, including the terminal entry's length,
+//! and the separate eight-byte `$EA_INFORMATION` summary are checked
 //! against Windows-authored bytes in `tests/ea_information_windows_oracle.rs`.
 //!
 //! [FILE_FULL_EA_INFORMATION]: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_file_full_ea_information
@@ -58,7 +59,7 @@ pub fn packed_ea_length(eas: &[Ea]) -> Result<u16, Error> {
 /// Pack a list of EAs into a `$EA` blob.
 pub fn encode(eas: &[Ea]) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
-    for (i, ea) in eas.iter().enumerate() {
+    for ea in eas {
         if ea.name.len() > 254 {
             return Err(Error::io(format!("ea name too long: {}", ea.name.len())));
         }
@@ -66,9 +67,10 @@ pub fn encode(eas: &[Ea]) -> Result<Vec<u8>, Error> {
             return Err(Error::io(format!("ea value too large: {}", ea.value.len())));
         }
         let entry_len = entry_encoded_size(ea.name.len(), ea.value.len());
-        let next_off = if i == eas.len() - 1 { 0 } else { entry_len };
-        // Header (8 bytes).
-        out.extend_from_slice(&(next_off as u32).to_le_bytes());
+        // Windows stores each entry's aligned size, including the last;
+        // the API input buffer's zero terminator corrupts an on-disk $EA
+        // under chkdsk (#745). The Windows fixture oracle checks all bytes.
+        out.extend_from_slice(&(entry_len as u32).to_le_bytes());
         out.push(ea.flags);
         out.push(ea.name.len() as u8);
         out.extend_from_slice(&(ea.value.len() as u16).to_le_bytes());

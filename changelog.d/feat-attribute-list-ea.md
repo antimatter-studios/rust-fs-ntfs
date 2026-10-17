@@ -10,3 +10,10 @@
   any record is still refused, and so are the EAs of a directory whose
   record cannot hold them.
 - **`rust-ntfs ea` sets or removes one of a file's extended attributes.**
+
+### Fixed
+
+- On-disk `$EA` entries retain their aligned length in the last entry too,
+  matching Windows-authored bytes instead of copying the API buffer's zero
+  terminator; chkdsk reported corrupt EA information after attribute-list EA
+  writes (#745).
