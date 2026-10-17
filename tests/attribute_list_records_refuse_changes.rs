@@ -7,10 +7,11 @@
 //! went into the base record with no list entry, so ntfs-3g could not find
 //! it and the file was internally inconsistent, while `Ok` was returned.
 //! Named streams are now written through the list, which gains or loses
-//! each one's entry. Every other attribute added to or removed from such a
-//! record -- an EA here -- is still refused with `Kind::Refused`, before
-//! anything is written. Rewriting an attribute in place, which leaves the
-//! list as true as it was, still works.
+//! each one's entry, and so are its EAs (#660). Every other attribute added
+//! to or removed from such a record -- an object id here -- is still
+//! refused with `Kind::Refused`, before anything is written. Rewriting an
+//! attribute in place, which leaves the list as true as it was, still
+//! works.
 
 mod common;
 
@@ -94,16 +95,16 @@ fn volume_with_a_listed_file(tag: &str) -> (String, u64) {
     (img, rec)
 }
 
-/// An attribute the list does not follow -- an EA -- is refused, and the
-/// image is byte-for-byte what it was.
+/// An attribute the list does not follow -- an object id -- is refused,
+/// and the image is byte-for-byte what it was.
 #[test]
 fn adding_an_attribute_the_list_does_not_follow_is_refused() {
     let (img, _) = volume_with_a_listed_file("refused");
     let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
     let before = std::fs::read(&img).expect("read image");
     refused(
-        "write an EA",
-        write::write_ea_io(&mut io, "/f", b"USER.KEY", b"value", 0),
+        "write an object id",
+        write::write_object_id_io(&mut io, "/f", &[0x5A; 16]),
     );
     <PathIo as BlockIo>::sync(&mut io).expect("sync");
     unchanged(&img, &before);

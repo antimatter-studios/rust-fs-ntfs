@@ -20,6 +20,7 @@
 //!   objid      Give a file an object id.
 //!   layout     Print how a file's `$DATA` is stored (flags, sizes, runs).
 //!   stream     Write or delete one of a file's named streams.
+//!   ea         Set or remove one of a file's extended attributes.
 //!
 //! Single binary so distribution (GitHub releases, Homebrew taps) ships
 //! one artefact rather than four. Each subcommand lives in its own
@@ -29,6 +30,7 @@
 //! through `cli::finish`, not only by this dispatcher -- see `cli.rs`.
 
 mod cli;
+mod ea;
 mod format;
 mod layout;
 mod link;
@@ -68,6 +70,7 @@ Subcommands:
   objid      Give a file an object id.
   layout     Print how a file's $DATA is stored (flags, sizes, runs).
   stream     Write or delete one of a file's named streams.
+  ea         Set or remove one of a file's extended attributes.
 
 Run `rust-ntfs <subcommand> --help` for per-subcommand options.
 
@@ -101,6 +104,7 @@ fn main() -> ExitCode {
         "objid" => objid::run(rest),
         "layout" => layout::run(rest),
         "stream" => stream::run(rest),
+        "ea" => ea::run(rest),
         "-h" | "--help" => {
             print!("{HELP}");
             ExitCode::SUCCESS

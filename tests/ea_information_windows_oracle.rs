@@ -11,7 +11,7 @@ use std::path::Path;
 
 const IMAGE: &str = "test-disks/ntfs-ea.img";
 
-fn windows_summary(path: &str) -> [u8; 8] {
+fn windows_attribute(path: &str, ty: NtfsAttributeType) -> Vec<u8> {
     assert!(
         Path::new(IMAGE).is_file(),
         "missing {IMAGE}; run test-disks/build-windows-native-read-fixtures.ps1 on Windows"
@@ -22,18 +22,19 @@ fn windows_summary(path: &str) -> [u8; 8] {
     while let Some(item) = attributes.next(&mut reader) {
         let item = item.expect("attribute item");
         let attribute = item.to_attribute().expect("attribute");
-        if attribute.ty().expect("attribute type") != NtfsAttributeType::EAInformation {
+        if attribute.ty().expect("attribute type") != ty {
             continue;
         }
-        assert_eq!(attribute.value_length(), 8, "Windows summary size");
-        let mut value = attribute.value(&mut reader).expect("Windows summary value");
-        let mut bytes = [0u8; 8];
+        let mut bytes = vec![0u8; attribute.value_length() as usize];
+        let mut value = attribute
+            .value(&mut reader)
+            .expect("Windows attribute value");
         value
             .read_exact(&mut reader, &mut bytes)
-            .expect("read Windows summary");
+            .expect("read Windows attribute");
         return bytes;
     }
-    panic!("Windows file {path} has no $EA_INFORMATION");
+    panic!("Windows file {path} has no {ty:?}");
 }
 
 #[test]
@@ -61,7 +62,8 @@ fn the_ea_summary_layout_and_lengths_match_windows() {
         ];
         // Literal lengths come from the two input entries, separately from
         // the implementation under test: compact 9 + 10, aligned 16 + 16.
-        let windows = windows_summary(&format!("/ea-summary-{need_count}.bin"));
+        let path = format!("/ea-summary-{need_count}.bin");
+        let windows = windows_attribute(&path, NtfsAttributeType::EAInformation);
         assert_eq!(windows, [19, 0, need_count as u8, 0, 32, 0, 0, 0]);
         assert_eq!(
             ea_io::packed_ea_length(&entries).expect("compact length"),
@@ -72,6 +74,17 @@ fn the_ea_summary_layout_and_lengths_match_windows() {
         assert_eq!(
             ea_io::build_ea_information_value(19, need_count, 32),
             windows
+        );
+        // On disk Windows retains the aligned entry size in the final
+        // entry's offset field too. The API input buffer's zero terminator
+        // is not the representation NtSetEaFile stores in $EA (#745).
+        let stored = windows_attribute(&path, NtfsAttributeType::EA);
+        assert_eq!(stored.len(), 32);
+        assert_eq!(&stored[16..20], &16u32.to_le_bytes());
+        assert_eq!(
+            ea_io::encode(&entries).expect("on-disk entries"),
+            stored,
+            "the complete $EA, including its terminal entry size"
         );
     }
 }
