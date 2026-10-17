@@ -74,7 +74,7 @@ licenses = ["LICENSE-APACHE", "LICENSE-MIT"]
 # dispatch, --version, doctor, the output contract, man pages and
 # completions -- is rust-fs-core's `cli` feature, turned on only here, so
 # the static library gains nothing. clap is MIT/Apache-2.0.
-cli = ["dep:clap", "rust-fs-core/cli"]
+cli = ["dep:clap", "dep:sha2", "rust-fs-core/cli"]
 # Test-only: builds `rust-ntfs`, the test matrix's driver (see its target
 # above). Nothing a consumer or a user installs turns it on.
 harness = []
@@ -121,6 +121,10 @@ rust-fs-core = { version = "0.3.13" }
 # the `rust-fs-ntfs` target above). No derive: the builder API keeps each
 # tool's command a function the man pages and completions are made from.
 clap = { version = "4.5", optional = true, default-features = false, features = ["std", "help", "usage", "error-context", "suggestions"] }
+# The SHA-256 `fsck.ntfs --dry-run` reports of each planned write's bytes,
+# behind the `cli` feature too, so the static library gains nothing.
+# MIT/Apache-2.0, already in the tree as a dev-dependency.
+sha2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 # YAML parser for tests/ci_profile.rs, which reads .github/workflows/ci.yml

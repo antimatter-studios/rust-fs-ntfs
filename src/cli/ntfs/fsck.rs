@@ -27,6 +27,14 @@
 //! operational error (the target could not be opened, or is not an NTFS
 //! volume), 16 a wrong command line.
 //!
+//! WHAT A DRY RUN REPORTS, with `--dry-run`: every write `-y` would make
+//! (with `--clear-dirty`, that too), worked out by the library's own repair
+//! over an overlay that records its writes instead of making them
+//! (`fs_ntfs::repair_plan`, #709). The plan is a list of units, each the
+//! writes made between two flushes, each write by offset, length and the
+//! SHA-256 of the bytes there before it and of the bytes it leaves. The
+//! target is opened read-only, as with `-n`, and the exit status is `-n`'s.
+//!
 //! Without `-y` nothing is written, as with `-n`.
 
 use std::ffi::OsString;
@@ -35,8 +43,11 @@ use clap::{value_parser, Arg, ArgAction, ArgMatches, Command as Cmd};
 
 use fs_core::cli::{CliError, Json, Outcome, Tool};
 use fs_ntfs::fsck::{
-    check_io, repair_dirty_io, replay_logfile_io, CheckFinding, CheckReport, LogfileState,
+    check_io, repair_dirty_io, replay_logfile_io, CheckFinding, CheckReport, FsckOptions,
+    LogfileState,
 };
+use fs_ntfs::repair_plan::{plan_fsck_io, RepairPlan};
+use sha2::{Digest, Sha256};
 
 /// fsck(8): no errors.
 pub const CLEAN: u8 = 0;
@@ -91,6 +102,10 @@ fn command() -> Cmd {
              Nothing is written unless -y (or -p) is given. Then a $LogFile that holds \
              work is replayed; a log that cannot be replayed in full is left as it is, \
              with nothing written.\n\n\
+             --dry-run works out every write -y would make (--clear-dirty's too, when \
+             given) and makes none: TARGET is opened read-only. The report's plan lists \
+             them in units, each the writes between two flushes, each by offset, length \
+             and the SHA-256 of the bytes before and after it.\n\n\
              The dirty flag is left set for Windows' chkdsk, which runs at the next mount \
              of a volume that carries it: it asks for a check of the whole volume, which \
              this is not. --clear-dirty with -y clears it once the log holds nothing to \
@@ -131,12 +146,19 @@ fn command() -> Cmd {
                 .conflicts_with("no"),
         )
         .arg(
+            Arg::new("dry_run")
+                .long("dry-run")
+                .help("Report every write -y would make, and make none: open read-only, as -n")
+                .action(ArgAction::SetTrue)
+                .conflicts_with_all(["no", "yes", "preen"]),
+        )
+        .arg(
             Arg::new("clear_dirty")
                 .short('d')
                 .long("clear-dirty")
                 .help(
                     "With -y or -p, also clear the dirty flag, which is otherwise left for \
-                     Windows' chkdsk",
+                     Windows' chkdsk; with --dry-run, plan that too",
                 )
                 .action(ArgAction::SetTrue)
                 .conflicts_with("no"),
@@ -168,6 +190,7 @@ fn command() -> Cmd {
             "Examples:\n  fsck.ntfs disk.img                 check, change nothing\n  \
              fsck.ntfs -fn disk.img             the same, as fsck(8) front-ends spell it\n  \
              fsck.ntfs -y disk.img              replay $LogFile; the dirty flag stays set\n  \
+             fsck.ntfs --dry-run disk.img       every write -y would make; none is made\n  \
              fsck.ntfs -y --clear-dirty disk.img   and clear the dirty flag too\n  \
              fsck.ntfs --text disk.img; echo $?",
         )
@@ -179,10 +202,12 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         .expect("clap requires the device");
     let offset = matches.get_one::<u64>("offset").copied().unwrap_or(0);
     let repair = matches.get_flag("yes") || matches.get_flag("preen");
+    let dry_run = matches.get_flag("dry_run");
     let clear_dirty = matches.get_flag("clear_dirty");
-    if clear_dirty && !repair {
+    if clear_dirty && !repair && !dry_run {
         return Err(CliError::usage(
-            "--clear-dirty writes, so it needs -y or -p: nothing is written without them",
+            "--clear-dirty writes, so it needs -y or -p (or --dry-run, to see what it would \
+             write): nothing is written without them",
         )
         .with_code(USAGE));
     }
@@ -192,6 +217,11 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
     let (mut dev, _) = super::device::mount(target, offset, repair).map_err(operational)?;
     let before = check_io(&mut dev)
         .map_err(|e| CliError::failed(format!("{name}: {e}")).with_code(OPERATIONAL))?;
+
+    // A dry run plans what -y would write, through the same repair, and
+    // writes nothing (#709): the device is read-only.
+    let plan =
+        dry_run.then(|| plan_fsck_io(&mut dev, FsckOptions { clear_dirty }).map_err(String::from));
 
     // The log first: replayed in full, or not touched (#137).
     let mut replay_refused = None;
@@ -289,10 +319,15 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
             .map(finding),
     );
 
-    let report = Json::object([
+    let mode = match (repair, dry_run) {
+        (true, _) => "repair",
+        (false, true) => "dry-run",
+        (false, false) => "check",
+    };
+    let mut fields = vec![
         ("fs", Json::from("ntfs")),
         ("device", Json::from(name.as_str())),
-        ("mode", Json::from(if repair { "repair" } else { "check" })),
+        ("mode", Json::from(mode)),
         (
             "checks",
             Json::Arr(CHECKS.iter().map(|c| Json::from(*c)).collect()),
@@ -320,7 +355,11 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
             ]),
         ),
         ("findings", Json::Arr(findings.clone())),
-    ]);
+    ];
+    if let Some(plan) = &plan {
+        fields.push(("plan", plan_json(plan)));
+    }
+    let report = Json::object(fields);
 
     let mut text = vec![match code {
         CLEAN => format!(
@@ -337,9 +376,83 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
     for f in &findings {
         text.push(format!("  {}", f.to_text().replace('\n', ", ")));
     }
+    match &plan {
+        Some(Ok(plan)) => text.extend(plan_text(plan)),
+        Some(Err(why)) => text.push(format!("  plan refused, nothing would be written: {why}")),
+        None => {}
+    }
     Ok(Outcome::report(report)
         .with_text(text.join("\n"))
         .with_code(code))
+}
+
+/// A dry run's plan as JSON: each unit's writes, by offset, length and the
+/// SHA-256 of the bytes before and after; or why the repair is refused.
+fn plan_json(plan: &Result<RepairPlan, String>) -> Json {
+    let (units, refused) = match plan {
+        Ok(plan) => (plan.units.as_slice(), None),
+        Err(why) => (&[][..], Some(why.as_str())),
+    };
+    let writes = units.iter().flat_map(|unit| &unit.writes);
+    Json::object([
+        ("refused", Json::from(refused)),
+        ("writes", Json::from(writes.clone().count() as u64)),
+        (
+            "bytes",
+            Json::from(writes.map(|w| w.after.len() as u64).sum::<u64>()),
+        ),
+        (
+            "units",
+            Json::Arr(
+                units
+                    .iter()
+                    .map(|unit| {
+                        Json::object([(
+                            "writes",
+                            Json::Arr(
+                                unit.writes
+                                    .iter()
+                                    .map(|w| {
+                                        Json::object([
+                                            ("offset", Json::from(w.offset)),
+                                            ("length", Json::from(w.after.len() as u64)),
+                                            ("before_sha256", Json::from(sha256_hex(&w.before))),
+                                            ("after_sha256", Json::from(sha256_hex(&w.after))),
+                                        ])
+                                    })
+                                    .collect(),
+                            ),
+                        )])
+                    })
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+/// A dry run's plan for people: a summary, then each unit's writes.
+fn plan_text(plan: &RepairPlan) -> Vec<String> {
+    let writes: usize = plan.units.iter().map(|unit| unit.writes.len()).sum();
+    let mut lines = vec![format!(
+        "  plan: {} units, {writes} writes; nothing was written",
+        plan.units.len()
+    )];
+    for (n, unit) in plan.units.iter().enumerate() {
+        let at: Vec<String> = unit
+            .writes
+            .iter()
+            .map(|w| format!("{:#x}+{}", w.offset, w.after.len()))
+            .collect();
+        lines.push(format!("    unit {}: {}", n + 1, at.join(", ")));
+    }
+    lines
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// How many problems a check left: the dirty flag counts as one, and so
