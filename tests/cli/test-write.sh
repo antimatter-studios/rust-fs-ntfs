@@ -3,8 +3,13 @@
 # resident in the MFT record, one cluster, one cluster and a byte, a MiB),
 # a file in a subdirectory, replacements by shorter and longer content,
 # typed ls entries, the label, refusals, and a clean fsck.ntfs afterwards.
-# Then a volume with a user file's record destroyed: every verb answers
-# without a panic, and fsck.ntfs reports the record.
+# mkdir --parents: a missing chain made whole, under existing directories,
+# through names in another case and through `.` and `..` read as Windows
+# reads them; a chain already there, made by nothing; and every refusal,
+# with no partial chain and the image byte-identical. What Windows makes of
+# the chains is the cli-mkdir-parents-win-verify-chkdsk scenario in
+# test-matrix.json. Then a volume with a user file's record destroyed:
+# every verb answers without a panic, and fsck.ntfs reports the record.
 source "$(dirname "$0")/lib.sh"
 source "$(dirname "$0")/lib-ntfs.sh"
 
@@ -169,6 +174,134 @@ status=$?
 check "write over a log it cannot replay in full exits 1 (exit $status)" test "$status" -eq 1
 jq_check "the refusal names \$LogFile" '.error | contains("$LogFile")' "$SANDBOX/torn.err"
 check "a refused write leaves the image as it was" cmp -s "$torn" "$SANDBOX/torn.before"
+
+# mkdir --parents, on a volume of its own.
+pimg="$SANDBOX/parents.img"
+mkfs.ntfs -q --size 64M --label PARENTS "$pimg" >/dev/null 2>&1
+check "mkfs.ntfs made the --parents image" test -s "$pimg"
+echo x | fs.ntfs "$pimg" write /f.txt >/dev/null 2>&1
+check "write /f.txt exits 0" test $? -eq 0
+
+# made PATH CREATED...: mkdir -p PATH succeeds, reporting {"path": PATH,
+# "created": [CREATED...]}, and each CREATED is a directory that stat
+# finds and its parent lists, spelled exactly so.
+made() {
+    local path="$1" want dir
+    shift
+    want="$(printf '%s\n' "$@" | jq -R . | jq -sc .)"
+    fs.ntfs "$pimg" mkdir -p "$path" >"$SANDBOX/p.json" 2>"$SANDBOX/p.err"
+    local rc=$?
+    check "mkdir -p $path exits 0 (got $rc: $(cat "$SANDBOX/p.err"))" test "$rc" -eq 0
+    check "mkdir -p $path prints nothing on stderr" test ! -s "$SANDBOX/p.err"
+    jq_check "mkdir -p $path reports what it made, $want" \
+        ". == {\"path\": \"$path\", \"created\": $want}" "$SANDBOX/p.json"
+    for dir in "$@"; do
+        jq_check "$dir is a directory" '.type == "dir"' <(fs.ntfs "$pimg" stat "$dir" 2>/dev/null)
+        local parent="${dir%/*}"
+        check "ls ${parent:-/} lists ${dir##*/}, exactly so" \
+            grep -qxF -- "${dir##*/}" <<<"$(fs.ntfs "$pimg" ls "${parent:-/}" 2>/dev/null | jq -r '.[].name')"
+    done
+}
+# there PATH: mkdir -p PATH succeeds with nothing to make, and writes nothing.
+there() {
+    cp "$pimg" "$SANDBOX/p-before.img"
+    fs.ntfs "$pimg" mkdir -p "$1" >"$SANDBOX/p.json" 2>"$SANDBOX/p.err"
+    local rc=$?
+    check "mkdir -p $1, already there, exits 0 (got $rc: $(cat "$SANDBOX/p.err"))" test "$rc" -eq 0
+    jq_check "mkdir -p $1 reports nothing created" ". == {\"path\": \"$1\", \"created\": []}" "$SANDBOX/p.json"
+    check "mkdir -p $1 leaves the image byte-identical" cmp -s "$pimg" "$SANDBOX/p-before.img"
+}
+# refused STATUS PATTERN PATH: mkdir -p PATH exits STATUS with nothing on
+# stdout, a structured error matching PATTERN, and the image byte-identical,
+# so no part of the chain is left behind.
+refused() {
+    cp "$pimg" "$SANDBOX/p-before.img"
+    fs.ntfs "$pimg" mkdir -p "$3" >"$SANDBOX/p.out" 2>"$SANDBOX/p.err"
+    local rc=$?
+    check "mkdir -p $3 exits $1 (got $rc: $(cat "$SANDBOX/p.err"))" test "$rc" -eq "$1"
+    check "mkdir -p $3 prints nothing on stdout" test ! -s "$SANDBOX/p.out"
+    jq_check "mkdir -p $3 says why" ".code == $1 and (.error | test(\"$2\"; \"i\"))" "$SANDBOX/p.err"
+    check "mkdir -p $3 leaves the image byte-identical" cmp -s "$pimg" "$SANDBOX/p-before.img"
+}
+
+made /a/b/c /a /a/b /a/b/c                            # a three-level chain
+made /a/b/d/e /a/b/d /a/b/d/e                         # under existing directories
+made /A/B/NewDir /A/B/NewDir                          # through names in another case
+check "the case-blind walk made no second b in /a" \
+    test "$(fs.ntfs "$pimg" ls /a 2>/dev/null | jq '[.[] | select(.name | ascii_downcase == "b")] | length')" = 1
+made /a/./x/../y /a/y                                 # `.` and `..` by the text, as Windows reads them
+check "/a/./x/../y made no /a/x" test -z "$(fs.ntfs "$pimg" ls /a 2>/dev/null | jq -r '.[] | select(.name == "x") | .name')"
+made /f.txt/../g /g                                   # `..` after a file, as Windows reads it
+made "/na$(printf '\303\257')ve/$(printf '\346\227\245\346\234\254')" \
+    "/na$(printf '\303\257')ve" "/na$(printf '\303\257')ve/$(printf '\346\227\245\346\234\254')"
+made //deep//1/2/3/4/5/6/7/8/9/10/11/12/ \
+    /deep /deep/1 /deep/1/2 /deep/1/2/3 /deep/1/2/3/4 /deep/1/2/3/4/5 /deep/1/2/3/4/5/6 \
+    /deep/1/2/3/4/5/6/7 /deep/1/2/3/4/5/6/7/8 /deep/1/2/3/4/5/6/7/8/9 \
+    /deep/1/2/3/4/5/6/7/8/9/10 /deep/1/2/3/4/5/6/7/8/9/10/11 /deep/1/2/3/4/5/6/7/8/9/10/11/12
+
+there /a/b/c
+there /a/b/c/
+there /A/B/C
+there /a/./b/..
+there /
+fs.ntfs "$pimg" mkdir --parents /a/b/c >/dev/null 2>&1
+check "--parents is -p's long form" test $? -eq 0
+check "mkdir -p --text names each directory made" \
+    test "$(fs.ntfs "$pimg" mkdir -p --text /t1/t2 2>/dev/null)" = "$(printf 'created /t1\ncreated /t1/t2')"
+check "mkdir -p --text says when nothing was made" \
+    test "$(fs.ntfs "$pimg" mkdir -p --text /t1/t2 2>/dev/null)" = "/t1/t2 exists; nothing created"
+
+fsck.ntfs "$pimg" >/dev/null 2>&1
+check "fsck.ntfs finds the volume clean after the chains" test $? -eq 0
+check "the volume is not dirty after the chains" test "$(fs.ntfs "$pimg" get dirty --text)" = false
+
+# Something in the way is refused before a directory is made, as Windows
+# refuses it: a file on the way or at PATH, and a symbolic link, which is
+# not followed.
+fs.ntfs "$pimg" ln -s /a /lnk >/dev/null 2>&1
+check "ln -s /a /lnk exits 0" test $? -eq 0
+refused 1 'not a directory' /f.txt/x/y
+refused 1 'not a directory' /new/../f.txt/x
+refused 1 'already exists' /f.txt
+refused 1 'already exists' /F.TXT
+refused 1 'symbolic link' /lnk/x
+refused 1 'already exists' /lnk
+# A name Windows cannot address, past a directory that would be made first.
+refused 1 'cannot address' '/n1/a:b/c'
+refused 1 'cannot address' '/n1/a*b'
+refused 1 'trailing space or period' /n1/x./y
+refused 1 'trailing space or period' '/n1/x /y'
+refused 1 'NUL' /n1/nul
+refused 1 'too long' "/n1/$(printf '%0256d' 0)/z"
+# shellcheck disable=SC2016 # \$Extend is the metafile's name, not a variable.
+refused 1 'metafile' '/$Extend/n1'
+check "no refused chain left /n1 or /new behind" \
+    test -z "$(fs.ntfs "$pimg" ls / 2>/dev/null | jq -r '.[] | select(.name == "n1" or .name == "new") | .name')"
+fs.ntfs "$pimg" mkdir -p n1/n2 >"$SANDBOX/p.out" 2>/dev/null
+check "mkdir -p of a path not from the root is a usage error" test $? -eq 2
+check "mkdir -p of a path not from the root prints nothing on stdout" test ! -s "$SANDBOX/p.out"
+
+# Plain mkdir is unchanged: its parent must exist.
+fs.ntfs "$pimg" mkdir /m1/m2 >"$SANDBOX/p.out" 2>"$SANDBOX/p.err"
+check "plain mkdir under a missing parent exits 1" test $? -eq 1
+jq_check "plain mkdir under a missing parent says so" '.code == 1 and (.error | test("not found"))' "$SANDBOX/p.err"
+
+# --offset: the same volume 1 MiB into a whole-disk image, the first MiB
+# left alone.
+{ head -c 1048576 /dev/zero; cat "$pimg"; } >"$SANDBOX/whole.img"
+fs.ntfs --offset 1048576 "$SANDBOX/whole.img" mkdir -p /o1/o2 >"$SANDBOX/p.json" 2>"$SANDBOX/p.err"
+rc=$?
+check "mkdir -p through --offset exits 0 (got $rc: $(cat "$SANDBOX/p.err"))" test "$rc" -eq 0
+jq_check "mkdir -p through --offset made the chain" '.created == ["/o1", "/o1/o2"]' "$SANDBOX/p.json"
+jq_check "mkdir -p through --offset made it inside the volume" '.type == "dir"' \
+    <(fs.ntfs --offset 1048576 "$SANDBOX/whole.img" stat /o1/o2 2>/dev/null)
+check "mkdir -p through --offset wrote nothing before the volume" \
+    cmp -s -n 1048576 "$SANDBOX/whole.img" /dev/zero
+
+# A dirty volume asks for a check before anything is written to it.
+fs.ntfs "$pimg" set dirty true >/dev/null 2>&1
+check "set dirty true exits 0" test $? -eq 0
+refused 1 'dirty' /d1/d2
 
 # A user file's MFT record with its FILE signature destroyed, and a mirror
 # that disagrees with $MFT: the volume is damaged, and every verb must say

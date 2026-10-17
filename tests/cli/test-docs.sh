@@ -42,5 +42,12 @@ for name in $(rust-fs-ntfs generate names) rust-fs-ntfs; do
 done
 check "rust-fs-ntfs doctor --help carries an example" grep -q '^Examples:' <<<"$(rust-fs-ntfs doctor --help 2>/dev/null)"
 check "rust-fs-ntfs doctor has a page of its own" test -s "${share:-/nonexistent}/man/man1/rust-fs-ntfs-doctor.1"
+# A flag reaches the generated docs too: mkdir --parents is on mkdir's own
+# page (where roff writes it \-\-parents) and in every shell's completion.
+check "fs.ntfs mkdir's man page carries --parents" \
+    grep -qE -- '(\\-\\-|--)parents' "${share:-/nonexistent}/man/man1/fs.ntfs-mkdir.1"
+check "fs.ntfs's zsh completion carries mkdir --parents" grep -q -- '--parents' "${share:-/nonexistent}/zsh/site-functions/_fs.ntfs"
+check "fs.ntfs's bash completion carries mkdir --parents" grep -q -- '--parents' "${share:-/nonexistent}/bash-completion/completions/fs.ntfs"
+check "fs.ntfs's fish completion carries mkdir --parents" grep -q -- '-l parents' "${share:-/nonexistent}/fish/vendor_completions.d/fs.ntfs.fish"
 
 finish
