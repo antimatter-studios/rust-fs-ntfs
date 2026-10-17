@@ -32,6 +32,12 @@
 #                                    fsck.ntfs -y replays it, and IMAGE.manifest is
 #                                    what Windows listed after recovering the same
 #                                    image itself, for win-cli-verify.ps1
+#   replay-stopped IMAGE SNAPSHOT    IMAGE is test-disks/windows-interrupted-SNAPSHOT,
+#                                    whose replay is cut right after its first undo
+#                                    write, as a power cut leaves it, so the log
+#                                    still holds work for Windows' restart to find;
+#                                    IMAGE.manifest is what Windows listed after
+#                                    recovering the same image itself
 #   write-after-replay IMAGE SNAPSHOT
 #                                    IMAGE is test-disks/windows-interrupted-SNAPSHOT;
 #                                    fsck.ntfs reports its log, fs.ntfs mkdir is
@@ -665,6 +671,24 @@ case "$step" in
         has '"logfile": "empty"' || die "fsck.ntfs -y did not leave the log empty: $out"
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the replay exited $status: $out"
+        windows_listing "$1"
+        ;;
+    replay-stopped)
+        [ $# -eq 1 ] || die "replay-stopped IMAGE SNAPSHOT"
+        unpack_interrupted "$1"
+        # A power cut right after the replay's first undo write (#754): the
+        # blocks written so far stay, and the log still holds work, so the
+        # next mount -- Windows, in the scenario -- runs its own restart
+        # over what the stopped replay left (#648).
+        set +e
+        out="$(cargo run --quiet --release --manifest-path "$REPO/Cargo.toml" \
+            --example replay_stopped -- "$image" 2>&1)"
+        status=$?
+        set -e
+        [ "$status" -eq 0 ] || die "replay_stopped exited $status: $out"
+        run fsck "$image"
+        [ "$status" -eq 4 ] || die "fsck.ntfs after the stopped replay exited $status, not 4: $out"
+        has '"kind": "logfile"' || die "fsck.ntfs did not report the log holding work after the stop: $out"
         windows_listing "$1"
         ;;
     write-after-replay)
