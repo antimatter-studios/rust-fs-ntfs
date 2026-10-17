@@ -604,6 +604,7 @@ tasks:
     # passing paths for CI execution.
     # #658 adds 46: 41 xattr checks, two generated-verb doc checks and
     # three completion checks; floor 1287, counted from the declared paths.
+    # #832 adds six: export's page/help and four --replace generated-doc checks.
     # Counts are derived from the passing paths; suites
     # run in CI, not in the implementation agent's checkout.
     cmds:
@@ -630,8 +631,10 @@ tasks:
     # Get-Content captures or explicitly checking directory refusal: floor 513.
     # #658 adds 144: two checks for each of eight Windows EA files, seven
     # per queried EA (18), one exact count and one immutable image: floor 657.
+    # #832 adds 120: 11 per Windows file (8), boundary/offset/refusal checks,
+    # damaged-data cleanup and source immutability, counted from passing paths.
     cmds:
-      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=657 scripts/test-cli.sh'
+      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=777 scripts/test-cli.sh'
 
   test:cli:host:
     desc: 'The host half of the cli scenarios in the Windows matrix, without the VM: every step each runs before its first Windows step (scripts/cli-oracle.sh)'
