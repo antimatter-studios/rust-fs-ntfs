@@ -441,7 +441,7 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-stat.img' -Label 'STAT' -Populate
         if ($LASTEXITCODE -ne 0) { throw "fsutil hardlink list ${rel}: $o" }
         $names[$rel] = (@($o | ForEach-Object { "$_".Trim() -replace '\\', '/' } |
             Where-Object { $_ }) -join '|')
-        $streams[$rel] = @(Get-Item -LiteralPath (& $at $rel) -Stream * |
+        $streams[$rel] = @(Get-Item -LiteralPath (& $at $rel) -Stream * -Force |
             Where-Object { $_.Stream -ne ':$DATA' }).Count
     }
 
