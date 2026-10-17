@@ -57,6 +57,7 @@ cli = [
   "cli-corrupt-signature-fsck-win-chkdsk",
   "cli-populate-win-verify-chkdsk",
   "cli-empty-directory-win-verify-chkdsk",
+  "cli-rename-win-verify-chkdsk",
   "cli-windows-interrupted-1-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-6-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-1-write-after-replay-win-verify-chkdsk",
@@ -365,6 +366,17 @@ expect_exit = 0
 # fsck.ntfs. Writes <image>.manifest: /kept's survivors, for win-cli-verify.
 host = "host"
 command = "bash scripts/cli-oracle.sh empty-directory {image_dir}/{run_id}/{scenario.image}"
+expect_exit = 0
+
+[ops.cli-rename]
+# fs.ntfs mv renames within a directory -- the same length, longer, shorter,
+# case only, a directory, a non-resident file, a Unicode name and a third of
+# a directory filled past one index level -- and refuses, writing nothing, a
+# move to another directory and a name already there; then a clean
+# fsck.ntfs. Writes <image>.manifest: every file under its new name, each new
+# name's exact case and each old name gone, for win-cli-verify.
+host = "host"
+command = "bash scripts/cli-oracle.sh rename {image_dir}/{run_id}/{scenario.image}"
 expect_exit = 0
 
 [ops.cli-replay]
