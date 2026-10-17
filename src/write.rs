@@ -1046,6 +1046,22 @@ pub fn truncate_io<T: BlockIo + ?Sized>(
 ) -> Result<u64, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     refuse_metafile_io(io, rec, "truncate")?;
+    // A FILE WITH AN $ATTRIBUTE_LIST IS RESIZED THROUGH IT.
+    //
+    // Its unnamed `$DATA` may be in an extension record, where the base
+    // record's walk calls it missing, and its base record may have no room
+    // for the stream to grow (#790, part of #663). The stream is read
+    // through the list, cut short or extended with zeros, and rewritten
+    // where the list keeps it, as `write_at` does (#789); the clusters past
+    // the new end are freed once the records no longer name them.
+    if listed_regular_file_io(io, rec)? {
+        let size = usize::try_from(new_size).map_err(|_| Error::io("size too large"))?;
+        let mut value = crate::read::read_attribute_value(io, rec, AttrType::Data, None)?;
+        value.resize(size, 0);
+        write_listed_unnamed_data_io(io, rec, &value)?;
+        finish_data_write_io(io, rec)?;
+        return Ok(new_size);
+    }
     // A resident value is resized and written back whole: cut short, or
     // extended with zeros, promoted if it outgrows the record (#500).
     if let Some(mut value) = resident_data_value_io(io, rec)? {
