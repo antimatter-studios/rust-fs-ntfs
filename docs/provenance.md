@@ -91,8 +91,8 @@ which shows only that the crate agrees with itself:
 | Boot sector, BPB | `boot_sector_geometry`, `mkfs_roundtrip` (Windows `chkdsk` on formatted images) |
 | File record header, fixups | `mft_io`, `mft_inventory_windows_oracle`, `mftmirr_windows_oracle` |
 | Attribute header, resident and non-resident | `check_io_reads_attribute_structure`, `read_attributes`, `data_runs` |
-| `$STANDARD_INFORMATION` | `read_si_full`, `field_exhaustion_si`, `security_id`, `write_times` |
-| `$FILE_NAME`, namespaces | `filename_fields_windows_oracle`, `rename_rederives_namespace`, `read_file_names` |
+| `$STANDARD_INFORMATION` | `read_si_full`, `field_exhaustion_si`, `security_id`, `write_times`, `tests/cli-oracle/test-stat-windows.sh` (times and attributes against Windows) |
+| `$FILE_NAME`, namespaces | `filename_fields_windows_oracle`, `rename_rederives_namespace`, `read_file_names`, `tests/cli-oracle/test-stat-windows.sh` (link names and parents against `fsutil hardlink list`) |
 | Indexes, collation | `index_name_collation`, `index_lookup_descent`, `fragmented_indx_fixture` and its matrix scenario (Windows enumeration and `chkdsk`) |
 | View indexes | `extend_view_indexes`, `view_index_spilled` |
 | `$Secure` | `security_descriptor_windows_oracle`, `security_id_must_exist` |
