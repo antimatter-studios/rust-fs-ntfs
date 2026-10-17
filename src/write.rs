@@ -5187,11 +5187,23 @@ fn link_unstamped_io<T: BlockIo + ?Sized>(
     const HARD_LINK_NAMESPACE: u8 = 0;
 
     // Step 1: append a new $FILE_NAME to the target record + bump
-    // hard_link_count.
-    update_mft_record_io(io, target_rec, |record| {
-        let attr_id = crate::attr_resize::allocate_attribute_id(record);
+    // hard_link_count. A file that carries an $ATTRIBUTE_LIST, or whose
+    // base record has no room for the name, takes it through the list,
+    // which is made if the file has none (#779).
+    let fn_len = crate::record_build::build_file_name_attribute(
+        0,
+        parent_reference,
+        new_basename,
+        nt_time,
+        /* is_dir */ false,
+    )?
+    .len();
+    let through_list = attr_io::find_attribute(&target_record_bytes, AttrType::AttributeList, None)
+        .is_some()
+        || !crate::attr_list::ListedFile::record_has_room(&target_record_bytes, fn_len);
+    if through_list {
         let mut fn_attr = crate::record_build::build_file_name_attribute(
-            attr_id,
+            0,
             parent_reference,
             new_basename,
             nt_time,
@@ -5199,11 +5211,29 @@ fn link_unstamped_io<T: BlockIo + ?Sized>(
         )?;
         // Resident value starts at 24; FILE_NAME's namespace is at +65.
         fn_attr[24 + 65] = HARD_LINK_NAMESPACE;
-        crate::attr_resize::insert_attribute_sorted(record, &fn_attr)?;
-        let cur = u16::from_le_bytes([record[0x12], record[0x13]]);
-        record[0x12..0x14].copy_from_slice(&cur.saturating_add(1).to_le_bytes());
-        Ok(())
-    })?;
+        let mut listed = crate::attr_list::ListedFile::open(io, target_rec)?;
+        if let Err(e) = listed.add_file_name(io, fn_attr) {
+            return Err(listed.abandon(io, e));
+        }
+        listed.commit(io)?;
+    } else {
+        update_mft_record_io(io, target_rec, |record| {
+            let attr_id = crate::attr_resize::allocate_attribute_id(record);
+            let mut fn_attr = crate::record_build::build_file_name_attribute(
+                attr_id,
+                parent_reference,
+                new_basename,
+                nt_time,
+                /* is_dir */ false,
+            )?;
+            // Resident value starts at 24; FILE_NAME's namespace is at +65.
+            fn_attr[24 + 65] = HARD_LINK_NAMESPACE;
+            crate::attr_resize::insert_attribute_sorted(record, &fn_attr)?;
+            let cur = u16::from_le_bytes([record[0x12], record[0x13]]);
+            record[0x12..0x14].copy_from_slice(&cur.saturating_add(1).to_le_bytes());
+            Ok(())
+        })?;
+    }
 
     // Step 2: insert index entry in new parent.
     let mut entry = index_io::build_file_name_index_entry(
@@ -5225,6 +5255,13 @@ fn link_unstamped_io<T: BlockIo + ?Sized>(
         // Roll back: remove the $FILE_NAME we added and decrement the
         // link count. Best-effort; mostly for tests since insertion
         // failures here would indicate a full directory.
+        if through_list {
+            let _ = crate::attr_list::ListedFile::open(io, target_rec).and_then(|mut listed| {
+                listed.remove_file_name(parent_reference, new_basename)?;
+                listed.commit(io)
+            });
+            return Err(e.context("link: insert index entry"));
+        }
         let _ = update_mft_record_io(io, target_rec, |record| {
             // Find the last $FILE_NAME matching new_basename+parent_ref
             // and strip it.
