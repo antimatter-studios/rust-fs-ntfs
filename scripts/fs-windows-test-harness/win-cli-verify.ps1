@@ -6,6 +6,10 @@
 # beside it, line by line, through ntfs.sys:
 #
 #   file<TAB>/path<TAB>size<TAB>sha256   Get-FileHash -Algorithm SHA256, and the length
+#   truncate<TAB>/path<TAB>old<TAB>size<TAB>intermediate
+#                                        Windows creates old bytes of Z, repeats the
+#                                        SetLength sequence and compares every byte
+#                                        by SHA-256, including every grown zero tail
 #   dir<TAB>/path                        a directory exists there
 #   label<TAB>text                       Get-Volume's FileSystemLabel
 #   name<TAB>/path                       the parent lists exactly one entry Windows
@@ -81,6 +85,27 @@ try {
                     $failures++
                 } else {
                     $report += "ok   file $($f[1]) ($length bytes)"
+                }
+            }
+            'truncate' {
+                $target = "${letter}:" + ($f[1] -replace '/', '\')
+                $reference = Join-Path $Diag 'truncate-windows-reference.bin'
+                $bytes = New-Object byte[] ([int]$f[2])
+                for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = 90 }
+                [System.IO.File]::WriteAllBytes($reference, $bytes)
+                $stream = [System.IO.File]::OpenWrite($reference)
+                try {
+                    if ($f.Count -gt 4 -and $f[4] -ne '') { $stream.SetLength([int64]$f[4]) }
+                    $stream.SetLength([int64]$f[3])
+                } finally { $stream.Dispose() }
+                $want = (Get-FileHash -LiteralPath $reference -Algorithm SHA256).Hash
+                $got = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+                $length = (Get-Item -LiteralPath $target -Force).Length
+                if ($length -ne [int64]$f[3] -or $got -ne $want) {
+                    $report += "FAIL truncate $($f[1]): $length bytes, SHA256 $got; Windows SetLength gives $($f[3]) bytes, SHA256 $want"
+                    $failures++
+                } else {
+                    $report += "ok   truncate $($f[1]): length and content match Windows SetLength"
                 }
             }
             'dir' {
