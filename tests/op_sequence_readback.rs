@@ -228,6 +228,39 @@ fn seeded_readback_boundary() {
 }
 
 #[test]
+fn committed_corpus_replays_every_seed() {
+    let corpus = Path::new("fuzz/corpus/operation_sequence");
+    for required in [
+        "basic-write-v1.json",
+        "namespace-v1.json",
+        "refusals-v1.json",
+    ] {
+        assert!(corpus.join(required).is_file(), "missing seed {required}");
+    }
+    let mut seeds: Vec<_> = fs::read_dir(corpus)
+        .expect("restore the committed operation corpus")
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == "json"))
+        .collect();
+    seeds.sort();
+    assert!(!seeds.is_empty(), "no operation sequences selected");
+    for (index, seed) in seeds.iter().enumerate() {
+        let operations = generator::decode_replay(&fs::read(seed).unwrap()).unwrap();
+        assert!(!operations.is_empty(), "empty seed {}", seed.display());
+        let mut h = harness::Harness::new(&format!("corpus-{index}"));
+        for operation in operations {
+            h.step(operation);
+        }
+        h.finish();
+    }
+    fs::write(
+        "tmp/op-sequence-model/corpus-executed.json",
+        serde_json::to_vec(&seeds).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
 fn generated_namespace_operations_and_refusals_survive_reopen() {
     let mut input = Vec::new();
     for (verb, target, parent, name, length, offset, data) in [
