@@ -3694,13 +3694,16 @@ fn place_listed_eas_io<T: BlockIo + ?Sized>(
                 if !was_nonresident && resident.len() <= file.max_attribute_len() {
                     resident
                 } else {
-                    listed_nonresident_attribute_io(
+                    let extents = listed_nonresident_attribute_io(
                         io,
                         file,
                         AttrType::ExtendedAttribute,
                         None,
                         &packed,
-                    )?
+                    )?;
+                    let exists = file.find(ty, "")?.is_some();
+                    place_listed_extents(io, file, ty, "", exists, extents)?;
+                    continue;
                 }
             }
             _ => crate::record_build::build_resident_ea_information_attribute(0, &info)?,
@@ -5720,8 +5723,8 @@ fn write_listed_named_stream_io<T: BlockIo + ?Sized>(
         None => (Vec::new(), false),
     };
     let resident = crate::record_build::build_named_resident_data_attribute(0, stream_name, data)?;
-    let attr = if !was_nonresident && resident.len() <= file.max_attribute_len() {
-        resident
+    let extents = if !was_nonresident && resident.len() <= file.max_attribute_len() {
+        vec![resident]
     } else {
         match listed_nonresident_attribute_io(
             io,
@@ -5730,14 +5733,18 @@ fn write_listed_named_stream_io<T: BlockIo + ?Sized>(
             Some(stream_name),
             data,
         ) {
-            Ok(attr) => attr,
+            Ok(extents) => extents,
             Err(e) => return Err(file.abandon(io, e)),
         }
     };
-    let placed = match found {
-        Some(_) => file.replace(io, AttrType::Data, stream_name, attr),
-        None => file.add(io, attr),
-    };
+    let placed = place_listed_extents(
+        io,
+        &mut file,
+        AttrType::Data,
+        stream_name,
+        found.is_some(),
+        extents,
+    );
     if let Err(e) = placed {
         return Err(file.abandon(io, e));
     }
@@ -5745,16 +5752,45 @@ fn write_listed_named_stream_io<T: BlockIo + ?Sized>(
     free_named_stream_runs_io(io, stream_name, "rewritten", old_runs)
 }
 
+/// Put `extents`, the pieces of the attribute `ty` named `name`, in the
+/// records of `file`: the first where the attribute is when it `exists`,
+/// else wherever [`crate::attr_list::ListedFile::add`] puts it, and each
+/// continuation in an extension record with its own list entry.
+fn place_listed_extents<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file: &mut crate::attr_list::ListedFile,
+    ty: AttrType,
+    name: &str,
+    exists: bool,
+    extents: Vec<Vec<u8>>,
+) -> Result<(), Error> {
+    let mut extents = extents.into_iter();
+    let first = extents
+        .next()
+        .ok_or(Error::io("an attribute with no extents"))?;
+    if exists {
+        file.replace(io, ty, name, first)?;
+    } else {
+        file.add(io, first)?;
+    }
+    for extent in extents {
+        file.add_extent(io, extent)?;
+    }
+    Ok(())
+}
+
 /// A non-resident attribute of type `ty` named `name` holding `data`, in
 /// clusters allocated and written here and counted among those `file`
-/// gives back if the change is abandoned.
+/// gives back if the change is abandoned. It comes back as extents with
+/// ascending starting VCNs: one when its mapping pairs fit an MFT record,
+/// else as many as it takes.
 fn listed_nonresident_attribute_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file: &mut crate::attr_list::ListedFile,
     ty: AttrType,
     name: Option<&str>,
     data: &[u8],
-) -> Result<Vec<u8>, Error> {
+) -> Result<Vec<Vec<u8>>, Error> {
     let params = *file.params();
     let size = data.len() as u64;
     let clusters = size.div_ceil(params.cluster_size).max(1);
@@ -5792,17 +5828,71 @@ fn listed_nonresident_attribute_io<T: BlockIo + ?Sized>(
         vcn += count;
     }
     io.sync()?;
-    let mapping = data_runs::encode_runs(&mapped)?;
-    crate::record_build::build_nonresident_attribute(
-        ty as u32,
-        name,
-        0,
-        size,
-        allocated,
-        size,
-        clusters as i64 - 1,
-        &mapping,
-    )
+    // A RUN LIST TOO LONG FOR ONE RECORD IS SPLIT INTO EXTENTS.
+    //
+    // Fragmented free space gives a stream a run per hole, and its mapping
+    // pairs outgrew the record that had to hold them, so the write was
+    // refused (#799). Windows splits such a run list into extents, each
+    // with its own lowest and highest VCN and its own list entry; only the
+    // first carries the stream's sizes, the others zero.
+    let name_units = name.map_or(0, |n| n.encode_utf16().count());
+    let room = file
+        .max_attribute_len()
+        .saturating_sub(crate::record_build::align8(64 + 2 * name_units));
+    let mut extents = Vec::new();
+    let mut start = 0usize;
+    while start < mapped.len() {
+        let lowest = mapped[start].starting_vcn;
+        let mut end = start + 1;
+        let mut mapping = encode_extent(&mapped[start..end], lowest)?;
+        if mapping.len() > room {
+            return Err(Error::no_space(format!(
+                "one run's mapping pairs take {} bytes, more than an MFT record of {} holds",
+                mapping.len(),
+                params.file_record_size
+            )));
+        }
+        while end < mapped.len() {
+            let longer = encode_extent(&mapped[start..=end], lowest)?;
+            if longer.len() > room {
+                break;
+            }
+            mapping = longer;
+            end += 1;
+        }
+        let highest = mapped[end - 1].starting_vcn + mapped[end - 1].length - 1;
+        let (data_len, alloc_len) = if start == 0 {
+            (size, allocated)
+        } else {
+            (0, 0)
+        };
+        let mut attr = crate::record_build::build_nonresident_attribute(
+            ty as u32,
+            name,
+            0,
+            data_len,
+            alloc_len,
+            data_len,
+            highest as i64,
+            &mapping,
+        )?;
+        attr[16..24].copy_from_slice(&lowest.to_le_bytes());
+        extents.push(attr);
+        start = end;
+    }
+    Ok(extents)
+}
+
+/// The mapping pairs of `runs`, an extent starting at VCN `lowest`.
+fn encode_extent(runs: &[DataRun], lowest: u64) -> Result<Vec<u8>, Error> {
+    let rebased: Vec<DataRun> = runs
+        .iter()
+        .map(|r| DataRun {
+            starting_vcn: r.starting_vcn - lowest,
+            ..*r
+        })
+        .collect();
+    data_runs::encode_runs(&rebased)
 }
 
 /// Enumerate the names of every *named* `$DATA` stream on a file
@@ -6589,15 +6679,15 @@ fn write_listed_unnamed_data_io<T: BlockIo + ?Sized>(
     let was_nonresident = !found.loc.is_resident;
     let resident =
         crate::record_build::build_resident_unnamed_attribute(AttrType::Data as u32, 0, data)?;
-    let attr = if !was_nonresident && resident.len() <= file.max_attribute_len() {
-        resident
+    let extents = if !was_nonresident && resident.len() <= file.max_attribute_len() {
+        vec![resident]
     } else {
         match listed_nonresident_attribute_io(io, &mut file, AttrType::Data, None, data) {
-            Ok(attr) => attr,
+            Ok(extents) => extents,
             Err(e) => return Err(file.abandon(io, e)),
         }
     };
-    if let Err(e) = file.replace(io, AttrType::Data, "", attr) {
+    if let Err(e) = place_listed_extents(io, &mut file, AttrType::Data, "", true, extents) {
         return Err(file.abandon(io, e));
     }
     file.commit(io)?;
