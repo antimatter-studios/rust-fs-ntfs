@@ -28,7 +28,21 @@ for fixture in ntfs-attrlist ntfs-stat; do
             'all(.[]; .resident == (.allocated < 4096))' "$SANDBOX/out"
         rows=$((rows + $(wc -l <"$SANDBOX/want")))
     done <"$SANDBOX/paths"
-    check "enumeration leaves $fixture byte-identical" cmp -s "$img" "$SANDBOX/before.img"
+    while IFS="$(printf '\t')" read -r item name size _allocated leaf; do
+        check "Windows captured the bytes for $fixture $item $name" test -f "$oracle.bytes/$leaf"
+        fs.ntfs "$img" read --stream "$name" "$item" >"$SANDBOX/read" 2>"$SANDBOX/err"
+        rc=$?
+        if [ "$item" = /dir ]; then
+            check "read keeps its directory refusal for named streams" test "$rc" -eq 1
+            check "directory refusal has no stdout" test ! -s "$SANDBOX/read"
+            jq_check "directory refusal names the reason" '.code == 1 and (.error|contains("is a directory"))' "$SANDBOX/err"
+        else
+            check "read selects Windows' $fixture $item $name" test "$rc" -eq 0
+            check "selected bytes equal Get-Content -Stream output" cmp -s "$oracle.bytes/$leaf" "$SANDBOX/read"
+            check "selected stream has Windows' length" test "$(wc -c <"$SANDBOX/read")" -eq "$size"
+        fi
+    done <"$oracle"
+    check "enumeration and reading leave $fixture byte-identical" cmp -s "$img" "$SANDBOX/before.img"
 done
 check "Windows captured all 102 named streams (got $rows)" test "$rows" -eq 102
 finish
