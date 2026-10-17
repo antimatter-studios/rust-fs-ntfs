@@ -992,6 +992,12 @@ pub enum CheckFinding {
     ClustersInUseMarkedFree { clusters: u64, first_lcn: u64 },
     /// `$Bitmap` could not be read, so no cluster was accounted for.
     BitmapUnreadable { reason: String },
+    /// The `$ATTRIBUTE_LIST` of this base record names a record that is not
+    /// one of the file's: one `$MFT`'s bitmap marks free, whose header is
+    /// not in use, whose sequence number is not the entry's, or whose base
+    /// reference names another file (#820). A reader following the list
+    /// reads another file's attributes, or none.
+    BadAttributeList { record: u64, reason: String },
 }
 
 /// What [`check_io`] read, and what it found.
