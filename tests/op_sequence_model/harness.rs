@@ -4,7 +4,7 @@ use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::{error::Error, facade::Filesystem, fsck, mkfs, read, write};
 use generator::{Generator, Geometry, Op, Regression, OPCODES};
-use model::Model;
+use model::{Ea, Model, NEED_EA};
 use ntfs::{NtfsAttributeType, NtfsFile, NtfsReadSeek};
 use shrink::Mismatch;
 use std::collections::BTreeMap;
@@ -52,6 +52,8 @@ pub struct Observed {
     bytes: Vec<u8>,
     /// Named `$DATA` streams by stored name, with their complete bytes.
     streams: Vec<(String, Vec<u8>)>,
+    /// Extended attributes by stored name, with flags and values (#732).
+    eas: Vec<Ea>,
 }
 
 fn join(parent: &str, name: &str) -> String {
@@ -105,6 +107,13 @@ fn compare(io: &mut PathIo, model: &impl Expected) -> BTreeMap<String, Observed>
         let mut wanted = model.tree().streams(&path).unwrap();
         wanted.sort();
         assert_eq!(streams, wanted, "named streams of {path}");
+        let mut eas: Vec<Ea> = write::list_eas_io(io, &path)
+            .expect("list modeled EAs")
+            .into_iter()
+            .map(|ea| (ea.name, ea.flags, ea.value))
+            .collect();
+        eas.sort();
+        assert_eq!(eas, model.tree().eas(&path).unwrap(), "EAs of {path}");
         let mut names = Vec::new();
         let mut bytes = Vec::new();
         if expected.directory {
@@ -151,6 +160,7 @@ fn compare(io: &mut PathIo, model: &impl Expected) -> BTreeMap<String, Observed>
                 names,
                 bytes,
                 streams,
+                eas,
             },
         );
     }
@@ -195,6 +205,106 @@ fn independent_streams(reader: &mut common::Reader, file: &NtfsFile) -> Vec<(Str
     streams
 }
 
+/// MS-FSCC 2.4.15 `FILE_FULL_EA_INFORMATION` entries, decoded here rather
+/// than by `ea_io` (#732): `NextEntryOffset` (u32), `Flags` (u8),
+/// `EaNameLength` (u8), `EaValueLength` (u16), the name and its NUL, then
+/// the value. Each entry starts four-byte aligned, the last has a zero
+/// offset, and nothing follows it but its padding.
+fn full_ea_information(bytes: &[u8]) -> Vec<Ea> {
+    let mut entries = Vec::new();
+    let mut at = 0;
+    loop {
+        let header = bytes
+            .get(at..at + 8)
+            .unwrap_or_else(|| panic!("EA entry at {at} runs past {} bytes", bytes.len()));
+        let next = u32::from_le_bytes(header[..4].try_into().unwrap()) as usize;
+        let name_end = at + 8 + usize::from(header[5]);
+        let end = name_end + 1 + usize::from(u16::from_le_bytes([header[6], header[7]]));
+        assert!(
+            end <= bytes.len(),
+            "EA entry at {at} ends at {end}, past {} bytes",
+            bytes.len()
+        );
+        let name = bytes[at + 8..name_end].to_vec();
+        assert!(!name.contains(&0), "EA name at {at} holds a NUL");
+        assert_eq!(bytes[name_end], 0, "EA name at {at} is not NUL-terminated");
+        entries.push((name, header[4], bytes[name_end + 1..end].to_vec()));
+        if next == 0 {
+            assert!(
+                bytes.len() <= end.next_multiple_of(4),
+                "{} bytes follow the last EA entry",
+                bytes.len() - end
+            );
+            return entries;
+        }
+        assert!(
+            next.is_multiple_of(4) && next >= end - at,
+            "EA entry at {at} has NextEntryOffset {next}"
+        );
+        at += next;
+    }
+}
+
+/// The EAs of `file`, from the raw `$EA` and `$EA_INFORMATION` values the
+/// upstream `ntfs` parser reads, following `$ATTRIBUTE_LIST`s and runs.
+/// `$EA_INFORMATION` must describe the decoded set, and a file with no EAs
+/// has neither attribute.
+fn independent_eas(reader: &mut common::Reader, file: &NtfsFile) -> Vec<Ea> {
+    let (mut ea, mut information) = (None, None);
+    let mut attributes = file.attributes();
+    while let Some(item) = attributes.next(reader) {
+        let item = item.unwrap();
+        let attribute = item.to_attribute().unwrap();
+        let slot = match attribute.ty().unwrap() {
+            NtfsAttributeType::EA => &mut ea,
+            NtfsAttributeType::EAInformation => &mut information,
+            _ => continue,
+        };
+        if slot.is_some() {
+            continue;
+        }
+        let mut value = attribute.value(reader).unwrap();
+        let mut bytes = Vec::new();
+        let mut chunk = [0; 4096];
+        loop {
+            match value.read(reader, &mut chunk).unwrap() {
+                0 => break,
+                n => bytes.extend_from_slice(&chunk[..n]),
+            }
+        }
+        *slot = Some(bytes);
+    }
+    let (ea, information) = match (ea, information) {
+        (None, None) => return Vec::new(),
+        (Some(ea), Some(information)) => (ea, information),
+        (ea, information) => panic!(
+            "$EA present: {}, $EA_INFORMATION present: {}",
+            ea.is_some(),
+            information.is_some()
+        ),
+    };
+    let mut entries = full_ea_information(&ea);
+    // EaPackedLength, NeedEaCount and EaQueryLength, from the entries.
+    let packed: usize = entries.iter().map(|(n, _, v)| 5 + n.len() + v.len()).sum();
+    let need = entries.iter().filter(|(_, f, _)| f & NEED_EA != 0).count();
+    let query: usize = entries
+        .iter()
+        .map(|(n, _, v)| (8 + n.len() + 1 + v.len()).next_multiple_of(4))
+        .sum();
+    assert_eq!(information.len(), 8, "$EA_INFORMATION length");
+    assert_eq!(
+        (
+            usize::from(u16::from_le_bytes([information[0], information[1]])),
+            usize::from(u16::from_le_bytes([information[2], information[3]])),
+            u32::from_le_bytes(information[4..8].try_into().unwrap()) as usize,
+        ),
+        (packed, need, query),
+        "$EA_INFORMATION against its $EA"
+    );
+    entries.sort();
+    entries
+}
+
 fn execute(io: &mut PathIo, op: &Op) -> Result<(), Error> {
     match op {
         Op::Create { parent, name } => write::create_file_io(io, parent, name).map(|_| ()),
@@ -221,9 +331,13 @@ fn execute(io: &mut PathIo, op: &Op) -> Result<(), Error> {
             write::write_named_stream_io(io, path, stream, data)
         }
         Op::DeleteStream { path, stream } => write::delete_named_stream_io(io, path, stream),
-        Op::WriteEa { .. } | Op::RemoveEa { .. } => {
-            unimplemented!("extended attributes reach the disk in #732")
-        }
+        Op::WriteEa {
+            path,
+            name,
+            flags,
+            value,
+        } => write::write_ea_io(io, path, name.as_bytes(), value, *flags),
+        Op::RemoveEa { path, name } => write::remove_ea_io(io, path, name.as_bytes()),
     }
 }
 
@@ -243,9 +357,12 @@ fn known_refusal(op: &Op, error: &Error) -> bool {
     // $ATTRIBUTE_LIST (#480), and the paths that add or drop a base-record
     // attribute, such as a name, refuse such a file (#468).
     let listed = error.kind() == Kind::Refused && error.contains("carries an $ATTRIBUTE_LIST");
-    // What `attr_list` documents it does not move to make room (#480).
-    let unmoved = matches!(op, Op::WriteStream { .. } | Op::DeleteStream { .. })
-        && error.kind() == Kind::Refused
+    // What `attr_list` documents it does not move to make room (#480),
+    // when a stream or an EA set goes through a file's list (#660).
+    let unmoved = matches!(
+        op,
+        Op::WriteStream { .. } | Op::DeleteStream { .. } | Op::WriteEa { .. } | Op::RemoveEa { .. }
+    ) && error.kind() == Kind::Refused
         && (error.contains("this driver does not move")
             || error.contains("is an attribute this driver moves"));
     capacity || listed || unmoved
@@ -449,6 +566,11 @@ impl<M: Expected> Harness<M> {
                 actual.streams,
                 "independent streams {path}"
             );
+            assert_eq!(
+                independent_eas(&mut reader, &file),
+                actual.eas,
+                "independent EAs {path}"
+            );
         }
         snapshot
     }
@@ -561,6 +683,32 @@ impl<M: Expected> Harness<M> {
                         &output.stdout, expected,
                         "ntfs-3g stream {stream} of {path}"
                     );
+                }
+                if !entry.eas.is_empty() {
+                    // The raw $EA, attribute type 0xE0, decoded as above.
+                    let output = std::process::Command::new("ntfscat")
+                        .args(["-a", "0xE0", &self.image, &path])
+                        .output()
+                        .expect("ntfscat missing: install ntfs-3g for test:op-sequence-oracle");
+                    let evidence = format!("ntfscat-{}-ea", entry.record);
+                    fs::write(
+                        self.artifacts.join(format!("{evidence}.bin")),
+                        &output.stdout,
+                    )
+                    .unwrap();
+                    fs::write(
+                        self.artifacts.join(format!("{evidence}.txt")),
+                        &output.stderr,
+                    )
+                    .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "ntfscat -a 0xE0 {path}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    let mut eas = full_ea_information(&output.stdout);
+                    eas.sort();
+                    assert_eq!(eas, entry.eas, "ntfs-3g EAs of {path}");
                 }
             }
             reference_tools(&self.image, &files, &self.artifacts);

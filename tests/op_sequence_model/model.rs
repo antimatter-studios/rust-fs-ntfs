@@ -11,6 +11,10 @@ type Streams = BTreeMap<Vec<u16>, (String, Vec<u8>)>;
 pub const NEED_EA: u8 = 0x80;
 /// One EA as a file holds it: stored name, flags and value (#732).
 pub type Ea = (Vec<u8>, u8, Vec<u8>);
+/// The most a file's EAs may pack to: `EaPackedLength` is a u16.
+pub const MAX_EA_SET: usize = u16::MAX as usize;
+/// EAs by stored, upper-cased name: flags and value.
+type Eas = BTreeMap<Vec<u8>, (u8, Vec<u8>)>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -39,6 +43,8 @@ struct Node {
     links: usize,
     /// A node's streams, not a name's: every hard link shares them (#731).
     streams: Streams,
+    /// Likewise a node's extended attributes (#732).
+    eas: Eas,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,6 +74,7 @@ impl Model {
             kind: Kind::Directory(BTreeMap::new()),
             links: 1,
             streams: Streams::new(),
+            eas: Eas::new(),
         };
         Ok(Self {
             nodes: BTreeMap::from([(0, root)]),
@@ -195,6 +202,7 @@ impl Model {
                 kind,
                 links: 1,
                 streams: Streams::new(),
+                eas: Eas::new(),
             },
         );
         self.next += 1;
@@ -308,26 +316,61 @@ impl Model {
             .collect())
     }
 
-    /// Create or replace the EA `name` of `path` (#732).
-    pub fn write_ea(
-        &mut self,
-        _path: &str,
-        _name: &[u8],
-        _flags: u8,
-        _value: &[u8],
-    ) -> Result<(), Error> {
-        let _refused_when_too_large = Error::EaSetTooLarge;
-        unimplemented!("extended attributes are modeled in #732")
+    /// A name a file's EA can have: 1 to 254 bytes, none of them the NUL
+    /// that ends a name on disk.
+    fn valid_ea_name(name: &[u8]) -> bool {
+        (1..=254).contains(&name.len()) && !name.contains(&0)
     }
 
-    /// Remove the EA `name` of `path` (#732).
-    pub fn remove_ea(&mut self, _path: &str, _name: &[u8]) -> Result<(), Error> {
-        unimplemented!("extended attributes are modeled in #732")
+    /// What a set adds up to in `$EA_INFORMATION`'s `EaPackedLength`: for
+    /// each entry its flags, name length, value length, name, the name's
+    /// NUL and value, without alignment.
+    fn packed(eas: &Eas) -> usize {
+        eas.iter()
+            .map(|(name, (_, value))| 5 + name.len() + value.len())
+            .sum()
+    }
+
+    /// Create or replace the EA `name` of `path` (#732). The name is
+    /// stored upper-cased, as `NtSetEaFile` stores it, so a name equal to
+    /// an existing one but for ASCII case replaces that entry, flags and
+    /// all. A directory holds EAs too.
+    pub fn write_ea(
+        &mut self,
+        path: &str,
+        name: &[u8],
+        flags: u8,
+        value: &[u8],
+    ) -> Result<(), Error> {
+        if !Self::valid_ea_name(name) {
+            return Err(Error::InvalidName);
+        }
+        let id = self.lookup(path)?;
+        let mut eas = self.nodes[&id].eas.clone();
+        eas.insert(name.to_ascii_uppercase(), (flags, value.to_vec()));
+        if Self::packed(&eas) > MAX_EA_SET {
+            return Err(Error::EaSetTooLarge);
+        }
+        self.nodes.get_mut(&id).unwrap().eas = eas;
+        Ok(())
+    }
+
+    /// Remove the EA `name` of `path`, matched as it was stored (#732).
+    pub fn remove_ea(&mut self, path: &str, name: &[u8]) -> Result<(), Error> {
+        let id = self.lookup(path)?;
+        let eas = &mut self.nodes.get_mut(&id).unwrap().eas;
+        eas.remove(&name.to_ascii_uppercase())
+            .map(|_| ())
+            .ok_or(Error::Missing)
     }
 
     /// The EAs of `path`, in stored-name order (#732).
-    pub fn eas(&self, _path: &str) -> Result<Vec<Ea>, Error> {
-        unimplemented!("extended attributes are modeled in #732")
+    pub fn eas(&self, path: &str) -> Result<Vec<Ea>, Error> {
+        Ok(self.nodes[&self.lookup(path)?]
+            .eas
+            .iter()
+            .map(|(name, (flags, value))| (name.clone(), *flags, value.clone()))
+            .collect())
     }
 
     /// Rename within a directory, matching the initial workload's API.

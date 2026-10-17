@@ -1,6 +1,6 @@
 //! Test-only operations and name-pool cases extracted from the preserved #484
 //! engine. Byte decoding and strict replay are independent of NTFS disk APIs.
-use super::model::{Error, Model};
+use super::model::{Error, Model, NEED_EA};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_STEPS: usize = 120;
@@ -348,6 +348,26 @@ fn stream_name(model: &Model, path: &str, selector: u8, step: usize) -> String {
     }
 }
 
+/// EA names (#732): byte strings, here ASCII, folded by ASCII case only.
+/// Name 12 is the target's first EA in lower case, so it matches the stored
+/// upper-case name only case-insensitively.
+fn ea_name(model: &Model, path: &str, selector: u8, step: usize) -> String {
+    const NAMES: &[&str] = &["a", "A", "user.x", "USER.X", "User.Y", "z", "ab", "AB", ""];
+    match selector % 14 {
+        n @ 0..=8 => NAMES[n as usize].into(),
+        9 => "n".repeat(254),
+        10 => "N".repeat(254),
+        11 => "n".repeat(255),
+        12 => model
+            .eas(path)
+            .ok()
+            .and_then(|e| e.into_iter().next())
+            .map(|(n, _, _)| String::from_utf8_lossy(&n).to_ascii_lowercase())
+            .unwrap_or_else(|| "a".into()),
+        _ => format!("ea{step}"),
+    }
+}
+
 pub struct Generator<'a> {
     remaining: &'a [u8],
     steps: usize,
@@ -360,7 +380,8 @@ impl<'a> Generator<'a> {
         }
     }
     /// Eight-byte, zero-padded header: verb, target, parent, name, LE u16
-    /// payload length/size, LE u16 offset. Only writes consume payload bytes.
+    /// payload length/size, LE u16 offset. Only writes, stream writes and
+    /// EA writes consume payload bytes.
     /// Every call consumes input; a partial header emits one final operation.
     pub fn next(&mut self, model: &Model) -> Option<Op> {
         if self.remaining.is_empty() || self.steps == MAX_STEPS {
@@ -371,7 +392,7 @@ impl<'a> Generator<'a> {
         h[..n].copy_from_slice(&self.remaining[..n]);
         self.remaining = &self.remaining[n..];
         self.steps += 1;
-        let verb = h[0] % 11;
+        let verb = h[0] % 13;
         let path = if verb >= 9 {
             stream_path(model, h[1])
         } else {
@@ -394,6 +415,25 @@ impl<'a> Generator<'a> {
             let len = (raw as usize % (MAX_DATA + 1)).min(self.remaining.len());
             data.extend_from_slice(&self.remaining[..len]);
             self.remaining = &self.remaining[len..];
+        }
+        if verb == 11 {
+            // An EA value reaches past 64 KiB from a bounded payload: the
+            // offset's low byte picks a size class for the length, payload
+            // short of that size repeats, and none fills a pattern (#732).
+            let size = usize::from(match h[6] % 4 {
+                0 => raw % 128,
+                1 => raw % 2048,
+                2 => raw % 16384,
+                _ => raw,
+            });
+            let len = size.min(MAX_DATA).min(self.remaining.len());
+            let payload = &self.remaining[..len];
+            self.remaining = &self.remaining[len..];
+            data = if payload.is_empty() {
+                (0..size).map(|i| (i % 251) as u8 + 1).collect()
+            } else {
+                payload.iter().copied().cycle().take(size).collect()
+            };
         }
         let offset =
             u32::from(u16::from_le_bytes([h[6], h[7]])) % (MAX_SIZE - data.len() as u32 + 1);
@@ -423,8 +463,18 @@ impl<'a> Generator<'a> {
                 path,
                 data,
             },
-            _ => Op::DeleteStream {
+            10 => Op::DeleteStream {
                 stream: stream_name(model, &path, h[3], self.steps),
+                path,
+            },
+            11 => Op::WriteEa {
+                name: ea_name(model, &path, h[3], self.steps),
+                flags: if h[2] & 1 != 0 { NEED_EA } else { 0 },
+                path,
+                value: data,
+            },
+            _ => Op::RemoveEa {
+                name: ea_name(model, &path, h[3], self.steps),
                 path,
             },
         })
