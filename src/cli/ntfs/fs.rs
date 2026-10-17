@@ -195,7 +195,14 @@ fn command() -> Cmd {
         )
         .subcommand(
             Cmd::new("write")
-                .about("Create or replace a file with the bytes on stdin")
+                .about("Create or replace a file, or patch an existing file with --at")
+                .arg(
+                    Arg::new("at")
+                        .long("at")
+                        .value_name("BYTES")
+                        .value_parser(value_parser!(u64))
+                        .help("Write stdin at this byte in an existing regular file, without truncating"),
+                )
                 .arg(
                     Arg::new("path")
                         .value_name("PATH")
@@ -205,8 +212,19 @@ fn command() -> Cmd {
                 .after_help(
                     "Examples:\n  fs.ntfs disk.img write /notes.txt < notes.txt\n  \
                      tar cf - ./dir | fs.ntfs disk.img write /backup.tar\n  \
-                     fs.ext4 src.img read /f | fs.ntfs dst.img write /f\n\n\
-                     The parent directory must exist. An existing file is replaced.",
+                     fs.ext4 src.img read /f | fs.ntfs dst.img write /f\n  \
+                     fs.ntfs disk.img write --at 4095 /notes.txt < patch.bin\n\n\
+                     Plain write creates or replaces; the parent must exist. With --at, \
+                     PATH must already be a regular file. Its prefix and suffix are kept; \
+                     a write past EOF grows the file and fills any gap with zeros. Empty \
+                     input changes nothing, even past EOF. Directories, missing files and \
+                     read-only files fail; symbolic links and other reparse points are \
+                     never followed (exit 3). Compressed, sparse or encrypted data the \
+                     driver cannot patch also answer exit 3. Input is read completely \
+                     before opening TARGET, and the edit is rehearsed before a writable \
+                     open, so predictable refusals leave the image unchanged. --at is a \
+                     byte position in the file; --offset remains the filesystem's position \
+                     in TARGET. Counts are unsigned decimal bytes without suffixes.",
                 ),
         )
         .subcommand(
@@ -484,7 +502,10 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
             super::inventory::run(&mut dev, sub)
         }
         "set" => set(target, offset, sub),
-        "write" => write(target, offset, path_arg(sub)?),
+        "write" => match sub.get_one::<u64>("at") {
+            Some(at) => write_at(target, offset, path_arg(sub)?, *at),
+            None => write(target, offset, path_arg(sub)?),
+        },
         "mkdir" if sub.get_flag("parents") => mkdir_parents(target, offset, path_arg(sub)?),
         "mkdir" => mkdir(target, offset, path_arg(sub)?),
         "truncate" => truncate(
@@ -1249,6 +1270,90 @@ fn write(target: &OsString, offset: u64, path: &str) -> Result<Outcome, CliError
         if created { "created" } else { "replaced" }
     );
     Ok(Outcome::report(report).with_text(text))
+}
+
+/// Patch an existing file through the driver's positional writer. Like
+/// Windows WriteFile, a nonempty write grows to its end with a zero gap;
+/// zero bytes neither extend nor truncate. All predictable failures are
+/// rehearsed, including mount preparation, before any writable open.
+fn write_at(target: &OsString, offset: u64, path: &str, at: u64) -> Result<Outcome, CliError> {
+    last_name(path)?;
+    let mut data = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut data)
+        .map_err(|e| CliError::failed(format!("read stdin: {e}")))?;
+    let (mut dev, info) = device::mount(target, offset, false)?;
+    let record = read::resolve_path(&mut dev, path).map_err(|e| ntfs_error(path, e))?;
+    let st = read::read_stat(&mut dev, record).map_err(|e| ntfs_error(path, e))?;
+    if st.file_attributes & 0x400 != 0
+        || read::read_attribute_value_if_present(&mut dev, record, AttrType::ReparsePoint, None)
+            .map_err(|e| ntfs_error(path, e))?
+            .is_some()
+    {
+        return Err(CliError::not_implemented(format!(
+            "{path}: write --at does not follow symbolic links or other reparse points"
+        )));
+    }
+    if st.is_dir || path.ends_with('/') {
+        return Err(CliError::failed(format!("{path}: not a regular file")));
+    }
+    if st.file_attributes & fs_ntfs::write::file_attr::READONLY != 0 {
+        return Err(CliError::failed(format!("{path}: file is read-only")));
+    }
+    let (_, record_bytes) =
+        fs_ntfs::mft_io::read_mft_record_io(&mut dev, record).map_err(|e| ntfs_error(path, e))?;
+    let attr = attr_io::find_attribute(&record_bytes, AttrType::Data, None).ok_or_else(|| {
+        CliError::not_implemented(format!(
+            "{path}: no unnamed $DATA in the base record to patch"
+        ))
+    })?;
+    let flags = attr_io::attribute_flags(&record_bytes, &attr)
+        .ok_or_else(|| CliError::failed(format!("{path}: truncated $DATA flags")))?;
+    if flags & attr_io::attr_flags::TRANSFORMED != 0 {
+        return Err(CliError::not_implemented(format!(
+            "{path}: write --at cannot patch {} data",
+            attr_io::describe_transform_flags(flags)
+        )));
+    }
+    let bytes = data.len() as u64;
+    let size = if data.is_empty() {
+        st.size
+    } else {
+        st.size.max(at.checked_add(bytes).ok_or_else(|| {
+            CliError::failed(format!("{path}: position plus input length overflows"))
+        })?)
+    };
+    if size > info.total_size {
+        return Err(CliError::failed(format!(
+            "{path}: no space for {size} bytes on this volume"
+        )));
+    }
+    let mut rehearsal = device::Rehearsal::over(&mut dev);
+    prepared(&mut rehearsal, path, |_| Ok(()))?;
+    if data.is_empty() {
+        // write_at_io's empty fast path bypasses its metafile guard. A
+        // same-size truncate rehearses that policy without touching disk.
+        fs_ntfs::write::truncate_io(&mut rehearsal, path, st.size)
+            .map_err(|e| ntfs_error(path, e))?;
+    } else {
+        fs_ntfs::write::write_at_io(&mut rehearsal, path, at, &data).map_err(|e| {
+            if e.contains("exceed attr capacity") {
+                CliError::not_implemented(format!("{path}: {e}"))
+            } else {
+                ntfs_error(path, e)
+            }
+        })?;
+        edit(target, offset, path, |io| {
+            fs_ntfs::write::write_at_io(io, path, at, &data)
+        })?;
+    }
+    let report = Json::object([
+        ("path", Json::from(path)),
+        ("at", Json::from(at)),
+        ("bytes", Json::from(bytes)),
+        ("size", Json::from(size)),
+    ]);
+    Ok(Outcome::report(report)
+        .with_text(format!("{path}: wrote {bytes} bytes at {at}, size {size}")))
 }
 
 /// Rehearse the complete resize over a read-only open, including mount
