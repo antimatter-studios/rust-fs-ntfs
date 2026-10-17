@@ -50,4 +50,10 @@ check "fs.ntfs's zsh completion carries mkdir --parents" grep -q -- '--parents' 
 check "fs.ntfs's bash completion carries mkdir --parents" grep -q -- '--parents' "${share:-/nonexistent}/bash-completion/completions/fs.ntfs"
 check "fs.ntfs's fish completion carries mkdir --parents" grep -q -- '-l parents' "${share:-/nonexistent}/fish/vendor_completions.d/fs.ntfs.fish"
 
+check "fs.ntfs write's man page carries --at" \
+    grep -qE -- '(\\-\\-|--)at' "${share:-/nonexistent}/man/man1/fs.ntfs-write.1"
+check "fs.ntfs's zsh completion carries write --at" grep -q -- '--at' "${share:-/nonexistent}/zsh/site-functions/_fs.ntfs"
+check "fs.ntfs's bash completion carries write --at" grep -q -- '--at' "${share:-/nonexistent}/bash-completion/completions/fs.ntfs"
+check "fs.ntfs's fish completion carries write --at" grep -q -- '-l at' "${share:-/nonexistent}/fish/vendor_completions.d/fs.ntfs.fish"
+
 finish
