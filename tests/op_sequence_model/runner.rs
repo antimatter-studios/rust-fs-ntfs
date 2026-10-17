@@ -82,10 +82,11 @@ pub fn fuzz_input(input: &[u8]) {
     h.finish();
     // Keep totals across completed inputs as well as the current prefix's
     // per-opcode accepted/refused counts when a later input crashes.
-    type Counts = ([usize; 9], [usize; 9]);
-    static TOTALS: std::sync::Mutex<Counts> = std::sync::Mutex::new(([0; 9], [0; 9]));
+    use generator::OPCODES;
+    static TOTALS: std::sync::Mutex<harness::Counts> =
+        std::sync::Mutex::new(([0; OPCODES], [0; OPCODES]));
     let mut totals = TOTALS.lock().unwrap();
-    for kind in 0..9 {
+    for kind in 0..OPCODES {
         totals.0[kind] += h.counts.0[kind];
         totals.1[kind] += h.counts.1[kind];
     }

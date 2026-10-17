@@ -186,6 +186,14 @@ fn simpler(op: &Op) -> Vec<Op> {
                 size: s as u32,
             })
             .collect(),
+        Op::WriteStream { path, stream, data } => smaller(data.len())
+            .into_iter()
+            .map(|n| Op::WriteStream {
+                path: path.clone(),
+                stream: stream.clone(),
+                data: data[..n].to_vec(),
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }

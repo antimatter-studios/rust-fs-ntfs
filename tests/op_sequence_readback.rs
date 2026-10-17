@@ -270,8 +270,17 @@ fn generated_namespace_operations_and_refusals_survive_reopen() {
     }
     let mut h = harness::Harness::new("generated");
     let counts = h.generated(&input);
-    assert!(counts.0.iter().all(|n| *n > 0), "accepted: {:?}", counts.0);
-    assert!(counts.1.iter().all(|n| *n > 0), "refused: {:?}", counts.1);
+    // The nine namespace and data opcodes; streams have their own case.
+    assert!(
+        counts.0[..9].iter().all(|n| *n > 0),
+        "accepted: {:?}",
+        counts.0
+    );
+    assert!(
+        counts.1[..9].iter().all(|n| *n > 0),
+        "refused: {:?}",
+        counts.1
+    );
     assert_eq!(h.model.read("/é").unwrap().len(), 9000);
     assert_eq!(h.model.stat("/é").unwrap().links, 1);
     h.finish();
@@ -312,6 +321,85 @@ fn replay_checks_nested_state_and_refusal_atomicity() {
     h.step(Op::Rmdir {
         path: "/moved".into(),
     });
+    h.finish();
+}
+
+/// Named streams (#731): `$UpCase` collisions, hard-link sharing, a stream
+/// past the resident limit and atomic refusals, through every reopen.
+#[test]
+fn generated_streams_and_refusals_survive_reopen() {
+    use generator::Op;
+    let mut operations = generator::decode_replay(
+        r#"{"version":1,"operations":[
+        {"op":"create","parent":"/","name":"a"},
+        {"op":"write","path":"/a","data":[1,2,3]},
+        {"op":"write_stream","path":"/a","stream":"s","data":[10,11]},
+        {"op":"write_stream","path":"/a","stream":"S","data":[12]},
+        {"op":"write_stream","path":"/a","stream":"σ","data":[]},
+        {"op":"write_stream","path":"/a","stream":"Σ","data":[5,6]},
+        {"op":"mkdir","parent":"/","name":"d"},
+        {"op":"link","path":"/a","parent":"/d","name":"é"},
+        {"op":"delete_stream","path":"/d/é","stream":"S"},
+        {"op":"delete_stream","path":"/a","stream":"s"},
+        {"op":"delete_stream","path":"/a","stream":""},
+        {"op":"write_stream","path":"/a","stream":"a:b","data":[1]},
+        {"op":"write_stream","path":"/a","stream":"x.","data":[1]},
+        {"op":"write_stream","path":"/a","stream":"","data":[1]},
+        {"op":"write_stream","path":"/missing","stream":"s","data":[1]},
+        {"op":"write_stream","path":"/a/x","stream":"s","data":[1]},
+        {"op":"write_at","path":"/a","offset":3,"data":[4]}
+    ]}"#
+        .as_bytes(),
+    )
+    .unwrap();
+    // Larger than a 1024-byte record can hold resident.
+    let big: Vec<u8> = (0..3000).map(|i| (i % 253) as u8 + 1).collect();
+    operations.push(Op::WriteStream {
+        path: "/a".into(),
+        stream: "big".into(),
+        data: big.clone(),
+    });
+    let mut h = harness::Harness::new("streams");
+    for op in operations {
+        h.step(op);
+    }
+    // Under the volume's $UpCase, S is s and Σ is σ: one stream each,
+    // spelled as first written, shared by both names of the file.
+    let expected = vec![("big".to_string(), big), ("σ".to_string(), vec![5, 6])];
+    assert_eq!(h.model.streams("/a").unwrap(), expected);
+    assert_eq!(h.model.streams("/d/é").unwrap(), expected);
+    assert_eq!(h.model.read("/a").unwrap(), &[1, 2, 3, 4]);
+    let (accepted, refused) = h.counts;
+    assert_eq!((accepted[9], refused[9]), (5, 5), "stream writes");
+    assert_eq!((accepted[10], refused[10]), (1, 2), "stream deletes");
+
+    // The same opcodes from raw generator bytes: a fresh stream on /a,
+    // then the deletion of its first stream, then refusals on a missing
+    // path and on a file used as a directory.
+    let mut input = Vec::new();
+    for (verb, target, name, length, data) in [
+        (9, 2, 20, 2u16, vec![7, 8]),
+        (10, 2, 19, 0, vec![]),
+        (9, 0, 0, 1, vec![9]),
+        (10, 1, 0, 0, vec![]),
+    ] {
+        input.extend([verb, target, 2, name]);
+        input.extend(length.to_le_bytes());
+        input.extend([0, 0]);
+        input.extend(data);
+    }
+    let counts = h.generated(&input);
+    assert_eq!(
+        (counts.0[9], counts.1[9]),
+        (1, 1),
+        "generated stream writes"
+    );
+    assert_eq!(
+        (counts.0[10], counts.1[10]),
+        (1, 1),
+        "generated stream deletes"
+    );
+    assert!(h.model.streams("/a").unwrap().len() == 2);
     h.finish();
 }
 
