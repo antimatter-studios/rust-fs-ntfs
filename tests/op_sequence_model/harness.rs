@@ -5,6 +5,7 @@ use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::{error::Error, facade::Filesystem, fsck, mkfs, read, write};
 use generator::{Generator, Geometry, Op, Regression, OPCODES};
 use model::Model;
+use ntfs::{NtfsAttributeType, NtfsFile, NtfsReadSeek};
 use shrink::Mismatch;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -49,6 +50,8 @@ pub struct Observed {
     stat: read::Stat,
     names: Vec<(String, u64, bool)>,
     bytes: Vec<u8>,
+    /// Named `$DATA` streams by stored name, with their complete bytes.
+    streams: Vec<(String, Vec<u8>)>,
 }
 
 fn join(parent: &str, name: &str) -> String {
@@ -89,6 +92,19 @@ fn compare(io: &mut PathIo, model: &impl Expected) -> BTreeMap<String, Observed>
             expected.links,
             "links of {path}"
         );
+        let mut streams: Vec<_> = write::list_named_streams_io(io, &path)
+            .expect("list modeled streams")
+            .into_iter()
+            .map(|name| {
+                let bytes = read::read_attribute_value(io, record, AttrType::Data, Some(&name))
+                    .expect("named stream contents");
+                (name, bytes)
+            })
+            .collect();
+        streams.sort();
+        let mut wanted = model.tree().streams(&path).unwrap();
+        wanted.sort();
+        assert_eq!(streams, wanted, "named streams of {path}");
         let mut names = Vec::new();
         let mut bytes = Vec::new();
         if expected.directory {
@@ -134,10 +150,49 @@ fn compare(io: &mut PathIo, model: &impl Expected) -> BTreeMap<String, Observed>
                 stat,
                 names,
                 bytes,
+                streams,
             },
         );
     }
     snapshot
+}
+
+/// Every named `$DATA` stream of `file` with its complete bytes, as the
+/// upstream `ntfs` parser reads them. A stream split across extension
+/// records is one stream; the parser follows the `$ATTRIBUTE_LIST`.
+fn independent_streams(reader: &mut common::Reader, file: &NtfsFile) -> Vec<(String, Vec<u8>)> {
+    let mut names = Vec::new();
+    let mut attributes = file.attributes();
+    while let Some(item) = attributes.next(reader) {
+        let item = item.unwrap();
+        let attribute = item.to_attribute().unwrap();
+        let name = attribute.name().unwrap().to_string_lossy();
+        if attribute.ty().unwrap() == NtfsAttributeType::Data
+            && !name.is_empty()
+            && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    }
+    let mut streams: Vec<_> = names
+        .into_iter()
+        .map(|name| {
+            let item = file.data(reader, &name).unwrap().unwrap();
+            let attribute = item.to_attribute().unwrap();
+            let mut value = attribute.value(reader).unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0; 4096];
+            loop {
+                match value.read(reader, &mut chunk).unwrap() {
+                    0 => break,
+                    n => bytes.extend_from_slice(&chunk[..n]),
+                }
+            }
+            (name, bytes)
+        })
+        .collect();
+    streams.sort();
+    streams
 }
 
 fn execute(io: &mut PathIo, op: &Op) -> Result<(), Error> {
@@ -162,19 +217,35 @@ fn execute(io: &mut PathIo, op: &Op) -> Result<(), Error> {
         Op::Unlink { path } => write::unlink_io(io, path),
         Op::Rmdir { path } => write::rmdir_io(io, path),
         Op::Link { path, parent, name } => write::link_io(io, path, parent, name),
-        Op::WriteStream { .. } | Op::DeleteStream { .. } => {
-            unimplemented!("named streams reach the disk in #731")
+        Op::WriteStream { path, stream, data } => {
+            write::write_named_stream_io(io, path, stream, data)
         }
+        Op::DeleteStream { path, stream } => write::delete_named_stream_io(io, path, stream),
     }
 }
 
+/// Refusals the model does not predict, because they depend on where the
+/// driver put a file's attributes, which the model never knows. Each is a
+/// documented driver limit, and every one must still leave the volume
+/// exactly as it was.
 fn known_refusal(op: &Op, error: &Error) -> bool {
+    use fs_ntfs::error::Kind;
     // The original four-seed gate documents W2.1's bounded mapping capacity.
-    matches!(
+    let capacity = matches!(
         op,
         Op::Write { .. } | Op::WriteAt { .. } | Op::Truncate { .. }
-    ) && error.kind() == fs_ntfs::error::Kind::Io
-        && error.contains("exceed attr capacity")
+    ) && error.kind() == Kind::Io
+        && error.contains("exceed attr capacity");
+    // A stream its base record cannot hold gives the file an
+    // $ATTRIBUTE_LIST (#480), and the paths that add or drop a base-record
+    // attribute, such as a name, refuse such a file (#468).
+    let listed = error.kind() == Kind::Refused && error.contains("carries an $ATTRIBUTE_LIST");
+    // What `attr_list` documents it does not move to make room (#480).
+    let unmoved = matches!(op, Op::WriteStream { .. } | Op::DeleteStream { .. })
+        && error.kind() == Kind::Refused
+        && (error.contains("this driver does not move")
+            || error.contains("is an attribute this driver moves"));
+    capacity || listed || unmoved
 }
 
 /// Accepted then refused operations, one slot per opcode.
@@ -370,6 +441,11 @@ impl<M: Expected> Harness<M> {
                     "independent size {path}"
                 );
             }
+            assert_eq!(
+                independent_streams(&mut reader, &file),
+                actual.streams,
+                "independent streams {path}"
+            );
         }
         snapshot
     }
@@ -455,7 +531,33 @@ impl<M: Expected> Harness<M> {
                         "ntfs-3g names {path}"
                     );
                 } else {
-                    files.insert(path, entry.bytes);
+                    files.insert(path.clone(), entry.bytes);
+                }
+                for (index, (stream, expected)) in entry.streams.iter().enumerate() {
+                    let output = std::process::Command::new("ntfscat")
+                        .args(["-n", stream, &self.image, &path])
+                        .output()
+                        .expect("ntfscat missing: install ntfs-3g for test:op-sequence-oracle");
+                    let evidence = format!("ntfscat-{}-stream-{index}", entry.record);
+                    fs::write(
+                        self.artifacts.join(format!("{evidence}.bin")),
+                        &output.stdout,
+                    )
+                    .unwrap();
+                    fs::write(
+                        self.artifacts.join(format!("{evidence}.txt")),
+                        &output.stderr,
+                    )
+                    .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "ntfscat -n {stream} {path}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    assert_eq!(
+                        &output.stdout, expected,
+                        "ntfs-3g stream {stream} of {path}"
+                    );
                 }
             }
             reference_tools(&self.image, &files, &self.artifacts);
