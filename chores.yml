@@ -595,8 +595,11 @@ tasks:
     # and test-docs.sh's 4 for --parents in the man page and completions;
     # that floor was 845. #655 adds 130: test-truncate.sh's 128 checks on
     # its passing path and the two test-docs.sh makes of the new verb;
-    # the derived floor was 975. Run 39704704635, CLI job 119587365786,
-    # passed all 12 files and measured 1093 checks; that is the new floor.
+    # the derived floor was 975. #656 adds 168: test-write-at.sh's 164
+    # checks and four generated-doc checks for --at; the derived floor
+    # was 1143. Run 39704704635 measured 1093 checks before positioned
+    # writes; run 39704708480, CLI job 119588831285, passed all 13 files
+    # and measured 1261 checks. That measured count is the new floor.
     # The retained CLI log and output measurement are in tier-budgets.txt.
     # Suites run on GitHub Actions.
     cmds:
@@ -634,10 +637,11 @@ tasks:
     # cli:install builds. FLOOR: the 20 cli scenarios when the tier was added;
     # 25 with the three format-plan scenarios (#698); 26 with the rename
     # scenario (#645); 27 with the link scenario (#646); 28 with the
-    # mkdir --parents scenario (#647); 29 with truncate (#655).
+    # mkdir --parents scenario (#647); 29 with truncate (#655);
+    # 30 with positioned writes (#656).
     deps: [cli:install]
     cmds:
-      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-host -- python3 scripts/fs-windows-test-harness/run-host-steps --group cli --floor 29'
+      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-host -- python3 scripts/fs-windows-test-harness/run-host-steps --group cli --floor 30'
 
   test:ignored:
     desc: 'The #[ignore]d tests: known defects, run so a fix cannot go unnoticed'
