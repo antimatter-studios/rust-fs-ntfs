@@ -323,6 +323,57 @@ pub fn find_free_run_io<T: BlockIo + ?Sized>(
     Ok(None)
 }
 
+/// Free clusters enough for `n_clusters`, as `(lcn, count)` runs in the
+/// order a scan from `hint_lcn` meets them, wrapping round: for a stream
+/// that no one free run holds, which Windows places in as many runs as it
+/// takes (#798). The last run is cut to what is still needed. `None` when
+/// the volume has fewer free clusters than that.
+pub fn find_free_runs_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    bm: &BitmapLocation,
+    n_clusters: u64,
+    hint_lcn: u64,
+) -> Result<Option<Vec<(u64, u64)>>, Error> {
+    if n_clusters == 0 {
+        return Err(Error::io("n_clusters = 0"));
+    }
+    const CHUNK: u64 = 64 * 1024;
+    let total = bm.total_bits;
+    let hint = hint_lcn.min(total);
+    let mut runs: Vec<(u64, u64)> = Vec::new();
+    let mut need = n_clusters;
+    for (begin, finish) in [(hint, total), (0, hint)] {
+        let mut run: Option<(u64, u64)> = None;
+        let mut lcn = begin;
+        while lcn < finish {
+            let end_bit = (lcn + CHUNK).min(finish);
+            let first_byte = lcn / 8;
+            let bytes = read_bitmap_bytes_io(io, bm, first_byte, end_bit.div_ceil(8) - first_byte)?;
+            for cursor in lcn..end_bit {
+                let bit = cursor - first_byte * 8;
+                if bit_is_set(bytes[(bit / 8) as usize], (bit % 8) as u8) {
+                    if let Some(r) = run.take() {
+                        runs.push(r);
+                    }
+                    continue;
+                }
+                let r = run.get_or_insert((cursor, 0));
+                r.1 += 1;
+                need -= 1;
+                if need == 0 {
+                    runs.push(*r);
+                    return Ok(Some(runs));
+                }
+            }
+            lcn = end_bit;
+        }
+        if let Some(r) = run.take() {
+            runs.push(r);
+        }
+    }
+    Ok(None)
+}
+
 /// Flip the bits for `[lcn..lcn+n)` to 1 (allocated). Fails if any bit
 /// in the range is already 1.
 pub fn allocate(image: &Path, bm: &BitmapLocation, lcn: u64, n: u64) -> Result<(), Error> {
