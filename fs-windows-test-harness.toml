@@ -430,6 +430,23 @@ host = "host"
 command = "bash scripts/cli-oracle.sh replay {image_dir}/{run_id}/{scenario.image} {step.snapshot}"
 expect_exit = 0
 
+[ops.cli-replay-lsn]
+# The same volume, replayed by fsck.ntfs -y as cli-replay does, with the
+# highest LSN the replay left in its MFT records and index blocks written to
+# <image>.lsns for lsn-after-windows (#649, #761).
+host = "host"
+command = "bash scripts/cli-oracle.sh replay-lsn {image_dir}/{run_id}/{scenario.image} {step.snapshot}"
+expect_exit = 0
+
+[ops.cli-lsn-after-windows]
+# The replayed volume back from Windows, which mounted it and wrote: every
+# restart area Windows wrote must name a current LSN past the highest the
+# replay left on the volume, or Windows' own redo would skip its records
+# for those blocks after its next unclean shutdown (#649, #761).
+host = "host"
+command = "bash scripts/cli-oracle.sh lsn-after-windows {image_dir}/{run_id}/{scenario.image}"
+expect_exit = 0
+
 [ops.cli-replay-stopped]
 # The same volume, whose replay a power cut stops right after its first
 # undo write (#754): the log still holds work, for Windows' own restart to
