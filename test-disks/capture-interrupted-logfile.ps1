@@ -67,6 +67,18 @@
 #                               segment is rewritten over and over, the
 #                               shape behind WriteEndOfFileRecordSegment,
 #                               which neither other mix produced (#764).
+#   -Mix freed                  the files mix with every directory
+#                               compressed and every file non-resident
+#                               across several compression units. Even
+#                               files have a range overwritten with
+#                               incompressible bytes, flushed, then
+#                               rewritten compressible and left dirty;
+#                               odd files are made sparse and have a range
+#                               zeroed straight after it was written. Both
+#                               free clusters while the stream's pages are
+#                               still dirty, the shape behind
+#                               DeleteDirtyClusters, which no other mix
+#                               produced (#769).
 #
 # Run elevated on Windows (GitHub's windows-latest is). Windows PowerShell 5.1
 # or PowerShell 7.
@@ -77,7 +89,7 @@ param(
     [int]$ClusterSize = 4096,
     [int]$Writers = 1,
     [int]$LogKB = 0,
-    [ValidateSet('files', 'views', 'tails')]
+    [ValidateSet('files', 'views', 'tails', 'freed')]
     [string]$Mix = 'files',
     [switch]$CheckpointProbe,
     [string]$Out = 'logfile-oracle'
@@ -196,7 +208,14 @@ $n = 0
 while ((Get-Date) -lt $end) {
     $i = $n * $Writers + $Writer
     $dir = Join-Path $Vol ('d{0:D3}' -f ($i % 64))
+    $fresh = -not [System.IO.Directory]::Exists($dir)
     [System.IO.Directory]::CreateDirectory($dir) | Out-Null
+    if ($Mix -eq 'freed' -and $fresh) {
+        # Files created in a compressed directory are compressed. Two
+        # writers may both find it new; compressing it twice is harmless.
+        $c = & compact.exe /c /q $dir 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "compact /c $dir failed ($LASTEXITCODE): $c" }
+    }
     $file = Join-Path $dir ('f{0:D7}.bin' -f $i)
     # Each file's bytes are its own index, repeated: distinct per file, so
     # the manifest's hashes tell every file apart, and compressible, so a
@@ -205,6 +224,8 @@ while ((Get-Date) -lt $end) {
     $len = $rng.Next(1, 32768)
     # Small enough that $DATA stays resident in a 1 KiB record.
     if ($Mix -eq 'tails') { $len = $rng.Next(1, 600) }
+    # Several 16-cluster compression units at every cluster size.
+    if ($Mix -eq 'freed') { $len = $rng.Next(4 * 16 * 4096, 12 * 16 * 4096) }
     $buf = New-Object byte[] $len
     for ($j = 0; $j -lt $len; $j++) { $buf[$j] = $unit[$j % $unit.Length] }
     [System.IO.File]::WriteAllBytes($file, $buf)
@@ -221,6 +242,35 @@ while ((Get-Date) -lt $end) {
             } finally { $fs.Dispose() }
             Set-Content -LiteralPath $file -Stream 'tail' -Value ('{0:D7}' -f $i)
             Remove-Item -LiteralPath $file -Stream 'tail'
+        }
+    }
+    if ($Mix -eq 'freed') {
+        # The range is whole compression units (64 KiB at 4 KiB clusters,
+        # and a multiple of the unit at smaller ones) past the first.
+        $unitBytes = 16 * 4096
+        $off = $unitBytes * $rng.Next(1, [int][Math]::Floor($len / $unitBytes))
+        $cnt = [Math]::Min($unitBytes * $rng.Next(1, 3), $len - $off)
+        if ($i % 2 -eq 0) {
+            # Incompressible bytes take every cluster of their units; once
+            # they are on disk, the pattern written back over them needs
+            # fewer, and those are freed when the dirty pages are written.
+            $noise = New-Object byte[] $cnt
+            $rng.NextBytes($noise)
+            $fs = [System.IO.File]::Open($file, 'Open', 'Write')
+            try {
+                $fs.Position = $off
+                $fs.Write($noise, 0, $cnt)
+                $fs.Flush($true)
+                $fs.Position = $off
+                $fs.Write($buf, $off, $cnt)
+            } finally { $fs.Dispose() }
+        } else {
+            # Zeroing a sparse file's range deallocates its clusters, which
+            # were written a moment ago and are still dirty in the cache.
+            $o = & fsutil.exe sparse setflag $file 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "fsutil sparse setflag $file failed: $o" }
+            $o = & fsutil.exe sparse setrange $file $off $cnt 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "fsutil sparse setrange $file failed: $o" }
         }
     }
     if ($Mix -eq 'views') {
