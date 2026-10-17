@@ -2490,8 +2490,9 @@ fn a_dry_run_plans_the_writes_that_reach_what_windows_recovered_and_makes_none()
 
         // The dry run, on a source it may not write to, exits as -n does,
         // reports those writes, and leaves the file as it was.
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let mut readonly = std::fs::metadata(&src).unwrap().permissions();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&src, readonly).unwrap();
         let out = Command::new(env!("CARGO_BIN_EXE_rust-fs-ntfs"))
             .args(["fsck", "--dry-run", &src])
             .output()
@@ -2536,6 +2537,11 @@ fn a_dry_run_plans_the_writes_that_reach_what_windows_recovered_and_makes_none()
             std::fs::read(&src).unwrap() == pristine,
             "{k}: fsck.ntfs --dry-run wrote to the source"
         );
+        // Windows refuses to delete a read-only file.
+        let mut writable = std::fs::metadata(&src).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        writable.set_readonly(false);
+        std::fs::set_permissions(&src, writable).unwrap();
         std::fs::remove_file(&src).unwrap();
     }
 }
