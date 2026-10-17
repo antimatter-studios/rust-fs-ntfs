@@ -5254,7 +5254,7 @@ fn link_unstamped_io<T: BlockIo + ?Sized>(
 /// Find the `$FILE_NAME` attribute whose parent_reference + name match
 /// the given pair. Used to unwind a partial `link` or to remove a
 /// specific hardlink. Returns the attribute location or `None`.
-fn find_file_name_attr(
+pub(crate) fn find_file_name_attr(
     record: &[u8],
     parent_reference: u64,
     name: &str,
@@ -7736,16 +7736,24 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
     // orphaned, chkdsk-flagged inconsistency). On the happy path this is a
     // pure read; on-disk behaviour is unchanged.
     let hard_link_count = u16::from_le_bytes([file_record_bytes[0x12], file_record_bytes[0x13]]);
-    // Dropping one of several names removes its $FILE_NAME attribute, and
-    // on a record that carries an $ATTRIBUTE_LIST the list would go on
-    // naming the attribute removed (#468), so that is refused before the
-    // parent's index entry goes.
-    if hard_link_count > 1 {
-        crate::attr_resize::refuse_if_attribute_list(&file_record_bytes, "unlink a hard link")?;
-    }
     let parent_seq = crate::mft_io::record_sequence(&parent_record_bytes);
     let parent_reference = crate::record_build::encode_file_reference(parent_rec, parent_seq);
+    // Dropping one of several names of a file that carries an
+    // $ATTRIBUTE_LIST takes the $FILE_NAME out of whichever record holds
+    // it, with its list entry (#778). It is planned in memory now, so a
+    // name or a list this cannot follow refuses the unlink before the
+    // parent's index entry goes.
+    let listed = if hard_link_count > 1
+        && attr_io::find_attribute(&file_record_bytes, AttrType::AttributeList, None).is_some()
+    {
+        let mut listed = crate::attr_list::ListedFile::open(io, file_rec)?;
+        listed.remove_file_name(parent_reference, basename)?;
+        Some(listed)
+    } else {
+        None
+    };
     if hard_link_count > 1
+        && listed.is_none()
         && find_file_name_attr(&file_record_bytes, parent_reference, basename).is_none()
     {
         return Err(Error::io(format!(
@@ -7787,6 +7795,9 @@ fn remove_file_record_io<T: BlockIo + ?Sized>(
     //     freed only when the LAST link goes away (the count==1 path below).
     //     `hard_link_count` / `parent_reference` were computed (and the
     //     $FILE_NAME presence verified) in the pre-flight above.
+    if let Some(listed) = listed {
+        return listed.commit(io);
+    }
     if hard_link_count > 1 {
         update_mft_record_io(io, file_rec, |record| {
             let loc = find_file_name_attr(record, parent_reference, basename).ok_or_else(|| {
