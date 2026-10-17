@@ -66,6 +66,17 @@
 #                                    IMAGE.manifest lists every name's SHA-256,
 #                                    each file's full set of names and each
 #                                    symbolic link's target and the bytes it reaches
+#   mkdir-parents IMAGE              fs.ntfs mkdir -p makes missing chains: three
+#                                    levels, under existing directories through
+#                                    names in another case, through `.` and `..`,
+#                                    twelve levels, Unicode names, and one into
+#                                    each of 300 directories filled past one index
+#                                    level. A chain already there writes nothing; a
+#                                    file in the way and names Windows cannot address
+#                                    are refused with every byte left as it was.
+#                                    IMAGE.manifest lists every directory made, its
+#                                    exact case, the name `..` passed over as absent
+#                                    and the chains Windows must refuse as well
 #   grow-mft IMAGE SNAPSHOT        IMAGE is what Windows recovered from
 #                                    test-disks/windows-interrupted-SNAPSHOT, whose
 #                                    $MFT:$Bitmap outruns $MFT; fs.ntfs writes files
@@ -491,6 +502,96 @@ case "$step" in
         names many 64 "${many[@]}"
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the links exited $status: $out"
+        ;;
+    mkdir-parents)
+        [ $# -eq 0 ] || die "mkdir-parents IMAGE"
+        manifest="$image.manifest"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        : >"$manifest"
+        # made PATH STORED...: fs.ntfs mkdir -p PATH makes exactly the
+        # directories STORED, in order, and says so. Each STORED is spelled
+        # as the volume now spells it, which is how Windows must list it.
+        # The report names each as PATH spelled it, `.` and `..` resolved:
+        # the same path but for case, which is all --text is compared on.
+        made() {
+            local path="$1" dir want=""
+            shift
+            for dir in "$@"; do want="${want}created ${dir}"$'\n'; done
+            run fs "$image" mkdir -p --text "$path"
+            [ "$status" -eq 0 ] || die "fs.ntfs mkdir -p $path exited $status: $(cat "$image.cli-err")"
+            [ "$(printf '%s' "$out" | tr '[:lower:]' '[:upper:]')" = "$(printf '%s' "${want%$'\n'}" | tr '[:lower:]' '[:upper:]')" ] ||
+                die "fs.ntfs mkdir -p $path reported '$out', not the chain '${want%$'\n'}'"
+            for dir in "$@"; do printf 'dir\t%s\nname\t%s\n' "$dir" "$dir" >>"$manifest"; done
+        }
+        # there PATH: fs.ntfs mkdir -p PATH finds the chain whole and writes nothing.
+        there() {
+            local before
+            before="$(sha "$image")"
+            run fs "$image" mkdir -p --text "$1"
+            [ "$status" -eq 0 ] || die "fs.ntfs mkdir -p $1 exited $status: $(cat "$image.cli-err")"
+            [ "$out" = "$1 exists; nothing created" ] || die "fs.ntfs mkdir -p $1 reported: $out"
+            [ "$(sha "$image")" = "$before" ] || die "fs.ntfs mkdir -p $1, already there, wrote to the volume"
+        }
+        # refused PATTERN PATH: fs.ntfs mkdir -p PATH exits 1 naming PATTERN
+        # and writes nothing, so no part of the chain is left behind.
+        refused() {
+            local before
+            before="$(sha "$image")"
+            run fs "$image" mkdir -p "$2"
+            [ "$status" -eq 1 ] && grep -qi -- "$1" "$image.cli-err" ||
+                die "fs.ntfs mkdir -p $2 exited $status, not 1 for '$1': $(cat "$image.cli-err")"
+            [ "$(sha "$image")" = "$before" ] || die "the refused fs.ntfs mkdir -p $2 wrote to the volume"
+        }
+
+        made /Chain/One/Two /Chain /Chain/One /Chain/One/Two
+        made /CHAIN/one/Two/three/four /Chain/One/Two/three /Chain/One/Two/three/four
+        made /Chain/./x/../dotted /Chain/dotted
+        made /deep/1/2/3/4/5/6/7/8/9/10/11 /deep /deep/1 /deep/1/2 /deep/1/2/3 /deep/1/2/3/4 \
+            /deep/1/2/3/4/5 /deep/1/2/3/4/5/6 /deep/1/2/3/4/5/6/7 /deep/1/2/3/4/5/6/7/8 \
+            /deep/1/2/3/4/5/6/7/8/9 /deep/1/2/3/4/5/6/7/8/9/10 /deep/1/2/3/4/5/6/7/8/9/10/11
+        u="/na$(printf '\303\257')ve/$(printf '\346\227\245\346\234\254')"
+        made "$u/$(printf '\316\251')" "${u%/*}" "$u" "$u/$(printf '\316\251')"
+        # 300 names of varying length, each the start of a two-level chain:
+        # /wide fills past one index level, so later chains go into index
+        # blocks rather than the root.
+        made /wide /wide
+        for i in $(seq 1 300); do
+            name="$(printf 'chain-%03d-%s' "$i" "$(printf '%*s' $((i % 23)) '' | tr ' ' x)")"
+            made "/wide/$name/leaf" "/wide/$name" "/wide/$name/leaf"
+        done
+
+        there /Chain/One/Two
+        there /CHAIN/ONE/TWO/
+        there /deep/1/./2/../2
+
+        # A file in the way, on the way and at PATH, is refused, and Windows
+        # must refuse the same chains; names Windows cannot address and a
+        # metafile's directory are refused before the first directory is made.
+        run fs "$image" mkdir /files
+        [ "$status" -eq 0 ] || die "fs.ntfs mkdir /files exited $status: $(cat "$image.cli-err")"
+        random "$work/f" 500
+        set +e
+        "$BIN" fs "$image" write /files/f.txt <"$work/f" >/dev/null 2>"$image.cli-err"
+        status=$?
+        set -e
+        [ "$status" -eq 0 ] || die "fs.ntfs write /files/f.txt exited $status: $(cat "$image.cli-err")"
+        for path in /files/f.txt/x/y /FILES/F.TXT/x /files/f.txt; do
+            case "$path" in
+                */x*) refused 'not a directory' "$path" ;;
+                *) refused 'already exists' "$path" ;;
+            esac
+            printf 'refuse\t%s\n' "$path" >>"$manifest"
+        done
+        refused 'cannot address' '/fresh/a:b/c'
+        refused 'trailing space or period' /fresh/x./y
+        # shellcheck disable=SC2016 # \$Extend is the metafile's name, not a variable.
+        refused 'metafile' '/$Extend/fresh'
+
+        printf 'file\t/files/f.txt\t500\t%s\n' "$(sha "$work/f")" >>"$manifest"
+        printf 'absent\t%s\n' /Chain/x /fresh >>"$manifest"
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the chains exited $status: $out"
         ;;
     replay)
         [ $# -eq 1 ] || die "replay IMAGE SNAPSHOT"
