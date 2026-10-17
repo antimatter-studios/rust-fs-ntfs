@@ -22,7 +22,7 @@
 //! neither its code nor its archive format is used (docs/provenance.md).
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 /// The archive's first eight bytes.
@@ -41,6 +41,7 @@ pub const KIND_UNREADABLE: u32 = 2;
 pub const DEFAULT_CHUNK: usize = 1024 * 1024;
 
 const MAX_CHUNK: usize = 64 * 1024 * 1024;
+const EMPTY_SOURCE: &str = "the source is empty: there is nothing to rescue";
 
 /// Why a read of the source failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +193,9 @@ pub fn scan_to_path(
 ) -> Result<ScanReport, String> {
     options.validate()?;
     let mut input = FileSource::open(source)?;
+    if input.size() == 0 {
+        return Err(EMPTY_SOURCE.into());
+    }
     let mut out = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -209,8 +213,149 @@ pub fn scan<S: RescueSource + ?Sized>(
     options: ScanOptions,
 ) -> Result<ScanReport, String> {
     options.validate()?;
-    let _ = (source, archive);
-    Err("the rescue scan is not implemented yet (#720)".into())
+    let size = source.size();
+    if size == 0 {
+        return Err(EMPTY_SOURCE.into());
+    }
+    write_header(archive, options.sector_size, size)?;
+    let mut out = Records::new(archive, size);
+    let sector = options.sector_size as usize;
+    let mut buf = vec![0u8; options.chunk_size];
+    let mut offset = 0u64;
+    while offset < size {
+        let n = (size - offset).min(options.chunk_size as u64) as usize;
+        let chunk = &mut buf[..n];
+        match source.read_at(offset, chunk) {
+            Ok(()) => out.data(offset, chunk)?,
+            Err(ReadFailure::Unreadable(_)) => {
+                out.report.failed_bulk_reads += 1;
+                retry_by_sector(source, &mut out, offset, chunk, sector)?;
+            }
+            Err(ReadFailure::Failed(e)) => return Err(format!("the scan stopped: {e}")),
+        }
+        offset += n as u64;
+    }
+    out.finish()
+}
+
+/// Read a chunk whose bulk read failed one sector at a time, archiving each
+/// readable run and recording each unreadable sector.
+fn retry_by_sector<S: RescueSource + ?Sized>(
+    source: &mut S,
+    out: &mut Records<'_>,
+    offset: u64,
+    chunk: &mut [u8],
+    sector: usize,
+) -> Result<(), String> {
+    // Where the run of readable sectors being gathered starts in `chunk`.
+    let mut run: Option<usize> = None;
+    let mut at = 0;
+    while at < chunk.len() {
+        let len = sector.min(chunk.len() - at);
+        let pos = offset + at as u64;
+        match source.read_at(pos, &mut chunk[at..at + len]) {
+            Ok(()) => {
+                run.get_or_insert(at);
+            }
+            Err(ReadFailure::Unreadable(_)) => {
+                if let Some(start) = run.take() {
+                    out.data(offset + start as u64, &chunk[start..at])?;
+                }
+                out.unreadable(pos, len as u64)?;
+            }
+            Err(ReadFailure::Failed(e)) => return Err(format!("the scan stopped: {e}")),
+        }
+        at += len;
+    }
+    if let Some(start) = run {
+        out.data(offset + start as u64, &chunk[start..])?;
+    }
+    Ok(())
+}
+
+/// The record stream: appends records in source order, holding back the
+/// current unreadable span until it ends so adjacent sectors become one.
+struct Records<'a> {
+    archive: &'a mut File,
+    pending: Option<(u64, u64)>,
+    report: ScanReport,
+}
+
+impl<'a> Records<'a> {
+    fn new(archive: &'a mut File, size: u64) -> Self {
+        Self {
+            archive,
+            pending: None,
+            report: ScanReport {
+                source_size: size,
+                ..ScanReport::default()
+            },
+        }
+    }
+
+    fn data(&mut self, offset: u64, payload: &[u8]) -> Result<(), String> {
+        self.close_span()?;
+        self.append(offset, payload.len() as u64, KIND_DATA, payload)?;
+        self.report.readable_bytes += payload.len() as u64;
+        self.report.data_records += 1;
+        Ok(())
+    }
+
+    fn unreadable(&mut self, offset: u64, len: u64) -> Result<(), String> {
+        match &mut self.pending {
+            Some((start, span)) if *start + *span == offset => *span += len,
+            _ => {
+                self.close_span()?;
+                self.pending = Some((offset, len));
+            }
+        }
+        Ok(())
+    }
+
+    fn close_span(&mut self) -> Result<(), String> {
+        if let Some((offset, len)) = self.pending.take() {
+            self.append(offset, len, KIND_UNREADABLE, &[])?;
+            self.report.unreadable_bytes += len;
+            self.report.unreadable_spans += 1;
+        }
+        Ok(())
+    }
+
+    fn append(&mut self, offset: u64, len: u64, kind: u32, payload: &[u8]) -> Result<(), String> {
+        let mut head = [0u8; RECORD_HEADER_LEN];
+        head[0..8].copy_from_slice(&offset.to_le_bytes());
+        head[8..16].copy_from_slice(&len.to_le_bytes());
+        head[16..20].copy_from_slice(&kind.to_le_bytes());
+        let crc = crc32(&[&head[..20], payload]);
+        head[20..24].copy_from_slice(&crc.to_le_bytes());
+        let what = |e: io::Error| format!("append the record for {offset}+{len}: {e}");
+        self.archive.write_all(&head).map_err(what)?;
+        self.archive.write_all(payload).map_err(what)?;
+        self.archive.sync_data().map_err(what)
+    }
+
+    fn finish(mut self) -> Result<ScanReport, String> {
+        self.close_span()?;
+        self.archive
+            .sync_all()
+            .map_err(|e| format!("flush the archive: {e}"))?;
+        Ok(self.report)
+    }
+}
+
+fn write_header(archive: &mut File, sector_size: u32, size: u64) -> Result<(), String> {
+    let mut head = [0u8; HEADER_LEN];
+    head[0..8].copy_from_slice(&ARCHIVE_MAGIC);
+    head[8..12].copy_from_slice(&ARCHIVE_VERSION.to_le_bytes());
+    head[12..16].copy_from_slice(&sector_size.to_le_bytes());
+    head[16..24].copy_from_slice(&size.to_le_bytes());
+    // 24..28 is reserved and zero.
+    let crc = crc32(&[&head[..28]]);
+    head[28..32].copy_from_slice(&crc.to_le_bytes());
+    archive
+        .write_all(&head)
+        .and_then(|()| archive.sync_all())
+        .map_err(|e| format!("write the archive header: {e}"))
 }
 
 /// Make a newly created archive's directory entry durable, so a power cut
@@ -233,9 +378,47 @@ fn sync_parent(archive: &Path) -> Result<(), String> {
     }
 }
 
+/// CRC-32 as zlib, gzip and PNG compute it (reflected polynomial
+/// 0xEDB88320, initial value and final XOR all ones), over `parts` in turn.
+fn crc32(parts: &[&[u8]]) -> u32 {
+    const TABLE: [u32; 256] = {
+        let mut table = [0u32; 256];
+        let mut i = 0;
+        while i < 256 {
+            let mut c = i as u32;
+            let mut bit = 0;
+            while bit < 8 {
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+                bit += 1;
+            }
+            table[i] = c;
+            i += 1;
+        }
+        table
+    };
+    let mut crc = !0u32;
+    for part in parts {
+        for &byte in *part {
+            crc = TABLE[((crc ^ byte as u32) & 0xFF) as usize] ^ (crc >> 8);
+        }
+    }
+    !crc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crc32_matches_the_published_check_value() {
+        // The check value every CRC-32 (IEEE) catalogue lists for "123456789".
+        assert_eq!(crc32(&[b"123456789"]), 0xCBF4_3926);
+        assert_eq!(crc32(&[b"1234", b"56789"]), 0xCBF4_3926);
+    }
 
     #[test]
     fn options_refuse_a_sector_size_or_chunk_the_scan_cannot_use() {
