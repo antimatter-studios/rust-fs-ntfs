@@ -1,14 +1,15 @@
 # Operation-sequence test support (#484)
 
 `generator.rs` adds #681's nine operations: create, mkdir, full write,
-write_at, truncate, same-directory rename, unlink, rmdir and link. It reuses
+write_at, truncate, same-directory rename, unlink, rmdir and link, then
+#731's write_stream and delete_stream. It reuses
 the preserved engine's operation shapes and collision/UTF-16 name cases.
 `Generator::next(&model)` chooses from the live tree after each disk result;
 `decode(bytes, &initial_model)` instead advances a cloned model, retaining
 refused operations. Both need the same initial tree and injected name table.
 No driver API, host filesystem, RNG, clock or locale supplies decisions.
 
-Input uses eight-byte headers: opcode modulo 9 in the order above, target,
+Input uses eight-byte headers: opcode modulo 11 in the order above, target,
 parent, name, little-endian u16 length/size, little-endian u16 offset. Partial
 headers are zero-padded; writes consume at most `length % 4097` remaining
 payload bytes. Selectors modulo 4 choose missing (0), wrong type (1) or
@@ -33,8 +34,8 @@ identities across same-directory rename. Refused transitions change nothing.
 Names use a supplied 65,536-entry UTF-16 `$UpCase` mapping, not Rust Unicode
 case conversion. The 1 MiB file bound is a workload limit, not an NTFS limit.
 Directory sizes are modeled as zero, and directory link counts count names,
-not POSIX dot entries. Timestamps, open handles, ADS and EAs are outside this
-slice. `harness.rs` wires it into disk execution; #683–#685 cover the explorer,
+not POSIX dot entries. Timestamps, open handles and EAs are outside this
+slice; named streams follow below (#731). `harness.rs` wires it into disk execution; #683–#685 cover the explorer,
 regression capture and extensions.
 These contracts prove expected-state semantics, not on-disk NTFS correctness;
 the existing independent readers below remain necessary for disk validation.
@@ -78,8 +79,8 @@ nested replay and deliberate persisted byte/name mutations. All eight readback
 tests run on each native CI host with an explicit floor, and the Ubuntu hook
 requires all three reference tools. Scratch images use the shared panic-safe
 owner. Concrete prefixes, input bytes, geometry and refusals are retained under
-`tmp/op-sequence-model/`. Windows chkdsk and ADS/EAs
-remain under #484; this test-only slice changes no format code.
+`tmp/op-sequence-model/`. Windows chkdsk and EAs
+remain under #685; this test-only slice changes no format code.
 
 The committed `fuzz/corpus/operation_sequence/*.json` corpus uses the generator's
 strict JSON v1 format. `committed_corpus_replays_every_seed` enumerates every
@@ -165,3 +166,42 @@ and a truncate to zero, which the real model and the disk agree on. Capture
 contracts cover raw generator bytes, the written pin and refused overwrites,
 clean inputs, scratch-directory inputs and names. The pin format has its own
 fixture-free contract in `op_sequence_generator.rs`.
+
+## Named data streams (#731)
+
+The model keeps a node's named `$DATA` streams beside its unnamed data,
+keyed through the volume's `$UpCase` like file names: `S` written to a file
+holding `s` replaces `s`'s bytes and keeps the spelling `s`. Streams belong
+to the node, so every hard link shows the same ones, and the last unlink or
+replacing rename discards them. A stream name is refused when it is empty,
+`.` or `..`, longer than 255 UTF-16 units, holds a reserved or control
+character, or ends in a space or period, which Win32 path parsing strips.
+Deleting a stream that is not there is refused. Stream bytes never count in
+a file's size.
+
+Opcode 9 is write_stream, which consumes its payload as a write does, and
+10 is delete_stream. Their target selector chooses a missing path (0), a
+file used as a directory (1) or an existing file (2/3); their name selector
+indexes a stream-name pool of `$UpCase` collisions, reserved characters, a
+trailing period and space, a control character, the 255/256-unit
+boundaries, an existing stream of the target (19) and a fresh name (20).
+The model accepts streams on directories, but the generator does not aim at
+them yet: `rmdir` gives back a directory's stream clusters only when the
+directory has index blocks (#735).
+
+Every step compares each modeled path's streams, names and complete bytes,
+on the synced writer and through fresh read-only descriptors, and again
+through the upstream `ntfs` parser, which enumerates `$DATA` attributes
+itself and follows `$ATTRIBUTE_LIST`s. The ntfs-3g hook reads every stream
+with `ntfscat -n` and compares it with the model. Shrinking shortens a
+stream write's payload as it does a write's.
+
+Three refusals depend on where the driver put a file's attributes, which
+the model does not know, so the harness accepts them when the model
+accepted the operation: W2.1's mapping capacity for unnamed data, the
+`$ATTRIBUTE_LIST` that a stream too big for its base record gives a file
+(#480), which the name-changing paths then refuse (#468), and the
+attributes `attr_list` documents it does not move. Each still has to leave
+the whole snapshot unchanged, and each is recorded in `refusals.tsv` with
+its reason. `fuzz/corpus/operation_sequence/streams-v1.json` seeds the
+explorer with the stream cases; histograms now have eleven slots.
