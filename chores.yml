@@ -528,7 +528,7 @@ tasks:
       - bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli,harness --no-fail-fast
 
   test:op-sequence-oracle:
-    desc: "Four seeded readback sequences, graded by ntfs-3g (install ntfs-3g first)"
+    desc: "Seeded and generated operation readback, graded by ntfs-3g (install ntfs-3g first)"
     deps: [siblings:gate]
     cmds:
       - bash scripts/test-op-sequence-oracle.sh
