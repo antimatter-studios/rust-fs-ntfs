@@ -268,6 +268,7 @@ fs.ntfs disk.img stat /notes.txt   # one path: record, links, sizes, every time
 fs.ntfs disk.img read /notes.txt > notes.txt
 fs.ntfs disk.img get label --text
 fs.ntfs disk.img write /notes.txt < notes.txt
+fs.ntfs disk.img truncate /notes.txt 4097   # length in bytes; a grown tail reads as zeros
 fs.ntfs disk.img mkdir /backup
 fs.ntfs disk.img mkdir -p /backup/2026/october   # every missing directory
 fs.ntfs disk.img rm /notes.txt
@@ -319,6 +320,16 @@ a dirty volume are all refused before the image is opened for writing, so
 it stays byte-identical. The report is `{"path": ..., "linked": true,
 "inode": N}`, N being the file's record for a hard link and the new link's
 for a symbolic one.
+
+`truncate PATH SIZE` sets a regular file's length to SIZE bytes, an unsigned
+decimal count without a suffix. Shrinking frees whole clusters past the new
+end; growing preserves the prefix and reads back zeros in the new tail.
+Resident data can grow into non-resident data. Directories and missing paths
+fail with exit 1; symbolic links, other reparse points, and compressed, sparse
+or encrypted data the driver cannot resize answer exit 3. Edits are rehearsed
+before a writable open, so any predictable refusal leaves the target
+byte-identical. The report is `{"path": ..., "size": N}`; `--offset` remains
+the filesystem's position inside TARGET.
 
 `mkdir --parents` (`-p`) makes every missing directory on the way to PATH;
 a directory already at PATH, or at any step, is fine. Names are found as

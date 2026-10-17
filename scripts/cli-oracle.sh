@@ -77,6 +77,9 @@
 #                                    IMAGE.manifest lists every directory made, its
 #                                    exact case, the name `..` passed over as absent
 #                                    and the chains Windows must refuse as well
+#   truncate IMAGE                   resize resident and non-resident files;
+#                                    Windows repeats each SetLength sequence
+#                                    independently and compares content and length
 #   grow-mft IMAGE SNAPSHOT        IMAGE is what Windows recovered from
 #                                    test-disks/windows-interrupted-SNAPSHOT, whose
 #                                    $MFT:$Bitmap outruns $MFT; fs.ntfs writes files
@@ -502,6 +505,37 @@ case "$step" in
         names many 64 "${many[@]}"
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the links exited $status: $out"
+        ;;
+    truncate)
+        [ $# -eq 0 ] || die "truncate IMAGE"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        : >"$image.manifest"
+        # NAME OLD FINAL [INTERMEDIATE]: the prefix is Z, with tails
+        # independently supplied by Windows' FileStream.SetLength oracle.
+        for spec in 'zero 12289 0' 'boundary 12289 4097' \
+            'grown 4097 8193' 'regrown 12289 8193 4097' \
+            'resident 5 8193' 'resident-shrink 5 2' 'empty 0 4097' \
+            'same 4097 4097'; do
+            read -r name old final middle <<<"$spec"
+            if [ "$old" -eq 0 ]; then : >"$work/input";
+            else head -c "$old" /dev/zero | tr '\000' Z >"$work/input"; fi
+            run fs "$image" write "/$name" <"$work/input"
+            [ "$status" -eq 0 ] || die "write /$name: $(cat "$image.cli-err")"
+            if [ -n "$middle" ]; then
+                run fs "$image" truncate "/$name" "$middle"
+                [ "$status" -eq 0 ] || die "intermediate truncate /$name: $(cat "$image.cli-err")"
+            fi
+            run fs "$image" truncate "/$name" "$final"
+            if [ "$status" -ne 0 ] || ! has "\"size\": $final"; then
+                die "truncate /$name: $out $(cat "$image.cli-err")"
+            fi
+            printf 'truncate\t/%s\t%s\t%s\t%s\n' "$name" "$old" "$final" "$middle" >>"$image.manifest"
+        done
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after truncate: $out"
+        run fs "$image" get dirty --text
+        [ "$status" -eq 0 ] && [ "$out" = false ] || die "truncate left the volume dirty"
         ;;
     mkdir-parents)
         [ $# -eq 0 ] || die "mkdir-parents IMAGE"
