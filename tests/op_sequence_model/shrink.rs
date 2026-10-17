@@ -194,6 +194,20 @@ fn simpler(op: &Op) -> Vec<Op> {
                 data: data[..n].to_vec(),
             })
             .collect(),
+        Op::WriteEa {
+            path,
+            name,
+            flags,
+            value,
+        } => smaller(value.len())
+            .into_iter()
+            .map(|n| Op::WriteEa {
+                path: path.clone(),
+                name: name.clone(),
+                flags: *flags,
+                value: value[..n].to_vec(),
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }
