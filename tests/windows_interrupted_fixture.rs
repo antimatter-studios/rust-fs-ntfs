@@ -1880,13 +1880,35 @@ mod oracle {
         out
     }
 
+    /// The LSN a FILE record or INDX block carries, or `None` for a block
+    /// that is not `magic` or is torn.
+    fn lsn(raw: &[u8], magic: &[u8; 4]) -> Option<u64> {
+        fixed(raw, magic).map(|b| le(&b, 8, 8))
+    }
+
+    /// Whether the replay left the LSN Windows' restart left. `content`
+    /// blanks it, so it is compared here: redo decides from it whether a
+    /// block already holds a record, so a replay leaves it where Windows'
+    /// restart does, not merely the bytes around it (#137). Two are not
+    /// compared: one Windows wrote after its restart (past the log's end),
+    /// and the stamp undo gives a block it rolled back, one past the log's
+    /// end, so a rerun can tell it from one it did not (#514); Windows logs
+    /// compensation records instead.
+    fn same_lsn(ours: Option<u64>, win: Option<u64>, log_end: u64) -> bool {
+        match (ours, win) {
+            (Some(o), Some(w)) => o == w || w > log_end || o == log_end + 1,
+            _ => true,
+        }
+    }
+
     pub fn same_metadata_as_windows(k: &str, pre: &Image, ours: &Image, win: &Image, log_end: u64) {
         let (min_records, min_blocks, min_bits) = super::floors(k);
         let after = windows_after_recovery(win, log_end);
 
-        // Every MFT record, as content.
+        // Every MFT record, as content, and its LSN.
         let mut replayed = 0;
         let mut differ = Vec::new();
+        let mut lsn_differ = Vec::new();
         for n in 0..win.records() {
             if after.contains(&n) {
                 continue;
@@ -1901,6 +1923,13 @@ mod oracle {
             }
             if content(ours.raw_record(n), b"FILE") != w {
                 differ.push(n);
+            }
+            let (o, w) = (
+                lsn(ours.raw_record(n), b"FILE"),
+                lsn(win.raw_record(n), b"FILE"),
+            );
+            if !same_lsn(o, w, log_end) {
+                lsn_differ.push(format!("record {n}: {o:#x?}, Windows {w:#x?}"));
             }
         }
         assert!(
@@ -1956,12 +1985,29 @@ mod oracle {
                          what Windows recovered",
                         at as u64 / win.cluster
                     );
+                    let (o, w) = (
+                        lsn(&o_alloc[at..at + size], b"INDX"),
+                        lsn(&w_alloc[at..at + size], b"INDX"),
+                    );
+                    if !same_lsn(o, w, log_end) {
+                        lsn_differ.push(format!(
+                            "record {n}'s {name} index block at VCN {}: {o:#x?}, Windows {w:#x?}",
+                            at as u64 / win.cluster
+                        ));
+                    }
                 }
             }
         }
         assert!(
             blocks >= min_blocks,
             "snapshot {k}: only {blocks} index blocks compared"
+        );
+        assert!(
+            lsn_differ.is_empty(),
+            "snapshot {k}: {} MFT records and index blocks carry an LSN Windows' restart did \
+             not leave: {:?}",
+            lsn_differ.len(),
+            &lsn_differ[..lsn_differ.len().min(10)]
         );
 
         // $MFT's own bitmap: any record whose bit differs is one Windows
