@@ -71,6 +71,7 @@ pub mod mkfs;
 pub mod read;
 pub mod record_build;
 pub mod repair_plan;
+pub mod rescue;
 pub mod sds;
 pub mod security_descriptor;
 pub mod sparse;
