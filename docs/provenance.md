@@ -127,6 +127,7 @@ which shows only that the crate agrees with itself:
 | Indexes, collation | `index_name_collation`, `index_lookup_descent`, `fragmented_indx_fixture` and its matrix scenario (Windows enumeration and `chkdsk`); `tests/cli-oracle/test-ls-recursive-windows.sh` (paths, types, sizes and record numbers against Windows' `Get-ChildItem` and handles opened without following reparses); the `cli-mkdir-parents-win-verify-chkdsk` matrix scenario (directories `fs.ntfs mkdir -p` made, 300 of them into one directory past one index level, listed by Windows exactly so and graded by `chkdsk`) |
 | View indexes | `extend_view_indexes`, `view_index_spilled` |
 | `$Secure` | `security_descriptor_windows_oracle`, `security_id_must_exist` |
+| `$ATTRIBUTE_LIST`, unnamed `$DATA` through it | the `cli-attrlist-data-win-verify-chkdsk` matrix scenario (the unnamed stream of a listed file rewritten, patched and truncated by `fs.ntfs`, read back by Windows with `Get-FileHash` and graded by `chkdsk`) |
 | `$EA`, `$EA_INFORMATION` | `ea_information_windows_oracle`, `ea_names_windows_oracle` |
 | Reparse points | `readlink_windows_oracle`, `write_reparse`, the `cli-link-win-verify-chkdsk` matrix scenario (symbolic links `fs.ntfs ln -s` made, their targets read and followed by Windows) |
 | `$OBJECT_ID` | `object_id`, `field_exhaustion_objid` |

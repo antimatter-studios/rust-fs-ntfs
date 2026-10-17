@@ -3618,6 +3618,37 @@
       "image": "nfs-cli-attrlist-links-win-verify-chkdsk.img",
       "_notes": "fs.ntfs ln gives one file 48 more names than its 1 KiB record holds, alternately in two directories, so its $FILE_NAMEs go through an $ATTRIBUTE_LIST into extension records, as Windows lays them out (#781, part of #662). fs.ntfs rm then takes the file's first name, which the base record held, and every third name; fs.ntfs mv renames every third after that to a longer name in the same directory, so a name may no longer fit in the record that held it; and fs.ntfs ln adds eight names in the room left. fs.ntfs stat counts every name after the links and again at the end, and fsck.ntfs finds the volume clean. Windows grades the result: every remaining name reads back with the SHA-256 written (Get-FileHash), fsutil hardlink list gives the file exactly the 40 names that remain, each renamed name is listed exactly so, every removed and old name is gone, and chkdsk finds the volume clean."
     },
+    "cli-attrlist-data-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "CLI ATTRDATA",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        { "op": "cli-mkfs" },
+        { "op": "cli-attrlist-data" },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        { "op": "win-cli-verify", "keep_image": "true" },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-attrlist-data-win-verify-chkdsk.img",
+      "_notes": "rust-ntfs ea and stream give two files a 64-byte EA and twelve 120-byte named streams, more than a 1 KiB record holds, so each file's base record fills and it gains an $ATTRIBUTE_LIST (#791, part of #663). /early.dat's unnamed stream is 6000 bytes, non-resident in the base record, before the record fills; /late.dat's is eight resident bytes when it fills and grows only after. fs.ntfs write then rewrites each unnamed stream whole to 9000 bytes (#788), fs.ntfs write --at patches inside it, across its end and past it with a gap (#789), and fs.ntfs truncate cuts it to 5000, grows it to 7000 with zeros and cuts it to 300 (#790), before a last patch grows it to 5290; after every write fs.ntfs reads the unnamed stream back as the host's model of it and every named stream unchanged, and fsck.ntfs finds the volume clean. Windows grades the result: each file reads back with the size and SHA-256 written (Get-FileHash), and chkdsk finds the volume clean."
+    },
     "cli-mkdir-parents-win-verify-chkdsk": {
       "status": "pending",
       "volume_params": {
