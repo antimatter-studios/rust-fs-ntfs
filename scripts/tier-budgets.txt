@@ -108,6 +108,17 @@
 # naming the binary, doctor's line per tool, and three lines per passing
 # file (its name, its count, its trailing line). It is small by design, so a
 # file that starts printing per check shows as a breach, not as noise.
+#
+# THE CLI ROW MOVED ON 2026-10-22 for #655, from 42/1540 to 45/1540.
+# Run 39704704635, job 119587365786, passed all 12 files and 1093 checks.
+# Its retained cli.log is 45 lines / 1529 bytes, SHA-256
+# 825d696415625c8b66047b5921a2031be5c4b4ff44673716159550526c464e9a.
+# The wrapper exited 65 solely because test-truncate.sh adds its normal
+# three verdict lines beyond the 42-line cap. The line cap is exactly the
+# measurement; the byte cap stays 1540. Raising the execution floor from
+# 975 to the measured 1093 adds one byte to the summary (1530 total).
+# No output is suppressed and no test changes.
+# Evidence: https://github.com/antimatter-studios/rust-fs-ntfs/actions/runs/39704704635/job/119587365786
 # CLI-ORACLE is the same script over tests/cli-oracle/, the checks against
 # volumes another platform wrote; the same shape, fewer files. On CI's
 # runner doctor adds a line per same-named program later on PATH (ntfs-3g's
@@ -139,6 +150,6 @@ asan         1100   72000
 scripts       135    3500
 semver         40    4000
 matrix       1850  135000
-cli            42    1540
+cli            45    1540
 cli-oracle     21     990
 cli-host       37    2630
