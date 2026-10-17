@@ -1,7 +1,7 @@
 //! `fs.ntfs <target> <verb>`: an errand inside an NTFS image or device,
 //! without mounting it.
 //!
-//! The verbs are the shared set: `ls`, `stat`, `read`, `write`, `mkdir`,
+//! The verbs include `ls`, `stat`, `streams`, `read`, `write`, `mkdir`,
 //! `truncate`, `rm`, `rmdir`, `mv`, `ln`, `get`/`info`, `set`, `resize`. Metadata is JSON
 //! (or `--text`); file content is raw bytes. A verb the library cannot do
 //! yet still exists and answers `not implemented` with exit status 3, so a
@@ -168,6 +168,27 @@ fn command() -> Cmd {
                      the epoch plus nanoseconds, from $STANDARD_INFORMATION: ctime is the MFT \
                      change and btime the creation. NTFS keeps no POSIX owner or permissions: \
                      uid and gid are null, and mode is the one ls reports for the type.",
+                ),
+        )
+        .subcommand(
+            Cmd::new("streams")
+                .about("List named data streams and their sizes and storage flags (read-only)")
+                .arg(
+                    Arg::new("path")
+                        .value_name("PATH")
+                        .required(true)
+                        .value_parser(value_parser!(OsString)),
+                )
+                .after_help(
+                    "Examples:\n  fs.ntfs disk.img streams /notes.txt\n  \
+                     fs.ntfs disk.img streams --text /Users\n  \
+                     fs.ntfs --offset 1048576 whole-disk.img streams /notes.txt\n\n\
+                     Only named $DATA streams are listed; the unnamed stream is excluded. \
+                     Each row reports name, size, allocated, resident, sparse and compressed. \
+                     Allocation is bytes reserved for the stream, including resident value \
+                     space in its record. Directories can have named streams too. A link's \
+                     own streams are listed without following it. PATH is always a path: \
+                     no colon suffix is interpreted as a stream selector.",
                 ),
         )
         .subcommand(
@@ -488,6 +509,11 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         "read" => {
             let (mut dev, _) = device::mount(target, offset, false)?;
             read(&mut dev, path_arg(sub)?, sub.get_one("output"))
+        }
+        "streams" => {
+            let (mut dev, _) = device::mount(target, offset, false)?;
+            let path = path_arg(sub)?;
+            streams(&mut dev, path).map_err(|e| ntfs_error(path, e))
         }
         "get" | "info" => {
             let (mut dev, info) = device::mount(target, offset, false)?;
@@ -981,6 +1007,65 @@ fn index_bytes(dev: &mut Device, record: u64) -> Result<u64, Error> {
         }
     }
     Ok(0)
+}
+
+/// Enumerate headers only, including attributes in extension records. A
+/// split stream contributes its first segment, the only one with sizes.
+/// The layout is Microsoft's ATTRIBUTE_RECORD_HEADER devnote; allocation
+/// is compared with Windows FileStreamInfo, including resident padding.
+fn streams(dev: &mut Device, path: &str) -> Result<Outcome, Error> {
+    let record = read::resolve_path(dev, path)?;
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+    for holder in records_holding(dev, record, AttrType::Data)? {
+        let (_, bytes) = fs_ntfs::mft_io::read_mft_record_io(dev, holder)?;
+        for loc in attr_io::iter_attributes(&bytes) {
+            if loc.type_code != AttrType::Data as u32 || loc.name_length == 0 {
+                continue;
+            }
+            let header = &bytes[loc.attr_offset..loc.attr_offset + loc.attr_length];
+            let u64_at = |off: usize| u64::from_le_bytes(header[off..off + 8].try_into().unwrap());
+            if !loc.is_resident && u64_at(0x10) != 0 {
+                continue;
+            }
+            let name = attr_io::decode_attr_name(&bytes, &loc);
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let flags = u16::from_le_bytes([header[0x0C], header[0x0D]]);
+            let sparse = flags & attr_io::attr_flags::SPARSE != 0;
+            let compressed = flags & attr_io::attr_flags::COMPRESSION_MASK != 0;
+            let (size, allocated) = if loc.is_resident {
+                (
+                    loc.resident_value_length.unwrap_or(0) as u64,
+                    (loc.attr_length - loc.resident_value_offset.unwrap_or(0) as usize) as u64,
+                )
+            } else {
+                let extended = loc.non_resident_mapping_pairs_offset.unwrap_or(0) >= 0x48;
+                (
+                    loc.non_resident_value_length.unwrap_or(0),
+                    if (sparse || compressed) && extended {
+                        u64_at(0x40)
+                    } else {
+                        u64_at(0x28)
+                    },
+                )
+            };
+            let row = Json::object([
+                ("name", Json::from(name.clone())),
+                ("size", Json::from(size)),
+                ("allocated", Json::from(allocated)),
+                ("resident", Json::from(loc.is_resident)),
+                ("sparse", Json::from(sparse)),
+                ("compressed", Json::from(compressed)),
+            ]);
+            rows.push((name, row));
+        }
+    }
+    rows.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    Ok(Outcome::report(Json::Arr(
+        rows.into_iter().map(|(_, row)| row).collect(),
+    )))
 }
 
 /// `stat PATH`: one path's identity, type, links, sizes and every time,
