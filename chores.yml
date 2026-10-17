@@ -55,7 +55,7 @@ vars:
   # equal. Cargo.toml, Cargo.lock and fuzz/Cargo.lock take the registry
   # rust-fs-core at the same version; no build here path-depends on this
   # checkout, which supplies the family scripts.
-  FS_CORE_REF: v0.3.13
+  FS_CORE_REF: v0.3.14
 
   # The Windows-VM test harness. Not a cargo dependency — a tool this
   # repo's scripts invoke — so nothing but this pin governs which
@@ -609,6 +609,8 @@ tasks:
     # generated-doc checks for --stream; 1296 + 63 sets the floor to 1359.
     # #658 adds 46: 41 xattr checks, two generated-verb doc checks and
     # three completion checks; 1359 + 46 sets the floor to 1405.
+    # #832 adds six: export's page/help and four --replace generated-doc
+    # checks; 1405 + 6 sets the floor to 1411.
     cmds:
       - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli -- scripts/test-cli.sh'
 
@@ -639,8 +641,11 @@ tasks:
     # #658 adds 144: two checks for each of eight Windows EA files, seven
     # per queried EA (18), one exact count and one immutable image:
     # 699 + 144 sets the floor to 843.
+    # #832 adds 120: 11 per Windows file (8), boundary/offset/refusal
+    # checks, damaged-data cleanup and source immutability, counted from
+    # passing paths: 843 + 120 sets the floor to 963.
     cmds:
-      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=843 scripts/test-cli.sh'
+      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=963 scripts/test-cli.sh'
 
   test:cli:host:
     desc: 'The host half of the cli scenarios in the Windows matrix, without the VM: every step each runs before its first Windows step (scripts/cli-oracle.sh)'

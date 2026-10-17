@@ -70,4 +70,10 @@ check "fs.ntfs's zsh completion carries xattr" grep -q -- 'xattr' "${share:-/non
 check "fs.ntfs's bash completion carries xattr" grep -q -- 'xattr' "${share:-/nonexistent}/bash-completion/completions/fs.ntfs"
 check "fs.ntfs's fish completion carries xattr" grep -q -- 'xattr' "${share:-/nonexistent}/fish/vendor_completions.d/fs.ntfs.fish"
 
+check "fs.ntfs export's man page carries --replace" \
+    grep -qE -- '(\\-\\-|--)replace' "${share:-/nonexistent}/man/man1/fs.ntfs-export.1"
+check "fs.ntfs's zsh completion carries export --replace" grep -q -- '--replace' "${share:-/nonexistent}/zsh/site-functions/_fs.ntfs"
+check "fs.ntfs's bash completion carries export --replace" grep -q -- '--replace' "${share:-/nonexistent}/bash-completion/completions/fs.ntfs"
+check "fs.ntfs's fish completion carries export --replace" grep -q -- '-l replace' "${share:-/nonexistent}/fish/vendor_completions.d/fs.ntfs.fish"
+
 finish

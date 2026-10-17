@@ -107,7 +107,7 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-cli-read.img' -Label 'CLIREAD' -P
         'resident.bin'         = 500
         'cluster.bin'          = 4096
         'cluster-plus-one.bin' = 4097
-        'random.bin'           = 1048576
+        'random.bin'           = 3145729
         'sub/deep/file.bin'    = 5000
         "na$([char]0x00EF)ve-$([char]0x65E5)$([char]0x672C).txt" = 42
     }
@@ -122,6 +122,8 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-cli-read.img' -Label 'CLIREAD' -P
     }
     [System.IO.File]::WriteAllText($cliReadReport, (($lines -join "`n") + "`n"),
         (New-Object System.Text.UTF8Encoding($false)))
+    & chkdsk.exe ($root.TrimEnd('\')) | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'chkdsk rejected the Windows CLI read/export fixture' }
 }
 
 # Extended attributes Windows sets itself, so the bytes this crate stores for
