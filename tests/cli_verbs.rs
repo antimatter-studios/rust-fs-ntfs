@@ -85,6 +85,7 @@ fn every_verb_documents_itself_on_stdout() {
         "objid",
         "layout",
         "stream",
+        "ea",
     ] {
         let out = run(&[verb, "--help"]);
         assert_eq!(code(&out), 0, "`{verb} --help` exit status");
@@ -154,6 +155,14 @@ fn the_verbs_that_change_a_volume_report_success() {
         code(&run(&["stream", &img, "/f.txt", "notes", "--delete"])),
         0
     );
+    assert_eq!(
+        code(&run(&["ea", &img, "/f.txt", "USER.NOTE", "--content", "x"])),
+        0
+    );
+    assert_eq!(
+        code(&run(&["ea", &img, "/f.txt", "USER.NOTE", "--delete"])),
+        0
+    );
     assert_eq!(code(&run(&["set-dirty", &img])), 0);
 
     // `layout` reads the file `write` left resident, and prints it.
@@ -217,6 +226,14 @@ fn the_verbs_fail_when_the_target_is_wrong() {
         (
             "deleting a stream that is not there",
             vec!["stream", &img, "/f.txt", "nope", "--delete"],
+        ),
+        (
+            "an EA of a file that is not there",
+            vec!["ea", &img, "/nope.txt", "USER.NOTE", "--content", "x"],
+        ),
+        (
+            "removing an EA that is not there",
+            vec!["ea", &img, "/f.txt", "USER.NOPE", "--delete"],
         ),
         ("ls of an image that is not there", vec!["ls", "/nope.img"]),
     ] {

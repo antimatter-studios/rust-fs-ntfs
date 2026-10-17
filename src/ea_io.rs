@@ -5,7 +5,8 @@
 //! packed list of FILE_FULL_EA_INFORMATION entries, 4-byte aligned.
 //!
 //! Reference: Microsoft's [FILE_FULL_EA_INFORMATION] documents the EA entry
-//! buffer. The separate eight-byte `$EA_INFORMATION` summary is checked
+//! buffer. The on-disk entries, including the terminal entry's length,
+//! and the separate eight-byte `$EA_INFORMATION` summary are checked
 //! against Windows-authored bytes in `tests/ea_information_windows_oracle.rs`.
 //!
 //! [FILE_FULL_EA_INFORMATION]: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_file_full_ea_information
@@ -58,7 +59,7 @@ pub fn packed_ea_length(eas: &[Ea]) -> Result<u16, Error> {
 /// Pack a list of EAs into a `$EA` blob.
 pub fn encode(eas: &[Ea]) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
-    for (i, ea) in eas.iter().enumerate() {
+    for ea in eas {
         if ea.name.len() > 254 {
             return Err(Error::io(format!("ea name too long: {}", ea.name.len())));
         }
@@ -66,9 +67,10 @@ pub fn encode(eas: &[Ea]) -> Result<Vec<u8>, Error> {
             return Err(Error::io(format!("ea value too large: {}", ea.value.len())));
         }
         let entry_len = entry_encoded_size(ea.name.len(), ea.value.len());
-        let next_off = if i == eas.len() - 1 { 0 } else { entry_len };
-        // Header (8 bytes).
-        out.extend_from_slice(&(next_off as u32).to_le_bytes());
+        // Windows stores each entry's aligned size, including the last;
+        // the API input buffer's zero terminator corrupts an on-disk $EA
+        // under chkdsk (#745). The Windows fixture oracle checks all bytes.
+        out.extend_from_slice(&(entry_len as u32).to_le_bytes());
         out.push(ea.flags);
         out.push(ea.name.len() as u8);
         out.extend_from_slice(&(ea.value.len() as u16).to_le_bytes());
@@ -294,14 +296,15 @@ mod tests {
     }
 
     #[test]
-    fn encode_last_entry_has_zero_next_offset() {
+    fn encode_last_entry_has_its_aligned_length() {
         let eas = vec![ea(b"A", b"1"), ea(b"B", b"2")];
         let bytes = encode(&eas).unwrap();
         // first entry's next_off = entry_encoded_size(1, 1) = align4(8+1+1+1)=12
         let first_len = entry_encoded_size(1, 1);
-        // second entry's next_off (at bytes[first_len..first_len+4]) must be 0
+        // Windows stores the aligned length even on the terminal on-disk
+        // entry; zero is the terminator of an API input buffer (#745).
         let last_next_off = u32::from_le_bytes(bytes[first_len..first_len + 4].try_into().unwrap());
-        assert_eq!(last_next_off, 0);
+        assert_eq!(last_next_off, first_len as u32);
     }
 
     #[test]

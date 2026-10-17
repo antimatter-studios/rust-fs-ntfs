@@ -3407,17 +3407,16 @@ pub fn write_ea_io<T: BlockIo + ?Sized>(
     }
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     refuse_metafile_io(io, rec, &format!("write_ea {file_path}"))?;
-    update_mft_record_io(io, rec, |record| {
-        let mut eas = crate::ea_io::read_from_record(record)?;
+    change_eas_io(io, rec, |eas| {
         crate::ea_io::upsert(
-            &mut eas,
+            eas,
             crate::ea_io::Ea {
                 flags,
                 name: ea_name.to_ascii_uppercase(),
                 value: ea_value.to_vec(),
             },
         );
-        commit_eas(record, &eas)
+        Ok(())
     })
 }
 
@@ -3434,15 +3433,14 @@ pub fn remove_ea_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     refuse_metafile_io(io, rec, &format!("remove_ea {file_path}"))?;
-    update_mft_record_io(io, rec, |record| {
-        let mut eas = crate::ea_io::read_from_record(record)?;
-        if !crate::ea_io::remove_by_name(&mut eas, ea_name) {
+    change_eas_io(io, rec, |eas| {
+        if !crate::ea_io::remove_by_name(eas, ea_name) {
             return Err(Error::not_found(format!(
                 "EA '{}' not found",
                 String::from_utf8_lossy(ea_name)
             )));
         }
-        commit_eas(record, &eas)
+        Ok(())
     })
 }
 
@@ -3457,8 +3455,13 @@ pub fn list_eas_io<T: BlockIo + ?Sized>(
     file_path: &str,
 ) -> Result<Vec<crate::ea_io::Ea>, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    let (_, record) = read_mft_record_io(io, rec)?;
-    crate::ea_io::read_from_record(&record)
+    // THE $EA MAY BE IN AN EXTENSION RECORD. Windows moves it out of a
+    // full base record, and so does this crate (#660): the base record
+    // alone listed no EAs for such a file. The read follows the file's
+    // `$ATTRIBUTE_LIST`.
+    let value =
+        crate::read::read_attribute_value_if_present(io, rec, AttrType::ExtendedAttribute, None)?;
+    value.map_or(Ok(Vec::new()), |value| crate::ea_io::decode(&value))
 }
 
 /// Return just the key (name) bytes of every EA on `file_path`,
@@ -3482,15 +3485,153 @@ pub fn list_ea_keys_io<T: BlockIo + ?Sized>(
     Ok(eas.into_iter().map(|ea| ea.name).collect())
 }
 
-/// Rewrite `$EA` + `$EA_INFORMATION`. Empty list ⇒ both removed.
-fn commit_eas(record: &mut [u8], eas: &[crate::ea_io::Ea]) -> Result<(), Error> {
+/// Apply `change` to the EAs of the file whose base record is `rec`, and
+/// write them back.
+///
+/// AN EA THE BASE RECORD CANNOT HOLD GOES THROUGH THE FILE'S LIST. An EA
+/// on a full base record was refused with "exceeds record capacity", and
+/// one on a file with an `$ATTRIBUTE_LIST` was refused outright, where
+/// Windows moves attributes to extension records and names them in the
+/// list (#660, part of #480). A regular file with a list, or whose base
+/// record has no room for its new `$EA` and `$EA_INFORMATION`, is written
+/// through [`crate::attr_list`]; any other is written in its base record,
+/// as before. A directory keeps the base-record path, as
+/// [`crate::attr_list::ListedFile`] does not move a directory's
+/// attributes.
+fn change_eas_io<T, F>(io: &mut T, rec: u64, change: F) -> Result<(), Error>
+where
+    T: BlockIo + ?Sized,
+    F: Fn(&mut Vec<crate::ea_io::Ea>) -> Result<(), Error>,
+{
+    let (_, record) = read_mft_record_io(io, rec)?;
+    let is_directory =
+        crate::mft_io::record_flags(&record) & crate::mft_io::MFT_FLAG_DIRECTORY != 0;
+    let listed = attr_io::find_attribute(&record, AttrType::AttributeList, None).is_some();
+    if !is_directory && listed {
+        return write_listed_eas_io(io, rec, &change);
+    }
+    let mut eas = crate::ea_io::read_from_record(&record)?;
+    change(&mut eas)?;
+    if !is_directory && !eas_fit_record(&record, &eas)? {
+        return write_listed_eas_io(io, rec, &change);
+    }
+    update_mft_record_io(io, rec, |record| commit_eas(record, &eas))
+}
+
+/// Whether `record` holds `eas` as a resident `$EA` and `$EA_INFORMATION`
+/// in place of the ones it has.
+fn eas_fit_record(record: &[u8], eas: &[crate::ea_io::Ea]) -> Result<bool, Error> {
+    if eas.is_empty() {
+        return Ok(true);
+    }
+    let (packed, info) = ea_values(eas)?;
+    let align8 = crate::record_build::align8;
+    let need = align8(0x18 + packed.len()) + align8(0x18 + info.len());
+    let held: usize = [
+        AttrType::ExtendedAttribute,
+        AttrType::ExtendedAttributeInformation,
+    ]
+    .into_iter()
+    .filter_map(|ty| attr_io::find_attribute(record, ty, None))
+    .map(|loc| loc.attr_length)
+    .sum();
+    let used = u32::from_le_bytes(record[0x18..0x1C].try_into().expect("4 bytes")) as usize;
+    let allocated = u32::from_le_bytes(record[0x1C..0x20].try_into().expect("4 bytes")) as usize;
+    Ok(allocated.saturating_sub(used) + held >= need)
+}
+
+/// Write the EAs `change` makes of those the file whose base record is
+/// `rec` has, through the file's `$ATTRIBUTE_LIST`, which is made when the
+/// file has none (#660); see [`crate::attr_list`]. `$EA` and
+/// `$EA_INFORMATION` stay where they are while their records hold them,
+/// and go wherever [`crate::attr_list::ListedFile::add`] puts them when
+/// they do not; no EAs left takes both out. A write refused before the
+/// records are written gives back what it allocated.
+fn write_listed_eas_io<T, F>(io: &mut T, rec: u64, change: &F) -> Result<(), Error>
+where
+    T: BlockIo + ?Sized,
+    F: Fn(&mut Vec<crate::ea_io::Ea>) -> Result<(), Error>,
+{
+    let mut file = crate::attr_list::ListedFile::open(io, rec)?;
+    let mut eas = match file.find(AttrType::ExtendedAttribute, "")? {
+        None => Vec::new(),
+        Some(found) if !found.loc.is_resident => {
+            return Err(Error::refused(format!(
+                "record {rec}: its $EA is non-resident, which this driver does not write"
+            )))
+        }
+        Some(found) => {
+            let attr = file.attribute_bytes(&found);
+            let off = found.loc.resident_value_offset.unwrap_or(0) as usize;
+            let len = found.loc.resident_value_length.unwrap_or(0) as usize;
+            let value = attr.get(off..off + len).ok_or_else(|| {
+                Error::io(format!(
+                    "record {rec}: its $EA's value runs past the attribute's {} bytes",
+                    attr.len()
+                ))
+            })?;
+            crate::ea_io::decode(value)?
+        }
+    };
+    change(&mut eas)?;
+    if let Err(e) = place_listed_eas_io(io, &mut file, &eas) {
+        return Err(file.abandon(io, e));
+    }
+    file.commit(io)
+}
+
+/// Put `eas` in `file` as its `$EA_INFORMATION` and `$EA`, replacing the
+/// ones it has, or take both out when `eas` is empty.
+fn place_listed_eas_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file: &mut crate::attr_list::ListedFile,
+    eas: &[crate::ea_io::Ea],
+) -> Result<(), Error> {
+    let kinds = [
+        AttrType::ExtendedAttributeInformation,
+        AttrType::ExtendedAttribute,
+    ];
+    if eas.is_empty() {
+        for ty in kinds {
+            if file.find(ty, "")?.is_some() {
+                file.remove(ty, "")?;
+            }
+        }
+        return Ok(());
+    }
+    let (packed, info) = ea_values(eas)?;
+    for ty in kinds {
+        let attr = match ty {
+            AttrType::ExtendedAttribute => {
+                crate::record_build::build_resident_ea_attribute(0, &packed)?
+            }
+            _ => crate::record_build::build_resident_ea_information_attribute(0, &info)?,
+        };
+        if file.find(ty, "")?.is_some() {
+            file.replace(io, ty, "", attr)?;
+        } else {
+            file.add(io, attr)?;
+        }
+    }
+    Ok(())
+}
+
+/// The `$EA` value `eas` packs into, and the `$EA_INFORMATION` value that
+/// describes it.
+fn ea_values(eas: &[crate::ea_io::Ea]) -> Result<(Vec<u8>, Vec<u8>), Error> {
     let packed = crate::ea_io::encode(eas)?;
     let packed_length = crate::ea_io::packed_ea_length(eas)?;
     let need = u16::try_from(crate::ea_io::count_need_ea(eas))
         .map_err(|_| "NEED_EA count too large".to_string())?;
     let query_length = u32::try_from(packed.len())
         .map_err(|_| format!("EA query length too large: {}", packed.len()))?;
-    let ea_info_value = crate::ea_io::build_ea_information_value(packed_length, need, query_length);
+    let info = crate::ea_io::build_ea_information_value(packed_length, need, query_length);
+    Ok((packed, info))
+}
+
+/// Rewrite `$EA` + `$EA_INFORMATION`. Empty list ⇒ both removed.
+fn commit_eas(record: &mut [u8], eas: &[crate::ea_io::Ea]) -> Result<(), Error> {
+    let (packed, ea_info_value) = ea_values(eas)?;
 
     if eas.is_empty() {
         remove_unnamed_attr(record, AttrType::ExtendedAttribute)?;

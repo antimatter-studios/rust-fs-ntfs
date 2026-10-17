@@ -170,7 +170,7 @@ Offsets below are relative to one entry in the encoded `$EA` value:
 
 | Offset | Bytes | Field |
 | --- | --- | --- |
-| `00` | 4 | Next entry byte offset; zero for final entry |
+| `00` | 4 | Aligned entry length, including the final on-disk entry |
 | `04` | 1 | Flags; `80` = NEED_EA |
 | `05` | 1 | Name length in bytes |
 | `06` | 2 | Value length in bytes |
@@ -206,6 +206,10 @@ reads raw summary bytes from files created with `NtSetEaFile`: compact length
 19, query length 32, and zero, one or two NEED_EA flags. The fixture generator
 runs on Windows in CI; the image is generated on demand. This comparison
 checks the on-disk summary separately from the documented API entry buffer.
+It also compares the complete `$EA` bytes: Windows stores the aligned length
+in the final entry's offset field too, where the API input buffer uses zero.
+Writing that zero into `$EA` made chkdsk report corrupt extended attribute
+information in the attribute-list EA scenario (#745).
 
 The decoder checks value and next-offset buffer bounds, but does not implement
 all conceivable NUL, alignment, overlap, trailing-partial-entry, flag, and summary

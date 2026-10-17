@@ -1346,6 +1346,19 @@ jobs:
               --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
               --vm-workdir=C:/rust-fs-ntfs-matrix
           done
+      # EAs a file's base record cannot hold, or written to a file that has
+      # an $ATTRIBUTE_LIST, go through the list. chkdsk grades them and
+      # Windows reads every EA back through NtQueryEaFile (#660).
+      - name: Validate EAs written through an attribute list on Windows
+        shell: bash
+        run: |
+          for scenario in mac-format-mac-write-streams-mac-write-eas-win-chkdsk \
+            win-format-win-write-streams-mac-write-eas-win-chkdsk; do
+            bash scripts/run-matrix.sh "$scenario" \
+              --vm-host=runneradmin@localhost \
+              --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+              --vm-workdir=C:/rust-fs-ntfs-matrix
+          done
       - name: Validate enumeration without required paths on Windows
         shell: bash
         run: |
