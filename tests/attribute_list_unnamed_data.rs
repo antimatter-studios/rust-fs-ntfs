@@ -310,3 +310,74 @@ fn a_base_record_too_full_to_promote_the_unnamed_stream_gains_a_list() {
     drop(reader);
     clean(&img);
 }
+
+/// Write `data` at `offset` of `/f` with `write_at`, apply the same write
+/// to `model`, then check the list, the contents the `ntfs` crate reads,
+/// the streams beside it and the volume (#789).
+fn write_at_and_check(img: &str, rec: u64, model: &mut Vec<u8>, offset: usize, data: &[u8]) {
+    let end = offset + data.len();
+    if model.len() < end {
+        model.resize(end, 0);
+    }
+    model[offset..end].copy_from_slice(data);
+    let mut io = PathIo::open_rw(Path::new(img)).expect("open_rw");
+    let written = write::write_at_io(&mut io, "/f", offset as u64, data)
+        .unwrap_or_else(|e| panic!("write {} bytes at {offset} of /f: {e}", data.len()));
+    assert_eq!(written, data.len() as u64);
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
+    drop(io);
+    list_is_true(img, rec);
+    let (ntfs, mut reader) = common::open(img);
+    let read_back = common::read_file_all(&ntfs, &mut reader, "/f");
+    assert!(
+        read_back == *model,
+        "after a write of {} bytes at {offset}, the ntfs crate reads {} bytes of /f \
+         that differ from the {} expected",
+        data.len(),
+        read_back.len(),
+        model.len()
+    );
+    drop(reader);
+    let mut io = PathIo::open_ro(Path::new(img)).expect("open_ro");
+    assert_eq!(
+        read::read_attribute_value(&mut io, rec, AttrType::Data, Some("s3")).expect("read /f:s3"),
+        vec![b'd'; 120],
+        "writing into the unnamed stream changed a named one"
+    );
+    drop(io);
+    clean(img);
+}
+
+/// Writes into the middle of and past the end of the unnamed stream of a
+/// listed file, resident, then promoted by an extending write, then
+/// non-resident.
+fn partial_writes(img: &str, rec: u64) {
+    let mut model = b"contents".to_vec();
+    write_at_and_check(img, rec, &mut model, 2, b"NT");
+    write_at_and_check(img, rec, &mut model, 8, &pattern(300));
+    write_at_and_check(img, rec, &mut model, 400, b"gap");
+    write_at_and_check(img, rec, &mut model, 100, &[b'm'; 50]);
+    write_at_and_check(img, rec, &mut model, 600, &pattern(8400));
+    write_at_and_check(img, rec, &mut model, 4090, &[b'x'; 20]);
+    write_at_and_check(img, rec, &mut model, 8990, &pattern(11_010));
+    write_at_and_check(img, rec, &mut model, 30_000, b"tail");
+}
+
+/// `write_at` on the unnamed `$DATA` of a listed file whose stream is in
+/// its base record goes through the list as it grows (#789).
+#[test]
+fn write_at_into_the_unnamed_stream_of_a_listed_file_keeps_the_list_true() {
+    let (img, rec) = volume_with_a_listed_file("at_base");
+    partial_writes(&img, rec);
+}
+
+/// `write_at` on a Windows-made file whose unnamed `$DATA` lives in an
+/// extension record writes it there, not refused for want of one in the
+/// base record (#789).
+#[test]
+fn write_at_into_the_unnamed_stream_in_an_extension_record_writes_it_there() {
+    let (img, rec) = volume_with_a_listed_file("at_ext");
+    move_unnamed_data_to_extension(&img, rec);
+    list_is_true(&img, rec);
+    partial_writes(&img, rec);
+}
