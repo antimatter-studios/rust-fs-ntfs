@@ -268,6 +268,7 @@ fs.ntfs disk.img stat /notes.txt   # one path: record, links, sizes, every time
 fs.ntfs disk.img read /notes.txt > notes.txt
 fs.ntfs disk.img get label --text
 fs.ntfs disk.img write /notes.txt < notes.txt
+fs.ntfs disk.img write --at 4095 /notes.txt < patch.bin   # patch without truncating
 fs.ntfs disk.img truncate /notes.txt 4097   # length in bytes; a grown tail reads as zeros
 fs.ntfs disk.img mkdir /backup
 fs.ntfs disk.img mkdir -p /backup/2026/october   # every missing directory
@@ -320,6 +321,18 @@ a dirty volume are all refused before the image is opened for writing, so
 it stays byte-identical. The report is `{"path": ..., "linked": true,
 "inode": N}`, N being the file's record for a hard link and the new link's
 for a symbolic one.
+
+`write --at BYTES PATH` writes all of stdin at a byte position in an existing
+regular file, preserving the prefix and suffix. A write past EOF grows the
+file and zero-fills the gap, as Windows does; an empty input changes nothing.
+Missing paths, directories and read-only files fail with exit 1. Symbolic
+links and other reparse points are never followed (exit 3); compressed,
+sparse and encrypted streams this driver cannot patch also answer exit 3.
+Input is buffered before opening the image, and the full edit is rehearsed
+before a writable open, so predictable refusals leave it byte-identical.
+The report is `{"path": ..., "at": N, "bytes": N, "size": N}`. Plain `write`
+still creates or replaces; `--offset` stays the filesystem's position inside
+TARGET, independent of `--at`.
 
 `truncate PATH SIZE` sets a regular file's length to SIZE bytes, an unsigned
 decimal count without a suffix. Shrinking frees whole clusters past the new

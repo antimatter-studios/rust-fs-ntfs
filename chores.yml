@@ -595,7 +595,9 @@ tasks:
     # and test-docs.sh's 4 for --parents in the man page and completions;
     # that floor was 845. #655 adds 130: test-truncate.sh's 128 checks on
     # its passing path and the two test-docs.sh makes of the new verb;
-    # the floor is 975. Counts are derived from the passing paths; suites
+    # that floor was 975. #656 adds 168: test-write-at.sh's 164 checks on
+    # its passing path and four generated-doc checks for --at; floor 1143.
+    # Counts are derived from the passing paths; suites
     # run in CI, not in the implementation agent's checkout.
     cmds:
       - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli -- scripts/test-cli.sh'
@@ -629,10 +631,11 @@ tasks:
     # cli:install builds. FLOOR: the 20 cli scenarios when the tier was added;
     # 25 with the three format-plan scenarios (#698); 26 with the rename
     # scenario (#645); 27 with the link scenario (#646); 28 with the
-    # mkdir --parents scenario (#647); 29 with truncate (#655).
+    # mkdir --parents scenario (#647); 29 with truncate (#655);
+    # 30 with positioned writes (#656).
     deps: [cli:install]
     cmds:
-      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-host -- python3 scripts/fs-windows-test-harness/run-host-steps --group cli --floor 29'
+      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-host -- python3 scripts/fs-windows-test-harness/run-host-steps --group cli --floor 30'
 
   test:ignored:
     desc: 'The #[ignore]d tests: known defects, run so a fix cannot go unnoticed'
