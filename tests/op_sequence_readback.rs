@@ -95,11 +95,21 @@ fn reference_tools(image: &str, model: &BTreeMap<String, Vec<u8>>, artifacts: &P
         "ntfsfix -n: {}",
         String::from_utf8_lossy(&report)
     );
-    for (path, expected) in model {
+    for (index, (path, expected)) in model.iter().enumerate() {
         let output = std::process::Command::new("ntfscat")
             .args([image, path])
             .output()
             .expect("ntfscat missing: install ntfs-3g for test:op-sequence-oracle");
+        fs::write(
+            artifacts.join(format!("ntfscat-{index}.bin")),
+            &output.stdout,
+        )
+        .unwrap();
+        fs::write(
+            artifacts.join(format!("ntfscat-{index}.txt")),
+            &output.stderr,
+        )
+        .unwrap();
         assert!(
             output.status.success(),
             "ntfscat {path}: {}",
@@ -107,6 +117,39 @@ fn reference_tools(image: &str, model: &BTreeMap<String, Vec<u8>>, artifacts: &P
         );
         assert_eq!(&output.stdout, expected, "ntfs-3g contents of {path}");
     }
+}
+
+/// Shared with libFuzzer: valid JSON replays concretely; other bytes use the
+/// live generator. The gate above always decodes its JSON strictly.
+#[allow(dead_code)]
+pub fn fuzz_input(input: &[u8]) {
+    let mut h = harness::Harness::new("explorer");
+    fs::write("tmp/op-sequence-model/explorer/input.bin", input).unwrap();
+    match generator::decode_replay(input) {
+        Ok(operations) => {
+            for operation in operations {
+                h.step(operation);
+            }
+        }
+        Err(_) => {
+            h.generated(input);
+        }
+    }
+    h.finish();
+    // Keep totals across completed inputs as well as the current prefix's
+    // per-opcode accepted/refused counts when a later input crashes.
+    type Counts = ([usize; 9], [usize; 9]);
+    static TOTALS: std::sync::Mutex<Counts> = std::sync::Mutex::new(([0; 9], [0; 9]));
+    let mut totals = TOTALS.lock().unwrap();
+    for kind in 0..9 {
+        totals.0[kind] += h.counts.0[kind];
+        totals.1[kind] += h.counts.1[kind];
+    }
+    fs::write(
+        "tmp/op-sequence-model/explorer/refusal-histogram.json",
+        serde_json::to_vec(&*totals).unwrap(),
+    )
+    .unwrap();
 }
 
 fn sequence(seed: u64) {
