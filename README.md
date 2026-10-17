@@ -273,6 +273,7 @@ fs.ntfs disk.img rmdir /backup     # an empty directory
 fs.ntfs disk.img set label "Backup Volume"
 fs.ntfs --offset 1048576 whole-disk.img info
 fsck.ntfs disk.img                 # dirty flag, $LogFile, $MFTMirr, MFT records; exit 0/1/4/8
+fsck.ntfs --dry-run disk.img       # every write -y would make, by unit; none is made
 rust-fs-ntfs doctor                # is every name on PATH this program?
 chore test:cli                     # the tools as installed: doctor, then tests/cli/
 chore test:cli:oracle              # against Windows-written volumes, and ntfs-3g (tests/cli-oracle/)
