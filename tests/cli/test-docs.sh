@@ -60,4 +60,10 @@ check "fs.ntfs's zsh completion carries streams" grep -q -- 'streams' "${share:-
 check "fs.ntfs's bash completion carries streams" grep -q -- 'streams' "${share:-/nonexistent}/bash-completion/completions/fs.ntfs"
 check "fs.ntfs's fish completion carries streams" grep -q -- 'streams' "${share:-/nonexistent}/fish/vendor_completions.d/fs.ntfs.fish"
 
+check "fs.ntfs read's man page carries --stream" \
+    grep -qE -- '(\\-\\-|--)stream' "${share:-/nonexistent}/man/man1/fs.ntfs-read.1"
+check "fs.ntfs's zsh completion carries read --stream" grep -q -- '--stream' "${share:-/nonexistent}/zsh/site-functions/_fs.ntfs"
+check "fs.ntfs's bash completion carries read --stream" grep -q -- '--stream' "${share:-/nonexistent}/bash-completion/completions/fs.ntfs"
+check "fs.ntfs's fish completion carries read --stream" grep -q -- '-l stream' "${share:-/nonexistent}/fish/vendor_completions.d/fs.ntfs.fish"
+
 finish
