@@ -1725,9 +1725,15 @@ fn rename_same_length_unstamped_io<T: BlockIo + ?Sized>(
     // The undo is the same edit backwards, and it can fail too. If it
     // does, both names are reported, because at that point neither this
     // function nor the caller knows which one the volume will answer to.
-    if let Err(e) = update_mft_record_io(io, file_rec, |record| {
-        index_io::rename_filename_attribute_same_length(record, &current_basename, new_name)
-    }) {
+    if let Err(e) = rename_file_name_io(
+        io,
+        file_rec,
+        &current_basename,
+        |record| {
+            index_io::rename_filename_attribute_same_length(record, &current_basename, new_name)
+        },
+        nothing_to_move,
+    ) {
         let undo = undo_index_rename_same_length(
             io,
             parent_rec,
@@ -1876,7 +1882,15 @@ fn rename_into_new_index_slot_io<T: BlockIo + ?Sized>(
         new,
         &old_entry,
         &new_entry,
-        |record| index_io::rename_filename_attribute_same_length(record, old, new),
+        |io| {
+            rename_file_name_io(
+                io,
+                file_rec,
+                old,
+                |record| index_io::rename_filename_attribute_same_length(record, old, new),
+                nothing_to_move,
+            )
+        },
     )
 }
 
@@ -1900,7 +1914,7 @@ fn move_index_entry_io<T: BlockIo + ?Sized>(
     new: &str,
     old_entry: &[u8],
     new_entry: &[u8],
-    rename_file: impl FnOnce(&mut [u8]) -> Result<(), Error>,
+    rename_file: impl FnOnce(&mut T) -> Result<(), Error>,
 ) -> Result<(), Error> {
     remove_parent_index_entry_io(io, parent_rec, file_rec, old).map_err(|e| {
         e.map_message(|m| {
@@ -1933,7 +1947,7 @@ fn move_index_entry_io<T: BlockIo + ?Sized>(
         });
     }
 
-    if let Err(e) = update_mft_record_io(io, file_rec, rename_file) {
+    if let Err(e) = rename_file(io) {
         let undo = remove_parent_index_entry_io(io, parent_rec, file_rec, new).and_then(|()| {
             let overflows = parent_index_overflows_io(io, parent_rec)?;
             insert_entry_in_parent_io(io, parent_rec, overflows, old_entry, old)
@@ -7306,14 +7320,30 @@ fn rename_replace_unstamped_io<T: BlockIo + ?Sized>(
             new_basename,
             &old_entry,
             &new_entry_bytes,
-            |record| {
-                replace_file_name_with_new_name(
-                    record,
+            |io| {
+                rename_file_name_io(
+                    io,
+                    file_rec,
                     &old_basename,
-                    new_basename,
-                    parent_reference,
-                    nt_time,
-                    is_dir,
+                    |record| {
+                        replace_file_name_with_new_name(
+                            record,
+                            &old_basename,
+                            new_basename,
+                            parent_reference,
+                            nt_time,
+                            is_dir,
+                        )
+                    },
+                    |namespace| {
+                        renamed_file_name_attribute(
+                            parent_reference,
+                            new_basename,
+                            nt_time,
+                            is_dir,
+                            namespace,
+                        )
+                    },
                 )
             },
         );
@@ -7346,16 +7376,24 @@ fn rename_replace_unstamped_io<T: BlockIo + ?Sized>(
     })?;
 
     // 2) Update the file's own $FILE_NAME attribute(s).
-    if let Err(step_two) = update_mft_record_io(io, file_rec, |record| {
-        replace_file_name_with_new_name(
-            record,
-            &old_basename,
-            new_basename,
-            parent_reference,
-            nt_time,
-            is_dir,
-        )
-    }) {
+    if let Err(step_two) = rename_file_name_io(
+        io,
+        file_rec,
+        &old_basename,
+        |record| {
+            replace_file_name_with_new_name(
+                record,
+                &old_basename,
+                new_basename,
+                parent_reference,
+                nt_time,
+                is_dir,
+            )
+        },
+        |namespace| {
+            renamed_file_name_attribute(parent_reference, new_basename, nt_time, is_dir, namespace)
+        },
+    ) {
         // Put the index back, so the failure leaves the volume as it
         // was rather than half-renamed.
         return Err(
@@ -7496,6 +7534,15 @@ fn replace_existing_dest_io<T: BlockIo + ?Sized>(
 
 /// The namespace of `record`'s `$FILE_NAME` called `name`, if it has one.
 fn file_name_namespace(record: &[u8], name: &str) -> Option<u8> {
+    find_file_name_by_name(record, name).map(|(_, namespace)| namespace)
+}
+
+/// The first `$FILE_NAME` in `record` whose name is `name`, and its
+/// namespace.
+pub(crate) fn find_file_name_by_name(
+    record: &[u8],
+    name: &str,
+) -> Option<(attr_io::AttrLocation, u8)> {
     let wanted: Vec<u16> = name.encode_utf16().collect();
     attr_io::iter_attributes(record)
         .filter(|loc| loc.type_code == AttrType::FileName as u32)
@@ -7511,8 +7558,64 @@ fn file_name_namespace(record: &[u8], name: &str) -> Option<u8> {
                 .chunks_exact(2)
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
                 .collect();
-            (cur == wanted).then(|| record[value + 0x41])
+            let namespace = record[value + 0x41];
+            (cur == wanted).then_some((loc, namespace))
         })
+}
+
+/// Rename the file's own `$FILE_NAME` named `old` with `rename`. A file
+/// with an `$ATTRIBUTE_LIST` may hold the name in an extension record, so
+/// its rename goes through the list, and a name that no longer fits its
+/// record is `moved` through it (#780).
+fn rename_file_name_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_rec: u64,
+    old: &str,
+    rename: impl Fn(&mut [u8]) -> Result<(), Error>,
+    moved: impl Fn(u8) -> Result<Vec<u8>, Error>,
+) -> Result<(), Error> {
+    let (_, record) = read_mft_record_io(io, file_rec)?;
+    if attr_io::find_attribute(&record, AttrType::AttributeList, None).is_none() {
+        return update_mft_record_io(io, file_rec, rename);
+    }
+    let mut listed = crate::attr_list::ListedFile::open(io, file_rec)?;
+    if let Err(e) = listed.rename_file_name(io, old, rename, moved) {
+        return Err(listed.abandon(io, e));
+    }
+    listed.commit(io)
+}
+
+/// A same-length rename never grows a `$FILE_NAME`, so it has nothing to
+/// move.
+fn nothing_to_move(_: u8) -> Result<Vec<u8>, Error> {
+    Err(Error::io("a same-length rename has no $FILE_NAME to move"))
+}
+
+/// The whole `$FILE_NAME` attribute a rename to `new_name` moves through
+/// the list: the value [`replace_file_name_with_new_name`] writes.
+fn renamed_file_name_attribute(
+    parent_reference: u64,
+    new_name: &str,
+    nt_time: u64,
+    is_dir: bool,
+    old_namespace: u8,
+) -> Result<Vec<u8>, Error> {
+    let mut attr = crate::record_build::build_file_name_attribute(
+        0,
+        parent_reference,
+        new_name,
+        nt_time,
+        is_dir,
+    )?;
+    let new_utf16: Vec<u16> = new_name.encode_utf16().collect();
+    let namespace = crate::record_build::fn_namespace_after_rename(old_namespace, new_name);
+    let value = build_file_name_value(parent_reference, &new_utf16, nt_time, is_dir, namespace);
+    let offset = u16::from_le_bytes([attr[0x14], attr[0x15]]) as usize;
+    if attr.len() < offset + value.len() {
+        return Err(Error::io("a built $FILE_NAME is shorter than its value"));
+    }
+    attr[offset..offset + value.len()].copy_from_slice(&value);
+    Ok(attr)
 }
 
 fn replace_file_name_with_new_name(
