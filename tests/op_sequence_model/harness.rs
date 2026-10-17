@@ -3,7 +3,7 @@ use super::{common, generator, model, reference_tools, shrink, SIZE};
 use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::{error::Error, facade::Filesystem, fsck, mkfs, read, write};
-use generator::{Generator, Geometry, Op, Regression};
+use generator::{Generator, Geometry, Op, Regression, OPCODES};
 use model::Model;
 use shrink::Mismatch;
 use std::collections::BTreeMap;
@@ -162,6 +162,9 @@ fn execute(io: &mut PathIo, op: &Op) -> Result<(), Error> {
         Op::Unlink { path } => write::unlink_io(io, path),
         Op::Rmdir { path } => write::rmdir_io(io, path),
         Op::Link { path, parent, name } => write::link_io(io, path, parent, name),
+        Op::WriteStream { .. } | Op::DeleteStream { .. } => {
+            unimplemented!("named streams reach the disk in #731")
+        }
     }
 }
 
@@ -174,13 +177,16 @@ fn known_refusal(op: &Op, error: &Error) -> bool {
         && error.contains("exceed attr capacity")
 }
 
+/// Accepted then refused operations, one slot per opcode.
+pub type Counts = ([usize; OPCODES], [usize; OPCODES]);
+
 pub struct Harness<M = Model> {
     pub image: String,
     pub model: M,
     artifacts: PathBuf,
     operations: Vec<Op>,
     refusals: Vec<String>,
-    pub counts: ([usize; 9], [usize; 9]),
+    pub counts: Counts,
     started: Instant,
 }
 
@@ -234,9 +240,10 @@ impl<M: Expected> Harness<M> {
         )
         .unwrap();
         fs::write(artifacts.join("refusals.tsv"), "").unwrap();
+        let zero: Counts = ([0; OPCODES], [0; OPCODES]);
         fs::write(
             artifacts.join("outcome-counts.json"),
-            "[[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0]]",
+            serde_json::to_vec(&zero).unwrap(),
         )
         .unwrap();
         Self {
@@ -245,7 +252,7 @@ impl<M: Expected> Harness<M> {
             artifacts,
             operations: Vec::new(),
             refusals: Vec::new(),
-            counts: ([0; 9], [0; 9]),
+            counts: ([0; OPCODES], [0; OPCODES]),
             started: Instant::now(),
         }
     }
@@ -269,17 +276,7 @@ impl<M: Expected> Harness<M> {
         let result = execute(&mut io, &op);
         io.sync().expect("sync operation, including refusal");
         let accepted = result.is_ok();
-        let kind = match &op {
-            Op::Create { .. } => 0,
-            Op::Mkdir { .. } => 1,
-            Op::Write { .. } => 2,
-            Op::WriteAt { .. } => 3,
-            Op::Truncate { .. } => 4,
-            Op::Rename { .. } => 5,
-            Op::Unlink { .. } => 6,
-            Op::Rmdir { .. } => 7,
-            Op::Link { .. } => 8,
-        };
+        let kind = op.opcode();
         if accepted {
             self.counts.0[kind] += 1;
         } else {
@@ -401,22 +398,12 @@ impl<M: Expected> Harness<M> {
         );
     }
 
-    pub fn generated(&mut self, input: &[u8]) -> ([usize; 9], [usize; 9]) {
+    pub fn generated(&mut self, input: &[u8]) -> Counts {
         fs::write(self.artifacts.join("input.bin"), input).unwrap();
         let mut generator = Generator::new(input);
-        let mut counts = ([0; 9], [0; 9]);
+        let mut counts = ([0; OPCODES], [0; OPCODES]);
         while let Some(op) = generator.next(self.model.tree()) {
-            let kind = match &op {
-                Op::Create { .. } => 0,
-                Op::Mkdir { .. } => 1,
-                Op::Write { .. } => 2,
-                Op::WriteAt { .. } => 3,
-                Op::Truncate { .. } => 4,
-                Op::Rename { .. } => 5,
-                Op::Unlink { .. } => 6,
-                Op::Rmdir { .. } => 7,
-                Op::Link { .. } => 8,
-            };
+            let kind = op.opcode();
             if self.step(op) {
                 counts.0[kind] += 1;
             } else {

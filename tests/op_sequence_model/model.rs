@@ -242,6 +242,21 @@ impl Model {
         Ok(())
     }
 
+    /// Create or replace the named `$DATA` stream `name` of `path` (#731).
+    pub fn write_stream(&mut self, _path: &str, _name: &str, _bytes: &[u8]) -> Result<(), Error> {
+        unimplemented!("named streams are modeled in #731")
+    }
+
+    /// Delete the named `$DATA` stream `name` of `path` (#731).
+    pub fn delete_stream(&mut self, _path: &str, _name: &str) -> Result<(), Error> {
+        unimplemented!("named streams are modeled in #731")
+    }
+
+    /// The named streams of `path`, in `$UpCase` key order (#731).
+    pub fn streams(&self, _path: &str) -> Result<Vec<(String, Vec<u8>)>, Error> {
+        unimplemented!("named streams are modeled in #731")
+    }
+
     /// Rename within a directory, matching the initial workload's API.
     /// Preconditions are checked before any namespace or link count changes.
     pub fn rename(&mut self, path: &str, name: &str, replace: bool) -> Result<(), Error> {

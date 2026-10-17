@@ -7,6 +7,8 @@ pub const MAX_STEPS: usize = 120;
 pub const MAX_DATA: usize = 4096;
 pub const MAX_PATH: usize = 4096;
 pub const MAX_SIZE: u32 = 65536;
+/// Operation kinds, in opcode order: histograms have one slot for each.
+pub const OPCODES: usize = 11;
 const MAX_REPLAY: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,8 +51,34 @@ pub enum Op {
         parent: String,
         name: String,
     },
+    /// Create or replace the named `$DATA` stream `stream` (#731).
+    WriteStream {
+        path: String,
+        stream: String,
+        data: Vec<u8>,
+    },
+    DeleteStream {
+        path: String,
+        stream: String,
+    },
 }
 impl Op {
+    /// The opcode that generates this kind, and its histogram slot.
+    pub fn opcode(&self) -> usize {
+        match self {
+            Self::Create { .. } => 0,
+            Self::Mkdir { .. } => 1,
+            Self::Write { .. } => 2,
+            Self::WriteAt { .. } => 3,
+            Self::Truncate { .. } => 4,
+            Self::Rename { .. } => 5,
+            Self::Unlink { .. } => 6,
+            Self::Rmdir { .. } => 7,
+            Self::Link { .. } => 8,
+            Self::WriteStream { .. } => 9,
+            Self::DeleteStream { .. } => 10,
+        }
+    }
     fn bounded(&self) -> bool {
         let primary = match self {
             Self::Create { parent, .. } | Self::Mkdir { parent, .. } => parent,
@@ -60,7 +88,9 @@ impl Op {
             | Self::Rename { path, .. }
             | Self::Unlink { path }
             | Self::Rmdir { path }
-            | Self::Link { path, .. } => path,
+            | Self::Link { path, .. }
+            | Self::WriteStream { path, .. }
+            | Self::DeleteStream { path, .. } => path,
         };
         primary.len() <= MAX_PATH
             && match self {
@@ -76,6 +106,10 @@ impl Op {
                         && u64::from(*offset) + data.len() as u64 <= u64::from(MAX_SIZE)
                 }
                 Self::Truncate { size, .. } => *size <= MAX_SIZE,
+                Self::WriteStream { stream, data, .. } => {
+                    stream.encode_utf16().count() <= 256 && data.len() <= MAX_DATA
+                }
+                Self::DeleteStream { stream, .. } => stream.encode_utf16().count() <= 256,
                 _ => true,
             }
     }
@@ -101,6 +135,8 @@ impl Op {
                 replace,
             } => model.rename(path, name, *replace),
             Self::Link { path, parent, name } => model.link(path, parent, name),
+            Self::WriteStream { path, stream, data } => model.write_stream(path, stream, data),
+            Self::DeleteStream { path, stream } => model.delete_stream(path, stream),
             Self::Unlink { path } | Self::Rmdir { path } => {
                 let directory = model.stat(path)?.directory;
                 if directory && matches!(self, Self::Unlink { .. }) {
