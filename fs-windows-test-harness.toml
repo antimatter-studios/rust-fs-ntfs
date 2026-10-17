@@ -49,6 +49,9 @@ smoke = [
 # this group; `chore matrix -- cli` runs it on the local VM.
 cli = [
   "cli-mkfs-win-chkdsk",
+  "cli-mkfs-plan-4k-win-ntfsinfo-chkdsk",
+  "cli-mkfs-plan-512-win-ntfsinfo-chkdsk",
+  "cli-mkfs-plan-64k-win-ntfsinfo-chkdsk",
   "cli-set-dirty-fsck-win-dirty-chkdsk",
   "cli-corrupt-mirror-fsck-win-chkdsk",
   "cli-corrupt-signature-fsck-win-chkdsk",
@@ -322,6 +325,17 @@ host = "host"
 command = "bash scripts/cli-oracle.sh mkfs {image_dir}/{run_id}/{scenario.image} {scenario.volume_params.size_mib} '{scenario.volume_params.label}'"
 expect_exit = 0
 
+[ops.cli-mkfs-plan]
+# mkfs.ntfs --dry-run with the scenario's size, label and cluster size and
+# the step's record size and serial: the report must carry a plan and
+# create nothing, and the same command without --dry-run must apply that
+# plan. Writes <image>.plan, which win-ntfsinfo checks.
+#   record_size -- --mft-record-size
+#   serial      -- --serial, 16 hex digits, so both runs plan the same volume
+host = "host"
+command = "bash scripts/cli-oracle.sh mkfs-plan {image_dir}/{run_id}/{scenario.image} {scenario.volume_params.size_mib} '{scenario.volume_params.label}' {scenario.volume_params.alloc_unit_size} {step.record_size} {step.serial}"
+expect_exit = 0
+
 [ops.cli-set-dirty]
 # fs.ntfs set dirty true, and get dirty must then say true.
 host = "host"
@@ -444,6 +458,18 @@ expect_exit = 0
 #   keep_image?  -- `true` keeps .img + .vhd for a follow-on op (default `false`)
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-usn-query.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Expect '{step.expect}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
+[ops.win-ntfsinfo]
+# Mount the .img and compare what Windows reports for the volume --
+# `fsutil fsinfo ntfsinfo` and Get-Volume's label -- with the plan
+# cli-mkfs-plan wrote: bytes per sector, cluster and record, total sectors
+# and clusters, the $MFT and $MFTMirr LCNs, the serial and the label.
+#
+# Step fields:
+#   keep_image?  -- `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-ntfsinfo.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Plan '{vm.workdir}/{scenario.image}.plan' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-cli-verify]
