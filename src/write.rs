@@ -5744,23 +5744,40 @@ fn listed_nonresident_attribute_io<T: BlockIo + ?Sized>(
     let size = data.len() as u64;
     let clusters = size.div_ceil(params.cluster_size).max(1);
     let bm = bitmap::locate_bitmap_io(io)?;
-    let lcn = bitmap::find_free_run_io(io, &bm, clusters, params.mft_lcn)?
-        .ok_or_else(|| Error::no_space(format!("no contiguous free run of {clusters} clusters")))?;
-    bitmap::allocate_io(io, &bm, lcn, clusters)?;
-    file.adopt_clusters(lcn, clusters);
+    // ONE RUN WHEN ONE FREE RUN HOLDS THE STREAM, ELSE AS MANY AS IT TAKES.
+    //
+    // On fragmented free space no run may be long enough, and the write
+    // was refused however much space the volume had (#798). Windows places
+    // such a stream in several runs; so does this, while the mapping pairs
+    // still fit one record.
+    let runs = match bitmap::find_free_run_io(io, &bm, clusters, params.mft_lcn)? {
+        Some(lcn) => vec![(lcn, clusters)],
+        None => bitmap::find_free_runs_io(io, &bm, clusters, params.mft_lcn)?
+            .ok_or_else(|| Error::no_space(format!("no {clusters} free clusters")))?,
+    };
     let allocated = clusters * params.cluster_size;
-    let at = crate::mft_io::cluster_span(&params, lcn, 0, 0, allocated, io.size())
-        .map_err(|e| e.context("write data"))?;
     let mut bytes = data.to_vec();
     bytes.resize(allocated as usize, 0);
-    io.write_all_at(at, &bytes)
-        .map_err(|e| Error::io(format!("write data: {e}")))?;
+    let mut mapped = Vec::with_capacity(runs.len());
+    let mut vcn = 0u64;
+    for &(lcn, count) in &runs {
+        bitmap::allocate_io(io, &bm, lcn, count)?;
+        file.adopt_clusters(lcn, count);
+        let len = count * params.cluster_size;
+        let at = crate::mft_io::cluster_span(&params, lcn, 0, 0, len, io.size())
+            .map_err(|e| e.context("write data"))?;
+        let from = (vcn * params.cluster_size) as usize;
+        io.write_all_at(at, &bytes[from..from + len as usize])
+            .map_err(|e| Error::io(format!("write data: {e}")))?;
+        mapped.push(DataRun {
+            starting_vcn: vcn,
+            length: count,
+            lcn: Some(lcn),
+        });
+        vcn += count;
+    }
     io.sync()?;
-    let mapping = data_runs::encode_runs(&[DataRun {
-        starting_vcn: 0,
-        length: clusters,
-        lcn: Some(lcn),
-    }])?;
+    let mapping = data_runs::encode_runs(&mapped)?;
     crate::record_build::build_nonresident_attribute(
         ty as u32,
         name,
