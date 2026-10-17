@@ -471,7 +471,17 @@ jobs:
           # Eight declared fixture-free contracts in #681, on every host leg.
           test "$n" -ge 8 || { echo "::error::generator contracts: $n executed, floor 8"; exit 1; }
 
-      - name: Seeded operation sequences against ntfs-3g
+      - name: Generated operations and fresh-reopen comparisons
+        run: |
+          read -r lines bytes < <(awk '$1 == "mkfs" { print $2, $3 }' scripts/tier-budgets.txt)
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored \
+            op-sequence-readback op-sequence-readback "$lines" "$bytes" -- \
+            cargo test --release --locked --test op_sequence_readback
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/op-sequence-readback.log | awk '{s+=$4} END{print s+0}')
+          # Four original seeds plus four declared #682 image-harness contracts.
+          test "$n" -ge 8 || { echo "::error::readback contracts: $n executed, floor 8"; exit 1; }
+
+      - name: Operation sequences against ntfs-3g
         if: matrix.os == 'ubuntu-latest'
         timeout-minutes: 10
         run: |
@@ -489,6 +499,7 @@ jobs:
             tmp/logs/op-sequence-oracle.log
             tmp/logs/op-sequence-reference-model.log
             tmp/logs/op-sequence-generator.log
+            tmp/logs/op-sequence-readback.log
           if-no-files-found: error
 
       # AND ONCE IN DEBUG, BECAUSE `overflow-checks` IS OFF IN RELEASE.
@@ -961,10 +972,10 @@ jobs:
         run: |
           bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli,harness --no-fail-fast
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
-          # Previous floor 1358 plus eight declared #681 generator contracts.
-          echo "tests executed: $n (floor 1366)"
-          if [ "$n" -lt 1366 ]; then
-              echo "::error::only $n tests executed, floor is 1366 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680 and eight generator contracts in #681. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
+          # Previous floor 1366 plus four declared #682 image-harness contracts.
+          echo "tests executed: $n (floor 1370)"
+          if [ "$n" -lt 1370 ]; then
+              echo "::error::only $n tests executed, floor is 1370 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680, eight generator contracts in #681 and four image-harness contracts in #682. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
               exit 1
           fi
       - run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness -- -D warnings

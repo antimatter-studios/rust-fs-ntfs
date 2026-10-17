@@ -2,6 +2,13 @@
 //! and a refused duplicate create. Every successful operation must execute;
 //! unsupported operations fail rather than disappearing from the workload.
 mod common;
+#[allow(dead_code)]
+#[path = "op_sequence_model/generator.rs"]
+mod generator;
+#[path = "op_sequence_model/harness.rs"]
+mod harness;
+#[path = "op_sequence_model/model.rs"]
+mod model;
 
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::{fsck, mkfs, read, write};
@@ -218,4 +225,106 @@ fn seeded_readback_484() {
 #[test]
 fn seeded_readback_boundary() {
     sequence(u64::MAX);
+}
+
+#[test]
+fn generated_namespace_operations_and_refusals_survive_reopen() {
+    let mut input = Vec::new();
+    for (verb, target, parent, name, length, offset, data) in [
+        (0, 2, 2, 0, 0u16, 0u16, vec![]), // create /a
+        (1, 2, 2, 2, 0, 0, vec![]),       // mkdir /b
+        (2, 2, 2, 0, 4096, 0, vec![7; 4096]),
+        (3, 2, 2, 0, 3, 6000, vec![1, 2, 3]),
+        (4, 2, 2, 0, 9000, 0, vec![]),
+        (8, 2, 2, 4, 0, 0, vec![]),  // link /a -> /é
+        (5, 2, 2, 20, 0, 0, vec![]), // rename /a -> /fresh7
+        (6, 2, 2, 0, 0, 0, vec![]),  // unlink /fresh7
+        (7, 6, 2, 0, 0, 0, vec![]),  // rmdir /b
+    ] {
+        input.extend([verb, target, parent, name]);
+        input.extend(length.to_le_bytes());
+        input.extend(offset.to_le_bytes());
+        input.extend(data);
+    }
+    // Every opcode also reaches the disk with an absent target/parent.
+    for verb in 0..9 {
+        let write = verb == 2 || verb == 3;
+        input.extend([verb, 0, 0, 0, u8::from(write), 0, 0, 0]);
+        if write {
+            input.push(42);
+        }
+    }
+    let mut h = harness::Harness::new("generated");
+    let counts = h.generated(&input);
+    assert!(counts.0.iter().all(|n| *n > 0), "accepted: {:?}", counts.0);
+    assert!(counts.1.iter().all(|n| *n > 0), "refused: {:?}", counts.1);
+    assert_eq!(h.model.read("/é").unwrap().len(), 9000);
+    assert_eq!(h.model.stat("/é").unwrap().links, 1);
+    h.finish();
+}
+
+#[test]
+fn replay_checks_nested_state_and_refusal_atomicity() {
+    use generator::Op;
+    let operations = generator::decode_replay(
+        br#"{"version":1,"operations":[
+        {"op":"mkdir","parent":"/","name":"d"},
+        {"op":"create","parent":"/d","name":"f"},
+        {"op":"write","path":"/d/f","data":[10,20,30]},
+        {"op":"link","path":"/d/f","parent":"/","name":"alias"},
+        {"op":"rename","path":"/d","name":"moved","replace":false},
+        {"op":"create","parent":"/moved","name":"F"},
+        {"op":"rmdir","path":"/moved"},
+        {"op":"unlink","path":"/moved"},
+        {"op":"rmdir","path":"/alias"},
+        {"op":"rename","path":"/alias","name":"moved","replace":true},
+        {"op":"create","parent":"/alias","name":"child"},
+        {"op":"truncate","path":"/moved/f","size":1},
+        {"op":"write_at","path":"/alias","offset":4,"data":[40]},
+        {"op":"create","parent":"/","name":"other"},
+        {"op":"rename","path":"/alias","name":"other","replace":true}
+    ]}"#,
+    )
+    .unwrap();
+    let mut h = harness::Harness::new("nested-replay");
+    for op in operations {
+        h.step(op);
+    }
+    assert_eq!(h.model.read("/other").unwrap(), &[10, 0, 0, 0, 40]);
+    assert_eq!(h.model.stat("/other").unwrap().links, 2);
+    h.step(Op::Unlink {
+        path: "/moved/f".into(),
+    });
+    h.step(Op::Rmdir {
+        path: "/moved".into(),
+    });
+    h.finish();
+}
+
+#[test]
+fn persisted_byte_mutation_is_detected_without_writer_state() {
+    let mut h = harness::Harness::new("byte-control");
+    h.step(generator::Op::Create {
+        parent: "/".into(),
+        name: "a".into(),
+    });
+    h.step(generator::Op::Write {
+        path: "/a".into(),
+        data: vec![1, 2, 3],
+    });
+    write::write_at(Path::new(&h.image), "/a", 0, &[99]).unwrap();
+    File::open(&h.image).unwrap().sync_all().unwrap();
+    assert!(std::panic::catch_unwind(|| h.verify()).is_err());
+}
+
+#[test]
+fn persisted_name_mutation_is_detected_without_writer_state() {
+    let mut h = harness::Harness::new("name-control");
+    h.step(generator::Op::Create {
+        parent: "/".into(),
+        name: "a".into(),
+    });
+    write::rename(Path::new(&h.image), "/a", "wrong").unwrap();
+    File::open(&h.image).unwrap().sync_all().unwrap();
+    assert!(std::panic::catch_unwind(|| h.verify()).is_err());
 }
