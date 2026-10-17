@@ -31,7 +31,10 @@ resized resident 2
 head -c 8191 /dev/zero >>"$SANDBOX/expected"
 resized resident 8193
 head -c 4097 "$SANDBOX/nonresident" >"$SANDBOX/expected"
+free_before="$(fs.ntfs "$img" get free_bytes --text)"
 resized nonresident 4097
+free_after="$(fs.ntfs "$img" get free_bytes --text)"
+check "shrink releases the two clusters past the new end" test "$((free_after - free_before))" -eq "$((2 * $(cluster_size "$img")))"
 head -c 4096 /dev/zero >>"$SANDBOX/expected"
 resized nonresident 8193
 cp "$img" "$SANDBOX/same.img"
@@ -62,7 +65,7 @@ refused() {
 refused 1 /dir 0
 refused 3 /link 0
 refused 1 /missing 0
-refused 1 '/$MFT' 0
+refused 1 "/\$MFT" 0
 refused 1 /resident/ 0
 refused 1 /nonresident 18446744073709551615
 for size in nope 1K -1 1.5 18446744073709551616; do refused 2 /resident "$size"; done
@@ -83,9 +86,24 @@ done
 for flags in '\001\000' '\000\100' '\000\200'; do
     poke "$img" $((attr + 12)) "$flags"
     refused 3 /resident 0
-    # Restore only this test's flag word; no image or test is deleted.
+    # Restore the untransformed file's flag word.
     poke "$img" $((attr + 12)) '\000\000'
 done
+# --offset stays the start of the filesystem, never a file byte position.
+head -c 1048576 /dev/zero >"$SANDBOX/prefix"
+cat "$SANDBOX/prefix" "$img" >"$SANDBOX/disk.img"
+fs.ntfs --offset 1048576 "$SANDBOX/disk.img" truncate /nonresident 17 >"$SANDBOX/out" 2>"$SANDBOX/err"
+check "truncate at a partition offset succeeds" test $? -eq 0
+fs.ntfs --offset 1048576 "$SANDBOX/disk.img" read /nonresident >"$SANDBOX/back" 2>"$SANDBOX/err"
+check "read at the partition offset succeeds" test $? -eq 0
+head -c 17 /dev/zero >"$SANDBOX/expected"
+check "partition file has the new length and content" cmp -s "$SANDBOX/expected" "$SANDBOX/back"
+check "the whole-disk prefix is unchanged" cmp -s "$SANDBOX/prefix" <(head -c 1048576 "$SANDBOX/disk.img")
+fsck.ntfs --offset 1048576 "$SANDBOX/disk.img" >/dev/null 2>"$SANDBOX/err"
+check "the resized partition is clean" test $? -eq 0
+fsck.ntfs "$img" >/dev/null 2>"$SANDBOX/err"
+check "the resized volume is clean" test $? -eq 0
+check "truncate releases the volume clean" test "$(fs.ntfs "$img" get dirty --text)" = false
 fs.ntfs "$img" set dirty true >/dev/null 2>&1
 check "dirty refusal fixture was prepared" test $? -eq 0
 refused 1 /resident 1
