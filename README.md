@@ -269,6 +269,7 @@ fs.ntfs disk.img read /notes.txt > notes.txt
 fs.ntfs disk.img get label --text
 fs.ntfs disk.img write /notes.txt < notes.txt
 fs.ntfs disk.img mkdir /backup
+fs.ntfs disk.img mkdir -p /backup/2026/october   # every missing directory
 fs.ntfs disk.img rm /notes.txt
 fs.ntfs disk.img rmdir /backup     # an empty directory
 fs.ntfs disk.img mv /notes.txt /notes-2026.txt   # a new name, same directory
@@ -318,6 +319,17 @@ a dirty volume are all refused before the image is opened for writing, so
 it stays byte-identical. The report is `{"path": ..., "linked": true,
 "inode": N}`, N being the file's record for a hard link and the new link's
 for a symbolic one.
+
+`mkdir --parents` (`-p`) makes every missing directory on the way to PATH;
+a directory already at PATH, or at any step, is fine. Names are found as
+Windows finds them, without regard to case, and `.` and `..` are taken from
+the text of PATH as Windows takes them, so `/a/../b` makes only `/b`. A file
+or a symbolic link on the way or at PATH (no link is followed), a name
+Windows cannot address and a dirty volume are refused before the image is
+opened for writing, so a refused `mkdir -p` makes no part of the chain; the
+whole chain is then made in one writable open. The report is `{"path": ...,
+"created": [...]}`, listing only the directories made, as PATH spells them.
+Plain `mkdir` still needs PATH's parent to exist.
 
 Reports are JSON on stdout (`--text` for people); a failure is
 `{"error": "...", "code": N}` on stderr, `N` being the exit status. A

@@ -18,6 +18,9 @@
 #                                        a symbolic link whose target Windows reads
 #                                        as text, `/` given as `\`, and through which
 #                                        it reads size bytes of that SHA-256 (fs.ntfs ln -s)
+#   refuse<TAB>/path                     Windows refuses to make the directory chain
+#                                        /path, as fs.ntfs mkdir -p did: CreateDirectory
+#                                        fails because something is in the way
 #
 # Args:
 #   -ImagePath  Path on the VM to the .img file.
@@ -148,6 +151,33 @@ try {
                     $failures++
                 } else {
                     $report += "ok   symlink $($f[1]) -> $want ($length bytes)"
+                }
+            }
+            'refuse' {
+                # Directory.CreateDirectory makes every missing directory on
+                # the way, as mkdir -p does. A file on the way or at the path
+                # fails it with ERROR_ALREADY_EXISTS (183); ERROR_PATH_NOT_FOUND
+                # (3) and ERROR_DIRECTORY (267) say the same of a path below a
+                # file. Any other failure is not this refusal, so it fails.
+                $target = "${letter}:" + ($f[1] -replace '/', '\')
+                $code = $null
+                $why = ''
+                try {
+                    [System.IO.Directory]::CreateDirectory($target) | Out-Null
+                } catch {
+                    $e = $_.Exception
+                    while ($e -is [System.Management.Automation.MethodInvocationException] -and $e.InnerException) { $e = $e.InnerException }
+                    $code = $e.HResult -band 0xFFFF
+                    $why = "$($e.GetType().Name): $($e.Message)"
+                }
+                if ($null -eq $code) {
+                    $report += "FAIL refuse $($f[1]): Windows made the chain fs.ntfs refused"
+                    $failures++
+                } elseif ($e -is [System.IO.IOException] -and (@(183, 3, 267) -contains $code)) {
+                    $report += "ok   refuse $($f[1]) (Win32 error $code)"
+                } else {
+                    $report += "FAIL refuse $($f[1]): Windows failed for another reason, Win32 error ${code}: $why"
+                    $failures++
                 }
             }
             'label' {
