@@ -1,0 +1,200 @@
+//! Fixture-free contracts shared by deterministic replay and future fuzz targets.
+#[path = "op_sequence_model/generator.rs"]
+mod generator;
+#[path = "op_sequence_model/model.rs"]
+mod model;
+use generator::{
+    decode, decode_replay, encode, Generator, Op, MAX_DATA, MAX_PATH, MAX_SIZE, MAX_STEPS,
+};
+use model::{Error, Model};
+
+fn tree() -> Model {
+    let mut table: Vec<_> = (0..=u16::MAX).collect();
+    for c in b'a'..=b'z' {
+        table[c as usize] = c.to_ascii_uppercase() as u16;
+    }
+    Model::new(table).unwrap()
+}
+fn frame(verb: u8, target: u8, parent: u8, name: u8, len: u16, offset: u16) -> Vec<u8> {
+    [
+        vec![verb, target, parent, name],
+        len.to_le_bytes().to_vec(),
+        offset.to_le_bytes().to_vec(),
+    ]
+    .concat()
+}
+
+#[test]
+fn named_reproducer_and_byte_decoding_have_a_host_independent_golden() {
+    let input = [
+        frame(0, 2, 2, 0, 0, 0),
+        frame(2, 2, 2, 0, 3, 0),
+        vec![0, 255, 65],
+    ]
+    .concat();
+    let golden = include_bytes!("op_sequence_model/reproducers/basic-write-v1.json");
+    let operations = decode_replay(golden).unwrap();
+    assert_eq!(decode(&input, &tree()), operations);
+    assert_eq!(encode(&operations).unwrap(), golden.trim_ascii_end());
+    let mut m = tree();
+    for op in operations {
+        op.apply(&mut m).unwrap();
+    }
+    assert_eq!(m.read("/a").unwrap(), &[0, 255, 65]);
+}
+
+#[test]
+fn empty_truncated_and_arbitrary_bytes_are_total_and_repeatable() {
+    assert!(decode(&[], &tree()).is_empty());
+    for byte in 0..=255 {
+        let input = [byte; 33];
+        for prefix in 0..=input.len() {
+            let operations = decode(&input[..prefix], &tree());
+            assert_eq!(decode(&input[..prefix], &tree()), operations);
+            assert_eq!(
+                decode_replay(&encode(&operations).unwrap()).unwrap(),
+                operations
+            );
+        }
+    }
+}
+
+#[test]
+fn every_operation_is_reachable_without_a_disk() {
+    let mut variants = std::collections::HashSet::new();
+    for verb in 0..9 {
+        let operations = decode(&frame(verb, 2, 2, 0, 0, 0), &tree());
+        assert_eq!(operations.len(), 1);
+        variants.insert(std::mem::discriminant(&operations[0]));
+    }
+    assert_eq!(variants.len(), 9);
+}
+
+#[test]
+fn generation_obeys_operation_data_path_and_size_bounds() {
+    let operations = decode(&vec![0; 100_000], &tree());
+    assert_eq!(operations.len(), MAX_STEPS);
+    for verb in [2, 3] {
+        let input = [frame(verb, 2, 2, 0, 4096, u16::MAX), vec![7; MAX_DATA + 10]].concat();
+        let op = decode(&input, &tree()).remove(0);
+        match op {
+            Op::Write { path, data } => {
+                assert!(path.len() <= MAX_PATH);
+                assert_eq!(data.len(), MAX_DATA);
+            }
+            Op::WriteAt { path, offset, data } => {
+                assert!(path.len() <= MAX_PATH);
+                assert_eq!(data.len(), MAX_DATA);
+                assert!(offset + data.len() as u32 <= MAX_SIZE);
+            }
+            _ => panic!("write opcode"),
+        }
+    }
+    assert!(encode(&vec![Op::Rmdir { path: "/".into() }; MAX_STEPS + 1]).is_err());
+}
+
+#[test]
+fn live_model_paths_include_existing_missing_and_wrong_type_targets() {
+    let mut m = tree();
+    m.create("/", "dir", true).unwrap();
+    m.create("/dir", "child", false).unwrap();
+    m.rename("/dir", "moved", false).unwrap();
+    for (selector, expected) in [(2, "/moved/child"), (0, "/missing"), (1, "/")] {
+        let input = frame(3, selector, 2, 0, 0, 0);
+        let mut generator = Generator::new(&input);
+        let op = generator.next(&m).unwrap();
+        assert!(matches!(op, Op::WriteAt { ref path, .. } if path == expected));
+        assert!(generator.next(&m).is_none());
+    }
+    let input = [frame(0, 2, 2, 0, 0, 0), frame(3, 2, 2, 0, 1, 0), vec![42]].concat();
+    let operations = decode(&input, &tree());
+    assert!(
+        matches!(&operations[1], Op::WriteAt { path, data, .. } if path == "/a" && data == &[42])
+    );
+}
+
+#[test]
+fn case_collisions_and_utf16_boundaries_remain_explicit_operations() {
+    let mut m = tree();
+    for (index, units, result) in [
+        (0, 1, Ok(())),
+        (1, 1, Err(Error::Exists)),
+        (15, 255, Ok(())),
+        (16, 254, Ok(())),
+        (17, 255, Ok(())),
+        (18, 256, Err(Error::InvalidName)),
+    ] {
+        let op = decode(&frame(0, 2, 2, index, 0, 0), &m).remove(0);
+        assert!(matches!(&op, Op::Create { name, .. } if name.encode_utf16().count() == units));
+        let before = m.clone();
+        assert_eq!(op.apply(&mut m), result);
+        if result.is_err() {
+            assert_eq!(m, before);
+        }
+    }
+}
+
+#[test]
+fn strict_replay_rejects_corruption_versions_unknown_fields_and_resource_excess() {
+    let golden = include_bytes!("op_sequence_model/reproducers/basic-write-v1.json");
+    for prefix in 0..golden.trim_ascii_end().len() {
+        assert!(decode_replay(&golden[..prefix]).is_err());
+    }
+    for input in [
+        r#"{"version":2,"operations":[]}"#,
+        r#"{"version":1,"operations":[],"extra":0}"#,
+        r#"{"version":1,"operations":[{"op":"unknown"}]}"#,
+        r#"{"version":1,"operations":[]} trailing"#,
+    ] {
+        assert!(decode_replay(input.as_bytes()).is_err());
+    }
+    for value in [
+        serde_json::json!({"op":"create", "parent":"/", "name":"n".repeat(257)}),
+        serde_json::json!({"op":"unlink", "path":"p".repeat(MAX_PATH + 1)}),
+        serde_json::json!({"op":"write", "path":"/a", "data":vec![0; MAX_DATA + 1]}),
+        serde_json::json!({"op":"truncate", "path":"/a", "size":MAX_SIZE + 1}),
+        serde_json::json!({"op":"write_at", "path":"/a", "offset":MAX_SIZE, "data":[1]}),
+    ] {
+        let op: Op = serde_json::from_value(value).unwrap();
+        assert!(encode(std::slice::from_ref(&op)).is_err());
+        let raw = serde_json::json!({"version": 1, "operations": [op]});
+        assert!(decode_replay(&serde_json::to_vec(&raw).unwrap()).is_err());
+    }
+    assert!(decode_replay(&vec![b' '; 4 * 1024 * 1024 + 1]).is_err());
+}
+
+#[test]
+fn operation_application_preserves_full_write_link_and_typed_removal_semantics() {
+    let script = r#"{"version":1,"operations":[{"op":"create","parent":"/","name":"a"},{"op":"mkdir","parent":"/","name":"dir"},{"op":"write","path":"/a","data":[1,2,3]},{"op":"write_at","path":"/a","offset":5,"data":[9]},{"op":"truncate","path":"/a","size":4},{"op":"link","path":"/a","parent":"/dir","name":"b"},{"op":"rename","path":"/a","name":"A","replace":false},{"op":"unlink","path":"/A"},{"op":"rmdir","path":"/dir"}]}"#;
+    let operations = decode_replay(script.as_bytes()).unwrap();
+    let mut m = tree();
+    for op in &operations[..8] {
+        op.apply(&mut m).unwrap();
+    }
+    assert_eq!(m.read("/dir/b").unwrap(), &[1, 2, 3, 0]);
+    assert_eq!(m.stat("/dir/b").unwrap().links, 1);
+    let before = m.clone();
+    assert_eq!(operations[8].apply(&mut m), Err(Error::NotEmpty));
+    assert_eq!(
+        Op::Unlink {
+            path: "/dir".into()
+        }
+        .apply(&mut m),
+        Err(Error::IsDirectory)
+    );
+    assert_eq!(
+        Op::Rmdir {
+            path: "/dir/b".into()
+        }
+        .apply(&mut m),
+        Err(Error::NotDirectory)
+    );
+    assert_eq!(m, before);
+    Op::Write {
+        path: "/dir/b".into(),
+        data: vec![7],
+    }
+    .apply(&mut m)
+    .unwrap();
+    assert_eq!(m.read("/dir/b").unwrap(), &[7]);
+}
