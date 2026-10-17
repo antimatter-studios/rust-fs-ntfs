@@ -612,6 +612,25 @@ pub fn write_at_io<T: BlockIo + ?Sized>(
     // written back whole -- staying resident while it fits, promoted when
     // it outgrows the record -- and a non-resident one is grown to the
     // write's end first, so the gap reads as zeros, as `pwrite` leaves it.
+    //
+    // A FILE WITH AN $ATTRIBUTE_LIST IS WRITTEN THROUGH IT.
+    //
+    // Its unnamed `$DATA` may be in an extension record, where the base
+    // record's walk calls it missing, and its base record may have no room
+    // for the stream to grow (#789, part of #663). The stream is read
+    // through the list, spliced, and rewritten where the list keeps it, as
+    // a whole rewrite is (#788).
+    if listed_regular_file_io(io, rec)? {
+        let end = usize::try_from(end).map_err(|_| Error::io("offset + len overflow"))?;
+        let mut value = crate::read::read_attribute_value(io, rec, AttrType::Data, None)?;
+        if value.len() < end {
+            value.resize(end, 0);
+        }
+        value[end - data.len()..end].copy_from_slice(data);
+        write_listed_unnamed_data_io(io, rec, &value)?;
+        finish_data_write_io(io, rec)?;
+        return Ok(data.len() as u64);
+    }
     let written = match resident_data_value_io(io, rec)? {
         Some(mut value) => {
             let end = usize::try_from(end).map_err(|_| Error::io("offset + len overflow"))?;
@@ -631,6 +650,14 @@ pub fn write_at_io<T: BlockIo + ?Sized>(
     };
     finish_data_write_io(io, rec)?;
     Ok(written)
+}
+
+/// Whether `rec` is a file, not a directory, with an `$ATTRIBUTE_LIST`.
+fn listed_regular_file_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<bool, Error> {
+    let (_, record) = read_mft_record_io(io, rec)?;
+    let is_directory =
+        crate::mft_io::record_flags(&record) & crate::mft_io::MFT_FLAG_DIRECTORY != 0;
+    Ok(!is_directory && attr_io::find_attribute(&record, AttrType::AttributeList, None).is_some())
 }
 
 /// The value of `rec`'s unnamed `$DATA` when it is resident, `None` when it
