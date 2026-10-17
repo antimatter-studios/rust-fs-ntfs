@@ -66,4 +66,8 @@ check "fs.ntfs's zsh completion carries read --stream" grep -q -- '--stream' "${
 check "fs.ntfs's bash completion carries read --stream" grep -q -- '--stream' "${share:-/nonexistent}/bash-completion/completions/fs.ntfs"
 check "fs.ntfs's fish completion carries read --stream" grep -q -- '-l stream' "${share:-/nonexistent}/fish/vendor_completions.d/fs.ntfs.fish"
 
+check "fs.ntfs's zsh completion carries xattr" grep -q -- 'xattr' "${share:-/nonexistent}/zsh/site-functions/_fs.ntfs"
+check "fs.ntfs's bash completion carries xattr" grep -q -- 'xattr' "${share:-/nonexistent}/bash-completion/completions/fs.ntfs"
+check "fs.ntfs's fish completion carries xattr" grep -q -- 'xattr' "${share:-/nonexistent}/fish/vendor_completions.d/fs.ntfs.fish"
+
 finish
