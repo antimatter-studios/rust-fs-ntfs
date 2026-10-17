@@ -13,6 +13,8 @@
 #   * ntfs-usnjrnl.img: a volume with an active change journal, plus
 #     ntfs-usnjrnl.query.txt and ntfs-usnjrnl.records.csv, what fsutil
 #     reports of the journal and of every record in it
+#   * ntfs-stat.img: one of each thing `fs.ntfs stat` reports on, plus
+#     ntfs-stat.windows.tsv, what Windows reports for each path
 #
 # Run from the repository root on an elevated Windows host. rust-img-vhd must be
 # on PATH; CI installs the pinned rust-img-vhd release before invoking this.
@@ -286,5 +288,187 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-inventory.img' -Label 'INVENTORY'
         (New-Object System.Text.UTF8Encoding($false)))
 }
 
-Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img,test-disks/ntfs-format-64k.img,test-disks/ntfs-usnjrnl.img,test-disks/ntfs-inventory.img |
+# What Windows reports for one path, through a handle that opens a symlink
+# or junction itself rather than what it names (FILE_FLAG_OPEN_REPARSE_POINT;
+# FILE_FLAG_BACKUP_SEMANTICS so a directory opens at all). Read gives the
+# file ID, the link count, the attributes, the reparse tag, the end of file
+# and allocation sizes, then the four $STANDARD_INFORMATION times as
+# FILETIMEs: creation, last access, last write, change. SetTimes sets those
+# four through FILE_BASIC_INFO, which leaves the attributes alone when they
+# are zero.
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public static class WindowsStat {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern SafeFileHandle CreateFileW(string path, uint access, uint share,
+        IntPtr security, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetFileInformationByHandle(SafeFileHandle handle, [Out] byte[] info);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int kind,
+        [Out] byte[] info, uint size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetFileInformationByHandle(SafeFileHandle handle, int kind,
+        byte[] info, uint size);
+
+    static SafeFileHandle Open(string path, uint access) {
+        var h = CreateFileW(path, access, 7, IntPtr.Zero, 3, 0x02000000 | 0x00200000, IntPtr.Zero);
+        if (h.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error(), path);
+        return h;
+    }
+
+    static byte[] Query(SafeFileHandle h, int kind, uint size, string path) {
+        var info = new byte[size];
+        if (!GetFileInformationByHandleEx(h, kind, info, size))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), path);
+        return info;
+    }
+
+    public static void SetTimes(string path, long created, long accessed, long written, long changed) {
+        var basic = new byte[40];
+        BitConverter.GetBytes(created).CopyTo(basic, 0);
+        BitConverter.GetBytes(accessed).CopyTo(basic, 8);
+        BitConverter.GetBytes(written).CopyTo(basic, 16);
+        BitConverter.GetBytes(changed).CopyTo(basic, 24);
+        // FILE_WRITE_ATTRIBUTES; FileBasicInfo = 0.
+        using (var h = Open(path, 0x100)) {
+            if (!SetFileInformationByHandle(h, 0, basic, 40))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), path);
+        }
+    }
+
+    public static string[] Read(string path) {
+        // FILE_READ_ATTRIBUTES, which moves no time.
+        using (var h = Open(path, 0x80)) {
+            var byHandle = new byte[52];
+            if (!GetFileInformationByHandle(h, byHandle))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), path);
+            var basic = Query(h, 0, 40, path);     // FileBasicInfo
+            var standard = Query(h, 1, 24, path);  // FileStandardInfo
+            var tag = Query(h, 9, 8, path);        // FileAttributeTagInfo
+            ulong id = ((ulong)BitConverter.ToUInt32(byHandle, 44) << 32)
+                | BitConverter.ToUInt32(byHandle, 48);
+            return new string[] {
+                id.ToString("x16"),
+                BitConverter.ToUInt32(byHandle, 40).ToString(),
+                BitConverter.ToUInt32(basic, 32).ToString(),
+                BitConverter.ToUInt32(tag, 4).ToString("x8"),
+                BitConverter.ToInt64(standard, 8).ToString(),
+                BitConverter.ToInt64(standard, 0).ToString(),
+                BitConverter.ToInt64(basic, 0).ToString(),
+                BitConverter.ToInt64(basic, 8).ToString(),
+                BitConverter.ToInt64(basic, 16).ToString(),
+                BitConverter.ToInt64(basic, 24).ToString(),
+            };
+        }
+    }
+}
+'@
+
+# A volume holding one of each thing `fs.ntfs stat` reports on, plus
+# ntfs-stat.windows.tsv: for every path, what Windows itself reports of it
+# (WindowsStat.Read), the names `fsutil hardlink list` gives a file, the
+# named streams `Get-Item -Stream *` finds on it, and the EAs Windows
+# accepted for it (tests/cli-oracle/test-stat-windows.sh, #642).
+#
+# Every time is set explicitly, last, each to a different value with its
+# own fraction of a second, and one before 1970: NTFS defers writing a
+# last-access time it updates itself, so a time Windows chose could be
+# reported before it is on the disk, and four times a moment apart would
+# not show two of them swapped. The root's times are not set: Windows
+# keeps writing System Volume Information there while it is mounted.
+$statReport = [System.IO.Path]::GetFullPath('test-disks/ntfs-stat.windows.tsv')
+New-WindowsFixture -ImagePath 'test-disks/ntfs-stat.img' -Label 'STAT' -Populate {
+    param($root)
+    $at = {
+        param($rel)
+        if ($rel -eq '/') { return $root }
+        Join-Path $root ($rel.TrimStart('/') -replace '/', '\')
+    }
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $bytes = New-Object byte[] 5000
+    $rng.GetBytes($bytes)
+    [System.IO.File]::WriteAllBytes((& $at '/plain.txt'), $bytes)
+    [System.IO.File]::WriteAllText((& $at '/small.txt'), 'resident')
+    New-Item -ItemType Directory -Path (& $at '/dir') | Out-Null
+    [System.IO.File]::WriteAllText((& $at '/dir/inner.txt'), 'inner')
+    [System.IO.File]::WriteAllText((& $at '/hard-a.txt'), 'linked')
+    New-Item -ItemType HardLink -Path (& $at '/dir/hard-b.txt') -Target (& $at '/hard-a.txt') | Out-Null
+    New-Item -ItemType SymbolicLink -Path (& $at '/link-file') -Value 'plain.txt' | Out-Null
+    New-Item -ItemType Junction -Path (& $at '/link-dir') -Value (& $at '/dir') | Out-Null
+    [System.IO.File]::WriteAllText((& $at '/ads.txt'), 'main')
+    [System.IO.File]::WriteAllText((& $at '/ads.txt') + ':one', 'first stream')
+    [System.IO.File]::WriteAllText((& $at '/ads.txt') + ':two', 'second stream')
+    [System.IO.File]::WriteAllText((& $at '/old.txt'), 'old')
+    [System.IO.File]::WriteAllText((& $at '/attrs.txt'), 'attributes')
+
+    # Two EAs through NtSetEaFile, as for ntfs-ea.img above.
+    [System.IO.File]::WriteAllText((& $at '/ea.txt'), 'ea')
+    $eas = [ordered]@{ '/ea.txt' = 2 }
+    $handle = [WindowsEa]::CreateFileW((& $at '/ea.txt'), [uint32]0x100018, [uint32]7,
+        [IntPtr]::Zero, [uint32]3, [uint32]0x80, [IntPtr]::Zero)
+    if ($handle.IsInvalid) {
+        throw "open ea.txt for EAs: Win32 error $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
+    try {
+        foreach ($ea in @(@('STAT.ONE', 'one'), @('STAT.TWO', 'two'))) {
+            $n = [System.Text.Encoding]::ASCII.GetBytes($ea[0])
+            $v = [System.Text.Encoding]::ASCII.GetBytes($ea[1])
+            $buf = New-Object byte[] (8 + $n.Length + 1 + $v.Length)
+            $buf[5] = [byte]$n.Length
+            [BitConverter]::GetBytes([uint16]$v.Length).CopyTo($buf, 6)
+            $n.CopyTo($buf, 8)
+            $v.CopyTo($buf, 8 + $n.Length + 1)
+            $status = New-Object WindowsEa+IoStatusBlock
+            $rc = [WindowsEa]::NtSetEaFile($handle, [ref]$status, $buf, [uint32]$buf.Length)
+            if ($rc -ne 0) { throw ("NtSetEaFile {0}: NTSTATUS 0x{1:X8}" -f $ea[0], $rc) }
+        }
+    } finally { $handle.Dispose() }
+    [System.IO.File]::SetAttributes((& $at '/attrs.txt'), 'Hidden, ReadOnly, NotContentIndexed')
+
+    $paths = @('/', '/plain.txt', '/small.txt', '/dir', '/dir/inner.txt', '/hard-a.txt',
+        '/dir/hard-b.txt', '/link-file', '/link-dir', '/ads.txt', '/ea.txt', '/attrs.txt', '/old.txt')
+    $files = @('/plain.txt', '/small.txt', '/dir/inner.txt', '/hard-a.txt', '/dir/hard-b.txt',
+        '/ads.txt', '/ea.txt', '/attrs.txt', '/old.txt')
+    $names = @{}
+    $streams = @{}
+    foreach ($rel in $files) {
+        $o = & fsutil.exe hardlink list (& $at $rel) 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "fsutil hardlink list ${rel}: $o" }
+        $names[$rel] = (@($o | ForEach-Object { "$_".Trim() -replace '\\', '/' } |
+            Where-Object { $_ }) -join '|')
+        $streams[$rel] = @(Get-Item -LiteralPath (& $at $rel) -Stream * |
+            Where-Object { $_.Stream -ne ':$DATA' }).Count
+    }
+
+    # 2001-02-03 04:05:06 UTC, a day apart per path; the last access an
+    # hour after the creation, the last write two, the change three.
+    $timed = @('/plain.txt', '/small.txt', '/dir/inner.txt', '/hard-a.txt', '/link-file',
+        '/ads.txt', '/ea.txt', '/attrs.txt', '/dir', '/link-dir')
+    $hour = 36000000000
+    for ($i = 0; $i -lt $timed.Count; $i++) {
+        $created = 126256467060000000 + $i * 24 * $hour + 1234567
+        [WindowsStat]::SetTimes((& $at $timed[$i]), $created, $created + $hour + 1111111,
+            $created + 2 * $hour + 2222222, $created + 3 * $hour + 3333333)
+    }
+    # 1960-01-02 03:04:05.5 UTC and after: signed seconds, positive nanoseconds.
+    $old = 113289518455000000
+    [WindowsStat]::SetTimes((& $at '/old.txt'), $old, $old + 1, $old + 9999999, $old + 10000001)
+
+    $lines = foreach ($rel in $paths) {
+        $read = [WindowsStat]::Read((& $at $rel))
+        $n = if ($names.ContainsKey($rel)) { $names[$rel] } else { '-' }
+        $s = if ($streams.ContainsKey($rel)) { $streams[$rel] } else { '-' }
+        $e = if ($eas.Contains($rel)) { $eas[$rel] } else { 0 }
+        (@($rel) + $read + @($n, $s, $e)) -join "`t"
+    }
+    [System.IO.File]::WriteAllText($statReport, (($lines -join "`n") + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+}
+
+Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img,test-disks/ntfs-format-64k.img,test-disks/ntfs-usnjrnl.img,test-disks/ntfs-inventory.img,test-disks/ntfs-stat.img |
     Format-Table Name,Length
