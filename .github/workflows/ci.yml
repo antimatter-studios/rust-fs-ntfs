@@ -1421,6 +1421,21 @@ jobs:
               --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
               --vm-workdir=C:/rust-fs-ntfs-matrix
           done
+      # An EA set no record holds resident is kept in clusters, rewritten
+      # there as it grows and shrinks, and gives them back when it is
+      # removed; chkdsk grades the clusters and Windows reads every EA back
+      # through NtQueryEaFile (#661).
+      - name: Validate non-resident EAs on Windows
+        shell: bash
+        run: |
+          for scenario in mac-format-mac-write-big-eas-win-chkdsk \
+            mac-format-mac-write-big-eas-remove-all-win-chkdsk \
+            win-format-win-write-streams-mac-write-big-eas-win-chkdsk; do
+            bash scripts/run-matrix.sh "$scenario" \
+              --vm-host=runneradmin@localhost \
+              --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+              --vm-workdir=C:/rust-fs-ntfs-matrix
+          done
       - name: Validate enumeration without required paths on Windows
         shell: bash
         run: |
