@@ -470,5 +470,44 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-stat.img' -Label 'STAT' -Populate
         (New-Object System.Text.UTF8Encoding($false)))
 }
 
-Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img,test-disks/ntfs-format-64k.img,test-disks/ntfs-usnjrnl.img,test-disks/ntfs-inventory.img,test-disks/ntfs-stat.img |
+# Get-ChildItem supplies the paths; WindowsStat opens the reparse itself
+# for its metadata. No expected entry comes from this crate (#644).
+$walkReport = [IO.Path]::GetFullPath('test-disks/ntfs-ls-recursive.windows.tsv')
+New-WindowsFixture -ImagePath 'test-disks/ntfs-ls-recursive.img' -Label 'LSRECURSIVE' -Populate {
+    param($root)
+    $system = Join-Path $root 'System Volume Information'
+    if (Test-Path -LiteralPath $system) {
+        & takeown.exe /F $system /A | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'takeown of fixture system directory failed' }
+        & icacls.exe $system /grant '*S-1-5-32-544:(OI)(CI)F' /T | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'grant of fixture enumeration access failed' }
+    }
+    foreach ($dir in @('a/b/c', 'empty')) {
+        New-Item -ItemType Directory -Path (Join-Path $root $dir) -Force | Out-Null
+    }
+    foreach ($file in @('a/b/c/deep', 'a/b/file', 'a/hard', 'a/with space', 'B', "$([char]0x00E9)")) {
+        [IO.File]::WriteAllText((Join-Path $root $file), "contents of $file")
+    }
+    New-Item -ItemType HardLink -Path (Join-Path $root 'z') -Target (Join-Path $root 'a/hard') | Out-Null
+    New-Item -ItemType SymbolicLink -Path (Join-Path $root 'dir-link') -Value 'a' | Out-Null
+    New-Item -ItemType SymbolicLink -Path (Join-Path $root 'a/back') -Value '..' | Out-Null
+    New-Item -ItemType SymbolicLink -Path (Join-Path $root 'dangling') -Value 'missing' | Out-Null
+    New-Item -ItemType Junction -Path (Join-Path $root 'junction') -Value (Join-Path $root 'a') | Out-Null
+    # Include root's empty directories too; never follow a reparse point.
+    $items = @(Get-ChildItem -LiteralPath $root -Force) +
+        @(Get-ChildItem -LiteralPath $root -Recurse -Force -Attributes !ReparsePoint) +
+        @(Get-ChildItem -LiteralPath $root -Recurse -Force -Attributes ReparsePoint)
+    $lines = foreach ($item in ($items | Sort-Object FullName -Unique)) {
+        $rel = '/' + $item.FullName.Substring($root.Length).Replace('\', '/')
+        $info = [WindowsStat]::Read($item.FullName)
+        $kind = if ($info[3] -eq 'a000000c') { 'symlink' }
+            elseif ($info[3] -eq 'a0000003') { 'junction' }
+            elseif ($item.PSIsContainer) { 'dir' } else { 'file' }
+        $record = [Convert]::ToUInt64($info[0], 16) -band 0xFFFFFFFFFFFFL
+        "$rel`t$kind`t$($info[4])`t$record`t$($rel.Split('/').Count - 1)"
+    }
+    [IO.File]::WriteAllText($walkReport, (($lines -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
+}
+
+Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img,test-disks/ntfs-format-64k.img,test-disks/ntfs-usnjrnl.img,test-disks/ntfs-inventory.img,test-disks/ntfs-stat.img,test-disks/ntfs-ls-recursive.img |
     Format-Table Name,Length
