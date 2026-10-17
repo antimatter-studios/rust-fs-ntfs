@@ -26,6 +26,10 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\scripts\fs-windows-test-harness\_lib.ps1"
 . "$PSScriptRoot\capture-python-directory-oracle.ps1"
 . "$PSScriptRoot\windows-fixture.ps1"
+. "$PSScriptRoot\capture-streams-oracle.ps1"
+
+$attrStreamsReport = [IO.Path]::GetFullPath('test-disks/ntfs-attrlist.streams.tsv')
+[IO.File]::WriteAllText($attrStreamsReport, '')
 
 New-WindowsFixture -ImagePath 'test-disks/ntfs-attrlist.img' -Label 'ATTRLIST' -Populate {
     param($root)
@@ -40,6 +44,10 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-attrlist.img' -Label 'ATTRLIST' -
         $bytes = [System.Text.Encoding]::UTF8.GetBytes("payload-$name")
         [System.IO.File]::WriteAllBytes("${file}:$name", $bytes)
     }
+    [IO.File]::WriteAllBytes("${file}:empty", [byte[]]@())
+    [IO.File]::WriteAllBytes("${file}:large", [byte[]]::new(8193))
+    [IO.File]::WriteAllBytes("${file}:na$([char]0x00EF)ve", [byte[]](1, 2, 3))
+    Write-NamedStreamOracle $file '/many.bin' $attrStreamsReport
 }
 
 New-WindowsFixture -ImagePath 'test-disks/ntfs-compressed.img' -Label 'COMPRESSED' -Populate {
@@ -423,6 +431,8 @@ public static class WindowsStat {
 # not show two of them swapped. The root's times are not set: Windows
 # keeps writing System Volume Information there while it is mounted.
 $statReport = [System.IO.Path]::GetFullPath('test-disks/ntfs-stat.windows.tsv')
+$statStreamsReport = [IO.Path]::GetFullPath('test-disks/ntfs-stat.streams.tsv')
+[IO.File]::WriteAllText($statStreamsReport, '')
 New-WindowsFixture -ImagePath 'test-disks/ntfs-stat.img' -Label 'STAT' -Populate {
     param($root)
     $at = {
@@ -444,6 +454,9 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-stat.img' -Label 'STAT' -Populate
     [System.IO.File]::WriteAllText((& $at '/ads.txt'), 'main')
     [System.IO.File]::WriteAllText((& $at '/ads.txt') + ':one', 'first stream')
     [System.IO.File]::WriteAllText((& $at '/ads.txt') + ':two', 'second stream')
+    [IO.File]::WriteAllBytes((& $at '/dir') + ':directory-data', [byte[]](7, 8, 9))
+    Write-NamedStreamOracle (& $at '/ads.txt') '/ads.txt' $statStreamsReport
+    Write-NamedStreamOracle (& $at '/dir') '/dir' $statStreamsReport
     [System.IO.File]::WriteAllText((& $at '/old.txt'), 'old')
     [System.IO.File]::WriteAllText((& $at '/attrs.txt'), 'attributes')
 
