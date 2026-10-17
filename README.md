@@ -271,6 +271,7 @@ fs.ntfs disk.img write /notes.txt < notes.txt
 fs.ntfs disk.img mkdir /backup
 fs.ntfs disk.img rm /notes.txt
 fs.ntfs disk.img rmdir /backup     # an empty directory
+fs.ntfs disk.img mv /notes.txt /notes-2026.txt   # a new name, same directory
 fs.ntfs disk.img set label "Backup Volume"
 fs.ntfs --offset 1048576 whole-disk.img info
 fsck.ntfs disk.img                 # dirty flag, $LogFile, $MFTMirr, MFT records; exit 0/1/4/8
@@ -292,6 +293,16 @@ stay hidden unless `--all` asks. Plain `ls` still lists only one directory.
 An exact fit succeeds. One more entry past either bound, or an unreadable
 directory, exits 1 with the complete partial report on stdout and the bound
 or stopping path named on stderr. A missing starting path prints no report.
+
+`mv SOURCE PATH` gives SOURCE the name PATH, which is the new name itself,
+not a directory to move into, and must be in SOURCE's directory. A move to
+another directory answers `not implemented` (exit 3) and changes nothing.
+A name already at PATH is refused rather than replaced, with names compared
+as Windows compares them, without regard to case; a case-only rename of
+SOURCE itself is allowed. Everything that can be refused -- a missing
+SOURCE, a name Windows cannot address, the root, `.`, `..`, a metafile, a
+dirty volume -- is refused before the image is opened for writing, so it
+stays byte-identical. The report is `{"path": ..., "moved": true}`.
 
 Reports are JSON on stdout (`--text` for people); a failure is
 `{"error": "...", "code": N}` on stderr, `N` being the exit status. A
