@@ -50,7 +50,8 @@ use crate::attr_io::read_u16_le;
 use crate::block_io::{BlockIo, PathIo};
 
 // BPB (BIOS Parameter Block) field byte offsets within the 512-byte boot sector.
-// Names match the BPB specification in Windows Internals 7th ed. / MS-FSCC.
+// Offsets from the Linux-NTFS documentation's boot sector page; the names
+// are the BPB names of Microsoft's FAT specification, whose BPB NTFS shares.
 const BOOT_OFF_OEM: usize = 0x03; // 8-byte OEM ID — "NTFS    " on a real NTFS volume
 const BOOT_OFF_BYTES_PER_SECTOR: usize = 0x0B; // WORD BytsPerSec
 const BOOT_OFF_SECTORS_PER_CLUSTER: usize = 0x0D; // BYTE SecPerClus
@@ -480,7 +481,9 @@ pub fn cluster_span(
     Ok(start)
 }
 
-/// In-memory MFT record header offsets (per Windows Internals 7th ed.).
+/// MFT record header offsets: Microsoft's FILE_RECORD_SEGMENT_HEADER and
+/// MULTI_SECTOR_HEADER devnotes for the fields they name, the Linux-NTFS
+/// documentation's file record page for the rest.
 const FILE_MAGIC: &[u8; 4] = b"FILE";
 const OFF_USA_OFFSET: usize = 0x04;
 const OFF_USA_COUNT: usize = 0x06;

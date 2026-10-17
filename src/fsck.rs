@@ -8,12 +8,14 @@
 //!
 //! 1. [`clear_dirty`] — clear the `VOLUME_IS_DIRTY` flag in
 //!    `$Volume/$VOLUME_INFORMATION` (bit `0x0001` of the u16 `flags` field,
-//!    per MS-FSCC and Windows Internals 7th ed.). Without this, Windows
+//!    per the Linux-NTFS documentation's `$VOLUME_INFORMATION` page).
+//!    Without this, Windows
 //!    and several NTFS drivers refuse to mount.
 //! 2. [`reset_logfile`] — overwrite `$LogFile`'s `$DATA` with `0xFF` bytes.
-//!    The all-`0xFF` pattern is the format-level "no transactions pending,
-//!    reinitialize on mount" signal documented in Windows Internals
-//!    7th ed. ch. "NTFS Logging".
+//!    The all-`0xFF` pattern is taken to mean "no transactions pending,
+//!    reinitialize on mount". Neither the Linux-NTFS documentation nor
+//!    Microsoft's describes it, so nothing published supports it (see
+//!    docs/provenance.md); #137 tracks replaying the log instead.
 //!
 //! Neither operation replays transactions; [`replay_logfile`] does. `fsck`
 //! reads `$LogFile`'s restart area ([`crate::logfile`]) on every volume.
@@ -76,10 +78,10 @@ const LOGFILE_RECORD_NUMBER: u64 = 2;
 const BOOT_REGION_BYTES: u64 = 8192;
 
 /// Offset of the 2-byte `flags` field within the `$VOLUME_INFORMATION` structure.
-/// Layout (MS-FSCC / Windows Internals 7th ed.): reserved(8) + major(1) + minor(1) + flags(2).
+/// Layout (Linux-NTFS documentation, `$VOLUME_INFORMATION`): reserved(8) + major(1) + minor(1) + flags(2).
 const VOLUME_FLAGS_OFFSET: u64 = 10;
 
-/// `$VOLUME_INFORMATION.flags` bits we act on (MS-FSCC). Replaces the upstream
+/// `$VOLUME_INFORMATION.flags` bits we act on (Linux-NTFS documentation). Replaces the upstream
 /// `NtfsVolumeFlags` enum so fsck doesn't depend on the `ntfs` crate.
 const VOLUME_IS_DIRTY: u16 = 0x0001;
 const VOLUME_UPGRADE_ON_MOUNT: u16 = 0x0004;
@@ -95,9 +97,10 @@ const VOLUME_DELETE_USN_UNDERWAY: u16 = 0x0010;
 /// Where a volume keeps its change journal, when it has one.
 const USN_JOURNAL_PATH: &str = "/$Extend/$UsnJrnl";
 
-/// NTFS format-level "empty log" sentinel byte. An all-`0xFF` `$LogFile`
-/// is the documented "no transactions pending" signal per Windows
-/// Internals 7th ed. ch. "NTFS Logging".
+/// The byte `reset_logfile` fills `$LogFile` with, taking an all-`0xFF` log
+/// to mean "no transactions pending". No published documentation states
+/// that, and a log Windows dismounts cleanly keeps its restart and
+/// checkpoint pages (see docs/provenance.md, #137).
 const LOGFILE_EMPTY_FILL: u8 = 0xFF;
 
 /// Chunk size used when overwriting `$LogFile` and when emitting progress
@@ -400,7 +403,7 @@ pub fn set_dirty_io<T: FsckIo>(io: &mut T) -> Result<bool, Error> {
 
 /// `upgrade_volume_version` over an arbitrary `FsckIo`.
 ///
-/// Layout reminder (MS-FSCC): `$VOLUME_INFORMATION` value is
+/// Layout reminder (Linux-NTFS documentation): `$VOLUME_INFORMATION` value is
 /// `reserved(8) + major(1) + minor(1) + flags(2)`. The major byte
 /// therefore sits at `flag_disk_offset - 2`. We read and write all
 /// four bytes (`major`, `minor`, `flags lo`, `flags hi`) in a single

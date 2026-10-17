@@ -56,7 +56,7 @@ pub struct FileTimes {
     pub access: Option<u64>,
 }
 
-// $STANDARD_INFORMATION field offsets (per Windows Internals 7th ed. and MS-FSCC).
+// $STANDARD_INFORMATION field offsets (Linux-NTFS documentation).
 const SI_CREATION: usize = 0x00;
 const SI_MODIFICATION: usize = 0x08;
 const SI_MFT_MODIFICATION: usize = 0x10;
@@ -65,7 +65,7 @@ const SI_FILE_ATTRIBUTES: usize = 0x20;
 
 /// `$STANDARD_INFORMATION.security_id` offset (NTFS 3.x form only —
 /// the 48-byte v1.x form omits this field). u32 at value bytes
-/// 0x34..0x38 per MS-FSCC §2.4.2.
+/// 0x34..0x38 per Microsoft's STANDARD_INFORMATION devnote.
 const SI_SECURITY_ID: usize = 0x34;
 
 /// Set file times on the file at `file_path`. Only modifies
@@ -205,7 +205,7 @@ pub fn read_security_id_io<T: BlockIo + ?Sized>(
     Ok(Some(id))
 }
 
-/// Full decoded `$STANDARD_INFORMATION` value (MS-FSCC §2.4.2).
+/// Full decoded `$STANDARD_INFORMATION` value (Linux-NTFS documentation).
 ///
 /// The optional `v3` block carries the 24 trailing bytes (`owner_id`,
 /// `security_id`, `quota`, `usn`) that only exist in the 72-byte
@@ -1033,7 +1033,7 @@ pub fn truncate_io<T: BlockIo + ?Sized>(
     Ok(size)
 }
 
-/// Attribute-header offsets for non-resident lengths (per Windows Internals 7th ed.).
+/// Attribute-header offsets for non-resident lengths (Microsoft's ATTRIBUTE_RECORD_HEADER devnote).
 const NONRES_ALLOCATED_LENGTH: usize = 0x28;
 const NONRES_DATA_LENGTH: usize = 0x30;
 const NONRES_INITIALIZED_LENGTH: usize = 0x38;
@@ -4049,7 +4049,8 @@ pub fn read_attributes_io<T: BlockIo + ?Sized>(
 /// WIN32_AND_DOS) — when the long Win32 name doesn't fit DOS 8.3.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileNameRecord {
-    /// `$FILE_NAME.namespace` byte at value +0x41 per MS-FSCC §2.4.4:
+    /// `$FILE_NAME.namespace` byte at value +0x41 (Linux-NTFS documentation;
+    /// Microsoft's FILE_NAME devnote names the byte and its NTFS and DOS bits):
     /// `0 = POSIX`, `1 = WIN32`, `2 = DOS`, `3 = WIN32_AND_DOS`.
     pub namespace: u8,
     /// The decoded UTF-16 name (lossy on invalid surrogates).
@@ -4098,7 +4099,7 @@ fn file_names_in_record(record: &[u8]) -> Result<Vec<FileNameRecord>, Error> {
             continue;
         }
         if !loc.is_resident {
-            // $FILE_NAME is required to be resident per MS-FSCC; a
+            // $FILE_NAME is always resident (Linux-NTFS documentation); a
             // non-resident one would itself be a corruption we don't
             // want to silently elide. Skip it but flag in the error
             // string of the next caller if surprising. For now: skip.
@@ -4109,7 +4110,7 @@ fn file_names_in_record(record: &[u8]) -> Result<Vec<FileNameRecord>, Error> {
                 .resident_value_offset
                 .ok_or(Error::io("$FILE_NAME no value_offset"))? as usize;
         let val_len = loc.resident_value_length.unwrap_or(0) as usize;
-        // $FILE_NAME value layout per MS-FSCC §2.4.4:
+        // $FILE_NAME value layout (Linux-NTFS documentation):
         //   +0x00 parent_directory_reference (u64)
         //   +0x08..+0x40 timestamps + sizes + attributes
         //   +0x40 name_length (u8, UTF-16 code units)
@@ -4504,7 +4505,7 @@ pub struct ObjectIdExtended {
 }
 
 /// Read the full `$OBJECT_ID` attribute, decoding the optional Birth
-/// GUIDs (MS-FSCC §2.4.6) when present. Returns:
+/// GUIDs (Linux-NTFS documentation) when present. Returns:
 ///   * `Ok(None)` — file has no `$OBJECT_ID` attribute.
 ///   * `Ok(Some(ext))` — attribute present. `ext.birth_ids` is
 ///     `Some(...)` when `value_length == 64`, `None` otherwise.
@@ -4533,7 +4534,7 @@ pub fn read_object_id_extended_io<T: BlockIo + ?Sized>(
             .resident_value_offset
             .ok_or(Error::io("$OBJECT_ID has no value_offset"))? as usize;
     let val_len = loc.resident_value_length.unwrap_or(0) as usize;
-    // MS-FSCC §2.4.6: $OBJECT_ID is either 16 bytes (object_id only) or
+    // Linux-NTFS documentation: $OBJECT_ID is either 16 bytes (object_id only) or
     // 64 bytes (object_id + 3 Birth GUIDs). Reject anything else as
     // malformed instead of silently downgrading.
     if val_len != 16 && val_len != 64 {
@@ -4572,7 +4573,7 @@ pub fn read_object_id_extended_io<T: BlockIo + ?Sized>(
 /// Write a 16-byte `$OBJECT_ID` to a file. Adds the attribute if absent,
 /// replaces the existing value in place if present. To also write the
 /// 48 bytes of DLT Birth-volume / Birth-object / Birth-domain GUIDs
-/// (MS-FSCC §2.4.6), use [`write_object_id_extended`].
+/// (Linux-NTFS documentation), use [`write_object_id_extended`].
 pub fn write_object_id(image: &Path, file_path: &str, object_id: &[u8; 16]) -> Result<(), Error> {
     let mut io = open_for_write(image)?;
     write_object_id_io(&mut io, file_path, object_id)

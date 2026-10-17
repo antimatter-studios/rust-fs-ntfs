@@ -2940,7 +2940,7 @@ pub extern "C" fn fs_ntfs_read_security_id(
     })
 }
 
-/// Full `$STANDARD_INFORMATION` value (MS-FSCC §2.4.2). The four
+/// Full `$STANDARD_INFORMATION` value (Linux-NTFS documentation). The four
 /// timestamps are NT 100-nanosecond intervals since 1601-01-01 UTC.
 /// `file_attributes` is the FILE_ATTRIBUTE_* bitmask. The trailing
 /// `owner_id` / `security_id` / `quota` / `usn` fields only have

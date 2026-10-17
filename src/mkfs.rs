@@ -55,19 +55,19 @@ const ATTR_BITMAP: u32 = 0xB0;
 const ATTR_END_MARKER: u32 = 0xFFFF_FFFF;
 const COLLATION_FILE_NAME: u32 = 0x01;
 // $SDH (Security Descriptor Hash) view-index — keyed by
-// (hash, security_id). MS-FSCC §2.4 ("Indexable Types") and the
-// publicly published NTFS layout list this collation as
-// `COLLATION_NTOFS_SECURITY_HASH = 0x12`.
+// (hash, security_id). The Linux-NTFS documentation's collation table
+// lists this rule, Security Hash, as 0x12:
+// `COLLATION_NTOFS_SECURITY_HASH`.
 const COLLATION_NTOFS_SECURITY_HASH: u32 = 0x12;
 // $SII (Security ID Index) view-index — keyed by security_id.
 // `COLLATION_NTOFS_ULONG = 0x10` per the same source. Used by
 const COLLATION_NTOFS_ULONG: u32 = 0x10;
 // $ObjId:$O and $Reparse:$R view-index — keyed by OBJECT_ID (16-byte
 // GUID-like structure) and reparse-tag+MFT-ref respectively.
-// `COLLATION_NTOFS_ULONGS = 0x13` per MS-FSCC §2.4.
+// `COLLATION_NTOFS_ULONGS = 0x13` per the same table.
 const COLLATION_NTOFS_ULONGS: u32 = 0x13;
 // $Quota:$O view-index — keyed by Security Identifier (SID).
-// `COLLATION_NTOFS_SID = 0x11` per MS-FSCC §2.4.
+// `COLLATION_NTOFS_SID = 0x11` per the same table.
 const COLLATION_NTOFS_SID: u32 = 0x11;
 
 // ---------------------------------------------------------------------------
@@ -223,7 +223,8 @@ fn logfile_checkpoint_home() -> (u64, &'static [u8]) {
     (offset - offset % 0x1000, page)
 }
 
-/// `$FILE_NAME` namespace values (MS-FSCC §2.4.4).
+/// `$FILE_NAME` namespace values (Linux-NTFS documentation; Microsoft's
+/// FILE_NAME devnote names the NTFS (0x01) and DOS (0x02) bits).
 ///
 /// * `WIN32_DOS` (3) is used on every name we currently ship: root,
 ///   the canonical 0..10 system files, and `$Extend` itself. All
@@ -2067,7 +2068,7 @@ fn write_standard_information(
     is_sparse: bool,
     security_id: u32,
 ) -> usize {
-    // 72-byte NTFS 3.x $STANDARD_INFORMATION (MS-FSCC §2.4.2):
+    // 72-byte NTFS 3.x $STANDARD_INFORMATION (Linux-NTFS documentation):
     //   4 timestamps (32) + DOSAttributes (4) + MaxVersions (4)
     //   + VersionNumber (4) + ClassId (4) + OwnerId (4) + SecurityId (4)
     //   + QuotaCharged (8) + USN (8).
@@ -2123,7 +2124,7 @@ fn write_standard_information(
         fa |= crate::sparse::FILE_ATTRIBUTE_SPARSE_FILE;
     }
     rec[v + 32..v + 36].copy_from_slice(&fa.to_le_bytes());
-    // SecurityId at value+0x34 (MS-FSCC §2.4.2). OwnerId (+0x30),
+    // SecurityId at value+0x34 (Microsoft's STANDARD_INFORMATION devnote). OwnerId (+0x30),
     // QuotaCharged (+0x38), USN (+0x40) stay zero (fresh-format defaults).
     rec[v + 0x34..v + 0x38].copy_from_slice(&security_id.to_le_bytes());
     at + attr_length
@@ -2249,7 +2250,7 @@ fn build_resident_unnamed(attr_type: u32, attr_id: u16, value: &[u8]) -> Vec<u8>
 /// or a named view-index `$INDEX_ROOT`). `name_utf16` is the stream
 /// name as UTF-16 code units (without a NUL terminator).
 ///
-/// Header layout (MS-FSCC §2.4.2.1 / NtfsResidentAttributeHeader):
+/// Header layout (Microsoft's ATTRIBUTE_RECORD_HEADER devnote):
 ///   0x00 ty                  u32
 ///   0x04 length              u32
 ///   0x08 is_non_resident     u8   (0 for resident)
@@ -2362,8 +2363,9 @@ fn build_populated_named_index_root_attr(
 
 /// Build a single INDEX_ENTRY for a view-index (`$SDH` / `$SII` style).
 ///
-/// INDEX_ENTRY's first 8 bytes are a union (per MS-FSCC §2.4.9 +
-/// Windows Internals 7e ch. "NTFS On-Disk Structure"):
+/// INDEX_ENTRY's first 8 bytes are a union. The Linux-NTFS documentation
+/// gives the file-name form; the view-index form was measured on the
+/// view indexes Windows writes (see `view_index.rs`):
 ///
 /// * **File-name indexes** (`$I30`) put a `FILE_REFERENCE` (u64)
 ///   there — the MFT ref the entry points at. The KEY embedded in
@@ -2417,7 +2419,7 @@ fn build_view_index_entry(key: &[u8], value: &[u8]) -> Vec<u8> {
     // View-index union: data_offset + data_length, NOT file_reference.
     // u16 narrowing must fail loudly if a future caller's
     // `value_off` or `value.len()` ever exceeds 65535 — those fields
-    // are u16-sized on disk per MS-FSCC §2.4.9, so silent truncation
+    // are u16-sized in the entries Windows writes, so silent truncation
     // would produce a wrong on-disk layout. Current callers ($SDH/$SII
     // with 4-/8-byte keys and 20-byte values) stay well under, but
     // future view indexes ($O / $Q / etc.) could push higher.
@@ -2746,7 +2748,7 @@ fn make_mft_internal_bitmap(size_bytes: usize, used_records: &[u32]) -> Vec<u8> 
 
 /// Build the canonical NTFS 3.1 $AttrDef table. 15 active entries ×
 /// 160 bytes + 1 zero-terminator entry = 2560 bytes total. Format per
-///   MS-FSCC and Windows Internals 7th ed.: 64-byte UTF-16 name +
+///   the Linux-NTFS documentation's `$AttrDef` page: 64-byte UTF-16 name +
 ///   u32 type + u32 display_rule + u32 collation + u32 flags +
 ///   u64 min_size + u64 max_size.
 fn build_attrdef_table() -> Vec<u8> {
