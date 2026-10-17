@@ -266,6 +266,8 @@ fs.ntfs disk.img ls /              # JSON entries; --all adds the metafiles
 fs.ntfs disk.img ls -R --max-depth 8 --limit 1000 /Users
 fs.ntfs disk.img stat /notes.txt   # one path: record, links, sizes, every time
 fs.ntfs disk.img streams /notes.txt   # named data streams; JSON or --text
+fs.ntfs disk.img xattr /notes.txt     # native NTFS EAs; JSON or --text
+fs.ntfs disk.img xattr /notes.txt user.comment -o comment.bin
 fs.ntfs disk.img read /notes.txt > notes.txt
 fs.ntfs disk.img read --stream Zone.Identifier /notes.txt
 fs.ntfs disk.img get label --text
@@ -305,6 +307,18 @@ Selection requires `--stream`: a colon in PATH never selects a stream.
 The installed CLI stream tests need ntfs-3g's `ntfscp` to author independent
 fixtures (`apt-get install ntfs-3g`); the Windows oracle tier compares each
 stream with bytes captured by `Get-Content -Stream NAME -AsByteStream`.
+
+`xattr PATH` lists native NTFS `$EA` entries with their stored `name`, value
+`size` in bytes and `ntfs.need_ea` boolean. Names retain their namespace prefix;
+a non-UTF-8 name is shown lossily and adds `name_hex` with its original bytes.
+These are NTFS EAs, separate from POSIX xattrs and named data streams.
+`xattr PATH NAME` writes that EA's raw value to stdout, or atomically to
+`-o FILE`, even with `--text`. Selection ignores ASCII case, as the native EA
+library does. A missing path or name exits 1 with no stdout and preserves an
+existing output file. Directories and links are inspected without following
+links. All inspection opens the image read-only and honors `--offset`.
+The Windows fixture producer captures `NtQueryEaFile` names, sizes, flags and
+value bytes for the CLI oracle tier, including binary values and large EA sets.
 
 `ls --recursive` (`-R`) walks depth first with each directory's names sorted
 as bytes. Entries add `path` from the volume root and `depth`; the starting
