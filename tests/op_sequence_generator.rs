@@ -258,3 +258,103 @@ fn captured_regressions_keep_their_pin_and_replay_ignores_it() {
     let unbounded = vec![Op::Rmdir { path: "/".into() }; MAX_STEPS + 1];
     assert!(encode_regression(&unbounded, &regression).is_err());
 }
+
+#[test]
+fn stream_operations_are_generated_on_files_bounded_and_replayable() {
+    let mut variants = std::collections::HashSet::new();
+    for verb in 0..11 {
+        let operations = decode(&frame(verb, 2, 2, 0, 0, 0), &tree());
+        assert_eq!(operations[0].opcode(), usize::from(verb));
+        variants.insert(std::mem::discriminant(&operations[0]));
+    }
+    assert_eq!(variants.len(), generator::OPCODES);
+
+    let mut m = tree();
+    m.create("/", "f", false).unwrap();
+    m.create("/", "d", true).unwrap();
+    // A stream write consumes its payload, as a write does; names 0 and 1
+    // are one stream under the table, so the delete removes the write's.
+    let input = [
+        frame(9, 2, 0, 0, 3, 0),
+        vec![1, 2, 3],
+        frame(10, 2, 0, 1, 0, 0),
+    ]
+    .concat();
+    let operations = decode(&input, &m);
+    assert_eq!(
+        operations,
+        vec![
+            Op::WriteStream {
+                path: "/f".into(),
+                stream: "s".into(),
+                data: vec![1, 2, 3],
+            },
+            Op::DeleteStream {
+                path: "/f".into(),
+                stream: "S".into(),
+            },
+        ]
+    );
+    let mut applied = m.clone();
+    for op in &operations {
+        op.apply(&mut applied).unwrap();
+    }
+    assert!(applied.streams("/f").unwrap().is_empty());
+    let replay = encode(&operations).unwrap();
+    assert_eq!(decode_replay(&replay).unwrap(), operations);
+    let text = String::from_utf8(replay).unwrap();
+    assert!(text.contains(r#""op":"write_stream""#), "{text}");
+    assert!(text.contains(r#""op":"delete_stream""#), "{text}");
+
+    // Selector 0 is missing and 1 is a file used as a directory; streams
+    // are never generated on a directory in this slice (#731).
+    for (selector, expected) in [(0, "/missing"), (1, "/f/x"), (2, "/f"), (3, "/f")] {
+        let op = decode(&frame(10, selector, 0, 0, 0, 0), &m).remove(0);
+        assert!(
+            matches!(&op, Op::DeleteStream { path, .. } if path == expected),
+            "{selector}: {op:?}"
+        );
+    }
+    for selector in 0..=u8::MAX {
+        let op = decode(&frame(9, selector, 0, 0, 0, 0), &m).remove(0);
+        let Op::WriteStream { path, .. } = op else {
+            panic!("stream opcode")
+        };
+        assert!(path != "/" && path != "/d", "{selector}: {path}");
+    }
+
+    // The name pool's UTF-16 boundaries, an existing name and a fresh one.
+    let mut named = m.clone();
+    named.write_stream("/f", "kept", b"").unwrap();
+    for (index, units, result) in [
+        (16, 255, Ok(())),
+        (17, 255, Ok(())),
+        (18, 256, Err(Error::InvalidName)),
+        (11, 3, Err(Error::InvalidName)),
+        (13, 2, Err(Error::InvalidName)),
+    ] {
+        let op = decode(&frame(9, 2, 0, index, 0, 0), &named).remove(0);
+        assert!(
+            matches!(&op, Op::WriteStream { stream, .. } if stream.encode_utf16().count() == units),
+            "{index}: {op:?}"
+        );
+        let mut probe = named.clone();
+        assert_eq!(op.apply(&mut probe), result, "{op:?}");
+        if result.is_err() {
+            assert_eq!(probe, named, "a refused stream write changed the model");
+        }
+    }
+    let existing = decode(&frame(10, 2, 0, 19, 0, 0), &named).remove(0);
+    assert!(matches!(&existing, Op::DeleteStream { stream, .. } if stream == "kept"));
+    let fresh = decode(&frame(9, 2, 0, 20, 0, 0), &named).remove(0);
+    assert!(matches!(&fresh, Op::WriteStream { stream, .. } if stream == "stream1"));
+
+    for value in [
+        serde_json::json!({"op":"write_stream", "path":"/f", "stream":"n".repeat(257), "data":[]}),
+        serde_json::json!({"op":"write_stream", "path":"/f", "stream":"s", "data":vec![0; MAX_DATA + 1]}),
+        serde_json::json!({"op":"delete_stream", "path":"p".repeat(MAX_PATH + 1), "stream":"s"}),
+    ] {
+        let op: Op = serde_json::from_value(value).unwrap();
+        assert!(encode(std::slice::from_ref(&op)).is_err(), "{op:?}");
+    }
+}
