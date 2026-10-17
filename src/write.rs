@@ -6662,10 +6662,19 @@ fn write_listed_unnamed_data_io<T: BlockIo + ?Sized>(
     data: &[u8],
 ) -> Result<u64, Error> {
     let mut file = crate::attr_list::ListedFile::open(io, rec)?;
-    let found = file
-        .find(AttrType::Data, "")?
+    // A STREAM SPLIT INTO EXTENTS IS REWRITTEN WHOLE.
+    //
+    // A stream whose run list outgrew one record is split into extents
+    // across records (#799), and `find` refused it, so a rewrite, a write
+    // at an offset and a truncate of it were refused (#800). The old
+    // extents' clusters are all freed once the records no longer name
+    // them; every extent but the first goes with its entry, and the first
+    // takes the new stream, split again if its run list needs it.
+    let extents = file.extents(AttrType::Data, "")?;
+    let found = extents
+        .first()
         .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
-    let attr = file.attribute_bytes(&found);
+    let attr = file.attribute_bytes(found);
     let at = attr_io::attr_off::FLAGS;
     let flags = u16::from_le_bytes([attr[at], attr[at + 1]]);
     if flags & attr_io::attr_flags::TRANSFORMED != 0 {
@@ -6675,8 +6684,12 @@ fn write_listed_unnamed_data_io<T: BlockIo + ?Sized>(
             attr_io::describe_transform_flags(flags)
         )));
     }
-    let old_runs = file.runs(&found)?;
+    let mut old_runs = Vec::new();
+    for extent in &extents {
+        old_runs.extend(file.runs(extent)?);
+    }
     let was_nonresident = !found.loc.is_resident;
+    file.remove_continuations(AttrType::Data, "")?;
     let resident =
         crate::record_build::build_resident_unnamed_attribute(AttrType::Data as u32, 0, data)?;
     let extents = if !was_nonresident && resident.len() <= file.max_attribute_len() {

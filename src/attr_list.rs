@@ -483,6 +483,74 @@ impl ListedFile {
         }
     }
 
+    /// Every extent of the attribute of `ty` named `name`, ascending by
+    /// starting VCN: one for an attribute held whole in a record, none for
+    /// one that is absent. A split attribute whose first extent does not
+    /// start at VCN 0 is refused.
+    pub(crate) fn extents(&self, ty: AttrType, name: &str) -> Result<Vec<Found>, Error> {
+        let units: Vec<u16> = name.encode_utf16().collect();
+        if self.list == List::Absent {
+            return Ok(self.find(ty, name)?.into_iter().collect());
+        }
+        let mut matching: Vec<&Entry> = self
+            .entries
+            .iter()
+            .filter(|e| e.type_code == ty as u32 && e.name == units)
+            .collect();
+        matching.sort_by_key(|e| e.starting_vcn);
+        if matching.len() > 1 && matching[0].starting_vcn != 0 {
+            return Err(Error::io(format!(
+                "{ty:?} {name:?} is split across {} records, and its first extent starts at \
+                 VCN {}, not 0",
+                matching.len(),
+                matching[0].starting_vcn
+            )));
+        }
+        matching
+            .into_iter()
+            .map(|e| {
+                let segment = self
+                    .segment_index(e.record_number())
+                    .ok_or_else(|| Error::io("an entry names a record that was not read"))?;
+                let loc = find_by_id(&self.segments[segment].bytes, e.type_code, e.attribute_id)
+                    .ok_or_else(|| Error::io("an entry names an attribute that is not there"))?;
+                Ok(Found { segment, loc })
+            })
+            .collect()
+    }
+
+    /// Take out every extent of the attribute of `ty` named `name` but
+    /// its first, with their entries, so it is held whole in one record
+    /// again and [`Self::find`] sees it. Extension records this leaves
+    /// empty are freed when the change is committed.
+    pub(crate) fn remove_continuations(&mut self, ty: AttrType, name: &str) -> Result<(), Error> {
+        let extents = self.extents(ty, name)?;
+        let mut continuations: Vec<(usize, AttrLocation)> = extents
+            .into_iter()
+            .skip(1)
+            .map(|f| (f.segment, f.loc))
+            .collect();
+        // Within a record, the later attribute goes first, so the offsets
+        // of those still to go stay true.
+        continuations.sort_by_key(|(segment, loc)| (*segment, std::cmp::Reverse(loc.attr_offset)));
+        for (index, loc) in continuations {
+            let number = self.segments[index].number;
+            let segment = &mut self.segments[index];
+            crate::write::remove_listed_attribute_at(
+                &mut segment.bytes,
+                loc.attr_offset,
+                loc.attr_length,
+            )?;
+            segment.dirty = true;
+            self.entries.retain(|e| {
+                !(e.record_number() == number
+                    && e.type_code == loc.type_code
+                    && e.attribute_id == loc.attribute_id)
+            });
+        }
+        Ok(())
+    }
+
     /// Add `attr`, a whole attribute whose id is assigned here.
     pub(crate) fn add<T: BlockIo + ?Sized>(
         &mut self,
