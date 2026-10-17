@@ -263,6 +263,7 @@ export PATH="$PWD/tmp/cli/bin:$PATH"
 mkfs.ntfs --size 64M --label BACKUP disk.img   # a JSON report on stdout
 rust-fs-ntfs mkfs --help           # the same tool; nothing can shadow this name
 fs.ntfs disk.img ls /              # JSON entries; --all adds the metafiles
+fs.ntfs disk.img ls -R --max-depth 8 --limit 1000 /Users
 fs.ntfs disk.img stat /notes.txt   # one path: record, links, sizes, every time
 fs.ntfs disk.img read /notes.txt > notes.txt
 fs.ntfs disk.img get label --text
@@ -279,6 +280,18 @@ chore test:cli                     # the tools as installed: doctor, then tests/
 chore test:cli:oracle              # against Windows-written volumes, and ntfs-3g (tests/cli-oracle/)
 chore test:cli:host                # the Windows matrix's cli steps that run on this machine, no VM
 ```
+
+`ls --recursive` (`-R`) walks depth first with each directory's names sorted
+as bytes. Entries add `path` from the volume root and `depth`; the starting
+directory's entries are depth 1. A file or reparse starting point is listed
+alone at depth 0. Symlinks, junctions and all other reparse points are listed
+without being followed; hard links appear under every name. Directory records
+already visited add `"revisited": true` and are not entered again. Metafiles
+stay hidden unless `--all` asks. Plain `ls` still lists only one directory.
+`--max-depth` defaults to 64 and `--limit` to 100000; both require `-R`.
+An exact fit succeeds. One more entry past either bound, or an unreadable
+directory, exits 1 with the complete partial report on stdout and the bound
+or stopping path named on stderr. A missing starting path prints no report.
 
 Reports are JSON on stdout (`--text` for people); a failure is
 `{"error": "...", "code": N}` on stderr, `N` being the exit status. A
