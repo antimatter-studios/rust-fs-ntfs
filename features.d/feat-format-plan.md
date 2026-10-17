@@ -1,0 +1,3 @@
+## Making a filesystem
+
+| `mkfs.ntfs --dry-run` / `plan_format`: the format plan (geometry, `$MFT`, `$MFTMirr` and `$LogFile` placement, label, serial) reported without writing, applied by formatting exactly as reported, and refused with the formatter's reason | Supported, for the geometry the formatter writes (512-byte sectors, 512 B to 64 KiB clusters); Windows' `fsutil fsinfo ntfsinfo` and `Get-Volume` read the plan back from the volume | Unreleased | #698 | `tests/cli/test-mkfs.sh`, `mkfs::tests`; Windows matrix `cli-mkfs-plan-4k-win-ntfsinfo-chkdsk`, `cli-mkfs-plan-512-win-ntfsinfo-chkdsk`, `cli-mkfs-plan-64k-win-ntfsinfo-chkdsk` |

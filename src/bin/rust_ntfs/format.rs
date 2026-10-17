@@ -19,7 +19,7 @@
 //! single command for image-file workflows.
 
 use fs_ntfs::block_io::PathIo;
-use fs_ntfs::mkfs::format_filesystem;
+use fs_ntfs::mkfs::{format_with_plan, plan_format, FormatPlan};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -44,7 +44,8 @@ Options:
                            full-volume zero pass).
   -f, --fast               Fast format alias for -Q.
   -F, --force              Format even if device looks in use. (Accepted.)
-  -n                       Dry-run: parse args + open device but do not write.
+  -n                       Dry-run: plan the volume and open the device, but
+                           write nothing. Refuses what formatting would refuse.
   -q, --quiet              Suppress non-error output.
   --create-size <SIZE>     If device doesn't exist, create it as a regular
                            file of the given size first. SIZE accepts K/M/G/T
@@ -62,7 +63,7 @@ pub const DEFAULT_CLUSTER_SIZE: u32 = 4096;
 /// The MFT record size used when none is given.
 pub const DEFAULT_MFT_RECORD_SIZE: u32 = 4096;
 /// `$VOLUME_NAME` holds 64 bytes: 32 UTF-16 code units.
-pub const MAX_LABEL_UNITS: usize = 32;
+pub const MAX_LABEL_UNITS: usize = fs_ntfs::mkfs::MAX_LABEL_UNITS;
 
 /// Everything a command line can ask of the formatter.
 #[derive(Default, Debug)]
@@ -90,6 +91,9 @@ pub struct Done {
     pub formatted: bool,
     pub cluster_size: u32,
     pub mft_record_size: u32,
+    /// The volume planned: what was written, or for a dry run what would
+    /// have been.
+    pub plan: FormatPlan,
 }
 
 /// `prog` is the name this invocation should call itself by, in usage
@@ -145,6 +149,9 @@ pub fn execute(opts: &Opts, device: &str, prog: &str) -> Result<Done, String> {
         // a write, and the sentence was false about the only thing the
         // command had done.
         if opts.dry_run {
+            // The size the target has, or would have been created at.
+            let size = std::fs::metadata(device).map_or(n, |m| m.len());
+            let plan = plan(opts, device, size)?;
             if !opts.quiet {
                 match std::fs::metadata(device) {
                     Ok(meta) => eprintln!(
@@ -155,11 +162,11 @@ pub fn execute(opts: &Opts, device: &str, prog: &str) -> Result<Done, String> {
                 }
             }
             return Ok(Done {
-                // The size the target has, or would have been created at.
-                device_bytes: Some(std::fs::metadata(device).map_or(n, |m| m.len())),
+                device_bytes: Some(size),
                 formatted: false,
                 cluster_size,
                 mft_record_size,
+                plan,
             });
         }
         match std::fs::metadata(device) {
@@ -212,6 +219,11 @@ pub fn execute(opts: &Opts, device: &str, prog: &str) -> Result<Done, String> {
             "device {device} reports size 0 — pre-create with truncate / fsutil first"
         ));
     }
+    // ONE PLAN FOR THE DRY RUN AND THE FORMAT. A dry run used to echo the
+    // sizes it was asked for and accept what formatting then refused
+    // (`-n -c 3000` exited 0); it now reports, or refuses, exactly what
+    // the format below would write.
+    let plan = plan(opts, device, size)?;
 
     if !opts.quiet {
         eprintln!(
@@ -231,18 +243,11 @@ pub fn execute(opts: &Opts, device: &str, prog: &str) -> Result<Done, String> {
             formatted: false,
             cluster_size,
             mft_record_size,
+            plan,
         });
     }
 
-    format_filesystem(
-        &mut dev,
-        size,
-        cluster_size,
-        mft_record_size,
-        opts.label.as_deref(),
-        opts.serial,
-    )
-    .map_err(|e| format!("format failed: {e}"))?;
+    format_with_plan(&mut dev, &plan).map_err(|e| format!("format failed: {e}"))?;
 
     {
         use fs_ntfs::block_io::BlockIo;
@@ -257,7 +262,21 @@ pub fn execute(opts: &Opts, device: &str, prog: &str) -> Result<Done, String> {
         formatted: true,
         cluster_size,
         mft_record_size,
+        plan,
     })
+}
+
+/// The volume `opts` asks for on a target of `size` bytes, or why it
+/// cannot be formatted.
+fn plan(opts: &Opts, device: &str, size: u64) -> Result<FormatPlan, String> {
+    plan_format(
+        size,
+        opts.cluster_size.unwrap_or(DEFAULT_CLUSTER_SIZE),
+        opts.mft_record_size.unwrap_or(DEFAULT_MFT_RECORD_SIZE),
+        opts.label.as_deref(),
+        opts.serial,
+    )
+    .map_err(|e| format!("cannot format {device}: {e}"))
 }
 
 /// THE CAP THE USAGE TEXT PROMISES: at most 32 UTF-16 code units.

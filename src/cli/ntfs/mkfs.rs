@@ -11,6 +11,10 @@
 //! volume that was written (`--text` prints nothing there, as the tool did
 //! before). The progress lines on stderr are unchanged.
 //!
+//! The report carries the format plan (`fs_ntfs::mkfs::plan_format`): for a
+//! dry run, the volume formatting would write, and for a format, the one it
+//! did. A dry run refuses what formatting would refuse.
+//!
 //! Convention follows the standard formatters: the device or file must
 //! already exist at the target size, unless `--size` is given for an
 //! image file that does not exist yet.
@@ -22,6 +26,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command as Cmd};
 use super::format::{self, Opts, DEFAULT_CLUSTER_SIZE, DEFAULT_MFT_RECORD_SIZE};
 use fs_core::cli::{CliError, Json, Outcome, Tool};
 use fs_ntfs::block_io::PathIo;
+use fs_ntfs::mkfs::FormatPlan;
 
 pub const TOOL: Tool = Tool {
     name: "mkfs.ntfs",
@@ -112,7 +117,10 @@ fn command() -> Cmd {
             Arg::new("dry-run")
                 .short('n')
                 .long("dry-run")
-                .help("Open the device and report, but write nothing")
+                .help(
+                    "Plan the volume and report the plan, but write nothing. Refuses what \
+                     formatting would refuse.",
+                )
                 .action(ArgAction::Count),
         )
         .arg(
@@ -187,6 +195,7 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         report.push(("label", Json::from(opts.label.clone())));
         report.push(("block_size", Json::from(done.cluster_size)));
         report.push(("mft_record_size", Json::from(done.mft_record_size)));
+        report.push(("plan", plan_json(&done.plan)));
         return Ok(Outcome::report(Json::object(report)).with_text(String::new()));
     }
 
@@ -210,6 +219,7 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         ("total_clusters", Json::from(vi.total_clusters)),
         ("mft_record_size", Json::from(vi.file_record_size)),
         ("serial_number", Json::from(serial_text(vi.serial_number))),
+        ("plan", plan_json(&done.plan)),
     ]);
     // `--text` prints nothing on success, exactly as the tool always has:
     // its progress is on stderr, and a script checks the status.
@@ -219,6 +229,30 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
 /// The serial number as the 16 hex digits `--serial` takes.
 pub fn serial_text(serial: u64) -> String {
     format!("{serial:016x}")
+}
+
+/// The format plan as the report shows it: the geometry, where `$MFT`,
+/// `$MFTMirr` and `$LogFile` go, and the label and serial. Sizes are in
+/// bytes; `total_clusters` is what Windows reports for the volume, the
+/// clusters `total_sectors` holds.
+fn plan_json(plan: &FormatPlan) -> Json {
+    Json::object([
+        ("bytes_per_sector", Json::from(plan.bytes_per_sector)),
+        ("sectors_per_cluster", Json::from(plan.sectors_per_cluster)),
+        ("cluster_size", Json::from(plan.cluster_size)),
+        ("mft_record_size", Json::from(plan.mft_record_size)),
+        ("index_block_size", Json::from(plan.index_block_size)),
+        ("total_sectors", Json::from(plan.total_sectors)),
+        ("total_clusters", Json::from(plan.total_clusters)),
+        ("mft_lcn", Json::from(plan.mft_lcn)),
+        ("mft_records", Json::from(plan.mft_records)),
+        ("mftmirr_lcn", Json::from(plan.mftmirr_lcn)),
+        ("mftmirr_records", Json::from(plan.mftmirr_records)),
+        ("logfile_lcn", Json::from(plan.logfile_lcn)),
+        ("logfile_bytes", Json::from(plan.logfile_bytes())),
+        ("label", Json::from(plan.label.as_str())),
+        ("serial", Json::from(serial_text(plan.serial))),
+    ])
 }
 
 #[cfg(test)]
