@@ -1,0 +1,3 @@
+## Interfaces
+
+| Operation-sequence regression capture (test support) | Experimental: one command deterministically shrinks a failing replay, by deleting and shortening operations while the same mismatch kind follows the same pinned operation, and writes it to the committed corpus with that mismatch and the image geometry; the ordinary suite replays every pinned entry; CI proves the shrinker against a test-only wrapper with a deliberate stale-size divergence | Unreleased (#730) | #684, #484 | `op_sequence_readback.rs::shrinker_reduces_a_known_divergence_to_its_minimal_sequence`, `op_sequence_readback.rs::capture_pins_a_minimized_regression_and_never_discards_the_original`, `examples/op_sequence_capture.rs` |
