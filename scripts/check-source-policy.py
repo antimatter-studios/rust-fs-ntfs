@@ -38,6 +38,25 @@ def violations(path, text):
     )
     if any(re.search(pattern, prose, re.IGNORECASE) for pattern in header_citations):
         yield f"{path}: implementation-header citation; use verified documentation or Windows observations"
+    if path.parts[:1] == ("src",):
+        # MS-FSCC's sections other than 2.1 (common data types) and 2.6 (file
+        # attributes) specify status codes, FSCTL buffers and information
+        # classes: Windows API structures, not on-disk records, which are
+        # different evidence. Windows Internals describes NTFS at a grain
+        # coarser than a field. Citations of either for an on-disk layout
+        # did not hold the facts they were cited for (#489).
+        for match in re.finditer(r"MS-FSCC\s*§?\s*(\d+)\.(\d+)", prose):
+            if (match.group(1), match.group(2)) not in {("2", "1"), ("2", "6")}:
+                yield (
+                    f"{path}: MS-FSCC §{match.group(1)}.{match.group(2)} documents API buffers, "
+                    "not on-disk records; cite the documentation that holds the fact"
+                )
+                break
+        if re.search(r"\bWindows Internals\b", prose):
+            yield (
+                f"{path}: Windows Internals does not document fields; cite the "
+                "documentation that holds the fact, or a Windows measurement"
+            )
     claims = (
         r"\bno GPL\b.{0,120}\bconsulted\b",
         r"\bconsulted no GPL\b",
