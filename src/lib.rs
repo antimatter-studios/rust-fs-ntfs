@@ -1711,7 +1711,8 @@ pub extern "C" fn fs_ntfs_readlink(
         let data = &reparse[data_start..data_start + data_len];
         let target = match tag {
             0xA000_000C /* SYMLINK */ => decode_symlink_print_name(data),
-            0xA000_0003 /* MOUNT_POINT */ => decode_mount_point_print_name(data),
+            0xA000_0003 /* MOUNT_POINT */ => decode_mount_point_print_name(data)
+            .or_else(|| decode_mount_point_substitute_name(data)),
             other => {
                 set_error(&Error::invalid(format!(
                         "fs_ntfs_readlink: {path_str} is not a symlink (reparse tag {other:#010x})"
@@ -1790,6 +1791,20 @@ fn decode_mount_point_print_name(data: &[u8]) -> Option<String> {
     utf16_le_bytes_to_string(&data[start..start + print_name_length])
 }
 
+/// A mount point's substitute name: its offset and length at 0x00 and
+/// 0x02 of the data, relative to the path buffer at 0x08 (MS-FSCC
+/// 2.1.2.5). A junction New-Item -ItemType Junction made has no print
+/// name, and Windows reports this as its target.
+fn decode_mount_point_substitute_name(data: &[u8]) -> Option<String> {
+    if data.len() < 8 {
+        return None;
+    }
+    let offset = u16::from_le_bytes([data[0], data[1]]) as usize;
+    let length = u16::from_le_bytes([data[2], data[3]]) as usize;
+    let start = 8 + offset;
+    utf16_le_bytes_to_string(data.get(start..start + length)?)
+}
+
 /// The target a `$REPARSE_POINT` value names, when it is a link: a
 /// symbolic link's or a mount point's print name, with any `\??\` NT
 /// prefix removed -- what `fs_ntfs_readlink` returns. A relative symbolic
@@ -1807,7 +1822,8 @@ pub fn reparse_link_target(reparse: &[u8]) -> Option<String> {
     let data = reparse.get(8..8 + data_len)?;
     let target = match tag {
         0xA000_000C /* SYMLINK */ => decode_symlink_print_name(data),
-        0xA000_0003 /* MOUNT_POINT */ => decode_mount_point_print_name(data),
+        0xA000_0003 /* MOUNT_POINT */ => decode_mount_point_print_name(data)
+            .or_else(|| decode_mount_point_substitute_name(data)),
         _ => None,
     }?;
     // A RELATIVE TARGET IS A PATH THE HOST WALKS, so it gets the host's

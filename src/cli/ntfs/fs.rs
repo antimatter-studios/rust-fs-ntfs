@@ -1,7 +1,7 @@
 //! `fs.ntfs <target> <verb>`: an errand inside an NTFS image or device,
 //! without mounting it.
 //!
-//! The verbs are the shared set: `ls`, `read`, `write`, `mkdir`,
+//! The verbs are the shared set: `ls`, `stat`, `read`, `write`, `mkdir`,
 //! `get`/`info`, `set`, `resize`. Metadata is JSON (or `--text`); file
 //! content is raw bytes. A verb the library cannot do yet still exists and
 //! answers `not implemented` with exit status 3, so a script moved between
@@ -14,7 +14,7 @@ use clap::{value_parser, Arg, ArgAction, ArgMatches, Command as Cmd};
 
 use super::device::{self, Device};
 use fs_core::cli::{CliError, Json, Outcome, Tool};
-use fs_ntfs::attr_io::AttrType;
+use fs_ntfs::attr_io::{self, AttrType};
 use fs_ntfs::error::{Error, Kind};
 use fs_ntfs::read::{self, VolumeInfo};
 
@@ -121,6 +121,25 @@ fn command() -> Cmd {
                     "Examples:\n  fs.ntfs disk.img ls /Users\n  \
                      fs.ntfs disk.img ls / | jq -r '.[].name'\n  \
                      fs.ntfs disk.img ls --all --text /",
+                ),
+        )
+        .subcommand(
+            Cmd::new("stat")
+                .about("Report one path: identity, type, links, sizes, every time and NTFS's own fields")
+                .arg(
+                    Arg::new("path")
+                        .value_name("PATH")
+                        .required(true)
+                        .value_parser(value_parser!(OsString)),
+                )
+                .after_help(
+                    "Examples:\n  fs.ntfs disk.img stat /notes.txt\n  \
+                     fs.ntfs disk.img stat /Users | jq .ntfs.file_names\n  \
+                     fs.ntfs disk.img stat --text /link\n\n\
+                     A symlink or junction is reported, not followed. Times are seconds since \
+                     the epoch plus nanoseconds, from $STANDARD_INFORMATION: ctime is the MFT \
+                     change and btime the creation. NTFS keeps no POSIX owner or permissions: \
+                     uid and gid are null, and mode is the one ls reports for the type.",
                 ),
         )
         .subcommand(
@@ -296,6 +315,11 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
             let (mut dev, _) = device::mount(target, offset, false)?;
             ls(&mut dev, path_arg(sub)?, sub.get_flag("all"))
         }
+        "stat" => {
+            let (mut dev, _) = device::mount(target, offset, false)?;
+            let path = path_arg(sub)?;
+            stat(&mut dev, path).map_err(|e| ntfs_error(path, e))
+        }
         "read" => {
             let (mut dev, _) = device::mount(target, offset, false)?;
             read(&mut dev, path_arg(sub)?, sub.get_one("output"))
@@ -443,6 +467,306 @@ fn ls(dev: &mut Device, path: &str, all: bool) -> Result<Outcome, CliError> {
         .collect::<Vec<_>>()
         .join("\n");
     Ok(Outcome::report(Json::Arr(entries)).with_text(text))
+}
+
+/// The file attribute bits MS-FSCC 2.6 documents, by the names `stat`
+/// gives them. A stored bit not named here is kept, as hex.
+const FILE_ATTRIBUTE_NAMES: &[(u32, &str)] = &[
+    (0x0000_0001, "readonly"),
+    (0x0000_0002, "hidden"),
+    (0x0000_0004, "system"),
+    (0x0000_0010, "directory"),
+    (0x0000_0020, "archive"),
+    (0x0000_0080, "normal"),
+    (0x0000_0100, "temporary"),
+    (0x0000_0200, "sparse_file"),
+    (0x0000_0400, "reparse_point"),
+    (0x0000_0800, "compressed"),
+    (0x0000_1000, "offline"),
+    (0x0000_2000, "not_content_indexed"),
+    (0x0000_4000, "encrypted"),
+    (0x0000_8000, "integrity_stream"),
+    (0x0002_0000, "no_scrub_data"),
+    (0x0004_0000, "recall_on_open"),
+    (0x0008_0000, "pinned"),
+    (0x0010_0000, "unpinned"),
+    (0x0040_0000, "recall_on_data_access"),
+];
+
+fn attribute_names(bits: u32) -> Json {
+    let mut names: Vec<Json> = FILE_ATTRIBUTE_NAMES
+        .iter()
+        .filter(|(bit, _)| bits & bit != 0)
+        .map(|(_, name)| Json::from(*name))
+        .collect();
+    let named = FILE_ATTRIBUTE_NAMES
+        .iter()
+        .fold(0, |all, (bit, _)| all | bit);
+    if bits & !named != 0 {
+        names.push(Json::from(format!("0x{:08x}", bits & !named)));
+    }
+    Json::Arr(names)
+}
+
+/// An NTFS time -- 100 ns units since 1601 -- as whole seconds since the
+/// Unix epoch, rounded down, and the nanoseconds past them. The epochs are
+/// a whole number of seconds apart, so the fraction is the time's own.
+fn unix_time(nt: u64) -> (i64, u64) {
+    (read::nt_to_unix(nt), nt % 10_000_000 * 100)
+}
+
+/// The four times under the shared keys, from NTFS's creation,
+/// modification, MFT change and access times.
+fn times(created: u64, modified: u64, changed: u64, accessed: u64) -> Vec<(&'static str, Json)> {
+    let mut fields = Vec::new();
+    for (key, nsec_key, nt) in [
+        ("atime", "atime_nsec", accessed),
+        ("mtime", "mtime_nsec", modified),
+        ("ctime", "ctime_nsec", changed),
+        ("btime", "btime_nsec", created),
+    ] {
+        let (secs, nsec) = unix_time(nt);
+        fields.push((key, Json::from(secs)));
+        fields.push((nsec_key, Json::from(nsec)));
+    }
+    fields
+}
+
+/// The records holding a file's attributes of `kind`: its base record,
+/// and every extension record its `$ATTRIBUTE_LIST` names for that kind.
+fn records_holding(dev: &mut Device, record: u64, kind: AttrType) -> Result<Vec<u64>, Error> {
+    let mut records = vec![record];
+    if let Some(list) =
+        read::read_attribute_value_if_present(dev, record, AttrType::AttributeList, None)?
+    {
+        for entry in read::parse_attribute_list(&list)? {
+            if entry.type_code == kind as u32 && !records.contains(&entry.record_number) {
+                records.push(entry.record_number);
+            }
+        }
+    }
+    Ok(records)
+}
+
+/// Every `$FILE_NAME` of a file: the name, its parent's record and
+/// sequence, its namespace and its own four times. The layout is the
+/// Linux-NTFS documentation's: the parent reference at 0x00; the creation,
+/// modification, MFT change and access times at 0x08, 0x10, 0x18 and 0x20;
+/// the name's length in UTF-16 units at 0x40, its namespace at 0x41 and
+/// the name itself from 0x42.
+fn file_names(dev: &mut Device, record: u64) -> Result<Vec<Json>, Error> {
+    let mut names = Vec::new();
+    for holder in records_holding(dev, record, AttrType::FileName)? {
+        let (_, bytes) = fs_ntfs::mft_io::read_mft_record_io(dev, holder)?;
+        for loc in attr_io::iter_attributes(&bytes) {
+            if loc.type_code != AttrType::FileName as u32 {
+                continue;
+            }
+            let value = attr_io::resident_value_start(&loc)
+                .zip(loc.resident_value_length)
+                .and_then(|(start, len)| bytes.get(start..start + len as usize))
+                .filter(|v| v.len() >= 0x42)
+                .ok_or_else(|| Error::io(format!("record {holder}: a $FILE_NAME is cut short")))?;
+            let units: Vec<u16> = value
+                .get(0x42..0x42 + 2 * usize::from(value[0x40]))
+                .ok_or_else(|| {
+                    Error::io(format!("record {holder}: a $FILE_NAME's name is cut short"))
+                })?
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            let u64_at = |off: usize| u64::from_le_bytes(value[off..off + 8].try_into().unwrap());
+            let parent = u64_at(0x00);
+            let namespace = match value[0x41] {
+                0 => "posix".to_string(),
+                1 => "win32".to_string(),
+                2 => "dos".to_string(),
+                3 => "win32_and_dos".to_string(),
+                other => format!("0x{other:02x}"),
+            };
+            let mut fields = vec![
+                ("name", Json::from(String::from_utf16_lossy(&units))),
+                ("parent", Json::from(parent & 0xFFFF_FFFF_FFFF)),
+                ("parent_sequence", Json::from(parent >> 48)),
+                ("namespace", Json::from(namespace)),
+            ];
+            fields.extend(times(
+                u64_at(0x08),
+                u64_at(0x10),
+                u64_at(0x18),
+                u64_at(0x20),
+            ));
+            names.push(Json::object(fields));
+        }
+    }
+    Ok(names)
+}
+
+/// The bytes of clusters the unnamed `$DATA` holds: the allocated length
+/// in the header of its first segment, or, for a compressed or sparse
+/// stream, the total it allocates (the Win32 ATTRIBUTE_RECORD_HEADER
+/// devnote's AllocatedLength at 0x28 and TotalAllocated at 0x40). Data
+/// resident in the record, and a directory, hold none.
+fn allocated_bytes(dev: &mut Device, record: u64) -> Result<u64, Error> {
+    const COMPRESSED: u16 = 0x0001;
+    const SPARSE: u16 = 0x8000;
+    for holder in records_holding(dev, record, AttrType::Data)? {
+        let (_, bytes) = fs_ntfs::mft_io::read_mft_record_io(dev, holder)?;
+        for loc in attr_io::iter_attributes(&bytes) {
+            if loc.type_code != AttrType::Data as u32 || loc.name_length != 0 {
+                continue;
+            }
+            if loc.is_resident {
+                return Ok(0);
+            }
+            let header = bytes
+                .get(loc.attr_offset..loc.attr_offset + loc.attr_length)
+                .filter(|h| h.len() >= 0x40)
+                .ok_or_else(|| {
+                    Error::io(format!("record {holder}: $DATA's header is cut short"))
+                })?;
+            let u64_at = |off: usize| u64::from_le_bytes(header[off..off + 8].try_into().unwrap());
+            if u64_at(0x10) != 0 {
+                continue; // a later segment: only the first carries the sizes
+            }
+            let flags = u16::from_le_bytes([header[0x0C], header[0x0D]]);
+            let total_present = loc.non_resident_mapping_pairs_offset.unwrap_or(0) >= 0x48;
+            return Ok(if flags & (COMPRESSED | SPARSE) != 0 && total_present {
+                u64_at(0x40)
+            } else {
+                u64_at(0x28)
+            });
+        }
+    }
+    Ok(0)
+}
+
+/// The bytes of a directory's `$I30` index allocation: the data length in
+/// the header of its first `$INDEX_ALLOCATION` segment, which is the size
+/// Windows reports for a directory. An index that fits its `$INDEX_ROOT`
+/// has none, and Windows reports 0.
+fn index_bytes(dev: &mut Device, record: u64) -> Result<u64, Error> {
+    for holder in records_holding(dev, record, AttrType::IndexAllocation)? {
+        let (_, bytes) = fs_ntfs::mft_io::read_mft_record_io(dev, holder)?;
+        for loc in attr_io::iter_attributes(&bytes) {
+            if loc.type_code != AttrType::IndexAllocation as u32 || loc.is_resident {
+                continue;
+            }
+            let start = loc.attr_offset + usize::from(loc.name_offset);
+            let name: Vec<u16> = bytes
+                .get(start..start + 2 * usize::from(loc.name_length))
+                .unwrap_or_default()
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            let first = bytes
+                .get(loc.attr_offset + 0x10..loc.attr_offset + 0x18)
+                .is_some_and(|v| v.iter().all(|b| *b == 0));
+            if String::from_utf16_lossy(&name) == "$I30" && first {
+                return Ok(loc.non_resident_value_length.unwrap_or(0));
+            }
+        }
+    }
+    Ok(0)
+}
+
+/// `stat PATH`: one path's identity, type, links, sizes and every time,
+/// the shared keys first and NTFS's own under `ntfs`. A symlink or
+/// junction is reported, not followed.
+///
+/// NTFS keeps no POSIX owner or permissions, so `uid` and `gid` are null
+/// and `mode` is the one `ls` reports for the type. `nlink` counts the
+/// file's names, a DOS 8.3 alias not being a link of its own. The times
+/// are `$STANDARD_INFORMATION`'s, `ctime` its MFT change and `btime` its
+/// creation; each `$FILE_NAME` keeps its own four under `ntfs.file_names`.
+fn stat(dev: &mut Device, path: &str) -> Result<Outcome, Error> {
+    let record = read::resolve_path(dev, path)?;
+    let st = read::read_stat(dev, record)?;
+    let (_, base) = fs_ntfs::mft_io::read_mft_record_io(dev, record)?;
+    let reparse = read::read_attribute_value_if_present(dev, record, AttrType::ReparsePoint, None)?;
+    let tag = reparse
+        .as_deref()
+        .filter(|r| r.len() >= 4)
+        .map(|r| u32::from_le_bytes([r[0], r[1], r[2], r[3]]));
+    let kind = kind(st.is_dir, tag);
+    let names = file_names(dev, record)?;
+    let links = names
+        .iter()
+        .filter(|n| n.get("namespace").map(Json::to_text).as_deref() != Some("dos"))
+        .count() as u64;
+    let security_id = fs_ntfs::write::read_si_full_io(dev, path)?
+        .v3
+        .map(|v3| v3.security_id);
+    let object_id = read::read_attribute_value_if_present(dev, record, AttrType::ObjectId, None)?
+        .and_then(|v| {
+            v.get(..16)
+                .map(|id| id.iter().map(|b| format!("{b:02x}")).collect::<String>())
+        });
+    let named_streams = fs_ntfs::write::list_named_streams_io(dev, path)?.len() as u64;
+    let ea_count = match read::read_attribute_value_if_present(
+        dev,
+        record,
+        AttrType::ExtendedAttribute,
+        None,
+    )? {
+        Some(value) => fs_ntfs::ea_io::decode(&value)?.len() as u64,
+        None => 0,
+    };
+    // NTFS marks a file holding EAs with 0x40000 in $STANDARD_INFORMATION,
+    // the bit winnt.h names FILE_ATTRIBUTE_EA; Windows never reports it for
+    // such a file (32, not 262176, for the fixture's /ea.txt).
+    const FILE_ATTRIBUTE_EA: u32 = 0x0004_0000;
+    let ea_bit = if ea_count > 0 { FILE_ATTRIBUTE_EA } else { 0 };
+    let attributes = (st.file_attributes & !ea_bit) | if st.is_dir { 0x10 } else { 0 };
+    // A directory's size is its $I30 allocation's, as Windows reports it.
+    let size = if st.is_dir {
+        index_bytes(dev, record)?
+    } else {
+        st.size
+    };
+
+    let mut fields = vec![
+        ("path", Json::from(path)),
+        ("inode", Json::from(record)),
+        ("type", Json::from(kind)),
+        ("mode", Json::from(mode(kind))),
+        ("uid", Json::Null),
+        ("gid", Json::Null),
+        ("nlink", Json::from(links)),
+        ("size", Json::from(size)),
+        ("allocated_bytes", Json::from(allocated_bytes(dev, record)?)),
+    ];
+    fields.extend(times(
+        st.created_nt,
+        st.modified_nt,
+        st.mft_modified_nt,
+        st.accessed_nt,
+    ));
+    if matches!(kind, "symlink" | "junction") {
+        fields.push((
+            "target",
+            Json::from(reparse.as_deref().and_then(fs_ntfs::reparse_link_target)),
+        ));
+    }
+    fields.push((
+        "ntfs",
+        Json::object([
+            ("record_number", Json::from(record)),
+            (
+                "sequence",
+                Json::from(fs_ntfs::mft_io::record_sequence(&base)),
+            ),
+            ("link_count", Json::from(st.link_count)),
+            ("attributes", attribute_names(attributes)),
+            ("security_id", Json::from(security_id)),
+            ("reparse_tag", Json::from(tag.map(|t| format!("0x{t:08x}")))),
+            ("object_id", Json::from(object_id)),
+            ("named_streams", Json::from(named_streams)),
+            ("ea_count", Json::from(ea_count)),
+            ("file_names", Json::Arr(names)),
+        ]),
+    ));
+    Ok(Outcome::report(Json::object(fields)))
 }
 
 /// Stream a regular file's unnamed `$DATA`. Each chunk is read before it is

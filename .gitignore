@@ -41,6 +41,8 @@ test-disks/*.manifest.tsv
 test-disks/ntfs-usnjrnl.query.txt
 test-disks/*.records.csv
 test-disks/usn-journal-measurements.txt
+# What Windows reports for each path of ntfs-stat.img (#642).
+test-disks/*.windows.tsv
 !test-disks/.gitkeep
 
 # Local Windows-VM test pipeline outputs. The orchestrator
