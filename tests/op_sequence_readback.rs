@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 
 const STEPS: usize = 120;
 const SIZE: u64 = 64 * 1024 * 1024;
+/// The committed seeds and captured regressions, replayed by the gate.
+const CORPUS: &str = "fuzz/corpus/operation_sequence";
 
 struct Rng(u64);
 impl Rng {
@@ -119,6 +121,14 @@ fn reference_tools(image: &str, model: &BTreeMap<String, Vec<u8>>, artifacts: &P
         );
         assert_eq!(&output.stdout, expected, "ntfs-3g contents of {path}");
     }
+}
+
+/// The capture command (#684), run from the repository root:
+/// `cargo run --release --example op_sequence_capture -- INPUT NAME`.
+#[allow(dead_code)]
+pub fn capture(original: &Path, name: &str) -> Result<std::path::PathBuf, String> {
+    shrink::quiet_panics();
+    harness::capture(original, name, Path::new(CORPUS), |model| model)
 }
 
 /// Shared with libFuzzer: valid JSON replays concretely; other bytes use the
@@ -274,7 +284,7 @@ fn seeded_readback_boundary() {
 
 #[test]
 fn committed_corpus_replays_every_seed() {
-    let corpus = Path::new("fuzz/corpus/operation_sequence");
+    let corpus = Path::new(CORPUS);
     for required in [
         "basic-write-v1.json",
         "namespace-v1.json",
@@ -289,7 +299,7 @@ fn committed_corpus_replays_every_seed() {
         .collect();
     seeds.sort();
     assert!(!seeds.is_empty(), "no operation sequences selected");
-    for (index, seed) in seeds.iter().enumerate() {
+    for seed in &seeds {
         // Shown only if this test fails: which seed, and what it pins.
         eprintln!("replaying {}", seed.display());
         let (operations, pinned) = generator::decode_regression(&fs::read(seed).unwrap()).unwrap();
@@ -303,7 +313,9 @@ fn committed_corpus_replays_every_seed() {
                 seed.display()
             );
         }
-        let mut h = harness::Harness::new(&format!("corpus-{index}"));
+        // Evidence lands in tmp/op-sequence-model/corpus-<file stem>/.
+        let stem = seed.file_stem().unwrap().to_str().unwrap();
+        let mut h = harness::Harness::new(&format!("corpus-{stem}"));
         for operation in operations {
             h.step(operation);
         }
