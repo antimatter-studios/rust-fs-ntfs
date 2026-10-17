@@ -60,6 +60,7 @@ cli = [
   "cli-rename-win-verify-chkdsk",
   "cli-link-win-verify-chkdsk",
   "cli-mkdir-parents-win-verify-chkdsk",
+  "cli-truncate-win-verify-chkdsk",
   "cli-windows-interrupted-1-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-6-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-1-write-after-replay-win-verify-chkdsk",
@@ -405,6 +406,13 @@ expect_exit = 0
 # passed over, and the chains Windows must refuse too, for win-cli-verify.
 host = "host"
 command = "bash scripts/cli-oracle.sh mkdir-parents {image_dir}/{run_id}/{scenario.image}"
+expect_exit = 0
+
+[ops.cli-truncate]
+# Windows independently repeats the SetLength sequences, then chkdsk
+# grades the image: shrink, growth, resident promotion and discarded tails.
+host = "host"
+command = "bash scripts/cli-oracle.sh truncate {image_dir}/{run_id}/{scenario.image}"
 expect_exit = 0
 
 [ops.cli-replay]

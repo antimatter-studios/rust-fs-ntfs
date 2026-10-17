@@ -2,7 +2,7 @@
 //! without mounting it.
 //!
 //! The verbs are the shared set: `ls`, `stat`, `read`, `write`, `mkdir`,
-//! `rm`, `rmdir`, `mv`, `ln`, `get`/`info`, `set`, `resize`. Metadata is JSON
+//! `truncate`, `rm`, `rmdir`, `mv`, `ln`, `get`/`info`, `set`, `resize`. Metadata is JSON
 //! (or `--text`); file content is raw bytes. A verb the library cannot do
 //! yet still exists and answers `not implemented` with exit status 3, so a
 //! script moved between filesystems fails loudly instead of meaning
@@ -207,6 +207,36 @@ fn command() -> Cmd {
                      tar cf - ./dir | fs.ntfs disk.img write /backup.tar\n  \
                      fs.ext4 src.img read /f | fs.ntfs dst.img write /f\n\n\
                      The parent directory must exist. An existing file is replaced.",
+                ),
+        )
+        .subcommand(
+            Cmd::new("truncate")
+                .about("Set a regular file's length in bytes; growth reads back as zeros")
+                .arg(
+                    Arg::new("path")
+                        .value_name("PATH")
+                        .required(true)
+                        .value_parser(value_parser!(OsString)),
+                )
+                .arg(
+                    Arg::new("size")
+                        .value_name("SIZE")
+                        .required(true)
+                        .value_parser(value_parser!(u64))
+                        .help("The new length in bytes, an unsigned decimal integer"),
+                )
+                .after_help(
+                    "Examples:\n  fs.ntfs disk.img truncate /notes.txt 0\n  \
+                     fs.ntfs disk.img truncate /backup.bin 1048576\n  \
+                     fs.ntfs --offset 1048576 whole-disk.img truncate /notes.txt 4097\n\n\
+                     Shrinking releases whole clusters past the new end; growing preserves \
+                     the prefix and reads back zeros in the new tail. Resident files can \
+                     grow into non-resident files. A directory, symbolic link or other \
+                     reparse point is refused; links are never followed. Compressed, sparse \
+                     and encrypted data this driver cannot resize answer exit 3. Every \
+                     edit is rehearsed before the image is opened for writing, so a \
+                     refused command leaves every byte unchanged. SIZE has no suffix; \
+                     --offset is the filesystem's offset in TARGET, never a file offset.",
                 ),
         )
         .subcommand(
@@ -457,6 +487,12 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         "write" => write(target, offset, path_arg(sub)?),
         "mkdir" if sub.get_flag("parents") => mkdir_parents(target, offset, path_arg(sub)?),
         "mkdir" => mkdir(target, offset, path_arg(sub)?),
+        "truncate" => truncate(
+            target,
+            offset,
+            path_arg(sub)?,
+            *sub.get_one::<u64>("size").expect("clap requires size"),
+        ),
         "rm" => remove(target, offset, path_arg(sub)?, false),
         "rmdir" => remove(target, offset, path_arg(sub)?, true),
         "mv" => rename(target, offset, text_arg(sub, "source")?, path_arg(sub)?),
@@ -1253,6 +1289,69 @@ fn write(target: &OsString, offset: u64, path: &str) -> Result<Outcome, CliError
         if created { "created" } else { "replaced" }
     );
     Ok(Outcome::report(report).with_text(text))
+}
+
+/// Rehearse the complete resize over a read-only open, including mount
+/// preparation. Unsupported data shapes and all predictable failures are
+/// refused before a writable open, even if growth would allocate and then
+/// discover that the new mapping pairs do not fit in the record.
+fn truncate(target: &OsString, offset: u64, path: &str, size: u64) -> Result<Outcome, CliError> {
+    last_name(path)?;
+    let (mut dev, info) = device::mount(target, offset, false)?;
+    let record = read::resolve_path(&mut dev, path).map_err(|e| ntfs_error(path, e))?;
+    let st = read::read_stat(&mut dev, record).map_err(|e| ntfs_error(path, e))?;
+    if st.file_attributes & 0x400 != 0
+        || read::read_attribute_value_if_present(&mut dev, record, AttrType::ReparsePoint, None)
+            .map_err(|e| ntfs_error(path, e))?
+            .is_some()
+    {
+        return Err(CliError::not_implemented(format!(
+            "{path}: truncate does not follow symbolic links or other reparse points"
+        )));
+    }
+    if st.is_dir || path.ends_with('/') {
+        return Err(CliError::failed(format!("{path}: not a regular file")));
+    }
+    let (_, bytes) =
+        fs_ntfs::mft_io::read_mft_record_io(&mut dev, record).map_err(|e| ntfs_error(path, e))?;
+    let data = attr_io::find_attribute(&bytes, AttrType::Data, None).ok_or_else(|| {
+        CliError::not_implemented(format!(
+            "{path}: no unnamed $DATA in the base record to resize"
+        ))
+    })?;
+    let flags = attr_io::attribute_flags(&bytes, &data)
+        .ok_or_else(|| CliError::failed(format!("{path}: truncated $DATA flags")))?;
+    if flags & attr_io::attr_flags::TRANSFORMED != 0 {
+        return Err(CliError::not_implemented(format!(
+            "{path}: truncate cannot resize {} data",
+            attr_io::describe_transform_flags(flags)
+        )));
+    }
+    if size > info.total_size {
+        return Err(CliError::failed(format!(
+            "{path}: no space for {size} bytes on this volume"
+        )));
+    }
+    // A same-size request still checks the driver policy (notably metafiles),
+    // but makes no writable open and changes no timestamps or volume metadata.
+    let mut rehearsal = device::Rehearsal::over(&mut dev);
+    if size == st.size {
+        fs_ntfs::write::truncate_io(&mut rehearsal, path, size).map_err(|e| ntfs_error(path, e))?;
+    } else {
+        prepared(&mut rehearsal, path, |_| Ok(()))?;
+        fs_ntfs::write::truncate_io(&mut rehearsal, path, size).map_err(|e| {
+            if e.contains("exceed attr capacity") {
+                CliError::not_implemented(format!("{path}: {e}"))
+            } else {
+                ntfs_error(path, e)
+            }
+        })?;
+        edit(target, offset, path, |io| {
+            fs_ntfs::write::truncate_io(io, path, size)
+        })?;
+    }
+    let report = Json::object([("path", Json::from(path)), ("size", Json::from(size))]);
+    Ok(Outcome::report(report).with_text(format!("{path}: {size} bytes")))
 }
 
 /// Create one directory. Its parent must exist, and nothing may be at the
