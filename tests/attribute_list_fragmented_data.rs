@@ -1,0 +1,236 @@
+//! A write through a file's `$ATTRIBUTE_LIST` takes several runs when no
+//! free run holds the stream (#798, part of #664).
+//!
+//! The unnamed `$DATA` of a listed file went into clusters as one run, and
+//! a volume whose free space was fragmented -- every free run shorter than
+//! the stream -- refused the write with "no contiguous free run", however
+//! much space it had. Windows places such a stream in as many runs as it
+//! takes. This fragments a volume's free space into one-cluster holes,
+//! writes a stream several holes long, and checks that its run list has
+//! several runs, that the list names every attribute where it is, that the
+//! `ntfs` crate -- a parser that is not this one -- reads the contents
+//! back, and that `check_io` is clean.
+
+mod common;
+
+use fs_ntfs::attr_io::{self, AttrType};
+use fs_ntfs::block_io::{BlockIo, PathIo};
+use fs_ntfs::mkfs::format_filesystem;
+use fs_ntfs::{bitmap, data_runs, fsck, mft_io, read, write};
+use std::fs::File;
+use std::path::Path;
+
+const VOL_SIZE: u64 = 16 * 1024 * 1024;
+const RECORD_SIZE: u32 = 1024;
+const CLUSTER: u32 = 4096;
+/// One-cluster holes the free space is cut into.
+const HOLES: usize = 8;
+/// The stream's length in clusters: longer than any hole, shorter than
+/// all of them together.
+const STREAM_CLUSTERS: usize = 6;
+
+/// `/f`, with an EA and enough named streams that its base record filled
+/// and it gained an `$ATTRIBUTE_LIST`.
+fn volume_with_a_listed_file(tag: &str) -> (String, u64) {
+    let img = common::temp_image_path(format!("alfrag_{tag}"));
+    let f = File::create(&img).expect("create image");
+    f.set_len(VOL_SIZE).expect("set_len");
+    drop(f);
+    let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
+    format_filesystem(&mut io, VOL_SIZE, CLUSTER, RECORD_SIZE, None, Some(1))
+        .expect("format_filesystem");
+    let rec = write::create_file_io(&mut io, "/", "f").expect("create /f");
+    write::write_file_contents_io(&mut io, "/f", b"contents").expect("write /f");
+    write::write_ea_io(&mut io, "/f", b"USER.TAG", &[b'e'; 64], 0).expect("write /f's EA");
+    for i in 0..8 {
+        write::write_named_stream_io(&mut io, "/f", &format!("s{i}"), &[b'a' + i as u8; 120])
+            .unwrap_or_else(|e| panic!("write /f:s{i}: {e}"));
+    }
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
+    assert!(
+        read::read_attribute_value_if_present(&mut io, rec, AttrType::AttributeList, None)
+            .expect("read /f's list")
+            .is_some(),
+        "/f's base record never filled, so it has no $ATTRIBUTE_LIST to test"
+    );
+    (img, rec)
+}
+
+/// The longest run of free clusters on the volume.
+fn longest_free_run(io: &mut PathIo) -> u64 {
+    let bm = bitmap::locate_bitmap_io(io).expect("locate $Bitmap");
+    let (mut lo, mut hi) = (0u64, bm.total_bits);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let found = bitmap::find_free_run_io(io, &bm, mid, 0).expect("scan $Bitmap");
+        if found.is_some() {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
+/// Cut the volume's free space into one-cluster holes: `2 * HOLES`
+/// one-cluster files, every free run longer than one cluster filled by a
+/// file of its own, then every other one-cluster file unlinked.
+fn fragment_free_space(img: &str) {
+    let mut io = PathIo::open_rw(Path::new(img)).expect("open_rw");
+    let one = vec![0xC5u8; CLUSTER as usize];
+    for i in 0..2 * HOLES {
+        let name = format!("c{i}");
+        write::create_file_io(&mut io, "/", &name).expect("create a one-cluster file");
+        write::write_file_contents_io(&mut io, &format!("/{name}"), &one)
+            .expect("write a one-cluster file");
+    }
+    let mut fill = 0;
+    loop {
+        let longest = longest_free_run(&mut io);
+        if longest < 2 {
+            break;
+        }
+        let name = format!("fill{fill}");
+        write::create_file_io(&mut io, "/", &name).expect("create a filler");
+        write::write_file_contents_io(
+            &mut io,
+            &format!("/{name}"),
+            &vec![0x3Cu8; (longest * CLUSTER as u64) as usize],
+        )
+        .unwrap_or_else(|e| panic!("fill a free run of {longest} clusters: {e}"));
+        fill += 1;
+    }
+    for i in (1..2 * HOLES).step_by(2) {
+        write::unlink_io(&mut io, &format!("/c{i}")).expect("unlink a one-cluster file");
+    }
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
+    let longest = longest_free_run(&mut io);
+    assert!(
+        longest < STREAM_CLUSTERS as u64,
+        "the free space was not fragmented: a run of {longest} clusters holds the stream"
+    );
+}
+
+/// Every attribute of the file at `rec` is named by a list entry where it
+/// is, and every entry names an attribute that is there.
+fn list_is_true(img: &str, rec: u64) {
+    let mut io = PathIo::open_ro(Path::new(img)).expect("open_ro");
+    let list = read::read_attribute_value(&mut io, rec, AttrType::AttributeList, None)
+        .expect("/f has an $ATTRIBUTE_LIST");
+    let entries = read::parse_attribute_list(&list).expect("parse the list");
+    let mut numbers: Vec<u64> = entries.iter().map(|e| e.record_number).collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    let mut held = 0usize;
+    for &n in &numbers {
+        let (_, record) = mft_io::read_mft_record_io(&mut io, n).expect("read a listed record");
+        assert_ne!(
+            mft_io::record_flags(&record) & mft_io::MFT_FLAG_IN_USE,
+            0,
+            "the list names record {n}, which is not in use"
+        );
+        for loc in attr_io::iter_attributes(&record) {
+            if loc.type_code == AttrType::AttributeList as u32 {
+                continue;
+            }
+            held += 1;
+            let named = entries.iter().any(|e| {
+                e.record_number == n
+                    && e.type_code == loc.type_code
+                    && e.attribute_id == loc.attribute_id
+            });
+            assert!(
+                named,
+                "record {n} holds attribute {:#x} id {}, and the list does not name it",
+                loc.type_code, loc.attribute_id
+            );
+        }
+    }
+    assert_eq!(
+        held,
+        entries.len(),
+        "the list has entries for attributes that are not where it says"
+    );
+}
+
+/// The runs of `/f`'s unnamed `$DATA`, read from the record its list
+/// entry names.
+fn unnamed_data_runs(img: &str, rec: u64) -> Vec<data_runs::DataRun> {
+    let mut io = PathIo::open_ro(Path::new(img)).expect("open_ro");
+    let list = read::read_attribute_value(&mut io, rec, AttrType::AttributeList, None)
+        .expect("/f has an $ATTRIBUTE_LIST");
+    let entry = read::parse_attribute_list(&list)
+        .expect("parse the list")
+        .into_iter()
+        .find(|e| e.type_code == AttrType::Data as u32 && e.name.is_none())
+        .expect("the list names the unnamed $DATA");
+    let (_, record) =
+        mft_io::read_mft_record_io(&mut io, entry.record_number).expect("read its record");
+    let loc = attr_io::iter_attributes(&record)
+        .find(|l| l.type_code == AttrType::Data as u32 && l.attribute_id == entry.attribute_id)
+        .expect("the record holds the unnamed $DATA");
+    assert!(!loc.is_resident, "the stream stayed resident");
+    let mpo = loc
+        .non_resident_mapping_pairs_offset
+        .expect("a mapping-pairs offset") as usize;
+    data_runs::decode_runs(&record[loc.attr_offset + mpo..loc.attr_offset + loc.attr_length])
+        .expect("decode the mapping pairs")
+}
+
+fn clean(img: &str) {
+    let mut io = PathIo::open_rw(Path::new(img)).expect("open_rw");
+    let report = fsck::check_io(&mut io).expect("check the volume");
+    assert!(
+        report.findings.is_empty(),
+        "check_io finds the volume unclean: {:?}",
+        report.findings
+    );
+}
+
+fn pattern(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+/// A stream longer than any free run is written in several runs, and the
+/// `ntfs` crate reads it back.
+#[test]
+fn the_unnamed_stream_of_a_listed_file_takes_several_runs_on_fragmented_free_space() {
+    let (img, rec) = volume_with_a_listed_file("unnamed");
+    fragment_free_space(&img);
+    clean(&img);
+    let data = pattern(STREAM_CLUSTERS * CLUSTER as usize - 100);
+    let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
+    let written = write::write_file_contents_io(&mut io, "/f", &data)
+        .unwrap_or_else(|e| panic!("write {} bytes to /f: {e}", data.len()));
+    assert_eq!(written, data.len() as u64);
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
+    drop(io);
+    let runs = unnamed_data_runs(&img, rec);
+    assert!(
+        runs.len() > 1,
+        "the stream is in {} run(s) on free space no run of which holds it",
+        runs.len()
+    );
+    let mapped: u64 = runs.iter().map(|r| r.length).sum();
+    assert_eq!(
+        mapped, STREAM_CLUSTERS as u64,
+        "the runs map {mapped} clusters, not the stream's {STREAM_CLUSTERS}"
+    );
+    list_is_true(&img, rec);
+    let (ntfs, mut reader) = common::open(&img);
+    let read_back = common::read_file_all(&ntfs, &mut reader, "/f");
+    assert!(
+        read_back == data,
+        "the ntfs crate reads {} bytes of /f, not the {} written",
+        read_back.len(),
+        data.len()
+    );
+    let mut io = PathIo::open_ro(Path::new(&img)).expect("open_ro");
+    assert_eq!(
+        read::read_attribute_value(&mut io, rec, AttrType::Data, Some("s3")).expect("read /f:s3"),
+        vec![b'd'; 120],
+        "writing the unnamed stream changed a named one"
+    );
+    drop(io);
+    clean(&img);
+}
