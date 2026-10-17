@@ -50,8 +50,11 @@ fn dir<'n>(ntfs: &'n Ntfs, fs: &mut Fs, from: &NtfsFile<'n>, name: &str) -> Ntfs
     panic!("directory {name} not found");
 }
 
-/// (name, file record number, FILE_NAME attribute flags) of every index key.
-fn keys(fs: &mut Fs, d: &NtfsFile) -> Vec<(String, u64, u32)> {
+/// Name, reference, flags, namespace, data size and allocated size.
+type NameCopy = (String, u64, u32, u8, u64, u64);
+
+/// Every index key, retaining the fields Windows duplicated into it.
+fn keys(fs: &mut Fs, d: &NtfsFile) -> Vec<NameCopy> {
     let index = d.directory_index(fs).expect("directory index");
     let mut entries = index.entries();
     let mut out = Vec::new();
@@ -62,13 +65,16 @@ fn keys(fs: &mut Fs, d: &NtfsFile) -> Vec<(String, u64, u32)> {
             key.name().to_string_lossy(),
             entry.file_reference().file_record_number(),
             key.file_attributes().bits(),
+            key.namespace() as u8,
+            key.data_size(),
+            key.allocated_size(),
         ));
     }
     out
 }
 
-/// (name, parent record, FILE_NAME attribute flags) of every own-record copy.
-fn own_names(fs: &mut Fs, file: &NtfsFile) -> Vec<(String, u64, u32)> {
+/// Every own-record copy, with its parent reference and duplicated fields.
+fn own_names(fs: &mut Fs, file: &NtfsFile) -> Vec<NameCopy> {
     let mut attrs = file.attributes();
     let mut out = Vec::new();
     while let Some(item) = attrs.next(fs) {
@@ -82,6 +88,9 @@ fn own_names(fs: &mut Fs, file: &NtfsFile) -> Vec<(String, u64, u32)> {
                 name.name().to_string_lossy(),
                 name.parent_directory_reference().file_record_number(),
                 name.file_attributes().bits(),
+                name.namespace() as u8,
+                name.data_size(),
+                name.allocated_size(),
             ));
         }
     }
@@ -144,7 +153,10 @@ fn hardlink_readonly_index_copies_are_observed_from_windows_images() {
         "Windows: control unchanged"
     );
 
-    let mut report = vec!["stage\tcopy\tname\tparent_or_record\tfile_attributes".to_string()];
+    let mut report = vec![
+        "stage\tcopy\tname\tparent_or_record\tfile_attributes\tnamespace\tdata_size\tallocated_size"
+            .to_string(),
+    ];
     let mut record_by_stage = Vec::new();
     for image in rows.iter().filter(|r| r[0] == "image") {
         let (stage, file, want) = (image[1], image[2], image[3]);
@@ -192,14 +204,20 @@ fn hardlink_readonly_index_copies_are_observed_from_windows_images() {
         );
         record_by_stage.push((linked.1, control.2));
         for n in &own {
-            report.push(format!("{stage}\town-mft\t{}\t{}\t{:#x}", n.0, n.1, n.2));
+            report.push(format!(
+                "{stage}\town-mft\t{}\t{}\t{:#x}\t{}\t{}\t{}",
+                n.0, n.1, n.2, n.3, n.4, n.5
+            ));
         }
         for (copy, k) in [
             ("alpha-index", linked),
             ("beta-index", second),
             ("control-index", control),
         ] {
-            report.push(format!("{stage}\t{copy}\t{}\t{}\t{:#x}", k.0, k.1, k.2));
+            report.push(format!(
+                "{stage}\t{copy}\t{}\t{}\t{:#x}\t{}\t{}\t{}",
+                k.0, k.1, k.2, k.3, k.4, k.5
+            ));
         }
     }
     assert_eq!(record_by_stage.len(), 4, "four frozen stages");

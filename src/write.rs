@@ -5074,6 +5074,9 @@ pub fn remove_object_id_io<T: BlockIo + ?Sized>(
     Ok(removed)
 }
 
+/// The most names Windows gives one file; see [`link_io`].
+pub const MAX_HARD_LINKS: u16 = 1024;
+
 /// Add a new hard link to an existing file. The new link lives at
 /// `new_parent_path/new_basename`. The target file's MFT record gains
 /// a new `$FILE_NAME` attribute and its hard-link count is incremented;
@@ -5081,6 +5084,7 @@ pub fn remove_object_id_io<T: BlockIo + ?Sized>(
 ///
 /// Refuses directories (NTFS disallows hardlinked directories).
 /// Refuses if the new basename already exists in the target parent.
+/// Refuses a file whose record already counts [`MAX_HARD_LINKS`] links.
 pub fn link(
     image: &Path,
     existing_path: &str,
@@ -5126,6 +5130,16 @@ fn link_unstamped_io<T: BlockIo + ?Sized>(
             "link: refusing to hardlink directory '{existing_path}'"
         )));
     }
+    // Windows gives a file at most 1024 names: CreateHardLinkW's
+    // documentation allows 1023 links beyond the first. The record's own
+    // count is checked, so no name is added that Windows could not have
+    // made, and the count can never saturate below what is stored.
+    let links = u16::from_le_bytes([target_record_bytes[0x12], target_record_bytes[0x13]]);
+    if links >= MAX_HARD_LINKS {
+        return Err(Error::refused(format!(
+            "link: '{existing_path}' already has {links} links, the most Windows allows a file"
+        )));
+    }
 
     let new_parent_rec = resolve_path_to_record_number_io(io, new_parent_path)?;
     refuse_metafile_io(io, new_parent_rec, &format!("link into {new_parent_path}"))?;
@@ -5161,18 +5175,25 @@ fn link_unstamped_io<T: BlockIo + ?Sized>(
     let target_seq = u16::from_le_bytes([target_record_bytes[0x10], target_record_bytes[0x11]]);
     let target_reference = crate::record_build::encode_file_reference(target_rec, target_seq);
     let nt_time = crate::record_build::nt_time_now();
+    // The independent Windows hard-link capture (run 39710860283) stores
+    // added names in namespace 0, even when they fit 8.3. A fresh link is
+    // not a second DOS alias for the original name. Keep the record and
+    // its directory key in the same namespace; leave existing names alone.
+    const HARD_LINK_NAMESPACE: u8 = 0;
 
     // Step 1: append a new $FILE_NAME to the target record + bump
     // hard_link_count.
     update_mft_record_io(io, target_rec, |record| {
         let attr_id = crate::attr_resize::allocate_attribute_id(record);
-        let fn_attr = crate::record_build::build_file_name_attribute(
+        let mut fn_attr = crate::record_build::build_file_name_attribute(
             attr_id,
             parent_reference,
             new_basename,
             nt_time,
             /* is_dir */ false,
         )?;
+        // Resident value starts at 24; FILE_NAME's namespace is at +65.
+        fn_attr[24 + 65] = HARD_LINK_NAMESPACE;
         crate::attr_resize::insert_attribute_sorted(record, &fn_attr)?;
         let cur = u16::from_le_bytes([record[0x12], record[0x13]]);
         record[0x12..0x14].copy_from_slice(&cur.saturating_add(1).to_le_bytes());
@@ -5180,13 +5201,14 @@ fn link_unstamped_io<T: BlockIo + ?Sized>(
     })?;
 
     // Step 2: insert index entry in new parent.
-    let entry = index_io::build_file_name_index_entry(
+    let mut entry = index_io::build_file_name_index_entry(
         target_reference,
         parent_reference,
         new_basename,
         nt_time,
         /* is_dir */ false,
     )?;
+    index_io::set_entry_namespace(&mut entry, HARD_LINK_NAMESPACE)?;
     let insert_res = insert_entry_in_parent_io(
         io,
         new_parent_rec,

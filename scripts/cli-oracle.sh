@@ -55,7 +55,18 @@
 #                                    IMAGE.manifest lists every file's SHA-256
 #                                    under its new name, the exact case of each
 #                                    new name and each old name now absent
-#   grow-mft IMAGE SNAPSHOT         IMAGE is what Windows recovered from
+#   link IMAGE                       fs.ntfs ln adds hard links -- in the same
+#                                    directory, in others, to data that is not
+#                                    resident, and to one file until its record
+#                                    is full -- and removes an original name; ln -s
+#                                    makes symbolic links, relative and from the
+#                                    root. A hard link to a directory, a name
+#                                    already there and one name too many are
+#                                    refused with every byte left as it was.
+#                                    IMAGE.manifest lists every name's SHA-256,
+#                                    each file's full set of names and each
+#                                    symbolic link's target and the bytes it reaches
+#   grow-mft IMAGE SNAPSHOT        IMAGE is what Windows recovered from
 #                                    test-disks/windows-interrupted-SNAPSHOT, whose
 #                                    $MFT:$Bitmap outruns $MFT; fs.ntfs writes files
 #                                    until $MFT has grown twice, and fsck.ntfs after
@@ -377,6 +388,109 @@ case "$step" in
         done <"$work/files"
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the renames exited $status: $out"
+        ;;
+    link)
+        [ $# -eq 0 ] || die "link IMAGE"
+        manifest="$image.manifest"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        : >"$manifest"
+        # put PATH SIZE KEY: fs.ntfs writes SIZE random bytes to PATH, kept
+        # as $work/KEY.
+        put() {
+            random "$work/$3" "$2"
+            set +e
+            "$BIN" fs "$image" write "$1" <"$work/$3" >/dev/null 2>"$image.cli-err"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] || die "fs.ntfs write $1 ($2 bytes) exited $status: $(cat "$image.cli-err")"
+        }
+        # linked FILE PATH: fs.ntfs ln makes PATH another name for FILE.
+        linked() {
+            run fs "$image" ln "$1" "$2"
+            [ "$status" -eq 0 ] || die "fs.ntfs ln $1 $2 exited $status: $(cat "$image.cli-err")"
+            has "\"path\": \"$2\"" && has '"linked": true' || die "fs.ntfs ln $1 $2 reported: $out"
+        }
+        # symlinked TEXT PATH KEY: fs.ntfs ln -s makes PATH a symbolic link
+        # to TEXT, a file holding KEY's bytes. Windows must read TEXT as the
+        # link's target and those bytes through PATH.
+        symlinked() {
+            run fs "$image" ln -s "$1" "$2"
+            [ "$status" -eq 0 ] || die "fs.ntfs ln -s $1 $2 exited $status: $(cat "$image.cli-err")"
+            has "\"path\": \"$2\"" && has '"linked": true' || die "fs.ntfs ln -s $1 $2 reported: $out"
+            printf 'symlink\t%s\t%s\t%s\t%s\n' "$2" "$1" "$(wc -c <"$work/$3" | tr -d ' ')" "$(sha "$work/$3")" >>"$manifest"
+        }
+        # refused STATUS ARG...: fs.ntfs ln ARG... exits STATUS and writes nothing.
+        refused() {
+            local want="$1" before
+            shift
+            before="$(sha "$image")"
+            run fs "$image" ln "$@"
+            [ "$status" -eq "$want" ] || die "fs.ntfs ln $* exited $status, not $want: $(cat "$image.cli-err")"
+            [ "$(sha "$image")" = "$before" ] || die "the refused fs.ntfs ln $* wrote to the volume"
+        }
+        # names KEY SIZE NAME...: every NAME holds KEY's SIZE bytes, and the
+        # NAMEs are all the file's names.
+        names() {
+            local key="$1" size="$2" name
+            shift 2
+            for name in "$@"; do
+                printf 'file\t%s\t%s\t%s\n' "$name" "$size" "$(sha "$work/$key")" >>"$manifest"
+            done
+            (IFS="$(printf '\t')" && printf 'links\t%s\n' "$*") >>"$manifest"
+        }
+
+        for dir in /d /d/sub /e; do
+            run fs "$image" mkdir "$dir"
+            [ "$status" -eq 0 ] || die "fs.ntfs mkdir $dir exited $status: $(cat "$image.cli-err")"
+        done
+        put /a.txt 500 a
+        put /big.bin 1048576 big
+        put /d/f.txt 4097 f
+        put /many.txt 64 many
+
+        linked /a.txt /a-also.txt         # the same directory
+        linked /a.txt /d/a-in-d.txt       # another directory
+        linked /a.txt /d/sub/A-DEEP.TXT   # deeper down, in capitals
+        linked /big.bin /e/big-link.bin   # data that is not resident
+        linked /d/f.txt /f-up.txt         # up to the root
+        # /many.txt takes names until its record has no room for another.
+        n=0
+        while [ "$n" -lt 100 ]; do
+            run fs "$image" ln /many.txt "/e/many-$n.txt"
+            [ "$status" -eq 0 ] || break
+            n=$((n + 1))
+        done
+        [ "$status" -eq 1 ] && grep -q 'no room' "$image.cli-err" ||
+            die "fs.ntfs ln /many.txt stopped after $n more names with exit $status: $(cat "$image.cli-err")"
+        [ "$n" -gt 1 ] || die "/many.txt took only $n more names before its record was full"
+        # The first name goes, and the file stays under its others.
+        run fs "$image" rm /a.txt
+        [ "$status" -eq 0 ] || die "fs.ntfs rm /a.txt exited $status: $(cat "$image.cli-err")"
+
+        symlinked a-also.txt /rel.txt a                # relative, the same directory
+        symlinked ../big.bin /d/up.bin big             # relative, up a level
+        symlinked ../d/sub/A-DEEP.TXT /e/deep.txt a    # relative, across the tree
+        symlinked /d/f.txt /e/abs.txt f                # from the volume's root
+
+        # Refusals, each leaving every byte as it was: a directory, a name
+        # already there as Windows compares names, a name more than the
+        # record holds, and a directory that is not there.
+        refused 1 /d /d-link
+        refused 1 /f-up.txt /A-ALSO.TXT
+        refused 1 /many.txt "/e/many-$n.txt"
+        refused 1 /a-also.txt /nowhere/x.txt
+
+        printf 'dir\t%s\n' /d /d/sub /e >>"$manifest"
+        printf 'absent\t%s\n' /a.txt >>"$manifest"
+        names a 500 /a-also.txt /d/a-in-d.txt /d/sub/A-DEEP.TXT
+        names big 1048576 /big.bin /e/big-link.bin
+        names f 4097 /d/f.txt /f-up.txt
+        many=(/many.txt)
+        for i in $(seq 0 $((n - 1))); do many+=("/e/many-$i.txt"); done
+        names many 64 "${many[@]}"
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the links exited $status: $out"
         ;;
     replay)
         [ $# -eq 1 ] || die "replay IMAGE SNAPSHOT"

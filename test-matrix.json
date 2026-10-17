@@ -3556,6 +3556,37 @@
       "image": "nfs-cli-rename-win-verify-chkdsk.img",
       "_notes": "fs.ntfs mv renames names within their directories (#645): the same length, longer, shorter, case only, a directory, a non-resident file, a Unicode name, and a seeded third of a directory filled past one index level, so entries move between index blocks. A move to another directory (exit 3) and a name already there, compared through $UpCase, are refused with every byte left as it was. Windows grades the result: every file reads back under its new name with the SHA-256 written before the rename (Get-FileHash), each parent lists each new name exactly so, no old name is found, and chkdsk finds the volume clean."
     },
+    "cli-link-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "CLI LINK",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        { "op": "cli-mkfs" },
+        { "op": "cli-link" },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        { "op": "win-cli-verify", "keep_image": "true" },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-link-win-verify-chkdsk.img",
+      "_notes": "fs.ntfs ln adds hard links (#646): in the same directory, in others, to a file whose data is not resident, and to one file until its record has no room for another name; then the first name of one file is removed. fs.ntfs ln -s makes symbolic links whose targets are relative (the same directory, up a level, across the tree) and from the volume's root. A hard link to a directory, a name already there compared through $UpCase, one name more than the record holds and a missing directory are refused with every byte left as it was. Windows grades the result: every name reads back with the SHA-256 written (Get-FileHash), fsutil hardlink list gives each file exactly the names fs.ntfs made, each symbolic link's target reads as given and Windows follows it to the target's bytes, the removed name is gone, and chkdsk finds the volume clean."
+    },
     "cli-windows-interrupted-1-fsck-replay-win-verify-chkdsk": {
       "status": "pending",
       "volume_params": {
