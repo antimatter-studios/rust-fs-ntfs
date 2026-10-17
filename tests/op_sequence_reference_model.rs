@@ -171,3 +171,74 @@ fn an_incomplete_upcase_table_is_refused() {
     assert_eq!(Model::new(vec![0; 65535]), Err(Error::InvalidTable));
     assert_eq!(Model::new(vec![0; 65537]), Err(Error::InvalidTable));
 }
+
+#[test]
+fn named_streams_belong_to_the_file_and_fold_through_the_supplied_table() {
+    let mut supplied = table();
+    // σ and Σ name one stream only because the supplied table says so.
+    supplied[0x3c3] = 0x3a3;
+    let mut m = Model::new(supplied).unwrap();
+    m.create("/", "f", false).unwrap();
+    m.create("/", "d", true).unwrap();
+    m.write_stream("/f", "s", b"one").unwrap();
+    m.write_stream("/f", "S", b"two").unwrap();
+    m.write_stream("/f", "σ", b"").unwrap();
+    m.write_stream("/f", "Σ", b"sigma").unwrap();
+    // A colliding name replaces the bytes and keeps the first spelling.
+    assert_eq!(
+        m.streams("/f").unwrap(),
+        vec![
+            ("s".into(), b"two".to_vec()),
+            ("σ".into(), b"sigma".to_vec())
+        ]
+    );
+    // The unnamed data is not a stream, and streams do not count in its size.
+    assert_eq!(m.read("/f").unwrap(), b"");
+    assert_eq!(m.stat("/f").unwrap().size, 0);
+    // Streams belong to the file: every hard link shows and changes them.
+    m.link("/f", "/d", "g").unwrap();
+    m.delete_stream("/d/g", "S").unwrap();
+    assert_eq!(
+        m.streams("/f").unwrap(),
+        vec![("σ".into(), b"sigma".to_vec())]
+    );
+
+    let before = m.clone();
+    let long = "n".repeat(256);
+    for name in [
+        "", ".", "..", "a:b", "a/b", "a\\b", "x.", "x ", "\u{1}", &long,
+    ] {
+        assert_eq!(
+            m.write_stream("/f", name, b"x"),
+            Err(Error::InvalidName),
+            "{name:?}"
+        );
+    }
+    assert_eq!(m.write_stream("/missing", "s", b"x"), Err(Error::Missing));
+    assert_eq!(m.write_stream("/f/x", "s", b"x"), Err(Error::NotDirectory));
+    assert_eq!(
+        m.write_stream("/f", "s", &vec![0; MAX_FILE_BYTES + 1]),
+        Err(Error::FileTooLarge)
+    );
+    assert_eq!(m.delete_stream("/f", "s"), Err(Error::Missing));
+    assert_eq!(m.delete_stream("/f", ""), Err(Error::InvalidName));
+    assert_eq!(m.streams("/missing"), Err(Error::Missing));
+    assert_eq!(m, before);
+
+    // 255 UTF-16 units is the longest name, counted in units, not chars.
+    let widest = "😀".repeat(127) + "x";
+    m.write_stream("/f", &widest, b"").unwrap();
+    assert_eq!(m.streams("/d/g").unwrap().len(), 2);
+    // A directory holds streams as a file does, and they go with it.
+    m.write_stream("/d", "s", b"dir").unwrap();
+    assert_eq!(
+        m.streams("/d").unwrap(),
+        vec![("s".into(), b"dir".to_vec())]
+    );
+    m.remove("/d/g").unwrap();
+    m.remove("/d").unwrap();
+    // The last name takes the file's streams with it.
+    m.remove("/f").unwrap();
+    m.create("/", "f", false).unwrap();
+    assert!(m.streams("/f").unwrap().is_empty());
+}
