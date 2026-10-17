@@ -4,7 +4,8 @@ mod generator;
 #[path = "op_sequence_model/model.rs"]
 mod model;
 use generator::{
-    decode, decode_replay, encode, Generator, Op, MAX_DATA, MAX_PATH, MAX_SIZE, MAX_STEPS,
+    decode, decode_regression, decode_replay, encode, encode_regression, Generator, Geometry, Op,
+    Regression, MAX_DATA, MAX_PATH, MAX_SIZE, MAX_STEPS,
 };
 use model::{Error, Model};
 
@@ -197,4 +198,63 @@ fn operation_application_preserves_full_write_link_and_typed_removal_semantics()
     .apply(&mut m)
     .unwrap();
     assert_eq!(m.read("/dir/b").unwrap(), &[7]);
+}
+
+#[test]
+fn captured_regressions_keep_their_pin_and_replay_ignores_it() {
+    let operations = vec![
+        Op::Create {
+            parent: "/".into(),
+            name: "a".into(),
+        },
+        Op::Truncate {
+            path: "/a".into(),
+            size: 0,
+        },
+    ];
+    let regression = Regression {
+        kind: "size of".into(),
+        step: 2,
+        geometry: Geometry {
+            size: 64 * 1024 * 1024,
+            cluster: 4096,
+            record: 1024,
+            label: "OPSEQ".into(),
+            serial: 682,
+        },
+        original: "tmp/op-sequence-model/explorer/reproducer.json".into(),
+        original_operations: 40,
+    };
+    let pinned = encode_regression(&operations, &regression).unwrap();
+    assert_eq!(
+        decode_regression(&pinned).unwrap(),
+        (operations.clone(), Some(regression.clone()))
+    );
+    assert_eq!(decode_replay(&pinned).unwrap(), operations);
+    let plain = encode(&operations).unwrap();
+    assert!(!String::from_utf8(plain.clone())
+        .unwrap()
+        .contains("regression"));
+    assert_eq!(
+        decode_regression(&plain).unwrap(),
+        (operations.clone(), None)
+    );
+    // The pin is as strict as the operations: unknown fields, a missing
+    // kind and a step past the last operation are all refused.
+    let mut value: serde_json::Value = serde_json::from_slice(&pinned).unwrap();
+    value["regression"]["extra"] = 0.into();
+    assert!(decode_replay(&serde_json::to_vec(&value).unwrap()).is_err());
+    for (kind, step) in [("", 2), ("size of", 3)] {
+        let bad = Regression {
+            kind: kind.into(),
+            step,
+            ..regression.clone()
+        };
+        assert!(encode_regression(&operations, &bad).is_err());
+        let mut value: serde_json::Value = serde_json::from_slice(&pinned).unwrap();
+        value["regression"] = serde_json::to_value(&bad).unwrap();
+        assert!(decode_regression(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+    let unbounded = vec![Op::Rmdir { path: "/".into() }; MAX_STEPS + 1];
+    assert!(encode_regression(&unbounded, &regression).is_err());
 }

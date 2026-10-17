@@ -1,14 +1,47 @@
 //! Disk execution for #682; expected state comes only from #680's model.
-use super::{common, generator, model, reference_tools, SIZE};
+use super::{common, generator, model, reference_tools, shrink, SIZE};
 use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::{error::Error, facade::Filesystem, fsck, mkfs, read, write};
-use generator::{Generator, Op};
+use generator::{Generator, Geometry, Op, Regression};
 use model::Model;
+use shrink::Mismatch;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+/// The state the disk is compared with. `Model` is the only real one; a
+/// test may wrap it to inject a known divergence (#684), never edit it.
+pub trait Expected: Clone {
+    fn tree(&self) -> &Model;
+    fn apply(&mut self, op: &Op) -> Result<(), model::Error>;
+    fn stat(&self, path: &str) -> Result<model::Stat, model::Error> {
+        self.tree().stat(path)
+    }
+}
+
+impl Expected for Model {
+    fn tree(&self) -> &Model {
+        self
+    }
+
+    fn apply(&mut self, op: &Op) -> Result<(), model::Error> {
+        op.apply(self)
+    }
+}
+
+/// The image every sequence starts on, recorded in each captured pin.
+pub fn geometry() -> Geometry {
+    Geometry {
+        size: SIZE,
+        cluster: 4096,
+        record: 1024,
+        label: "OPSEQ".into(),
+        serial: 682,
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Observed {
@@ -33,9 +66,9 @@ fn paths(model: &Model, path: &str, out: &mut Vec<String>) {
 
 /// Also retains times, flags and exact directory references: a refusal must
 /// leave all observable target/parent state unchanged, beyond modeled fields.
-fn compare(io: &mut PathIo, model: &Model) -> BTreeMap<String, Observed> {
+fn compare(io: &mut PathIo, model: &impl Expected) -> BTreeMap<String, Observed> {
     let mut all = Vec::new();
-    paths(model, "/", &mut all);
+    paths(model.tree(), "/", &mut all);
     let mut snapshot = BTreeMap::new();
     let mut identities = BTreeMap::new();
     let mut records = BTreeMap::new();
@@ -67,6 +100,7 @@ fn compare(io: &mut PathIo, model: &Model) -> BTreeMap<String, Observed> {
                 .collect();
             names.sort();
             let mut wanted: Vec<_> = model
+                .tree()
                 .list(&path)
                 .unwrap()
                 .into_iter()
@@ -89,7 +123,7 @@ fn compare(io: &mut PathIo, model: &Model) -> BTreeMap<String, Observed> {
                 .expect("logical contents");
             assert_eq!(
                 bytes,
-                model.read(&path).unwrap(),
+                model.tree().read(&path).unwrap(),
                 "complete logical contents of {path}"
             );
         }
@@ -140,9 +174,9 @@ fn known_refusal(op: &Op, error: &Error) -> bool {
         && error.contains("exceed attr capacity")
 }
 
-pub struct Harness {
+pub struct Harness<M = Model> {
     pub image: String,
-    pub model: Model,
+    pub model: M,
     artifacts: PathBuf,
     operations: Vec<Op>,
     refusals: Vec<String>,
@@ -152,10 +186,26 @@ pub struct Harness {
 
 impl Harness {
     pub fn new(name: &str) -> Self {
+        Self::with(name, |model| model)
+    }
+}
+
+impl<M: Expected> Harness<M> {
+    /// `wrap` receives the real model of the freshly formatted image.
+    pub fn with(name: &str, wrap: impl FnOnce(Model) -> M) -> Self {
+        let geometry = geometry();
         let image = common::temp_image_path(format!("opseq_{name}"));
         File::create(&image).unwrap().set_len(SIZE).unwrap();
         let mut io = PathIo::open_rw(Path::new(&image)).unwrap();
-        mkfs::format_filesystem(&mut io, SIZE, 4096, 1024, Some("OPSEQ"), Some(682)).unwrap();
+        mkfs::format_filesystem(
+            &mut io,
+            geometry.size,
+            geometry.cluster,
+            geometry.record,
+            Some(&geometry.label),
+            Some(geometry.serial),
+        )
+        .unwrap();
         io.sync().unwrap();
         drop(io);
         let (oracle, mut reader) = common::open(&image);
@@ -171,7 +221,10 @@ impl Harness {
         fs::create_dir_all(&artifacts).unwrap();
         fs::write(
             artifacts.join("geometry.txt"),
-            format!("{SIZE}\t4096\t1024\t682\n"),
+            format!(
+                "{}\t{}\t{}\t{}\n",
+                geometry.size, geometry.cluster, geometry.record, geometry.serial
+            ),
         )
         .unwrap();
         fs::write(artifacts.join("active-image.txt"), &image).unwrap();
@@ -188,7 +241,7 @@ impl Harness {
         .unwrap();
         Self {
             image,
-            model,
+            model: wrap(model),
             artifacts,
             operations: Vec::new(),
             refusals: Vec::new(),
@@ -212,7 +265,7 @@ impl Harness {
         let mut io = PathIo::open_rw(Path::new(&self.image)).unwrap();
         let before = compare(&mut io, &self.model);
         let mut candidate = self.model.clone();
-        let expected = op.apply(&mut candidate);
+        let expected = candidate.apply(&op);
         let result = execute(&mut io, &op);
         io.sync().expect("sync operation, including refusal");
         let accepted = result.is_ok();
@@ -352,7 +405,7 @@ impl Harness {
         fs::write(self.artifacts.join("input.bin"), input).unwrap();
         let mut generator = Generator::new(input);
         let mut counts = ([0; 9], [0; 9]);
-        while let Some(op) = generator.next(&self.model) {
+        while let Some(op) = generator.next(self.model.tree()) {
             let kind = match &op {
                 Op::Create { .. } => 0,
                 Op::Mkdir { .. } => 1,
@@ -427,7 +480,7 @@ impl Harness {
     }
 }
 
-impl Drop for Harness {
+impl<M> Drop for Harness<M> {
     fn drop(&mut self) {
         if std::thread::panicking() {
             fs::copy(&self.image, self.artifacts.join("failure.img"))
@@ -436,4 +489,79 @@ impl Drop for Harness {
         // Fuzz workers stay alive across inputs; don't accumulate image files.
         let _ = fs::remove_file(&self.image);
     }
+}
+
+/// Replay concrete operations on a fresh image. The first mismatch is its
+/// kind and the number of operations executed when it was seen (#684).
+pub fn replay<M: Expected>(
+    name: &str,
+    operations: &[Op],
+    wrap: impl FnOnce(Model) -> M,
+) -> Option<Mismatch> {
+    let mut h = Harness::with(name, wrap);
+    let outcome = shrink::quietly(|| {
+        panic::catch_unwind(AssertUnwindSafe(|| {
+            for op in operations {
+                h.step(op.clone());
+            }
+            h.finish();
+        }))
+    });
+    let payload = outcome.err()?;
+    Some(Mismatch {
+        kind: shrink::kind_of(&*payload),
+        step: h.operations.len(),
+    })
+}
+
+/// Raw generator bytes become the operations the harness ran from them,
+/// up to and including any that failed.
+fn concretize<M: Expected>(name: &str, input: &[u8], wrap: impl FnOnce(Model) -> M) -> Vec<Op> {
+    let mut h = Harness::with(name, wrap);
+    let _ = shrink::quietly(|| panic::catch_unwind(AssertUnwindSafe(|| h.generated(input))));
+    h.operations.clone()
+}
+
+/// Minimize a saved failing input, JSON replay or raw generator bytes, and
+/// pin it as `<corpus>/<name>-v1.json` with the mismatch it reproduces.
+/// The input is only ever read: a failed capture leaves it as it was.
+pub fn capture<M: Expected>(
+    original: &Path,
+    name: &str,
+    corpus: &Path,
+    wrap: impl Fn(Model) -> M,
+) -> Result<PathBuf, String> {
+    let destination = shrink::destination(corpus, name)?;
+    let kept = |why: &str| {
+        format!(
+            "{}: {why}; it is unchanged and nothing was pinned",
+            original.display()
+        )
+    };
+    let input = fs::read(original).map_err(|e| format!("{}: {e}", original.display()))?;
+    let scratch = format!("capture-{name}");
+    let scratch_dir = Path::new("tmp/op-sequence-model").join(&scratch);
+    if let (Ok(file), Ok(dir)) = (fs::canonicalize(original), fs::canonicalize(&scratch_dir)) {
+        if file.starts_with(dir) {
+            return Err(kept("the capture's replays write here: move it first"));
+        }
+    }
+    let operations = match generator::decode_replay(&input) {
+        Ok(operations) => operations,
+        Err(_) => concretize(&scratch, &input, &wrap),
+    };
+    let found = replay(&scratch, &operations, &wrap)
+        .ok_or_else(|| kept("it replays without a mismatch"))?;
+    let minimal = shrink::shrink(&operations, &found, |candidate| {
+        replay(&scratch, candidate, &wrap)
+    })
+    .map_err(|e| kept(&e))?;
+    let regression = Regression {
+        kind: found.kind,
+        step: minimal.len(),
+        geometry: geometry(),
+        original: original.display().to_string(),
+        original_operations: operations.len(),
+    };
+    shrink::pin(&destination, &minimal, &regression)
 }

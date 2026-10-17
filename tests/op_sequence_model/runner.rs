@@ -8,12 +8,16 @@ pub(crate) mod generator;
 pub(crate) mod harness;
 #[path = "model.rs"]
 pub(crate) mod model;
+#[path = "shrink.rs"]
+pub(crate) mod shrink;
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
 pub(crate) const SIZE: u64 = 64 * 1024 * 1024;
+/// The committed seeds and captured regressions, replayed by the gate.
+pub(crate) const CORPUS: &str = "fuzz/corpus/operation_sequence";
 
 pub(crate) fn reference_tools(image: &str, model: &BTreeMap<String, Vec<u8>>, artifacts: &Path) {
     let fixed = std::process::Command::new("ntfsfix")
@@ -50,6 +54,14 @@ pub(crate) fn reference_tools(image: &str, model: &BTreeMap<String, Vec<u8>>, ar
         );
         assert_eq!(&output.stdout, expected, "ntfs-3g contents of {path}");
     }
+}
+
+/// The capture command (#684), run from the repository root:
+/// `cargo run --release --example op_sequence_capture -- INPUT NAME`.
+#[allow(dead_code)]
+pub fn capture(original: &Path, name: &str) -> Result<std::path::PathBuf, String> {
+    shrink::quiet_panics();
+    harness::capture(original, name, Path::new(CORPUS), |model| model)
 }
 
 /// Valid JSON replays concretely; other bytes use the live generator.
