@@ -87,6 +87,15 @@
 #                                    IMAGE.manifest lists every remaining name's
 #                                    SHA-256, the file's full set of names, each
 #                                    new name's exact case and each name now absent
+#   attrlist-data IMAGE              rust-ntfs stream and ea fill two files' base
+#                                    records so each gains an $ATTRIBUTE_LIST, one
+#                                    with its unnamed stream already in the base
+#                                    record and one whose stream grows after; fs.ntfs
+#                                    write, write --at and truncate then rewrite,
+#                                    patch and resize each unnamed stream, every
+#                                    named stream read back unchanged each time.
+#                                    IMAGE.manifest lists each file's final size
+#                                    and SHA-256
 #   mkdir-parents IMAGE              fs.ntfs mkdir -p makes missing chains: three
 #                                    levels, under existing directories through
 #                                    names in another case, through `.` and `..`,
@@ -621,6 +630,132 @@ case "$step" in
         printf 'links\t%s\n' "$(paste -s -d '\t' - <"$work/names")" >>"$manifest"
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the links, unlinks and renames exited $status: $out"
+        ;;
+    attrlist-data)
+        [ $# -eq 0 ] || die "attrlist-data IMAGE"
+        manifest="$image.manifest"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        : >"$manifest"
+        # The named streams and the EA are written by the harness binary,
+        # rust-ntfs stream and ea: fs.ntfs reads them but has no writer.
+        HARNESS="${RUST_NTFS:-$REPO/target/release/rust-ntfs}"
+        [ -x "$HARNESS" ] || [ -x "$HARNESS.exe" ] ||
+            die "no $HARNESS: build it with \`cargo build --release --locked --features harness --bin rust-ntfs\`"
+        # Twelve 120-byte resident streams, each a 0x18-byte header, a name
+        # of two or three UTF-16 letters aligned to 8 and the value, outgrow the
+        # record before the EA or the unnamed stream is counted, so each
+        # file's base record fills and it gains an $ATTRIBUTE_LIST (#663).
+        streams=12
+        [ $((streams * (0x18 + 8 + 120))) -gt "$(record_size "$image")" ] ||
+            die "$streams streams fit in one $(record_size "$image")-byte record: the file would need no list"
+        listed() {
+            local i
+            set +e
+            MSYS_NO_PATHCONV=1 "$HARNESS" ea "$image" "$1" USER.TAG --content "$(printf 'e%.0s' $(seq 1 64))" \
+                >/dev/null 2>"$image.cli-err"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] || die "rust-ntfs ea $1 USER.TAG exited $status: $(cat "$image.cli-err")"
+            for i in $(seq 1 "$streams"); do
+                { printf 's%02d of %s ' "$i" "$1"; head -c 120 /dev/zero | tr '\000' "$(printf '%x' $((i % 16)))"; } |
+                    head -c 120 >"$work/s$i"
+                set +e
+                MSYS_NO_PATHCONV=1 "$HARNESS" stream "$image" "$1" "s$i" --content "$(cat "$work/s$i")" \
+                    >/dev/null 2>"$image.cli-err"
+                status=$?
+                set -e
+                [ "$status" -eq 0 ] || die "rust-ntfs stream $1 s$i exited $status: $(cat "$image.cli-err")"
+            done
+        }
+        # streams_kept FILE: every named stream still holds what was written.
+        streams_kept() {
+            local i
+            for i in $(seq 1 "$streams"); do
+                run fs "$image" read --stream "s$i" "$1"
+                [ "$status" -eq 0 ] || die "fs.ntfs read --stream s$i $1 exited $status: $(cat "$image.cli-err")"
+                [ "$out" = "$(cat "$work/s$i")" ] || die "$1:s$i changed under the unnamed stream's writes: $out"
+            done
+        }
+        # same FILE: the unnamed stream reads back as the host's model of it.
+        same() {
+            set +e
+            "$BIN" fs "$image" read "$1" >"$work/back" 2>"$image.cli-err"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] || die "fs.ntfs read $1 exited $status: $(cat "$image.cli-err")"
+            cmp -s "$work/back" "$work/model" || die "$1 does not read back as written"
+            streams_kept "$1"
+        }
+        # rewritten FILE BYTES: the whole unnamed stream is replaced.
+        rewritten() {
+            random "$work/model" "$2"
+            set +e
+            out="$("$BIN" fs "$image" write "$1" <"$work/model" 2>"$image.cli-err")"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] || die "fs.ntfs write $1 exited $status: $(cat "$image.cli-err")"
+            same "$1"
+        }
+        # patched FILE AT BYTES: BYTES random bytes are written at AT.
+        patched() {
+            local size
+            random "$work/patch" "$3"
+            dd if="$work/patch" of="$work/model" bs=1 seek="$2" conv=notrunc 2>/dev/null
+            size="$(wc -c <"$work/model" | tr -d ' ')"
+            set +e
+            out="$("$BIN" fs "$image" write --at "$2" "$1" <"$work/patch" 2>"$image.cli-err")"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] && has "\"size\": $size" && has "\"at\": $2" && has "\"bytes\": $3" ||
+                die "fs.ntfs write --at $2 $1: $out $(cat "$image.cli-err")"
+            same "$1"
+        }
+        # resized FILE SIZE: the unnamed stream is truncated or zero-extended.
+        resized() {
+            local have
+            have="$(wc -c <"$work/model" | tr -d ' ')"
+            if [ "$2" -le "$have" ]; then
+                head -c "$2" "$work/model" >"$work/next"
+            else
+                { cat "$work/model"; head -c $(($2 - have)) /dev/zero; } >"$work/next"
+            fi
+            cat "$work/next" >"$work/model"
+            run fs "$image" truncate "$1" "$2"
+            [ "$status" -eq 0 ] && has "\"size\": $2" || die "fs.ntfs truncate $1 $2: $out $(cat "$image.cli-err")"
+            same "$1"
+        }
+
+        # /early.dat: its unnamed stream is non-resident before its record
+        # fills, so it stays in the base record. /late.dat: its stream is
+        # eight resident bytes when the record fills and grows only after,
+        # so it has to be placed through the list.
+        random "$work/model" 6000
+        run fs "$image" write /early.dat <"$work/model"
+        [ "$status" -eq 0 ] || die "fs.ntfs write /early.dat exited $status: $(cat "$image.cli-err")"
+        listed /early.dat
+        same /early.dat
+        printf 'contents' >"$work/model"
+        run fs "$image" write /late.dat <"$work/model"
+        [ "$status" -eq 0 ] || die "fs.ntfs write /late.dat exited $status: $(cat "$image.cli-err")"
+        listed /late.dat
+        same /late.dat
+        for file in /early.dat /late.dat; do
+            rewritten "$file" 9000
+            patched "$file" 4000 300
+            patched "$file" 8990 20
+            patched "$file" 12000 100
+            resized "$file" 5000
+            resized "$file" 7000
+            resized "$file" 300
+            patched "$file" 290 5000
+            size="$(wc -c <"$work/model" | tr -d ' ')"
+            printf 'file\t%s\t%s\t%s\n' "$file" "$size" "$(sha "$work/model")" >>"$manifest"
+        done
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the unnamed stream's writes exited $status: $out"
+        run fs "$image" get dirty --text
+        [ "$status" -eq 0 ] && [ "$out" = false ] || die "the unnamed stream's writes left the volume dirty"
         ;;
     write-at)
         [ $# -eq 0 ] || die "write-at IMAGE"
