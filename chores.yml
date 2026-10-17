@@ -599,6 +599,9 @@ tasks:
     # its passing path and four generated-doc checks for --at; floor 1143.
     # #757 adds 35: test-streams.sh's 30 checks, two generated-verb docs
     # checks and three completion checks; floor 1178.
+    # #758 adds 63: 59 named-read checks in test-streams.sh and four
+    # generated-doc checks for --stream; floor 1241, counted from the
+    # passing paths for CI execution.
     # Counts are derived from the passing paths; suites
     # run in CI, not in the implementation agent's checkout.
     cmds:
@@ -621,8 +624,10 @@ tasks:
     # Windows' recursive enumeration; that floor was 87. #757 adds 18:
     # five checks for each of three stream-bearing paths, two immutable
     # image checks and one exact stream count; the floor is 105.
+    # #758 adds four checks per Windows-authored stream (102), comparing
+    # Get-Content captures or explicitly checking directory refusal: floor 513.
     cmds:
-      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=105 scripts/test-cli.sh'
+      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=513 scripts/test-cli.sh'
 
   test:cli:host:
     desc: 'The host half of the cli scenarios in the Windows matrix, without the VM: every step each runs before its first Windows step (scripts/cli-oracle.sh)'
