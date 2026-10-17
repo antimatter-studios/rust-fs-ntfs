@@ -509,6 +509,28 @@ impl ListedFile {
         self.place(target, &mut attr, true)
     }
 
+    /// Add `attr`, a continuation extent of an attribute split across
+    /// records, in an extension record, as Windows keeps them out of the
+    /// base record. Its entry carries the extent's starting VCN.
+    pub(crate) fn add_extent<T: BlockIo + ?Sized>(
+        &mut self,
+        io: &mut T,
+        mut attr: Vec<u8>,
+    ) -> Result<(), Error> {
+        if attr.len() > self.max_attribute_len() {
+            return Err(Error::no_space(format!(
+                "an attribute extent of {} bytes does not fit in an MFT record of {}",
+                attr.len(),
+                self.params.file_record_size
+            )));
+        }
+        if self.list == List::Absent {
+            self.convert(io)?;
+        }
+        let target = self.segment_with_room(attr.len(), io)?;
+        self.place(target, &mut attr, true)
+    }
+
     /// Replace the attribute `ty` named `name` with `attr`: where it is,
     /// keeping its id, when its record has the room, else wherever
     /// [`Self::add`] puts it.
