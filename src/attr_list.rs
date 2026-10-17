@@ -670,6 +670,18 @@ impl ListedFile {
         Ok(())
     }
 
+    /// Change the base record in place with `change`, which neither moves
+    /// nor resizes an attribute: a flag in its `$STANDARD_INFORMATION`.
+    pub(crate) fn change_base<F>(&mut self, change: F) -> Result<(), Error>
+    where
+        F: FnOnce(&mut [u8]) -> Result<(), Error>,
+    {
+        let base = &mut self.segments[0];
+        change(&mut base.bytes)?;
+        base.dirty = true;
+        Ok(())
+    }
+
     /// Whether `len` more bytes fit in the record `record`.
     pub(crate) fn record_has_room(record: &[u8], len: usize) -> bool {
         free_space(record) >= len
