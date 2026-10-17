@@ -45,7 +45,17 @@
 #                                    /gone in shuffled order, and rmdir removes
 #                                    /gone; IMAGE.manifest lists /kept's survivors
 #                                    for win-cli-verify.ps1
-#   grow-mft IMAGE SNAPSHOT          IMAGE is what Windows recovered from
+#   rename IMAGE                     fs.ntfs mv renames within a directory: the
+#                                    same length, longer, shorter, case only, a
+#                                    directory, data that is not resident, a
+#                                    Unicode name, and a third of a directory
+#                                    filled past one index level. A move to
+#                                    another directory and a name already there
+#                                    are refused with every byte left as it was.
+#                                    IMAGE.manifest lists every file's SHA-256
+#                                    under its new name, the exact case of each
+#                                    new name and each old name now absent
+#   grow-mft IMAGE SNAPSHOT         IMAGE is what Windows recovered from
 #                                    test-disks/windows-interrupted-SNAPSHOT, whose
 #                                    $MFT:$Bitmap outruns $MFT; fs.ntfs writes files
 #                                    until $MFT has grown twice, and fsck.ntfs after
@@ -267,6 +277,106 @@ case "$step" in
         [ "$status" -eq 0 ] || die "fs.ntfs rmdir /gone exited $status: $(cat "$image.cli-err")"
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the removals exited $status: $out"
+        ;;
+    rename)
+        [ $# -eq 0 ] || die "rename IMAGE"
+        manifest="$image.manifest"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        : >"$work/files"
+        : >"$manifest"
+        # put PATH SIZE: fs.ntfs writes SIZE random bytes to PATH, kept in
+        # $work under PATH's record in $work/files.
+        put() {
+            local key
+            key="$(printf '%s' "$1" | od -An -tx1 | tr -d ' \n')"
+            random "$work/$key" "$2"
+            set +e
+            "$BIN" fs "$image" write "$1" <"$work/$key" >/dev/null 2>"$image.cli-err"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] || die "fs.ntfs write $1 ($2 bytes) exited $status: $(cat "$image.cli-err")"
+            printf '%s\t%s\t%s\n' "$1" "$2" "$key" >>"$work/files"
+        }
+        # renamed SOURCE PATH: fs.ntfs mv renames SOURCE to PATH, and every file
+        # recorded under SOURCE, or under it as a directory, is now under
+        # PATH. Windows must list PATH's last name exactly so, and find
+        # SOURCE no more unless the two differ only in case.
+        renamed() {
+            run fs "$image" mv "$1" "$2"
+            [ "$status" -eq 0 ] || die "fs.ntfs mv $1 $2 exited $status: $(cat "$image.cli-err")"
+            has "\"path\": \"$2\"" && has '"moved": true' || die "fs.ntfs mv $1 $2 reported: $out"
+            awk -F '\t' -v from="$1" -v to="$2" 'BEGIN { OFS = FS }
+                $1 == from { $1 = to }
+                index($1, from "/") == 1 { $1 = to substr($1, length(from) + 1) }
+                { print }' "$work/files" >"$work/f"
+            cp "$work/f" "$work/files"
+            printf 'name\t%s\n' "$2" >>"$manifest"
+            if [ "$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')" != "$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')" ]; then
+                printf 'absent\t%s\n' "$1" >>"$manifest"
+            fi
+        }
+        # refused STATUS SOURCE PATH: fs.ntfs mv exits STATUS and writes nothing.
+        refused() {
+            local before
+            before="$(sha "$image")"
+            run fs "$image" mv "$2" "$3"
+            [ "$status" -eq "$1" ] || die "fs.ntfs mv $2 $3 exited $status, not $1: $(cat "$image.cli-err")"
+            [ "$(sha "$image")" = "$before" ] || die "the refused fs.ntfs mv $2 $3 wrote to the volume"
+        }
+
+        for dir in /d /d/sub /e /big; do
+            run fs "$image" mkdir "$dir"
+            [ "$status" -eq 0 ] || die "fs.ntfs mkdir $dir exited $status: $(cat "$image.cli-err")"
+        done
+        put /alpha.bin 500
+        put /short.txt 5000
+        put /long-file-name.data 4097
+        put /readme.txt 42
+        put /d/sub/inner.bin 1048576
+        put /naive.txt 7
+        put /e/stay.txt 9
+        # 300 names of varying length: past one index level in 4 KiB blocks.
+        for i in $(seq 1 300); do
+            printf 'name-%03d-%s\n' "$i" "$(printf '%*s' $((i % 23)) '' | tr ' ' x)"
+        done >"$work/names"
+        while read -r name; do put "/big/$name" 64; done <"$work/names"
+
+        renamed /alpha.bin /omega.bin                                  # the same length
+        renamed /short.txt "/a much longer name than before.txt"       # longer
+        renamed /long-file-name.data /x.dat                            # shorter, and fits 8.3
+        renamed /readme.txt /README.txt                                # case only
+        renamed /d /docs                                               # a directory
+        renamed /docs/sub/inner.bin /docs/sub/i.bin                    # deeper down
+        renamed /naive.txt "/na$(printf '\303\257')ve-$(printf '\346\227\245\346\234\254').txt"
+        # A seeded third of /big: case only, longer (sorting last) and
+        # shorter (sorting first), so entries move between index blocks.
+        awk 'BEGIN { srand(645) } { print rand() "\t" $0 }' "$work/names" | sort | cut -f2 | head -n 100 >"$work/order"
+        n=0
+        while read -r name; do
+            n=$((n + 1))
+            case $((n % 3)) in
+                0) new="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')" ;;
+                1) new="zz-renamed-$name" ;;
+                2) new="$(printf 'a%03d' "$n")" ;;
+            esac
+            renamed "/big/$name" "/big/$new"
+        done <"$work/order"
+
+        # Refusals, each leaving every byte as it was: another directory
+        # (a move this driver cannot make, exit 3), a name already there as
+        # Windows compares names, and a new name under a file.
+        refused 3 /omega.bin /docs/omega.bin
+        refused 3 /docs/sub /e/sub
+        refused 1 /x.dat /OMEGA.BIN
+        refused 1 /e/stay.txt /e/STAY.TXT/x
+
+        printf 'dir\t%s\n' /docs /docs/sub /e /big >>"$manifest"
+        while IFS="$(printf '\t')" read -r path size key; do
+            printf 'file\t%s\t%s\t%s\n' "$path" "$size" "$(sha "$work/$key")" >>"$manifest"
+        done <"$work/files"
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the renames exited $status: $out"
         ;;
     replay)
         [ $# -eq 1 ] || die "replay IMAGE SNAPSHOT"

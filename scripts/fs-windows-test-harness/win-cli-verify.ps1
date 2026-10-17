@@ -1,13 +1,17 @@
 # win-cli-verify.ps1 -- does WINDOWS read back what fs.ntfs wrote?
 #
-# The oracle for `fs.ntfs write`, `mkdir` and `set label`: mounts the .img
+# The oracle for `fs.ntfs write`, `mkdir`, `mv` and `set label`: mounts the .img
 # (re-using a prior op's .vhd if `keep_image=true` was set on the prior
-# step) and checks the manifest scripts/cli-oracle.sh `populate` wrote
+# step) and checks the manifest a scripts/cli-oracle.sh step wrote
 # beside it, line by line, through ntfs.sys:
 #
 #   file<TAB>/path<TAB>size<TAB>sha256   Get-FileHash -Algorithm SHA256, and the length
 #   dir<TAB>/path                        a directory exists there
 #   label<TAB>text                       Get-Volume's FileSystemLabel
+#   name<TAB>/path                       the parent lists exactly one entry Windows
+#                                        takes for the last name, and it is spelled
+#                                        exactly so, case included (fs.ntfs mv)
+#   absent<TAB>/path                     nothing is there (fs.ntfs mv's old name)
 #
 # Args:
 #   -ImagePath  Path on the VM to the .img file.
@@ -77,6 +81,27 @@ try {
                 } else {
                     $report += "FAIL dir  $($f[1]): not a directory on Windows"
                     $failures++
+                }
+            }
+            'name' {
+                $slash = $f[1].LastIndexOf('/')
+                $leaf = $f[1].Substring($slash + 1)
+                $parent = "${letter}:" + ($f[1].Substring(0, $slash) -replace '/', '\') + '\'
+                $found = @(Get-ChildItem -LiteralPath $parent -Force | Where-Object { $_.Name -ieq $leaf } | ForEach-Object { $_.Name })
+                if ($found.Count -eq 1 -and $found[0] -ceq $leaf) {
+                    $report += "ok   name $($f[1])"
+                } else {
+                    $report += "FAIL name $($f[1]): Windows lists '$($found -join "', '")'"
+                    $failures++
+                }
+            }
+            'absent' {
+                $target = "${letter}:" + ($f[1] -replace '/', '\')
+                if (Test-Path -LiteralPath $target) {
+                    $report += "FAIL absent $($f[1]): still there on Windows"
+                    $failures++
+                } else {
+                    $report += "ok   absent $($f[1])"
                 }
             }
             'label' {
