@@ -1,0 +1,1 @@
+{"version":1,"operations":[{"op":"create","parent":"/","name":"a"},{"op":"write","path":"/a","data":[1,2,3]},{"op":"write_at","path":"/a","offset":4096,"data":[4,5]},{"op":"truncate","path":"/a","size":8192},{"op":"truncate","path":"/a","size":2}]}

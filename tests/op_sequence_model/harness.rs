@@ -146,6 +146,7 @@ pub struct Harness {
     artifacts: PathBuf,
     operations: Vec<Op>,
     refusals: Vec<String>,
+    pub counts: ([usize; 9], [usize; 9]),
     started: Instant,
 }
 
@@ -173,12 +174,25 @@ impl Harness {
             format!("{SIZE}\t4096\t1024\t682\n"),
         )
         .unwrap();
+        fs::write(artifacts.join("active-image.txt"), &image).unwrap();
+        fs::write(
+            artifacts.join("reproducer.json"),
+            generator::encode(&[]).unwrap(),
+        )
+        .unwrap();
+        fs::write(artifacts.join("refusals.tsv"), "").unwrap();
+        fs::write(
+            artifacts.join("outcome-counts.json"),
+            "[[0,0,0,0,0,0,0,0,0],[0,0,0,0,0,0,0,0,0]]",
+        )
+        .unwrap();
         Self {
             image,
             model,
             artifacts,
             operations: Vec::new(),
             refusals: Vec::new(),
+            counts: ([0; 9], [0; 9]),
             started: Instant::now(),
         }
     }
@@ -202,6 +216,27 @@ impl Harness {
         let result = execute(&mut io, &op);
         io.sync().expect("sync operation, including refusal");
         let accepted = result.is_ok();
+        let kind = match &op {
+            Op::Create { .. } => 0,
+            Op::Mkdir { .. } => 1,
+            Op::Write { .. } => 2,
+            Op::WriteAt { .. } => 3,
+            Op::Truncate { .. } => 4,
+            Op::Rename { .. } => 5,
+            Op::Unlink { .. } => 6,
+            Op::Rmdir { .. } => 7,
+            Op::Link { .. } => 8,
+        };
+        if accepted {
+            self.counts.0[kind] += 1;
+        } else {
+            self.counts.1[kind] += 1;
+        }
+        fs::write(
+            self.artifacts.join("outcome-counts.json"),
+            serde_json::to_vec(&self.counts).unwrap(),
+        )
+        .unwrap();
         match result {
             Ok(()) => {
                 assert!(
@@ -353,6 +388,11 @@ impl Harness {
                         .args(["-a", "-p", &path, &self.image])
                         .output()
                         .expect("ntfsls missing: install ntfs-3g for test:op-sequence-oracle");
+                    fs::write(
+                        self.artifacts.join(format!("ntfsls-{}.txt", entry.record)),
+                        [&output.stdout[..], &output.stderr[..]].concat(),
+                    )
+                    .unwrap();
                     assert!(
                         output.status.success(),
                         "ntfsls {path}: {}",
@@ -384,5 +424,16 @@ impl Harness {
             self.started.elapsed() < Duration::from_secs(90),
             "sequence deadline"
         );
+    }
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            fs::copy(&self.image, self.artifacts.join("failure.img"))
+                .expect("retain failed operation image");
+        }
+        // Fuzz workers stay alive across inputs; don't accumulate image files.
+        let _ = fs::remove_file(&self.image);
     }
 }
