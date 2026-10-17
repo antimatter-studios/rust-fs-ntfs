@@ -7,6 +7,7 @@
 #     each file's path, size and the SHA-256 Windows itself computes
 #   * ntfs-ea.img: extended attributes Windows set through NtSetEaFile, plus
 #     ntfs-ea.names.tsv, each name and value as it was handed to Windows;
+#     ntfs-ea.query.tsv, stored names, sizes, flags and bytes from NtQueryEaFile;
 #     ea-summary-{0,1,2}.bin distinguish compact/query sizes and NEED_EA counts;
 #     ea-large.bin, ea-full.bin and ea-shrunk.bin carry EA sets no record
 #     holds resident
@@ -144,9 +145,41 @@ public static class WindowsEa {
     [DllImport("ntdll.dll")]
     public static extern int NtSetEaFile(
         SafeFileHandle handle, out IoStatusBlock status, byte[] buffer, uint length);
+
+    // Microsoft FILE_FULL_EA_INFORMATION and ZwQueryEaFile document this
+    // buffer and call: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-zwqueryeafile
+    [DllImport("ntdll.dll")]
+    static extern int NtQueryEaFile(SafeFileHandle handle, out IoStatusBlock status,
+        [Out] byte[] buffer, uint length, byte single, IntPtr list,
+        uint listLength, IntPtr index, byte restart);
+
+    public static string[] Query(SafeFileHandle handle) {
+        var buffer = new byte[128 * 1024];
+        IoStatusBlock status;
+        int rc = NtQueryEaFile(handle, out status, buffer, (uint)buffer.Length,
+            0, IntPtr.Zero, 0, IntPtr.Zero, 1);
+        if (rc != 0) throw new Exception("NtQueryEaFile: " + rc.ToString("X8"));
+        var rows = new System.Collections.Generic.List<string>();
+        int at = 0, used = checked((int)status.Information.ToInt64());
+        while (true) {
+            if (at + 8 > used) throw new Exception("short EA header");
+            int next = checked((int)BitConverter.ToUInt32(buffer, at));
+            int n = buffer[at + 5], v = BitConverter.ToUInt16(buffer, at + 6);
+            if (at + 9 + n + v > used) throw new Exception("short EA value");
+            string name = System.Text.Encoding.ASCII.GetString(buffer, at + 8, n);
+            string hex = BitConverter.ToString(buffer, at + 9 + n, v).Replace("-", "").ToLowerInvariant();
+            rows.Add(name + "\t" + v + "\t" + buffer[at + 4] + "\t" + hex);
+            if (next == 0) break;
+            if (next < 9 + n + v) throw new Exception("overlapping EA entries");
+            at = checked(at + next);
+        }
+        return rows.ToArray();
+    }
 }
 '@
 $eaReport = [System.IO.Path]::GetFullPath('test-disks/ntfs-ea.names.tsv')
+$eaQueryReport = [System.IO.Path]::GetFullPath('test-disks/ntfs-ea.query.tsv')
+[System.IO.File]::WriteAllText($eaQueryReport, '')
 New-WindowsFixture -ImagePath 'test-disks/ntfs-ea.img' -Label 'EA' -Populate {
     param($root)
     $file = Join-Path $root 'ea.bin'
@@ -210,6 +243,24 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-ea.img' -Label 'EA' -Populate {
         } finally { $handle.Dispose() }
     }
 
+    # A binary value proves the CLI does not decode, wrap or terminate it.
+    $file = Join-Path $root 'ea-binary.bin'
+    [System.IO.File]::WriteAllBytes($file, [byte[]](0x45))
+    $handle = [WindowsEa]::CreateFileW($file, [uint32]0x100018, [uint32]7, [IntPtr]::Zero,
+        [uint32]3, [uint32]0x80, [IntPtr]::Zero)
+    if ($handle.IsInvalid) { throw 'open ea-binary.bin for EAs failed' }
+    try {
+        $name = [Text.Encoding]::ASCII.GetBytes('USER.BINARY')
+        $buf = New-Object byte[] (9 + $name.Length + 4)
+        $buf[5] = [byte]$name.Length
+        $buf[6] = 4
+        $name.CopyTo($buf, 8)
+        ([byte[]](0, 255, 128, 10)).CopyTo($buf, 9 + $name.Length)
+        $status = New-Object WindowsEa+IoStatusBlock
+        $rc = [WindowsEa]::NtSetEaFile($handle, [ref]$status, $buf, [uint32]$buf.Length)
+        if ($rc -ne 0) { throw ("NtSetEaFile binary: {0:X8}" -f $rc) }
+    } finally { $handle.Dispose() }
+
     # EA sets too large for a resident $EA in any 1 KiB record, so the
     # layout Windows gives them is what tests/non_resident_ea.rs holds this
     # crate's to (#661). Each change is one NtSetEaFile call; EA i holds
@@ -246,6 +297,18 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-ea.img' -Label 'EA' -Populate {
                 $rc = [WindowsEa]::NtSetEaFile($handle, [ref]$status, $buf, [uint32]$buf.Length)
                 if ($rc -ne 0) { throw ("NtSetEaFile {0} USER.E{1}: NTSTATUS 0x{2:X8}" -f $fileName, $i, $rc) }
             }
+        } finally { $handle.Dispose() }
+    }
+    # Query through Windows, independently of our parser: 18 EAs across
+    # eight files, including NEED_EA, non-resident storage and binary content.
+    foreach ($file in Get-ChildItem -LiteralPath $root -Filter 'ea*.bin') {
+        $handle = [WindowsEa]::CreateFileW($file.FullName, [uint32]0x100008, [uint32]7,
+            [IntPtr]::Zero, [uint32]3, [uint32]0x80, [IntPtr]::Zero)
+        if ($handle.IsInvalid) { throw "open $($file.Name) for EA query failed" }
+        try {
+            $lines = @([WindowsEa]::Query($handle) | ForEach-Object { "/$($file.Name)`t$_" })
+            [IO.File]::AppendAllText($eaQueryReport, (($lines -join "`n") + "`n"),
+                [Text.UTF8Encoding]::new($false))
         } finally { $handle.Dispose() }
     }
 }
