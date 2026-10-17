@@ -586,7 +586,9 @@ tasks:
     # the names, on a Mac), 86 with fs.ntfs's read verbs, 135 with fsck.ntfs
     # and `set dirty`, 215 with write, mkdir and set label, 257 with the man
     # pages and completions; that floor was 244. #644 adds 79 checks for
-    # bounded recursive listing and its generated docs; the floor is 323.
+    # bounded recursive listing and its generated docs; that floor was 323.
+    # #645 adds 166 checks for mv, counted from tests/cli/test-mv.sh's
+    # checks on its passing path; the floor is 489.
     cmds:
       - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli -- scripts/test-cli.sh'
 
@@ -617,10 +619,11 @@ tasks:
     # test-matrix.json, so a new cli scenario is covered with no edit here.
     # They run the release CLI at target/release/rust-fs-ntfs, which
     # cli:install builds. FLOOR: the 20 cli scenarios when the tier was added;
-    # 25 with the three format-plan scenarios (#698).
+    # 25 with the three format-plan scenarios (#698); 26 with the rename
+    # scenario (#645).
     deps: [cli:install]
     cmds:
-      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-host -- python3 scripts/fs-windows-test-harness/run-host-steps --group cli --floor 25'
+      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-host -- python3 scripts/fs-windows-test-harness/run-host-steps --group cli --floor 26'
 
   test:ignored:
     desc: 'The #[ignore]d tests: known defects, run so a fix cannot go unnoticed'
