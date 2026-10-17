@@ -3558,9 +3558,9 @@ pub fn list_ea_keys_io<T: BlockIo + ?Sized>(
 /// list (#660, part of #480). A regular file with a list, or whose base
 /// record has no room for its new `$EA` and `$EA_INFORMATION`, is written
 /// through [`crate::attr_list`]; any other is written in its base record,
-/// as before. A directory keeps the base-record path, as
-/// [`crate::attr_list::ListedFile`] does not move a directory's
-/// attributes.
+/// as before. A directory is written the same way (#814): the list moves
+/// none of its index attributes, so its `$INDEX_ROOT` stays in the base
+/// record, where the index edits find it.
 ///
 /// A SET NO RECORD HOLDS RESIDENT GOES INTO CLUSTERS. A file's EAs may
 /// total 64 KiB, and Windows keeps a set too large for a resident `$EA`
@@ -3573,17 +3573,15 @@ where
     F: Fn(&mut Vec<crate::ea_io::Ea>) -> Result<(), Error>,
 {
     let (_, record) = read_mft_record_io(io, rec)?;
-    let is_directory =
-        crate::mft_io::record_flags(&record) & crate::mft_io::MFT_FLAG_DIRECTORY != 0;
     let listed = attr_io::find_attribute(&record, AttrType::AttributeList, None).is_some();
     let nonresident = attr_io::find_attribute(&record, AttrType::ExtendedAttribute, None)
         .is_some_and(|loc| !loc.is_resident);
-    if !is_directory && (listed || nonresident) {
+    if listed || nonresident {
         return write_listed_eas_io(io, rec, &change);
     }
     let mut eas = crate::ea_io::read_from_record(&record)?;
     change(&mut eas)?;
-    if !is_directory && !eas_fit_record(&record, &eas)? {
+    if !eas_fit_record(&record, &eas)? {
         return write_listed_eas_io(io, rec, &change);
     }
     update_mft_record_io(io, rec, |record| commit_eas(record, &eas))
@@ -7598,6 +7596,22 @@ fn remove_dir_record_io<T: BlockIo + ?Sized>(
         }
     }
 
+    // A DIRECTORY WITH AN $ATTRIBUTE_LIST TAKES ITS EXTENSION RECORDS WITH
+    // IT. A directory whose EAs outgrew its base record keeps them in
+    // extension records (#814); retiring the base record alone left those
+    // in use, owned by a record that is not, with every cluster they map.
+    // They are read and decoded now, before anything is written, as
+    // unlink does (#565). A non-resident attribute in a base record with
+    // no index blocks, such as an `$EA` in clusters, gives its clusters
+    // back too.
+    let extensions = extension_records_io(io, dir_rec, &dir_record_bytes)?;
+    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES == 0 {
+        index_runs.extend(nonresident_runs(&dir_record_bytes)?);
+    }
+    for (_, record) in &extensions {
+        index_runs.extend(nonresident_runs(record)?);
+    }
+
     // A junction or a directory with an object id leaves the $Extend
     // view indexes with it (#478), and its quota charge leaves its owner
     // (#674), worked out before either is written.
@@ -7609,22 +7623,28 @@ fn remove_dir_record_io<T: BlockIo + ?Sized>(
     // overflowed — dispatch like unlink.
     remove_parent_index_entry_io(io, parent_rec, dir_rec, basename)?;
 
-    // Clear IN_USE flag + free MFT bit.
-    update_mft_record_io(io, dir_rec, |record| {
-        let cur = u16::from_le_bytes([record[0x16], record[0x17]]);
-        let new = cur & !crate::mft_io::MFT_FLAG_IN_USE;
-        record[0x16..0x18].copy_from_slice(&new.to_le_bytes());
-        Ok(())
-    })?;
+    // Clear IN_USE flag + free MFT bit: the base record first and its
+    // extension records after it, as unlink orders them.
+    for record_number in std::iter::once(dir_rec).chain(extensions.iter().map(|(n, _)| *n)) {
+        update_mft_record_io(io, record_number, |record| {
+            let cur = u16::from_le_bytes([record[0x16], record[0x17]]);
+            let new = cur & !crate::mft_io::MFT_FLAG_IN_USE;
+            record[0x16..0x18].copy_from_slice(&new.to_le_bytes());
+            Ok(())
+        })?;
+    }
     let mbm = crate::mft_bitmap::locate_io(io)?;
     crate::mft_bitmap::free_io(io, &mbm, dir_rec)?;
+    for (record_number, _) in &extensions {
+        crate::mft_bitmap::free_io(io, &mbm, *record_number)?;
+    }
     if !index_runs.is_empty() {
         let bm = bitmap::locate_bitmap_io(io)?;
         for (lcn, n) in index_runs {
             bitmap::free_io(io, &bm, lcn, n).map_err(|e| {
                 e.map_message(|m| {
                     format!(
-                        "rmdir: '{display}' was removed, but freeing its index blocks' clusters \
+                        "rmdir: '{display}' was removed, but freeing its clusters \
                          [{lcn}..{}] failed ({m}): they are still marked allocated",
                         lcn + n
                     )

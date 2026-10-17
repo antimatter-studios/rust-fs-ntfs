@@ -37,6 +37,11 @@
 //! or resized by `truncate` (#790): it is written where the list keeps it
 //! and moves only when its record cannot hold it.
 //!
+//! A directory takes the list too (#814): as only named streams and EAs
+//! move, its `$INDEX_ROOT`, `$INDEX_ALLOCATION` and `$BITMAP` stay in the
+//! base record, where the index edits find them, and an index edit that
+//! resizes `$INDEX_ROOT` in place changes no entry of the list.
+//!
 //! - A file with no list whose base record has no room for a stream or
 //!   an EA gets one: an entry for every attribute, and the named streams
 //!   moved to an extension record.
@@ -288,19 +293,15 @@ impl ListedFile {
     ///
     /// A list this does not understand is refused before anything is
     /// written: one naming a record that is not in use, belongs to another
-    /// file, or does not hold the attribute the entry says it does. So is
-    /// a directory, whose index this driver edits in the base record alone.
+    /// file, or does not hold the attribute the entry says it does. A
+    /// directory is opened like a file: its index attributes are never
+    /// moved, so they stay in the base record, where the index edits find
+    /// them (#814).
     pub(crate) fn open<T: BlockIo + ?Sized>(io: &mut T, base: u64) -> Result<Self, Error> {
         let (params, record) = mft_io::read_mft_record_io(io, base)?;
         if u64_at(&record, REC_BASE_REFERENCE) != 0 {
             return Err(Error::io(format!(
                 "record {base} is an extension record, not a file's base record"
-            )));
-        }
-        if mft_io::record_flags(&record) & mft_io::MFT_FLAG_DIRECTORY != 0 {
-            return Err(Error::refused(format!(
-                "record {base} is a directory, whose attributes this driver does not move \
-                 between records"
             )));
         }
         let upcase = UpcaseTable::load_io(io).ok();
