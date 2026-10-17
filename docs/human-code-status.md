@@ -2,7 +2,7 @@
 
 Tracks the **High** and **Medium** findings from
 [`human-code-report-2026-08-28.md`](human-code-report-2026-08-28.md). The report
-predates the work; this is the current position. Updated 2026-09-22.
+predates the work; this is the current position. Updated 2026-10-17.
 
 **103 findings** — 56 High, 44 Medium, 3 Low, grouped A (CLI), B (`write.rs`),
 C (C ABI), D (`mkfs.rs`), E, F, G.
@@ -58,16 +58,11 @@ be allowed (`..a`, `a..`, `...`).
 
 ---
 
-## Still open — 94 High and Medium
+## Finding notes
 
 Not triaged individually here; the report carries the detail, and the
 issue tracker carries the ones that have been transcribed. The ones the
 report's own ordering puts next:
-
-### C1 — `fs_ntfs_write_file` and `fs_ntfs_write_file_contents` treat `len == 0` oppositely — High
-
-Two C entry points disagreeing about what an empty write means. A caller cannot
-be right about both.
 
 ### G3 — a dead assignment in the cluster allocator's wrap-around scan — Medium
 
@@ -236,6 +231,8 @@ direction has to be deliberate.
 
 The tests format their own image rather than using `test-disks/`, which needs
 `mkntfs` and so only exists on CI.
+
+## Still open — 94 High and Medium
 
 ### The remainder
 
