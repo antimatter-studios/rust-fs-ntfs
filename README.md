@@ -349,11 +349,10 @@ root when it starts with `/`, or a drive path. The link is a file link, as
 `mklink` makes one without `/D`. A directory is given no second name, and a
 file no more than the 1024 Windows allows. A name already at PATH, compared
 as Windows compares names, a missing directory, a name Windows cannot
-address, a metafile, a file whose record has no room for another name and
-a dirty volume are all refused before the image is opened for writing, so
-it stays byte-identical. The report is `{"path": ..., "linked": true,
-"inode": N}`, N being the file's record for a hard link and the new link's
-for a symbolic one.
+address, a metafile and a dirty volume are all refused before the image is
+opened for writing, so it stays byte-identical. The report is `{"path":
+..., "linked": true, "inode": N}`, N being the file's record for a hard
+link and the new link's for a symbolic one.
 
 `write --at BYTES PATH` writes all of stdin at a byte position in an existing
 regular file, preserving the prefix and suffix. A write past EOF grows the
