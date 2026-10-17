@@ -7,8 +7,23 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STATUS="$ROOT/docs/human-code-status.md"
 
-fixed_body=$(grep -Ec '^### .* — \*\*fixed( earlier)?\*\*$' "$STATUS")
-documented_body=$(grep -Ec '^### .* — \*\*documented and pinned\*\*$' "$STATUS")
+body_counts=$(awk '
+    /^### [A-G][0-9]+ — / {
+        id = $2
+        if (seen[id]++) {
+            printf "  FAIL  duplicate finding ID %s\n", id > "/dev/stderr"
+            bad = 1
+        }
+        if ($0 ~ / — \*\*fixed( earlier)?\*\*$/) fixed++
+        else if ($0 ~ / — \*\*documented and pinned\*\*$/) documented++
+        else if ($0 ~ / — \*\*partially fixed;/) {
+            partial++
+            if (id != "B4" || $0 !~ /\[#140\]/) bad = 1
+        }
+    }
+    END { print fixed + 0, documented + 0, partial + 0, bad + 0 }
+' "$STATUS")
+read -r fixed_body documented_body partial_body bad_body <<< "$body_counts"
 fixed_summary=$(awk -F'|' '$2 ~ /^ Fixed / { gsub(/ /, "", $3); print $3 }' "$STATUS")
 documented_summary=$(awk -F'|' '$2 ~ /^ Documented and pinned/ { print $3 + 0 }' "$STATUS")
 open_summary=$(awk -F'|' '$2 ~ /^ Still open / { print $3 + 0 }' "$STATUS")
@@ -31,6 +46,8 @@ check_equal "fixed summary agrees with body" "$fixed_summary" "$fixed_body"
 check_equal "documented summary agrees with body" "$documented_summary" "$documented_body"
 check_equal "open summary is the remaining High/Medium findings" "$open_summary" "$expected_open"
 check_equal "open heading agrees with summary" "$open_heading" "$open_summary"
+check_equal "one partial finding remains open" "$partial_body" 1
+check_equal "body IDs and partial status are unambiguous" "$bad_body" 0
 
 if grep -Eq '^### B4 .*— \*\*partially fixed; same-length path tracked by \[#140\]' "$STATUS"; then
     pass=$((pass + 1))
