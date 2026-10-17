@@ -385,10 +385,10 @@ expect_exit = 0
 
 [ops.cli-link]
 # fs.ntfs ln adds hard links -- in the same directory, in others, to data
-# that is not resident, and to one file until its record is full -- and rm
-# takes one file's first name away; ln -s makes symbolic links, relative
-# and from the root. A hard link to a directory, a name already there, one
-# name too many and a missing directory are refused, writing nothing; then
+# that is not resident, and to one file past the names its base record
+# holds -- and rm takes one file's first name away; ln -s makes symbolic
+# links, relative and from the root. A hard link to a directory, a name
+# already there and a missing directory are refused, writing nothing; then
 # a clean fsck.ntfs. Writes <image>.manifest: every name's bytes, each
 # file's full set of names and each symbolic link's target, for
 # win-cli-verify.
