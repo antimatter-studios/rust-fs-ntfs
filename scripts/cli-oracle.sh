@@ -506,6 +506,36 @@ case "$step" in
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the links exited $status: $out"
         ;;
+    write-at)
+        [ $# -eq 0 ] || die "write-at IMAGE"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        : >"$image.manifest"
+        # Windows independently repeats each positioned write on a reference
+        # containing OLD bytes of Z, with COUNT bytes of Q as the patch.
+        for spec in 'resident 5 2 3' 'promoted 5 4095 3' \
+            'inside 12289 20 3' 'boundary 12289 4095 3' \
+            'append 12289 12289 3' 'gap 12289 16385 8193' \
+            'empty 0 0 3' 'null 12289 16385 0'; do
+            read -r name old at count <<<"$spec"
+            head -c "$old" /dev/zero | tr '\000' Z >"$work/input"
+            head -c "$count" /dev/zero | tr '\000' Q >"$work/patch"
+            run fs "$image" write "/$name" <"$work/input"
+            [ "$status" -eq 0 ] || die "write /$name: $(cat "$image.cli-err")"
+            size="$old"
+            if [ "$count" -gt 0 ] && [ "$((at + count))" -gt "$size" ]; then size=$((at + count)); fi
+            run fs "$image" write --at "$at" "/$name" <"$work/patch"
+            if [ "$status" -ne 0 ] || ! has "\"size\": $size" || \
+                ! has "\"at\": $at" || ! has "\"bytes\": $count"; then
+                die "write --at $at /$name: $out $(cat "$image.cli-err")"
+            fi
+            printf 'write-at\t/%s\t%s\t%s\t%s\n' "$name" "$old" "$at" "$count" >>"$image.manifest"
+        done
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after positioned writes: $out"
+        run fs "$image" get dirty --text
+        [ "$status" -eq 0 ] && [ "$out" = false ] || die "positioned write left the volume dirty"
+        ;;
     truncate)
         [ $# -eq 0 ] || die "truncate IMAGE"
         work="$(mktemp -d)"
