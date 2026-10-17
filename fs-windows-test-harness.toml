@@ -409,6 +409,18 @@ host = "host"
 command = "bash scripts/cli-oracle.sh attrlist-links {image_dir}/{run_id}/{scenario.image}"
 expect_exit = 0
 
+[ops.cli-attrlist-data]
+# rust-ntfs stream and ea fill the base records of /early.dat, whose
+# unnamed stream is already non-resident there, and /late.dat, whose stream
+# is eight resident bytes, so each gains an $ATTRIBUTE_LIST (#663); then
+# fs.ntfs write, write --at and truncate rewrite, patch, grow and cut each
+# unnamed stream through the list (#788, #789, #790), each named stream
+# read back unchanged after every write; then a clean fsck.ntfs. Writes
+# <image>.manifest: each file's final size and SHA-256, for win-cli-verify.
+host = "host"
+command = "bash scripts/cli-oracle.sh attrlist-data {image_dir}/{run_id}/{scenario.image}"
+expect_exit = 0
+
 [ops.cli-mkdir-parents]
 # fs.ntfs mkdir -p makes missing chains -- three levels, under existing
 # directories through names in another case, through `.` and `..`, twelve
