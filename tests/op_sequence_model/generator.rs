@@ -115,24 +115,61 @@ impl Op {
     }
 }
 
+/// What a captured regression pins (#684). Replay never consults it: it
+/// records the mismatch the operations were minimized to reproduce, the
+/// image they ran on and where the unminimized input came from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Regression {
+    /// The harness failure's stable label, such as `size of`.
+    pub kind: String,
+    /// Operations executed when it was observed; the last is the pinned one.
+    pub step: usize,
+    pub geometry: Geometry,
+    pub original: String,
+    pub original_operations: usize,
+}
+/// The `format_filesystem` arguments of the image every replay starts on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Geometry {
+    pub size: u64,
+    pub cluster: u32,
+    pub record: u32,
+    pub label: String,
+    pub serial: u64,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Replay {
     version: u8,
     operations: Vec<Op>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    regression: Option<Regression>,
 }
-fn validate(operations: &[Op]) -> Result<(), String> {
+fn validate(operations: &[Op], regression: Option<&Regression>) -> Result<(), String> {
     if operations.len() > MAX_STEPS || !operations.iter().all(Op::bounded) {
         return Err("operation workload bound exceeded".into());
+    }
+    if regression.is_some_and(|r| r.kind.is_empty() || r.step > operations.len()) {
+        return Err("regression pin outside its operations".into());
     }
     Ok(())
 }
 /// Versioned concrete operations: replay never resolves selectors again.
 pub fn encode(operations: &[Op]) -> Result<Vec<u8>, String> {
-    validate(operations)?;
+    encode_replay(operations, None)
+}
+pub fn encode_regression(operations: &[Op], regression: &Regression) -> Result<Vec<u8>, String> {
+    encode_replay(operations, Some(regression))
+}
+fn encode_replay(operations: &[Op], regression: Option<&Regression>) -> Result<Vec<u8>, String> {
+    validate(operations, regression)?;
     let bytes = serde_json::to_vec(&Replay {
         version: 1,
         operations: operations.to_vec(),
+        regression: regression.cloned(),
     })
     .map_err(|e| e.to_string())?;
     if bytes.len() > MAX_REPLAY {
@@ -141,6 +178,9 @@ pub fn encode(operations: &[Op]) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 pub fn decode_replay(bytes: &[u8]) -> Result<Vec<Op>, String> {
+    decode_regression(bytes).map(|(operations, _)| operations)
+}
+pub fn decode_regression(bytes: &[u8]) -> Result<(Vec<Op>, Option<Regression>), String> {
     if bytes.len() > MAX_REPLAY {
         return Err("replay byte bound exceeded".into());
     }
@@ -148,8 +188,8 @@ pub fn decode_replay(bytes: &[u8]) -> Result<Vec<Op>, String> {
     if replay.version != 1 {
         return Err("unsupported replay version".into());
     }
-    validate(&replay.operations)?;
-    Ok(replay.operations)
+    validate(&replay.operations, replay.regression.as_ref())?;
+    Ok((replay.operations, replay.regression))
 }
 
 fn join(parent: &str, name: &str) -> String {
