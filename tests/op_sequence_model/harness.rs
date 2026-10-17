@@ -221,6 +221,9 @@ fn execute(io: &mut PathIo, op: &Op) -> Result<(), Error> {
             write::write_named_stream_io(io, path, stream, data)
         }
         Op::DeleteStream { path, stream } => write::delete_named_stream_io(io, path, stream),
+        Op::WriteEa { .. } | Op::RemoveEa { .. } => {
+            unimplemented!("extended attributes reach the disk in #732")
+        }
     }
 }
 
