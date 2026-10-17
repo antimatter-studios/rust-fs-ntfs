@@ -265,6 +265,7 @@ rust-fs-ntfs mkfs --help           # the same tool; nothing can shadow this name
 fs.ntfs disk.img ls /              # JSON entries; --all adds the metafiles
 fs.ntfs disk.img ls -R --max-depth 8 --limit 1000 /Users
 fs.ntfs disk.img stat /notes.txt   # one path: record, links, sizes, every time
+fs.ntfs disk.img streams /notes.txt   # named data streams; JSON or --text
 fs.ntfs disk.img read /notes.txt > notes.txt
 fs.ntfs disk.img get label --text
 fs.ntfs disk.img write /notes.txt < notes.txt
@@ -286,6 +287,15 @@ chore test:cli                     # the tools as installed: doctor, then tests/
 chore test:cli:oracle              # against Windows-written volumes, and ntfs-3g (tests/cli-oracle/)
 chore test:cli:host                # the Windows matrix's cli steps that run on this machine, no VM
 ```
+
+`streams PATH` lists named `$DATA` streams, excluding the unnamed stream,
+as rows with `name`, `size`, `allocated`, `resident`, `sparse` and `compressed`.
+Sizes are bytes; allocation includes resident value space inside the record
+or the clusters actually allocated to non-resident data. Names are sorted
+as UTF-8 bytes, including streams held in extension records. Directories
+can have named streams. Links are inspected without following them, and a
+colon in PATH is never reinterpreted as a stream selector. The command opens
+the source read-only. Plain `read` continues to return the unnamed stream.
 
 `ls --recursive` (`-R`) walks depth first with each directory's names sorted
 as bytes. Entries add `path` from the volume root and `depth`; the starting
