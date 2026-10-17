@@ -624,6 +624,60 @@ impl ListedFile {
         Ok(())
     }
 
+    /// Rename the `$FILE_NAME`s that name the file `old` with `rename`, in
+    /// whichever record holds each (#780). Windows keeps names in extension
+    /// records too, so every record the list names is searched. A name its
+    /// record has no room for once renamed is taken out with its entry and
+    /// `moved`, given the old name's namespace, goes wherever
+    /// [`Self::add`] puts it.
+    pub(crate) fn rename_file_name<T: BlockIo + ?Sized>(
+        &mut self,
+        io: &mut T,
+        old: &str,
+        rename: impl Fn(&mut [u8]) -> Result<(), Error>,
+        moved: impl Fn(u8) -> Result<Vec<u8>, Error>,
+    ) -> Result<(), Error> {
+        let mut renamed = false;
+        let mut index = 0;
+        while index < self.segments.len() {
+            let Some((loc, namespace)) =
+                crate::write::find_file_name_by_name(&self.segments[index].bytes, old)
+            else {
+                index += 1;
+                continue;
+            };
+            renamed = true;
+            let mut bytes = self.segments[index].bytes.clone();
+            if rename(&mut bytes).is_ok() {
+                let segment = &mut self.segments[index];
+                segment.bytes = bytes;
+                segment.dirty = true;
+                index += 1;
+                continue;
+            }
+            let number = self.segments[index].number;
+            let segment = &mut self.segments[index];
+            crate::write::remove_listed_attribute_at(
+                &mut segment.bytes,
+                loc.attr_offset,
+                loc.attr_length,
+            )?;
+            segment.dirty = true;
+            self.entries.retain(|e| {
+                !(e.record_number() == number
+                    && e.type_code == loc.type_code
+                    && e.attribute_id == loc.attribute_id)
+            });
+            self.add(io, moved(namespace)?)?;
+        }
+        if !renamed {
+            return Err(Error::not_found(format!(
+                "rename: no $FILE_NAME for '{old}' in any record of the file"
+            )));
+        }
+        Ok(())
+    }
+
     /// Give a file with no list one: an entry for every attribute in its
     /// base record, and its named streams moved out, as Windows moved
     /// everything but `$STANDARD_INFORMATION` the first time.
