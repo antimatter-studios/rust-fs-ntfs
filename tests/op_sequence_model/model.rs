@@ -7,6 +7,10 @@ pub const MAX_FILE_BYTES: usize = 1024 * 1024;
 type Directory = BTreeMap<Vec<u16>, (String, usize)>;
 /// Named `$DATA` streams by `$UpCase` key: stored spelling and bytes.
 type Streams = BTreeMap<Vec<u16>, (String, Vec<u8>)>;
+/// `FILE_NEED_EA`, the one EA flag Windows defines.
+pub const NEED_EA: u8 = 0x80;
+/// One EA as a file holds it: stored name, flags and value (#732).
+pub type Ea = (Vec<u8>, u8, Vec<u8>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -19,6 +23,8 @@ pub enum Error {
     Exists,
     NotEmpty,
     FileTooLarge,
+    /// A file's EAs would pack to more than `$EA_INFORMATION` can count.
+    EaSetTooLarge,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -300,6 +306,28 @@ impl Model {
             .values()
             .cloned()
             .collect())
+    }
+
+    /// Create or replace the EA `name` of `path` (#732).
+    pub fn write_ea(
+        &mut self,
+        _path: &str,
+        _name: &[u8],
+        _flags: u8,
+        _value: &[u8],
+    ) -> Result<(), Error> {
+        let _refused_when_too_large = Error::EaSetTooLarge;
+        unimplemented!("extended attributes are modeled in #732")
+    }
+
+    /// Remove the EA `name` of `path` (#732).
+    pub fn remove_ea(&mut self, _path: &str, _name: &[u8]) -> Result<(), Error> {
+        unimplemented!("extended attributes are modeled in #732")
+    }
+
+    /// The EAs of `path`, in stored-name order (#732).
+    pub fn eas(&self, _path: &str) -> Result<Vec<Ea>, Error> {
+        unimplemented!("extended attributes are modeled in #732")
     }
 
     /// Rename within a directory, matching the initial workload's API.

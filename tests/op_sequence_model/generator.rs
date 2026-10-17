@@ -7,8 +7,10 @@ pub const MAX_STEPS: usize = 120;
 pub const MAX_DATA: usize = 4096;
 pub const MAX_PATH: usize = 4096;
 pub const MAX_SIZE: u32 = 65536;
+/// The longest EA value a replay holds: the width of `EaValueLength`.
+pub const MAX_EA_VALUE: usize = u16::MAX as usize;
 /// Operation kinds, in opcode order: histograms have one slot for each.
-pub const OPCODES: usize = 11;
+pub const OPCODES: usize = 13;
 const MAX_REPLAY: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +63,17 @@ pub enum Op {
         path: String,
         stream: String,
     },
+    /// Create or replace the extended attribute `name` (#732).
+    WriteEa {
+        path: String,
+        name: String,
+        flags: u8,
+        value: Vec<u8>,
+    },
+    RemoveEa {
+        path: String,
+        name: String,
+    },
 }
 impl Op {
     /// The opcode that generates this kind, and its histogram slot.
@@ -77,6 +90,8 @@ impl Op {
             Self::Link { .. } => 8,
             Self::WriteStream { .. } => 9,
             Self::DeleteStream { .. } => 10,
+            Self::WriteEa { .. } => 11,
+            Self::RemoveEa { .. } => 12,
         }
     }
     fn bounded(&self) -> bool {
@@ -90,7 +105,9 @@ impl Op {
             | Self::Rmdir { path }
             | Self::Link { path, .. }
             | Self::WriteStream { path, .. }
-            | Self::DeleteStream { path, .. } => path,
+            | Self::DeleteStream { path, .. }
+            | Self::WriteEa { path, .. }
+            | Self::RemoveEa { path, .. } => path,
         };
         primary.len() <= MAX_PATH
             && match self {
@@ -110,6 +127,10 @@ impl Op {
                     stream.encode_utf16().count() <= 256 && data.len() <= MAX_DATA
                 }
                 Self::DeleteStream { stream, .. } => stream.encode_utf16().count() <= 256,
+                Self::WriteEa { name, value, .. } => {
+                    name.len() <= 256 && value.len() <= MAX_EA_VALUE
+                }
+                Self::RemoveEa { name, .. } => name.len() <= 256,
                 _ => true,
             }
     }
@@ -137,6 +158,13 @@ impl Op {
             Self::Link { path, parent, name } => model.link(path, parent, name),
             Self::WriteStream { path, stream, data } => model.write_stream(path, stream, data),
             Self::DeleteStream { path, stream } => model.delete_stream(path, stream),
+            Self::WriteEa {
+                path,
+                name,
+                flags,
+                value,
+            } => model.write_ea(path, name.as_bytes(), *flags, value),
+            Self::RemoveEa { path, name } => model.remove_ea(path, name.as_bytes()),
             Self::Unlink { path } | Self::Rmdir { path } => {
                 let directory = model.stat(path)?.directory;
                 if directory && matches!(self, Self::Unlink { .. }) {
