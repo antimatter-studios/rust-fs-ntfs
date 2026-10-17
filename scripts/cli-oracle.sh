@@ -38,6 +38,12 @@
 #                                    still holds work for Windows' restart to find;
 #                                    IMAGE.manifest is what Windows listed after
 #                                    recovering the same image itself
+#   replay-lsn IMAGE SNAPSHOT        IMAGE is test-disks/windows-interrupted-SNAPSHOT
+#                                    replayed by fsck.ntfs -y; IMAGE.lsns holds the
+#                                    LSNs the replay left on the volume (#649)
+#   lsn-after-windows IMAGE          IMAGE, back from Windows, carries no restart
+#                                    area naming an LSN at or below IMAGE.lsns'
+#                                    highest block LSN (#649)
 #   write-after-replay IMAGE SNAPSHOT
 #                                    IMAGE is test-disks/windows-interrupted-SNAPSHOT;
 #                                    fsck.ntfs reports its log, fs.ntfs mkdir is
@@ -146,6 +152,13 @@ record_size() {
 poke() { printf "$3" | dd of="$1" bs=1 seek="$2" conv=notrunc 2>/dev/null; }
 sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 random() { if [ "$2" -gt 0 ]; then head -c "$2" /dev/urandom >"$1"; else : >"$1"; fi; }
+
+# lsns IMAGE: the LSNs IMAGE's raw bytes carry, one "<kind> <lsn>" per
+# line (examples/log_lsns.rs).
+lsns() {
+    cargo run --quiet --release --manifest-path "$REPO/Cargo.toml" --example log_lsns -- "$1" ||
+        die "log_lsns $1 failed"
+}
 
 # windows_listing SNAPSHOT: what Windows listed after recovering the same
 # image itself -- path, size and Get-FileHash SHA-256 -- as win-cli-verify
@@ -690,6 +703,38 @@ case "$step" in
         [ "$status" -eq 4 ] || die "fsck.ntfs after the stopped replay exited $status, not 4: $out"
         has '"kind": "logfile"' || die "fsck.ntfs did not report the log holding work after the stop: $out"
         windows_listing "$1"
+        ;;
+    replay-lsn)
+        [ $# -eq 1 ] || die "replay-lsn IMAGE SNAPSHOT"
+        unpack_interrupted "$1"
+        run fsck -y "$image"
+        [ "$status" -eq 1 ] || die "fsck.ntfs -y exited $status, not 1 (corrected): $out"
+        has '"logfile": "empty"' || die "fsck.ntfs -y did not leave the log empty: $out"
+        # The LSNs the replay left on the volume (#649): its MFT records and
+        # index blocks keep those of the old log, which the replay filled
+        # with 0xFF. Read from the raw bytes, for lsn-after-windows to
+        # compare with what Windows logs once it has written.
+        lsns "$image" >"$image.lsns"
+        grep -q '^block-max ' "$image.lsns" || die "no FILE or INDX block carries an LSN: $(cat "$image.lsns")"
+        echo "replay-lsn: the replay left: $(tr '\n' ' ' <"$image.lsns")"
+        ;;
+    lsn-after-windows)
+        [ $# -eq 0 ] || die "lsn-after-windows IMAGE"
+        [ -s "$image.lsns" ] || die "no $image.lsns: run replay-lsn first"
+        # Redo skips a block whose LSN is at or past a record's (#649): if
+        # Windows' fresh log starts below the LSNs the replay left, its own
+        # restart after the next unclean shutdown skips its records for
+        # those blocks. Every restart area Windows wrote -- one not on the
+        # volume before it was attached -- must name a current LSN past the
+        # highest the replay left.
+        lsns "$image" >"$image.lsns-after"
+        echo "lsn-after-windows: Windows left: $(tr '\n' ' ' <"$image.lsns-after")"
+        floor="$(awk '$1 == "block-max" { print $2 }' "$image.lsns")"
+        new="$(grep '^restart-current ' "$image.lsns-after" | grep -vxF -f "$image.lsns" || true)"
+        [ -n "$new" ] || die "Windows wrote no restart area the replayed volume did not already hold"
+        old="$(printf '%s\n' "$new" | awk -v f="$floor" '$2 <= f { print $2 }')"
+        [ -z "$old" ] || die "Windows' restart areas name current LSN(s) $(echo $old) at or below $floor, the highest the replay left on the volume (#649)"
+        echo "lsn-after-windows: every restart area Windows wrote is past $floor"
         ;;
     write-after-replay)
         [ $# -eq 1 ] || die "write-after-replay IMAGE SNAPSHOT"
