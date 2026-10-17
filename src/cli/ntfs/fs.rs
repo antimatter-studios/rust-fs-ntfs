@@ -1,7 +1,7 @@
 //! `fs.ntfs <target> <verb>`: an errand inside an NTFS image or device,
 //! without mounting it.
 //!
-//! The verbs include `ls`, `stat`, `streams`, `read`, `write`, `mkdir`,
+//! The verbs include `ls`, `stat`, `streams`, `xattr`, `read`, `write`, `mkdir`,
 //! `truncate`, `rm`, `rmdir`, `mv`, `ln`, `get`/`info`, `set`, `resize`. Metadata is JSON
 //! (or `--text`); file content is raw bytes. A verb the library cannot do
 //! yet still exists and answers `not implemented` with exit status 3, so a
@@ -189,6 +189,36 @@ fn command() -> Cmd {
                      space in its record. Directories can have named streams too. A link's \
                      own streams are listed without following it. PATH is always a path: \
                      no colon suffix is interpreted as a stream selector.",
+                ),
+        )
+        .subcommand(
+            Cmd::new("xattr")
+                .about("List native NTFS extended attributes, or read one value (read-only)")
+                .arg(
+                    Arg::new("path").value_name("PATH").required(true)
+                        .value_parser(value_parser!(OsString)),
+                )
+                .arg(
+                    Arg::new("name").value_name("NAME")
+                        .value_parser(value_parser!(OsString)),
+                )
+                .arg(
+                    Arg::new("output").short('o').long("output").value_name("FILE")
+                        .requires("name").value_parser(value_parser!(OsString))
+                        .help("Write the selected EA's raw bytes here instead of stdout"),
+                )
+                .after_help(
+                    "Examples:\n  fs.ntfs disk.img xattr /notes.txt\n  \
+                     fs.ntfs disk.img xattr --text /notes.txt\n  \
+                     fs.ntfs disk.img xattr /notes.txt user.comment -o comment.bin\n\n\
+                     Without NAME, list native $EA names, value sizes and ntfs.need_ea. \
+                     Names retain their stored spelling and namespace prefix; invalid UTF-8 \
+                     is shown lossily with the original bytes in name_hex. These are NTFS \
+                     EAs, separate from POSIX xattrs and named data streams. NAME selects \
+                     one value, ignoring ASCII case; its raw bytes are written even with \
+                     --text. A missing name exits 1 before producing output. Directories \
+                     and links are inspected themselves; links are never followed. The \
+                     source is opened read-only, and -o uses FILE.partial then renames it.",
                 ),
         )
         .subcommand(
@@ -526,6 +556,15 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
                 &mut dev,
                 path_arg(sub)?,
                 sub.get_one::<String>("stream").map(String::as_str),
+                sub.get_one("output"),
+            )
+        }
+        "xattr" => {
+            let (mut dev, _) = device::mount(target, offset, false)?;
+            xattr(
+                &mut dev,
+                path_arg(sub)?,
+                sub.get_one("name"),
                 sub.get_one("output"),
             )
         }
@@ -1161,6 +1200,89 @@ fn stat(dev: &mut Device, path: &str) -> Result<Outcome, Error> {
         ]),
     ));
     Ok(Outcome::report(Json::object(fields)))
+}
+
+/// Native EA names are bytes, not POSIX namespace translations or stream names.
+fn xattr_entry(ea: &fs_ntfs::ea_io::Ea) -> Json {
+    let mut fields = vec![
+        (
+            "name",
+            Json::from(String::from_utf8_lossy(&ea.name).into_owned()),
+        ),
+        ("size", Json::from(ea.value.len() as u64)),
+        (
+            "ntfs",
+            Json::object([(
+                "need_ea",
+                Json::from(ea.flags & fs_ntfs::ea_io::FLAG_NEED_EA != 0),
+            )]),
+        ),
+    ];
+    if std::str::from_utf8(&ea.name).is_err() {
+        fields.push((
+            "name_hex",
+            Json::from(
+                ea.name
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>(),
+            ),
+        ));
+    }
+    Json::object(fields)
+}
+
+fn xattr(
+    dev: &mut Device,
+    path: &str,
+    name: Option<&OsString>,
+    output: Option<&OsString>,
+) -> Result<Outcome, CliError> {
+    let eas = fs_ntfs::write::list_eas_io(dev, path).map_err(|e| ntfs_error(path, e))?;
+    let Some(name) = name else {
+        let rows: Vec<_> = eas.iter().map(xattr_entry).collect();
+        let text = rows
+            .iter()
+            .map(|row| {
+                format!(
+                    "{}\t{}\tneed_ea={}",
+                    row.get("name").unwrap().to_text(),
+                    row.get("size").unwrap().to_text(),
+                    row.get("ntfs").unwrap().get("need_ea").unwrap().to_text()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Ok(Outcome::report(Json::Arr(rows)).with_text(text));
+    };
+    let ea = eas
+        .iter()
+        .find(|ea| ea.name.eq_ignore_ascii_case(name.as_encoded_bytes()))
+        .ok_or_else(|| {
+            CliError::failed(format!("{path}: EA {:?} not found", name.to_string_lossy()))
+        })?;
+    match output {
+        None => {
+            let mut stdout = std::io::stdout().lock();
+            stdout
+                .write_all(&ea.value)
+                .and_then(|()| stdout.flush())
+                .map_err(|e| CliError::failed(format!("write: {e}")))?;
+        }
+        Some(file) => {
+            let dest = std::path::Path::new(file);
+            let mut partial = dest.as_os_str().to_owned();
+            partial.push(".partial");
+            let partial = std::path::PathBuf::from(partial);
+            std::fs::write(&partial, &ea.value).map_err(|e| {
+                let _ = std::fs::remove_file(&partial);
+                CliError::failed(format!("write {}: {e}", partial.display()))
+            })?;
+            std::fs::rename(&partial, dest)
+                .map_err(|e| CliError::failed(format!("rename to {}: {e}", dest.display())))?;
+        }
+    }
+    Ok(Outcome::done())
 }
 
 /// Stream a regular file's selected `$DATA`. Each chunk is read before it is
