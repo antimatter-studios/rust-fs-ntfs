@@ -42,7 +42,16 @@ function Write-NamedStreamOracle {
     $lines = foreach ($stream in @(Get-Item -LiteralPath $File -Stream * -Force)) {
         if ($stream.Stream -eq ':$DATA') { continue }
         if (-not $allocated.ContainsKey($stream.Stream)) { throw "FileStreamInfo lost $($stream.Stream)" }
-        "$VolumePath`t$($stream.Stream)`t$($stream.Length)`t$($allocated[$stream.Stream])"
+        # Get-Content reads through Windows' filesystem, independently of our
+        # raw attribute reader. Keep binary captures beside the listing report.
+        $contentDir = "$Report.bytes"
+        $null = New-Item -ItemType Directory -Path $contentDir -Force
+        $leaf = [guid]::NewGuid().ToString('N') + '.bin'
+        [byte[]]$bytes = Get-Content -LiteralPath $File -Stream $stream.Stream -AsByteStream -Raw
+        if ($null -eq $bytes) { $bytes = [byte[]]@() }
+        if ($bytes.Length -ne $stream.Length) { throw "Get-Content length differs for $($stream.Stream)" }
+        [IO.File]::WriteAllBytes((Join-Path $contentDir $leaf), $bytes)
+        "$VolumePath`t$($stream.Stream)`t$($stream.Length)`t$($allocated[$stream.Stream])`t$leaf"
     }
     [IO.File]::AppendAllText($Report, (($lines -join "`n") + "`n"),
         [Text.UTF8Encoding]::new($false))

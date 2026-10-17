@@ -195,6 +195,12 @@ fn command() -> Cmd {
             Cmd::new("read")
                 .about("Write a file's bytes to stdout, or to a file with -o")
                 .arg(
+                    Arg::new("stream")
+                        .long("stream")
+                        .value_name("NAME")
+                        .help("Read this named data stream instead of the unnamed stream"),
+                )
+                .arg(
                     Arg::new("path")
                         .value_name("PATH")
                         .required(true)
@@ -211,7 +217,15 @@ fn command() -> Cmd {
                 .after_help(
                     "Examples:\n  fs.ntfs disk.img read /notes.txt\n  \
                      fs.ntfs disk.img read /logs/app.log | grep -i error\n  \
-                     fs.ntfs disk.img read /backup.zip -o backup.zip",
+                     fs.ntfs disk.img read /backup.zip -o backup.zip\n  \
+                     fs.ntfs disk.img read --stream Zone.Identifier /notes.txt\n  \
+                     fs.ntfs disk.img read --stream backup /notes.txt -o backup.bin\n\n\
+                     --stream selects one named $DATA stream, using Windows case-insensitive \
+                     name lookup. Plain read selects unnamed data. PATH is always a path; \
+                     a colon suffix never selects a stream. Directories and links retain \
+                     read's refusal rules, even when they have named streams. A missing \
+                     stream exits 1, names NAME and writes no stdout. The source is opened \
+                     read-only; -o writes FILE.partial and renames it only after success.",
                 ),
         )
         .subcommand(
@@ -508,7 +522,12 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         }
         "read" => {
             let (mut dev, _) = device::mount(target, offset, false)?;
-            read(&mut dev, path_arg(sub)?, sub.get_one("output"))
+            read(
+                &mut dev,
+                path_arg(sub)?,
+                sub.get_one::<String>("stream").map(String::as_str),
+                sub.get_one("output"),
+            )
         }
         "streams" => {
             let (mut dev, _) = device::mount(target, offset, false)?;
@@ -1009,12 +1028,27 @@ fn index_bytes(dev: &mut Device, record: u64) -> Result<u64, Error> {
     Ok(0)
 }
 
+struct NamedStream {
+    name: String,
+    size: u64,
+    report: Json,
+}
+
+fn streams(dev: &mut Device, path: &str) -> Result<Outcome, Error> {
+    let record = read::resolve_path(dev, path)?;
+    Ok(Outcome::report(Json::Arr(
+        named_streams(dev, record)?
+            .into_iter()
+            .map(|stream| stream.report)
+            .collect(),
+    )))
+}
+
 /// Enumerate headers only, including attributes in extension records. A
 /// split stream contributes its first segment, the only one with sizes.
 /// The layout is Microsoft's ATTRIBUTE_RECORD_HEADER devnote; allocation
 /// is compared with Windows FileStreamInfo, including resident padding.
-fn streams(dev: &mut Device, path: &str) -> Result<Outcome, Error> {
-    let record = read::resolve_path(dev, path)?;
+fn named_streams(dev: &mut Device, record: u64) -> Result<Vec<NamedStream>, Error> {
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
     for holder in records_holding(dev, record, AttrType::Data)? {
@@ -1059,13 +1093,15 @@ fn streams(dev: &mut Device, path: &str) -> Result<Outcome, Error> {
                 ("sparse", Json::from(sparse)),
                 ("compressed", Json::from(compressed)),
             ]);
-            rows.push((name, row));
+            rows.push(NamedStream {
+                name,
+                size,
+                report: row,
+            });
         }
     }
-    rows.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
-    Ok(Outcome::report(Json::Arr(
-        rows.into_iter().map(|(_, row)| row).collect(),
-    )))
+    rows.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+    Ok(rows)
 }
 
 /// `stat PATH`: one path's identity, type, links, sizes and every time,
@@ -1167,13 +1203,18 @@ fn stat(dev: &mut Device, path: &str) -> Result<Outcome, Error> {
     Ok(Outcome::report(Json::object(fields)))
 }
 
-/// Stream a regular file's unnamed `$DATA`. Each chunk is read before it is
+/// Stream a regular file's selected `$DATA`. Each chunk is read before it is
 /// written, so a file whose clusters turn out unreadable part-way stops
 /// with status 1 and what came before stays on stdout; everything that can
 /// be refused up front (no such path, a directory, a link) is refused
 /// before a byte is written. `-o FILE` writes `FILE.partial` and renames
 /// it, so FILE is never left half written.
-fn read(dev: &mut Device, path: &str, output: Option<&OsString>) -> Result<Outcome, CliError> {
+fn read(
+    dev: &mut Device,
+    path: &str,
+    stream: Option<&str>,
+    output: Option<&OsString>,
+) -> Result<Outcome, CliError> {
     let record = read::resolve_path(dev, path).map_err(|e| ntfs_error(path, e))?;
     let st = read::read_stat(dev, record).map_err(|e| ntfs_error(path, e))?;
     if st.is_dir {
@@ -1188,17 +1229,44 @@ fn read(dev: &mut Device, path: &str, output: Option<&OsString>) -> Result<Outco
             )));
         }
     }
+    let context = stream
+        .map(|name| format!("{path}: stream {name:?}"))
+        .unwrap_or_else(|| path.to_owned());
+    // Resolve the stored spelling before ranged reads, whose attribute lookup
+    // is exact. Like Windows, selection folds UTF-16 through this volume's
+    // $UpCase, including names held in extension records.
+    let selected = if let Some(name) = stream {
+        let upcase =
+            fs_ntfs::upcase::UpcaseTable::load_io(dev).map_err(|e| ntfs_error(&context, e))?;
+        let wanted: Vec<u16> = name.encode_utf16().collect();
+        let mut candidates = named_streams(dev, record).map_err(|e| ntfs_error(&context, e))?;
+        let index = candidates
+            .iter()
+            .position(|s| s.name == name)
+            .or_else(|| {
+                candidates.iter().position(|s| {
+                    upcase
+                        .cmp_names(&s.name.encode_utf16().collect::<Vec<_>>(), &wanted)
+                        .is_eq()
+                })
+            })
+            .ok_or_else(|| CliError::failed(format!("{context}: not found")))?;
+        Some(candidates.swap_remove(index))
+    } else {
+        None
+    };
+    let size = selected.as_ref().map(|s| s.size).unwrap_or(st.size);
+    let name = selected.as_ref().map(|s| s.name.as_str());
     const CHUNK: usize = 1 << 20;
     let mut copy = |sink: &mut dyn Write| -> Result<(), CliError> {
         let mut offset = 0u64;
-        while offset < st.size {
-            let want = CHUNK.min((st.size - offset) as usize);
-            let got = read::read_attribute_range(dev, record, AttrType::Data, None, offset, want)
-                .map_err(|e| ntfs_error(path, e))?;
+        while offset < size {
+            let want = CHUNK.min((size - offset) as usize);
+            let got = read::read_attribute_range(dev, record, AttrType::Data, name, offset, want)
+                .map_err(|e| ntfs_error(&context, e))?;
             if got.is_empty() {
                 return Err(CliError::failed(format!(
-                    "{path}: short read at byte {offset} of {}",
-                    st.size
+                    "{context}: short read at byte {offset} of {size}"
                 )));
             }
             sink.write_all(&got)
