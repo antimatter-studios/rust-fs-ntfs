@@ -541,5 +541,11 @@ fn finding(f: &CheckFinding) -> Json {
             ("why", Json::from(reason.as_str())),
             ("repairable", Json::from(false)),
         ]),
+        CheckFinding::BadAttributeList { record, reason } => Json::object([
+            ("kind", Json::from("bad_attribute_list")),
+            ("record", Json::from(*record)),
+            ("why", Json::from(reason.as_str())),
+            ("repairable", Json::from(false)),
+        ]),
     }
 }
