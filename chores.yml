@@ -55,7 +55,7 @@ vars:
   # equal. Cargo.toml, Cargo.lock and fuzz/Cargo.lock take the registry
   # rust-fs-core at the same version; no build here path-depends on this
   # checkout, which supplies the family scripts.
-  FS_CORE_REF: v0.3.12
+  FS_CORE_REF: v0.3.13
 
   # The Windows-VM test harness. Not a cargo dependency — a tool this
   # repo's scripts invoke — so nothing but this pin governs which
@@ -438,6 +438,7 @@ tasks:
       - cargo fmt --check
       - bash ../rust-fs-core/scripts/agents-core-check.sh
       - bash ../rust-fs-core/scripts/changelog-check.sh
+      - bash ../rust-fs-core/scripts/features-check.sh
       # The family scripts are rust-fs-core's alone: fails on a committed copy,
       # or a call to a local copy.
       - bash ../rust-fs-core/scripts/family-check.sh
