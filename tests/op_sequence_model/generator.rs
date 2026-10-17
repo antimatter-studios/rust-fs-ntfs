@@ -294,3 +294,27 @@ pub fn decode(bytes: &[u8], initial: &Model) -> Vec<Op> {
     }
     operations
 }
+
+/// Interface only (#684): the implementation follows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Regression {
+    pub kind: String,
+    pub step: usize,
+    pub geometry: Geometry,
+    pub original: String,
+    pub original_operations: usize,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Geometry {
+    pub size: u64,
+    pub cluster: u32,
+    pub record: u32,
+    pub label: String,
+    pub serial: u64,
+}
+pub fn encode_regression(_operations: &[Op], _regression: &Regression) -> Result<Vec<u8>, String> {
+    unimplemented!("#684")
+}
+pub fn decode_regression(_bytes: &[u8]) -> Result<(Vec<Op>, Option<Regression>), String> {
+    unimplemented!("#684")
+}

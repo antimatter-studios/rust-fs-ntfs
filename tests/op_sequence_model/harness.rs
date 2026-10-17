@@ -437,3 +437,44 @@ impl Drop for Harness {
         let _ = fs::remove_file(&self.image);
     }
 }
+
+/// Interface only (#684): the implementation follows.
+#[allow(dead_code)] // The harness does not compare through it yet.
+pub trait Expected: Clone {
+    fn tree(&self) -> &Model;
+    fn apply(&mut self, op: &Op) -> Result<(), model::Error>;
+    fn stat(&self, path: &str) -> Result<model::Stat, model::Error> {
+        self.tree().stat(path)
+    }
+}
+
+pub fn geometry() -> generator::Geometry {
+    unimplemented!("#684")
+}
+
+pub fn replay<M: Expected>(
+    _name: &str,
+    _operations: &[Op],
+    _wrap: impl FnOnce(Model) -> M,
+) -> Option<super::shrink::Mismatch> {
+    unimplemented!("#684")
+}
+
+pub fn capture<M: Expected>(
+    _original: &Path,
+    _name: &str,
+    _corpus: &Path,
+    _wrap: impl Fn(Model) -> M,
+) -> Result<PathBuf, String> {
+    unimplemented!("#684")
+}
+
+impl Expected for Model {
+    fn tree(&self) -> &Model {
+        self
+    }
+
+    fn apply(&mut self, op: &Op) -> Result<(), model::Error> {
+        op.apply(self)
+    }
+}
