@@ -2099,6 +2099,146 @@
       "image": "nfs-win-format-win-write-streams-mac-write-streams-win-chkdsk.img",
       "_notes": "Windows writes one file with forty non-resident named streams and spreads its attributes over extension records behind its own $ATTRIBUTE_LIST. This crate rewrites those forty in place, adds twenty more and deletes every fifth, through Windows' list. chkdsk grades the result and Windows must read back every stream left (#480)."
     },
+    "mac-format-mac-write-streams-mac-write-eas-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "ALEA",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "many.bin"
+        },
+        {
+          "op": "mac-write",
+          "path": "/many.bin",
+          "content": "unnamed"
+        },
+        {
+          "op": "mac-write-streams",
+          "path": "/many.bin",
+          "count": "40",
+          "size_bytes": "16",
+          "delete_every": "0"
+        },
+        {
+          "op": "mac-write-eas",
+          "path": "/many.bin",
+          "count": "3",
+          "size_bytes": "1000",
+          "delete_every": "2"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-verify-eas",
+          "path": "/many.bin",
+          "count": "3",
+          "size_bytes": "1000",
+          "delete_every": "2",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-verify-streams",
+          "path": "/many.bin",
+          "count": "40",
+          "size_bytes": "16",
+          "delete_every": "0",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-mac-format-mac-write-streams-mac-write-eas-win-chkdsk.img",
+      "_notes": "Forty small streams leave one file's base record with room for one 1000-byte EA but not two, so the second EA gives the file an $ATTRIBUTE_LIST and moves its streams to an extension record; the third moves $EA to an extension record of its own, and removing the second rewrites it there. chkdsk grades the records and the list, and Windows must read back every EA through NtQueryEaFile and every stream (#660, part of #480)."
+    },
+    "win-format-win-write-streams-mac-write-eas-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "ALEAWIN",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-streams",
+          "path": "/many.bin",
+          "count": "40",
+          "size_bytes": "2000",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "mac-write-eas",
+          "path": "/many.bin",
+          "count": "3",
+          "size_bytes": "250",
+          "delete_every": "2"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-verify-eas",
+          "path": "/many.bin",
+          "count": "3",
+          "size_bytes": "250",
+          "delete_every": "2",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-verify-streams",
+          "path": "/many.bin",
+          "count": "40",
+          "size_bytes": "2000",
+          "delete_every": "0",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-win-format-win-write-streams-mac-write-eas-win-chkdsk.img",
+      "_notes": "Windows writes one file with forty non-resident named streams and spreads its attributes over extension records behind its own $ATTRIBUTE_LIST. This crate adds three EAs and removes the second through Windows' list. chkdsk grades the result, and Windows must read back both EAs left through NtQueryEaFile and every stream (#660, part of #480)."
+    },
     "win-format-win-write-views-mac-write-views-win-chkdsk": {
       "status": "pending",
       "volume_params": {
