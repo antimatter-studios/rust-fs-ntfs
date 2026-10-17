@@ -78,6 +78,15 @@
 #                                    IMAGE.manifest lists every name's SHA-256,
 #                                    each file's full set of names and each
 #                                    symbolic link's target and the bytes it reaches
+#   attrlist-links IMAGE             fs.ntfs ln gives one file more names than its
+#                                    record holds, in two directories, so they go
+#                                    through an $ATTRIBUTE_LIST; rm takes the first
+#                                    name and every third, mv renames every third
+#                                    longer, and ln adds names in the room left,
+#                                    fs.ntfs stat counting every name each time.
+#                                    IMAGE.manifest lists every remaining name's
+#                                    SHA-256, the file's full set of names, each
+#                                    new name's exact case and each name now absent
 #   mkdir-parents IMAGE              fs.ntfs mkdir -p makes missing chains: three
 #                                    levels, under existing directories through
 #                                    names in another case, through `.` and `..`,
@@ -524,6 +533,97 @@ case "$step" in
         names many 64 "${many[@]}"
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the links exited $status: $out"
+        ;;
+    attrlist-links)
+        [ $# -eq 0 ] || die "attrlist-links IMAGE"
+        manifest="$image.manifest"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        : >"$manifest"
+        # One file takes more names than its record can hold, so its
+        # $FILE_NAMEs go through an $ATTRIBUTE_LIST into extension records,
+        # as Windows lays them out (#662). Each name is twelve characters:
+        # its $FILE_NAME is a 0x18-byte header, 0x42 bytes of fields and 24
+        # of UTF-16, 120 bytes rounded up to 8, so COUNT of them outgrow the
+        # record before any other attribute is counted.
+        count=48
+        [ $((count * 120)) -gt "$(record_size "$image")" ] ||
+            die "$count names fit in one $(record_size "$image")-byte record: the file would need no list"
+        # linked, unlinked, renamed: fs.ntfs ln, rm and mv, each checked by
+        # what it reported. $work/names holds every name the file has.
+        linked() {
+            run fs "$image" ln "$1" "$2"
+            [ "$status" -eq 0 ] || die "fs.ntfs ln $1 $2 exited $status: $(cat "$image.cli-err")"
+            has "\"path\": \"$2\"" && has '"linked": true' || die "fs.ntfs ln $1 $2 reported: $out"
+            echo "$2" >>"$work/names"
+        }
+        unlinked() {
+            run fs "$image" rm "$1"
+            [ "$status" -eq 0 ] || die "fs.ntfs rm $1 exited $status: $(cat "$image.cli-err")"
+            grep -vxF -- "$1" "$work/names" >"$work/kept" || true
+            cat "$work/kept" >"$work/names"
+            printf 'absent\t%s\n' "$1" >>"$manifest"
+        }
+        renamed() {
+            run fs "$image" mv "$1" "$2"
+            [ "$status" -eq 0 ] || die "fs.ntfs mv $1 $2 exited $status: $(cat "$image.cli-err")"
+            has "\"path\": \"$2\"" && has '"moved": true' || die "fs.ntfs mv $1 $2 reported: $out"
+            grep -vxF -- "$1" "$work/names" >"$work/kept" || true
+            { cat "$work/kept"; echo "$2"; } >"$work/names"
+            printf 'absent\t%s\nname\t%s\n' "$1" "$2" >>"$manifest"
+        }
+        # nlinks: fs.ntfs stat counts exactly the names in $work/names.
+        nlinks() {
+            local want
+            want="$(wc -l <"$work/names" | tr -d ' ')"
+            run fs "$image" stat "$(head -n 1 "$work/names")"
+            [ "$status" -eq 0 ] || die "fs.ntfs stat exited $status: $(cat "$image.cli-err")"
+            grep -qE "\"nlink\": ${want}([^0-9]|\$)" <<<"$out" || die "fs.ntfs stat does not count $want names: $out"
+        }
+        # name_of I: the Ith name, alternately in /m and /n.
+        name_of() {
+            if [ $(($1 % 2)) -eq 0 ]; then printf '/m/name-%03d.txt' "$1"; else printf '/n/name-%03d.txt' "$1"; fi
+        }
+
+        for dir in /m /n; do
+            run fs "$image" mkdir "$dir"
+            [ "$status" -eq 0 ] || die "fs.ntfs mkdir $dir exited $status: $(cat "$image.cli-err")"
+        done
+        random "$work/data" 700
+        set +e
+        "$BIN" fs "$image" write /m/first.dat <"$work/data" >/dev/null 2>"$image.cli-err"
+        status=$?
+        set -e
+        [ "$status" -eq 0 ] || die "fs.ntfs write /m/first.dat exited $status: $(cat "$image.cli-err")"
+        echo /m/first.dat >"$work/names"
+        for i in $(seq 0 $((count - 1))); do
+            linked /m/first.dat "$(name_of "$i")"
+        done
+        nlinks
+        # The first name goes, which the base record held; then every third
+        # name, and every third after that is renamed longer, so it may no
+        # longer fit in the record that held it; then new names take the
+        # room the others left.
+        unlinked /m/first.dat
+        for i in $(seq 0 $((count - 1))); do
+            case $((i % 3)) in
+                0) unlinked "$(name_of "$i")" ;;
+                1) renamed "$(name_of "$i")" "$(dirname "$(name_of "$i")")/renamed-to-a-longer-name-$i.txt" ;;
+            esac
+        done
+        for i in $(seq 0 7); do
+            linked "$(head -n 1 "$work/names")" "/n/again-$i.txt"
+        done
+        nlinks
+
+        printf 'dir\t%s\n' /m /n >>"$manifest"
+        hash="$(sha "$work/data")"
+        while read -r name; do
+            printf 'file\t%s\t700\t%s\n' "$name" "$hash" >>"$manifest"
+        done <"$work/names"
+        printf 'links\t%s\n' "$(paste -s -d '\t' - <"$work/names")" >>"$manifest"
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the links, unlinks and renames exited $status: $out"
         ;;
     write-at)
         [ $# -eq 0 ] || die "write-at IMAGE"

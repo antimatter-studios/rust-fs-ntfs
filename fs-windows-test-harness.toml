@@ -396,6 +396,19 @@ host = "host"
 command = "bash scripts/cli-oracle.sh link {image_dir}/{run_id}/{scenario.image}"
 expect_exit = 0
 
+[ops.cli-attrlist-links]
+# fs.ntfs ln gives one file more names than its record holds, in two
+# directories, so its $FILE_NAMEs go through an $ATTRIBUTE_LIST into
+# extension records (#662); rm takes its first name and every third, mv
+# renames every third longer, and ln adds names in the room left, fs.ntfs
+# stat counting every name each time; then a clean fsck.ntfs. Writes
+# <image>.manifest: every remaining name's bytes, the file's full set of
+# names, each new name's exact case and each removed or old name gone, for
+# win-cli-verify.
+host = "host"
+command = "bash scripts/cli-oracle.sh attrlist-links {image_dir}/{run_id}/{scenario.image}"
+expect_exit = 0
+
 [ops.cli-mkdir-parents]
 # fs.ntfs mkdir -p makes missing chains -- three levels, under existing
 # directories through names in another case, through `.` and `..`, twelve
