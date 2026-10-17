@@ -15,6 +15,7 @@ name: logfile oracle
 #   small cluster: cluster_size 1024 (or 512, 2048)
 #   view indexes, quota updates, truncation: mix views
 #   file record tails (WriteEndOfFileRecordSegment): mix tails
+#   clusters freed under dirty pages (DeleteDirtyClusters): mix freed
 #
 # On demand only. It builds no code and gates nothing: a fixture is chosen
 # from its artifact by a person and committed, and from then on the tests
@@ -43,7 +44,7 @@ on:
         required: false
         default: "0"
       mix:
-        description: "Workload: files (create, write, rename, delete), views (adds quota tracking, security descriptors, object ids, junctions, truncation) or tails (small resident files whose data is cut and regrown, and a named stream added and removed)"
+        description: "Workload: files (create, write, rename, delete), views (adds quota tracking, security descriptors, object ids, junctions, truncation), tails (small resident files whose data is cut and regrown, and a named stream added and removed) or freed (compressed files rewritten compressible and sparse files zeroed, so clusters are freed while their pages are dirty)"
         required: false
         default: "files"
 
