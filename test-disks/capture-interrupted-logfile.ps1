@@ -245,11 +245,13 @@ while ((Get-Date) -lt $end) {
         }
     }
     if ($Mix -eq 'freed') {
-        # The range is whole compression units (64 KiB at 4 KiB clusters,
-        # and a multiple of the unit at smaller ones) past the first.
+        # The range is one or two whole compression units (64 KiB at 4 KiB
+        # clusters, and a multiple of the unit at smaller ones), never the
+        # first, and at least two whole units remain from its start, so it
+        # ends inside the file.
         $unitBytes = 16 * 4096
-        $off = $unitBytes * $rng.Next(1, [int][Math]::Floor($len / $unitBytes))
-        $cnt = [Math]::Min($unitBytes * $rng.Next(1, 3), $len - $off)
+        $off = $unitBytes * $rng.Next(1, [int][Math]::Floor($len / $unitBytes) - 1)
+        $cnt = $unitBytes * $rng.Next(1, 3)
         if ($i % 2 -eq 0) {
             # Incompressible bytes take every cluster of their units; once
             # they are on disk, the pattern written back over them needs
