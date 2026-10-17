@@ -7,7 +7,9 @@
 #     each file's path, size and the SHA-256 Windows itself computes
 #   * ntfs-ea.img: extended attributes Windows set through NtSetEaFile, plus
 #     ntfs-ea.names.tsv, each name and value as it was handed to Windows;
-#     ea-summary-{0,1,2}.bin distinguish compact/query sizes and NEED_EA counts
+#     ea-summary-{0,1,2}.bin distinguish compact/query sizes and NEED_EA counts;
+#     ea-large.bin, ea-full.bin and ea-shrunk.bin carry EA sets no record
+#     holds resident
 #   * ntfs-format-64k.img: an empty volume Windows formatted with 64 KiB
 #     clusters, whose $MFTMirr the formatter is held to
 #   * ntfs-usnjrnl.img: a volume with an active change journal, plus
@@ -199,6 +201,45 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-ea.img' -Label 'EA' -Populate {
                 $status = New-Object WindowsEa+IoStatusBlock
                 $rc = [WindowsEa]::NtSetEaFile($handle, [ref]$status, $buf, [uint32]$buf.Length)
                 if ($rc -ne 0) { throw ("NtSetEaFile {0}: NTSTATUS 0x{1:X8}" -f $entry.Name, $rc) }
+            }
+        } finally { $handle.Dispose() }
+    }
+
+    # EA sets too large for a resident $EA in any 1 KiB record, so the
+    # layout Windows gives them is what tests/non_resident_ea.rs holds this
+    # crate's to (#661). Each change is one NtSetEaFile call; EA i holds
+    # "ea <i> " repeated to its size, and a change of no value removes it.
+    #   ea-large.bin   USER.E1..USER.E3 of 2000 bytes each
+    #   ea-full.bin    USER.E1..USER.E4 of 15000 bytes each
+    #   ea-shrunk.bin  USER.E1 of 2000 bytes and USER.E2 of 10, then USER.E1
+    #                  removed: whether Windows takes $EA back into the record
+    $eaChanges = [ordered]@{
+        'ea-large.bin'  = @(@(1, 2000), @(2, 2000), @(3, 2000))
+        'ea-full.bin'   = @(@(1, 15000), @(2, 15000), @(3, 15000), @(4, 15000))
+        'ea-shrunk.bin' = @(@(1, 2000), @(2, 10), @(1, 0))
+    }
+    foreach ($fileName in $eaChanges.Keys) {
+        $file = Join-Path $root $fileName
+        [System.IO.File]::WriteAllBytes($file, [byte[]](0x45))
+        $handle = [WindowsEa]::CreateFileW($file, [uint32]0x100018, [uint32]7, [IntPtr]::Zero,
+            [uint32]3, [uint32]0x80, [IntPtr]::Zero)
+        if ($handle.IsInvalid) {
+            throw "open ${fileName} for EAs: Win32 error $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+        }
+        try {
+            foreach ($change in $eaChanges[$fileName]) {
+                $i = $change[0]
+                $size = $change[1]
+                $n = [System.Text.Encoding]::ASCII.GetBytes("USER.E$i")
+                $unit = [System.Text.Encoding]::ASCII.GetBytes("ea $i ")
+                $buf = New-Object byte[] (8 + $n.Length + 1 + $size)
+                $buf[5] = [byte]$n.Length
+                [BitConverter]::GetBytes([uint16]$size).CopyTo($buf, 6)
+                $n.CopyTo($buf, 8)
+                for ($b = 0; $b -lt $size; $b++) { $buf[8 + $n.Length + 1 + $b] = $unit[$b % $unit.Length] }
+                $status = New-Object WindowsEa+IoStatusBlock
+                $rc = [WindowsEa]::NtSetEaFile($handle, [ref]$status, $buf, [uint32]$buf.Length)
+                if ($rc -ne 0) { throw ("NtSetEaFile {0} USER.E{1}: NTSTATUS 0x{2:X8}" -f $fileName, $i, $rc) }
             }
         } finally { $handle.Dispose() }
     }
