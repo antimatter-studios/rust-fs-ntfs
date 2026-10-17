@@ -585,7 +585,8 @@ tasks:
     # file passed. 41 checks executed when the tier was added (mkfs.ntfs and
     # the names, on a Mac), 86 with fs.ntfs's read verbs, 135 with fsck.ntfs
     # and `set dirty`, 215 with write, mkdir and set label, 257 with the man
-    # pages and completions; the floor is 244, about 95% of that.
+    # pages and completions; that floor was 244. #644 adds 79 checks for
+    # bounded recursive listing and its generated docs; the floor is 323.
     cmds:
       - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli -- scripts/test-cli.sh'
 
@@ -602,9 +603,10 @@ tasks:
     # FLOOR: 27 checks executed when the tier was added (the Windows-authored
     # read fixtures: eight files, the compressed file, three symlinks), 35
     # with fsck.ntfs on each Windows volume, 57 with ntfs-3g reading what
-    # fs.ntfs wrote; the floor is 54.
+    # fs.ntfs wrote; that floor was 54. #644 adds at least 33 checks against
+    # Windows' recursive enumeration; the floor is 87.
     cmds:
-      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=54 scripts/test-cli.sh'
+      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=87 scripts/test-cli.sh'
 
   test:cli:host:
     desc: 'The host half of the cli scenarios in the Windows matrix, without the VM: every step each runs before its first Windows step (scripts/cli-oracle.sh)'
