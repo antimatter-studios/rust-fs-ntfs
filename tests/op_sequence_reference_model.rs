@@ -2,7 +2,7 @@
 #[path = "op_sequence_model/model.rs"]
 mod model;
 
-use model::{Error, Model, MAX_FILE_BYTES};
+use model::{Error, Model, MAX_FILE_BYTES, NEED_EA};
 
 fn table() -> Vec<u16> {
     let mut table: Vec<_> = (0..=u16::MAX).collect();
@@ -241,4 +241,83 @@ fn named_streams_belong_to_the_file_and_fold_through_the_supplied_table() {
     m.remove("/f").unwrap();
     m.create("/", "f", false).unwrap();
     assert!(m.streams("/f").unwrap().is_empty());
+}
+
+#[test]
+fn extended_attributes_belong_to_the_file_and_are_stored_upper_cased() {
+    let mut m = tree();
+    m.create("/", "f", false).unwrap();
+    m.create("/", "d", true).unwrap();
+    m.write_ea("/f", b"user.a", 0, b"one").unwrap();
+    // A name matching an existing one case-insensitively replaces that
+    // entry, flags and all, and every name is stored upper-cased, as
+    // Windows' NtSetEaFile stores it. An empty value is still an EA.
+    m.write_ea("/f", b"User.A", NEED_EA, b"two").unwrap();
+    m.write_ea("/f", b"b", 0, b"").unwrap();
+    assert_eq!(
+        m.eas("/f").unwrap(),
+        vec![
+            (b"B".to_vec(), 0, Vec::new()),
+            (b"USER.A".to_vec(), NEED_EA, b"two".to_vec()),
+        ]
+    );
+    // EAs are neither the file's data nor its streams.
+    assert_eq!(m.read("/f").unwrap(), b"");
+    assert_eq!(m.stat("/f").unwrap().size, 0);
+    assert!(m.streams("/f").unwrap().is_empty());
+    // They belong to the file: every hard link shows and changes them.
+    m.link("/f", "/d", "g").unwrap();
+    m.remove_ea("/d/g", b"b").unwrap();
+    assert_eq!(
+        m.eas("/f").unwrap(),
+        vec![(b"USER.A".to_vec(), NEED_EA, b"two".to_vec())]
+    );
+
+    let before = m.clone();
+    for name in [&b""[..], &[b'n'; 255], b"a\0b"] {
+        assert_eq!(
+            m.write_ea("/f", name, 0, b"x"),
+            Err(Error::InvalidName),
+            "{name:?}"
+        );
+    }
+    assert_eq!(m.write_ea("/missing", b"a", 0, b"x"), Err(Error::Missing));
+    assert_eq!(m.write_ea("/f/x", b"a", 0, b"x"), Err(Error::NotDirectory));
+    assert_eq!(m.remove_ea("/f", b"b"), Err(Error::Missing));
+    assert_eq!(m.remove_ea("/f", b""), Err(Error::Missing));
+    assert_eq!(m.remove_ea("/missing", b"a"), Err(Error::Missing));
+    assert_eq!(m.eas("/missing"), Err(Error::Missing));
+    assert_eq!(m, before);
+
+    // 254 bytes is the longest name.
+    m.write_ea("/f", &[b'n'; 254], 0, b"").unwrap();
+    // A file's EAs pack to at most 65,535 bytes, five per entry beside its
+    // name and value: USER.A packs to 14 and the long name to 259, which
+    // leaves 65,256 bytes for the value of a one-byte name.
+    m.write_ea("/f", b"z", 0, &vec![7; 65_256]).unwrap();
+    let full = m.clone();
+    assert_eq!(m.write_ea("/f", b"y", 0, b""), Err(Error::EaSetTooLarge));
+    assert_eq!(
+        m.write_ea("/f", b"Z", 0, &vec![7; 65_257]),
+        Err(Error::EaSetTooLarge)
+    );
+    assert_eq!(m, full);
+    // A smaller replacement makes room again, up to the byte.
+    m.write_ea("/f", b"Z", 0, &vec![8; 65_250]).unwrap();
+    m.write_ea("/f", b"y", 0, b"").unwrap();
+    assert_eq!(m.eas("/d/g").unwrap().len(), 4);
+    assert_eq!(m.eas("/f").unwrap()[3], (b"Z".to_vec(), 0, vec![8; 65_250]));
+
+    // A directory holds EAs as a file does, and they go with it.
+    m.write_ea("/d", b"dir", 0, b"x").unwrap();
+    assert_eq!(
+        m.eas("/d").unwrap(),
+        vec![(b"DIR".to_vec(), 0, b"x".to_vec())]
+    );
+    m.remove("/d/g").unwrap();
+    m.remove("/d").unwrap();
+    // The last name takes the file's EAs with it.
+    m.remove("/f").unwrap();
+    m.create("/", "f", false).unwrap();
+    assert!(m.eas("/f").unwrap().is_empty());
 }
