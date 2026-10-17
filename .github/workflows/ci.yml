@@ -778,6 +778,8 @@ jobs:
             test-disks/ntfs-usnjrnl.records.csv
             test-disks/ntfs-inventory.img
             test-disks/ntfs-inventory.fileids.txt
+            test-disks/ntfs-stat.img
+            test-disks/ntfs-stat.windows.tsv
             test-disks/ntfs-i30-slack.img
             test-disks/ntfs-i30-slack.manifest.json
           if-no-files-found: error
