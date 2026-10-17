@@ -2,7 +2,7 @@
 //! without mounting it.
 //!
 //! The verbs are the shared set: `ls`, `stat`, `read`, `write`, `mkdir`,
-//! `rm`, `rmdir`, `mv`, `get`/`info`, `set`, `resize`. Metadata is JSON
+//! `rm`, `rmdir`, `mv`, `ln`, `get`/`info`, `set`, `resize`. Metadata is JSON
 //! (or `--text`); file content is raw bytes. A verb the library cannot do
 //! yet still exists and answers `not implemented` with exit status 3, so a
 //! script moved between filesystems fails loudly instead of meaning
@@ -280,6 +280,44 @@ fn command() -> Cmd {
                      writing.",
                 ),
         )
+        .subcommand(
+            Cmd::new("ln")
+                .about("Add a name for a file (a hard link), or with -s make a symbolic link")
+                .arg(
+                    Arg::new("symbolic")
+                        .short('s')
+                        .long("symbolic")
+                        .action(ArgAction::SetTrue)
+                        .help("Make a symbolic link whose target is TARGET, as given"),
+                )
+                .arg(
+                    Arg::new("target")
+                        .value_name("TARGET")
+                        .required(true)
+                        .value_parser(value_parser!(OsString)),
+                )
+                .arg(
+                    Arg::new("path")
+                        .value_name("PATH")
+                        .required(true)
+                        .value_parser(value_parser!(OsString)),
+                )
+                .after_help(
+                    "Examples:\n  fs.ntfs disk.img ln /data/report.txt /data/report-2026.txt\n  \
+                     fs.ntfs disk.img ln /data/report.txt /archive/report.txt\n  \
+                     fs.ntfs disk.img ln -s ../data/report.txt /docs/report.txt\n  \
+                     fs.ntfs disk.img ln -s /data/report.txt /report.txt\n\n\
+                     Without -s, PATH becomes another name for the file at TARGET, in any \
+                     directory. A directory is given no second name, and a file has at most \
+                     the 1024 names Windows allows. With -s, PATH is a symbolic link to TARGET, \
+                     the text as given: relative to PATH's directory, from the volume's root \
+                     when it starts with /, or a drive path such as C:\\data. The link is a \
+                     file link, as mklink makes one without /D. A name already at PATH, \
+                     compared as Windows compares names, a missing directory, a name Windows \
+                     cannot address and the volume's own metafiles are refused before the \
+                     image is opened for writing.",
+                ),
+        )
         .subcommand(key_command(
             "get",
             "Report the filesystem's properties, or one of them",
@@ -404,6 +442,13 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         "rm" => remove(target, offset, path_arg(sub)?, false),
         "rmdir" => remove(target, offset, path_arg(sub)?, true),
         "mv" => rename(target, offset, text_arg(sub, "source")?, path_arg(sub)?),
+        "ln" => link(
+            target,
+            offset,
+            text_arg(sub, "target")?,
+            path_arg(sub)?,
+            sub.get_flag("symbolic"),
+        ),
         "resize" => Err(CliError::not_implemented(
             "resize: this library cannot resize an NTFS volume",
         )),
@@ -1312,6 +1357,110 @@ fn stored_name(
             let n: Vec<u16> = n.encode_utf16().collect();
             upcase.cmp_names(&n, &wanted).is_eq()
         }))
+}
+
+/// `ln`: give the file at `to` the further name `path` (a hard link), or
+/// with `symbolic` make `path` a symbolic link whose target is the text
+/// `to`, through the library's `link_io` and `create_symlink_io`. As for
+/// `mv`, everything that can be refused is refused on a read-only open:
+/// first what this verb decides itself, then the edit rehearsed in full,
+/// so the library refuses whatever it would refuse on the real volume, in
+/// the same words. The report names the record the new name reaches: the
+/// file's own for a hard link, the new link's for a symbolic one.
+fn link(
+    target: &OsString,
+    offset: u64,
+    to: &str,
+    path: &str,
+    symbolic: bool,
+) -> Result<Outcome, CliError> {
+    let (parent, name) = linkable(target, offset, to, path, symbolic)?;
+    let record = edit(target, offset, path, |dev| {
+        make_link(dev, to, parent, name, symbolic)
+    })?;
+    let report = Json::object([
+        ("path", Json::from(path)),
+        ("linked", Json::from(true)),
+        ("inode", Json::from(record)),
+    ]);
+    Ok(Outcome::report(report).with_text(format!("linked {path}")))
+}
+
+/// The link [`link`] makes in `dev`, and the record it reaches.
+fn make_link<D: BlockIo>(
+    dev: &mut D,
+    to: &str,
+    parent: &str,
+    name: &str,
+    symbolic: bool,
+) -> Result<u64, Error> {
+    if symbolic {
+        // The library decides from the target's form whether it is
+        // relative, as Windows does; the flag is only a hint.
+        return fs_ntfs::write::create_symlink_io(dev, parent, name, to, !to.starts_with('/'));
+    }
+    let file = hard_link_target(to);
+    fs_ntfs::write::link_io(dev, file, parent, name)?;
+    read::resolve_path(dev, file)
+}
+
+/// A hard link's target without any trailing `/`; the root stays `/`.
+fn hard_link_target(to: &str) -> &str {
+    match to.trim_end_matches('/') {
+        "" => "/",
+        file => file,
+    }
+}
+
+/// The directory and last name of [`link`]'s `path`, once every refusal
+/// has been ruled out. In order:
+///
+/// - `.`, `..` or the root as `path`, and a trailing `/` on it: a link is
+///   never a directory;
+/// - for a hard link, a `to` not from the root (a usage error), a missing
+///   one, and a trailing `/` on one that is not a directory;
+/// - whatever the library refuses: a missing directory, a name Windows
+///   cannot address, a name already there as Windows compares names
+///   (through `$UpCase`), a hard link to a directory, a file that already
+///   has the 1024 names Windows allows, a record with no room for another
+///   name, a metafile, an empty symbolic link target, and a volume not fit
+///   to be written.
+fn linkable<'p>(
+    target: &OsString,
+    offset: u64,
+    to: &str,
+    path: &'p str,
+    symbolic: bool,
+) -> Result<(&'p str, &'p str), CliError> {
+    let (parent, name, slash) = last_name(path)?;
+    if name.is_empty() || name == "." || name == ".." {
+        return Err(CliError::failed(format!(
+            "{path}: ., .. and the root cannot be made a link"
+        )));
+    }
+    if slash {
+        return Err(CliError::failed(format!(
+            "{path}: not a directory; a link is never one"
+        )));
+    }
+    if !symbolic {
+        last_name(to)?;
+    }
+    let (mut dev, _) = device::mount(target, offset, false)?;
+    if !symbolic {
+        let file = hard_link_target(to);
+        let record = read::resolve_path(&mut dev, file).map_err(|e| ntfs_error(to, e))?;
+        let is_dir = read::read_stat(&mut dev, record)
+            .map_err(|e| ntfs_error(to, e))?
+            .is_dir;
+        if !is_dir && file.len() < to.len() {
+            return Err(CliError::failed(format!("{to}: not a directory")));
+        }
+    }
+    prepared(&mut device::Rehearsal::over(&mut dev), path, |io| {
+        make_link(io, to, parent, name, symbolic)
+    })?;
+    Ok((parent, name))
 }
 
 /// Whether `$Volume` carries the dirty flag: the volume was not cleanly

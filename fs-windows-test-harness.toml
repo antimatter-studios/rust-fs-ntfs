@@ -58,6 +58,7 @@ cli = [
   "cli-populate-win-verify-chkdsk",
   "cli-empty-directory-win-verify-chkdsk",
   "cli-rename-win-verify-chkdsk",
+  "cli-link-win-verify-chkdsk",
   "cli-windows-interrupted-1-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-6-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-1-write-after-replay-win-verify-chkdsk",
@@ -377,6 +378,19 @@ expect_exit = 0
 # name's exact case and each old name gone, for win-cli-verify.
 host = "host"
 command = "bash scripts/cli-oracle.sh rename {image_dir}/{run_id}/{scenario.image}"
+expect_exit = 0
+
+[ops.cli-link]
+# fs.ntfs ln adds hard links -- in the same directory, in others, to data
+# that is not resident, and to one file until its record is full -- and rm
+# takes one file's first name away; ln -s makes symbolic links, relative
+# and from the root. A hard link to a directory, a name already there, one
+# name too many and a missing directory are refused, writing nothing; then
+# a clean fsck.ntfs. Writes <image>.manifest: every name's bytes, each
+# file's full set of names and each symbolic link's target, for
+# win-cli-verify.
+host = "host"
+command = "bash scripts/cli-oracle.sh link {image_dir}/{run_id}/{scenario.image}"
 expect_exit = 0
 
 [ops.cli-replay]
