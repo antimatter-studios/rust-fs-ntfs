@@ -383,15 +383,88 @@ fn mftmirr_records(cluster_size: u32, mft_record_size: u32) -> u64 {
 /// Size of the root directory's index blocks, as the boot sector declares.
 const INDEX_BLOCK_SIZE: u32 = 4096;
 
-/// Format an NTFS volume in place over a [`BlockIo`].
-pub fn format_filesystem(
-    dev: &mut dyn BlockIo,
+/// The longest volume label, in UTF-16 code units: `$VOLUME_NAME` holds 64
+/// bytes, and Windows' formatter refuses a longer label.
+pub const MAX_LABEL_UNITS: usize = 32;
+
+/// What [`format_filesystem`] writes, decided and checked before a byte is:
+/// the geometry, where each system file goes, the label and the serial.
+///
+/// [`plan_format`] makes one, and [`format_with_plan`] writes exactly it,
+/// so a dry run that reports a plan and a format that applies one cannot
+/// disagree. Every refusal the formatter makes is made while planning,
+/// before the target is touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FormatPlan {
+    /// The size the volume was planned for, in bytes. The volume is the
+    /// whole clusters this holds.
+    pub size_bytes: u64,
+    pub bytes_per_sector: u16,
+    pub sectors_per_cluster: u32,
+    /// The allocation unit, in bytes.
+    pub cluster_size: u32,
+    /// Bytes per MFT record (FILE record segment).
+    pub mft_record_size: u32,
+    /// Bytes per directory index block, as the boot sector declares it.
+    pub index_block_size: u32,
+    /// Clusters laid out: the volume is `clusters * cluster_size` bytes,
+    /// and its last cluster holds the backup boot sector.
+    pub clusters: u64,
+    /// The boot sector's `NumberSectors`: every sector of the volume but
+    /// the last, which holds the backup boot sector.
+    pub total_sectors: u64,
+    /// `total_sectors` in whole clusters, which is what Windows reports as
+    /// the volume's total clusters (`fsutil fsinfo ntfsinfo`).
+    pub total_clusters: u64,
+    pub mft_lcn: u64,
+    pub mft_clusters: u64,
+    /// The records `$MFT` holds when the volume is new.
+    pub mft_records: u64,
+    pub logfile_lcn: u64,
+    pub logfile_clusters: u64,
+    pub bitmap_lcn: u64,
+    pub bitmap_clusters: u64,
+    pub upcase_lcn: u64,
+    pub upcase_clusters: u64,
+    pub attrdef_lcn: u64,
+    pub attrdef_clusters: u64,
+    /// The cluster holding `$MFT`'s own `$BITMAP`.
+    pub mft_bitmap_lcn: u64,
+    /// `$Secure:$SDS`'s primary cluster; its mirror is the next one.
+    pub sds_lcn: u64,
+    /// The root directory's first index block, used only when its system
+    /// entries do not fit a resident `$INDEX_ROOT`.
+    pub root_index_lcn: u64,
+    pub root_index_clusters: u64,
+    pub mftmirr_lcn: u64,
+    /// The records `$MFTMirr` holds: the first four, or every record in
+    /// one cluster when a cluster holds more, as Windows writes it.
+    pub mftmirr_records: u64,
+    pub mftmirr_clusters: u64,
+    pub backup_boot_lcn: u64,
+    pub label: String,
+    pub serial: u64,
+}
+
+impl FormatPlan {
+    /// The bytes `$LogFile` occupies.
+    pub fn logfile_bytes(&self) -> u64 {
+        self.logfile_clusters * u64::from(self.cluster_size)
+    }
+}
+
+/// Plan an NTFS volume of `size_bytes`, refusing anything the formatter
+/// cannot write, and write nothing. `serial` is drawn at random when not
+/// given, and the plan carries the one drawn: [`format_with_plan`] then
+/// writes that serial.
+pub fn plan_format(
     size_bytes: u64,
     cluster_size: u32,
     mft_record_size: u32,
     label: Option<&str>,
     serial: Option<u64>,
-) -> Result<(), Error> {
+) -> Result<FormatPlan, Error> {
     if !cluster_size.is_power_of_two() || !(512..=65536).contains(&cluster_size) {
         return Err(Error::invalid(format!(
             "invalid cluster_size {cluster_size}"
@@ -400,6 +473,13 @@ pub fn format_filesystem(
     if !mft_record_size.is_power_of_two() || !(512..=16384).contains(&mft_record_size) {
         return Err(Error::invalid(format!(
             "invalid mft_record_size {mft_record_size}"
+        )));
+    }
+    let label = label.unwrap_or("");
+    let label_units = label.encode_utf16().count();
+    if label_units > MAX_LABEL_UNITS {
+        return Err(Error::invalid(format!(
+            "the label is {label_units} UTF-16 code units, and $VOLUME_NAME holds {MAX_LABEL_UNITS}"
         )));
     }
     let bytes_per_sector: u16 = 512;
@@ -411,12 +491,6 @@ pub fn format_filesystem(
     if cluster_count < 1024 {
         return Err(Error::io(format!(
             "volume too small: {cluster_count} clusters"
-        )));
-    }
-    if dev.size() < size_bytes {
-        return Err(Error::io(format!(
-            "device size {} < requested format size {size_bytes}",
-            dev.size()
         )));
     }
 
@@ -488,7 +562,6 @@ pub fn format_filesystem(
     // bitmap bytes (only mft_records_capacity/8 bytes used; rest of
     // the cluster is zero-padded — same shape as Microsoft's output).
     let mft_bitmap_lcn = attrdef_lcn + attrdef_clusters;
-    let mft_bitmap_clusters: u64 = 1;
 
     // $Secure:$SDS data — two real clusters (primary entries + mirror at
     // file offset 0x40000). Placed immediately after $MFT's $BITMAP
@@ -496,9 +569,8 @@ pub fn format_filesystem(
     // sparse data run, so only 2 clusters are actually consumed on
     // disk regardless of cluster size — matches the Microsoft
     // reference's $SDS layout (primary + mirror, sparse middle).
-    let sds_primary_lcn = mft_bitmap_lcn + mft_bitmap_clusters;
+    let sds_primary_lcn = mft_bitmap_lcn + MFT_BITMAP_CLUSTERS;
     let sds_mirror_lcn = sds_primary_lcn + 1;
-    let sds_real_clusters: u64 = 2;
 
     let mftmirr_lcn = cluster_count / 2;
     // The mirror holds MFT records 0..3 -- $MFT, $MFTMirr, $LogFile and
@@ -526,7 +598,117 @@ pub fn format_filesystem(
         return Err(Error::io("volume too small for chosen layout"));
     }
 
-    let serial = serial.unwrap_or_else(generate_serial);
+    // The boot sector counts every sector but the last, which holds the
+    // backup boot sector (see `build_boot_sector`).
+    let total_sectors = cluster_count * u64::from(sectors_per_cluster) - 1;
+    Ok(FormatPlan {
+        size_bytes,
+        bytes_per_sector,
+        sectors_per_cluster,
+        cluster_size,
+        mft_record_size,
+        index_block_size: INDEX_BLOCK_SIZE,
+        clusters: cluster_count,
+        total_sectors,
+        total_clusters: total_sectors / u64::from(sectors_per_cluster),
+        mft_lcn,
+        mft_clusters,
+        mft_records: mft_records_capacity,
+        logfile_lcn,
+        logfile_clusters,
+        bitmap_lcn,
+        bitmap_clusters,
+        upcase_lcn,
+        upcase_clusters,
+        attrdef_lcn,
+        attrdef_clusters,
+        mft_bitmap_lcn,
+        sds_lcn: sds_primary_lcn,
+        root_index_lcn,
+        root_index_clusters,
+        mftmirr_lcn,
+        mftmirr_records: mftmirr_record_count,
+        mftmirr_clusters,
+        backup_boot_lcn,
+        label: label.to_string(),
+        serial: serial.unwrap_or_else(generate_serial),
+    })
+}
+
+/// `$MFT`'s own `$BITMAP` takes one cluster.
+const MFT_BITMAP_CLUSTERS: u64 = 1;
+
+/// Format an NTFS volume in place over a [`BlockIo`]: [`plan_format`],
+/// then [`format_with_plan`].
+pub fn format_filesystem(
+    dev: &mut dyn BlockIo,
+    size_bytes: u64,
+    cluster_size: u32,
+    mft_record_size: u32,
+    label: Option<&str>,
+    serial: Option<u64>,
+) -> Result<(), Error> {
+    let plan = plan_format(size_bytes, cluster_size, mft_record_size, label, serial)?;
+    format_with_plan(dev, &plan)
+}
+
+/// Write the volume `plan` describes over a [`BlockIo`].
+///
+/// The plan is checked again first: one changed after [`plan_format`]
+/// made it is refused, so what is written is always a plan the formatter
+/// validated.
+pub fn format_with_plan(dev: &mut dyn BlockIo, plan: &FormatPlan) -> Result<(), Error> {
+    let checked = plan_format(
+        plan.size_bytes,
+        plan.cluster_size,
+        plan.mft_record_size,
+        Some(&plan.label),
+        Some(plan.serial),
+    )?;
+    if checked != *plan {
+        return Err(Error::invalid(
+            "the format plan was changed after plan_format made it; plan again instead",
+        ));
+    }
+    if dev.size() < plan.size_bytes {
+        return Err(Error::io(format!(
+            "device size {} < requested format size {}",
+            dev.size(),
+            plan.size_bytes
+        )));
+    }
+
+    let bytes_per_sector = plan.bytes_per_sector;
+    let sectors_per_cluster = plan.sectors_per_cluster;
+    let cluster_size = plan.cluster_size;
+    let mft_record_size = plan.mft_record_size;
+    let cluster_count = plan.clusters;
+    let mft_lcn = plan.mft_lcn;
+    let mft_clusters = plan.mft_clusters;
+    let mft_records_capacity = plan.mft_records;
+    let logfile_lcn = plan.logfile_lcn;
+    let logfile_clusters = plan.logfile_clusters;
+    let bitmap_lcn = plan.bitmap_lcn;
+    let bitmap_clusters = plan.bitmap_clusters;
+    let upcase_lcn = plan.upcase_lcn;
+    let upcase_clusters = plan.upcase_clusters;
+    let attrdef_lcn = plan.attrdef_lcn;
+    let attrdef_clusters = plan.attrdef_clusters;
+    let mft_bitmap_lcn = plan.mft_bitmap_lcn;
+    let mft_bitmap_clusters = MFT_BITMAP_CLUSTERS;
+    let sds_primary_lcn = plan.sds_lcn;
+    let sds_mirror_lcn = sds_primary_lcn + 1;
+    let sds_real_clusters: u64 = 2;
+    let mftmirr_lcn = plan.mftmirr_lcn;
+    let mftmirr_record_count = plan.mftmirr_records;
+    let mftmirr_clusters = plan.mftmirr_clusters;
+    let root_index_lcn = plan.root_index_lcn;
+    let root_index_clusters = plan.root_index_clusters;
+    let backup_boot_lcn = plan.backup_boot_lcn;
+    let mftmirr_bytes: u64 = mftmirr_record_count * mft_record_size as u64;
+    let bitmap_bytes: u64 = cluster_count.div_ceil(8);
+    let label = plan.label.as_str();
+    let serial = plan.serial;
     let now = nt_time_now();
 
     // 0. Zero out critical regions ---------------------------------------
@@ -859,7 +1041,6 @@ pub fn format_filesystem(
 
     // record 3: $Volume
     {
-        let label = label.unwrap_or("");
         let label_utf16: Vec<u16> = label.encode_utf16().collect();
         let mut volume_name_value = Vec::with_capacity(label_utf16.len() * 2);
         for c in &label_utf16 {
@@ -3304,5 +3485,129 @@ mod tests {
             "a 4096-byte record holds the whole root index"
         );
         assert_eq!(upstream_root_names(&mut dev), system_root_names());
+    }
+
+    // --- the format plan (#698) ---------------------------------------------
+
+    /// What `format_with_plan` wrote is the plan, as a reader that is not
+    /// this crate's -- the upstream `ntfs` crate -- finds it.
+    #[test]
+    fn the_volume_written_is_the_plan_another_reader_finds() {
+        const SIZE: u64 = 64 * 1024 * 1024;
+        for cluster in [512u32, 1024, 4096, 16384] {
+            let plan = plan_format(SIZE, cluster, 4096, Some("PLAN"), Some(0x698)).expect("plan");
+            let mut dev = MemDev {
+                buf: vec![0u8; SIZE as usize],
+            };
+            format_with_plan(&mut dev as &mut dyn BlockIo, &plan).expect("format_with_plan");
+
+            let mut reader = crate::block_io::IoReadSeek::new(&mut dev);
+            let ntfs = ntfs::Ntfs::new(&mut reader).expect("Ntfs::new");
+            assert_eq!(
+                ntfs.sector_size(),
+                plan.bytes_per_sector,
+                "cluster {cluster}"
+            );
+            assert_eq!(ntfs.cluster_size(), plan.cluster_size, "cluster {cluster}");
+            assert_eq!(
+                ntfs.file_record_size(),
+                plan.mft_record_size,
+                "cluster {cluster}"
+            );
+            assert_eq!(ntfs.serial_number(), plan.serial, "cluster {cluster}");
+            assert_eq!(
+                ntfs.size(),
+                plan.total_sectors * u64::from(plan.bytes_per_sector),
+                "cluster {cluster}"
+            );
+            assert_eq!(
+                ntfs.mft_position().value().map(|p| p.get()),
+                Some(plan.mft_lcn * u64::from(plan.cluster_size)),
+                "cluster {cluster}"
+            );
+            let name = ntfs
+                .volume_name(&mut reader)
+                .expect("a label")
+                .expect("volume name");
+            assert_eq!(
+                name.name().to_string_lossy(),
+                plan.label,
+                "cluster {cluster}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plan_is_the_same_plan_however_often_it_is_made() {
+        let a = plan_format(64 << 20, 4096, 4096, Some("A"), Some(1)).expect("plan");
+        let b = plan_format(64 << 20, 4096, 4096, Some("A"), Some(1)).expect("plan");
+        assert_eq!(a, b);
+        assert_eq!(
+            a.total_clusters,
+            a.clusters - 1,
+            "the last cluster holds the backup boot sector"
+        );
+        assert_eq!(a.total_sectors, a.clusters * 8 - 1);
+        assert_eq!(a.logfile_bytes(), a.logfile_clusters * 4096);
+    }
+
+    #[test]
+    fn planning_refuses_what_formatting_cannot_write() {
+        let refused = |size: u64, cluster: u32, record: u32, label: &str| {
+            plan_format(size, cluster, record, Some(label), Some(1))
+                .expect_err("refused")
+                .to_string()
+        };
+        assert!(refused(64 << 20, 3000, 4096, "").contains("cluster_size 3000"));
+        assert!(refused(64 << 20, 131072, 4096, "").contains("cluster_size 131072"));
+        assert!(refused(64 << 20, 4096, 3000, "").contains("mft_record_size 3000"));
+        assert!(refused(1 << 20, 4096, 4096, "").contains("too small"));
+        let long = "x".repeat(MAX_LABEL_UNITS + 1);
+        assert!(refused(64 << 20, 4096, 4096, &long).contains("UTF-16 code units"));
+        assert!(plan_format(
+            64 << 20,
+            4096,
+            4096,
+            Some(&"x".repeat(MAX_LABEL_UNITS)),
+            None
+        )
+        .is_ok());
+    }
+
+    /// A plan changed after `plan_format` made it is refused, and nothing
+    /// is written.
+    #[test]
+    fn a_changed_plan_is_refused_before_anything_is_written() {
+        const SIZE: u64 = 64 * 1024 * 1024;
+        let mut plan = plan_format(SIZE, 4096, 4096, None, Some(1)).expect("plan");
+        plan.mftmirr_lcn += 1;
+        let mut dev = MemDev {
+            buf: vec![0u8; SIZE as usize],
+        };
+        let err = format_with_plan(&mut dev as &mut dyn BlockIo, &plan).expect_err("refused");
+        assert!(err.to_string().contains("plan again"), "{err}");
+        assert!(dev.buf.iter().all(|&b| b == 0), "nothing written");
+    }
+
+    /// `format_filesystem` keeps a label to the 32 UTF-16 code units
+    /// `$VOLUME_NAME` holds, as the command line always did.
+    #[test]
+    fn format_filesystem_refuses_a_label_volume_name_cannot_hold() {
+        const SIZE: u64 = 64 * 1024 * 1024;
+        let mut dev = MemDev {
+            buf: vec![0u8; SIZE as usize],
+        };
+        let long = "x".repeat(MAX_LABEL_UNITS + 1);
+        let err = format_filesystem(
+            &mut dev as &mut dyn BlockIo,
+            SIZE,
+            4096,
+            4096,
+            Some(&long),
+            None,
+        )
+        .expect_err("refused");
+        assert!(err.to_string().contains("UTF-16 code units"), "{err}");
+        assert!(dev.buf.iter().all(|&b| b == 0), "nothing written");
     }
 }
