@@ -3096,6 +3096,81 @@
       "image": "nfs-cli-mkfs-win-chkdsk.img",
       "_notes": "The installed mkfs.ntfs (the multi-call binary's mkfs), graded by chkdsk. Same formatter as rust-ntfs format, reached through the command-line tools' own argument parsing and report."
     },
+    "cli-mkfs-plan-4k-win-ntfsinfo-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "PLAN4K",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        { "op": "cli-mkfs-plan", "record_size": "4096", "serial": "5eed000000001000" },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.plan",
+          "dest": "{vm.workdir}/{scenario.image}.plan"
+        },
+        { "op": "win-ntfsinfo", "keep_image": "true" },
+        { "op": "win-chkdsk", "modes": "readonly,/scan", "keep_image": "false", "verdict_shape": "Clean" }
+      ],
+      "image": "nfs-cli-mkfs-plan-4k-win-ntfsinfo-chkdsk.img",
+      "_notes": "mkfs.ntfs --dry-run reports a format plan and creates nothing, and the same command applies that plan (#698). Windows grades the plan, not our reading of it: fsutil fsinfo ntfsinfo must report the plan's bytes per sector, cluster and record, total sectors and clusters, $MFT and $MFTMirr LCNs and serial, Get-Volume its label, and chkdsk must find the volume clean. The default geometry: 4 KiB clusters, 4 KiB records."
+    },
+    "cli-mkfs-plan-512-win-ntfsinfo-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 64,
+        "label": "PLAN512",
+        "alloc_unit_size": 512
+      },
+      "recipe": [
+        { "op": "cli-mkfs-plan", "record_size": "4096", "serial": "5eed000000000200" },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.plan",
+          "dest": "{vm.workdir}/{scenario.image}.plan"
+        },
+        { "op": "win-ntfsinfo", "keep_image": "true" },
+        { "op": "win-chkdsk", "modes": "readonly,/scan", "keep_image": "false", "verdict_shape": "Clean" }
+      ],
+      "image": "nfs-cli-mkfs-plan-512-win-ntfsinfo-chkdsk.img",
+      "_notes": "mkfs.ntfs --dry-run reports a format plan and creates nothing, and the same command applies that plan (#698). Windows grades the plan, not our reading of it: fsutil fsinfo ntfsinfo must report the plan's bytes per sector, cluster and record, total sectors and clusters, $MFT and $MFTMirr LCNs and serial, Get-Volume its label, and chkdsk must find the volume clean. The smallest cluster: one sector per cluster, records of eight clusters."
+    },
+    "cli-mkfs-plan-64k-win-ntfsinfo-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 512,
+        "label": "PLAN64K",
+        "alloc_unit_size": 65536
+      },
+      "recipe": [
+        { "op": "cli-mkfs-plan", "record_size": "4096", "serial": "5eed000000010000" },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.plan",
+          "dest": "{vm.workdir}/{scenario.image}.plan"
+        },
+        { "op": "win-ntfsinfo", "keep_image": "true" },
+        { "op": "win-chkdsk", "modes": "readonly,/scan", "keep_image": "false", "verdict_shape": "Clean" }
+      ],
+      "image": "nfs-cli-mkfs-plan-64k-win-ntfsinfo-chkdsk.img",
+      "_notes": "mkfs.ntfs --dry-run reports a format plan and creates nothing, and the same command applies that plan (#698). Windows grades the plan, not our reading of it: fsutil fsinfo ntfsinfo must report the plan's bytes per sector, cluster and record, total sectors and clusters, $MFT and $MFTMirr LCNs and serial, Get-Volume its label, and chkdsk must find the volume clean. The largest cluster this formatter writes: 128 sectors per cluster, sixteen records in each."
+    },
     "cli-set-dirty-fsck-win-dirty-chkdsk": {
       "status": "pending",
       "volume_params": {
