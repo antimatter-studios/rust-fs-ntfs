@@ -491,6 +491,124 @@ fn generated_streams_and_refusals_survive_reopen() {
     h.finish();
 }
 
+/// Extended attributes (#732): case collisions, hard-link sharing, sets on
+/// both sides of the resident limit and at and past 64 KiB, and atomic
+/// refusals, through every reopen.
+#[test]
+fn generated_eas_and_refusals_survive_reopen() {
+    use generator::Op;
+    let mut operations = generator::decode_replay(
+        r#"{"version":1,"operations":[
+        {"op":"create","parent":"/","name":"a"},
+        {"op":"write","path":"/a","data":[1,2,3]},
+        {"op":"write_ea","path":"/a","name":"user.x","flags":0,"value":[10,11]},
+        {"op":"write_ea","path":"/a","name":"USER.x","flags":128,"value":[12]},
+        {"op":"write_ea","path":"/a","name":"z","flags":0,"value":[]},
+        {"op":"mkdir","parent":"/","name":"d"},
+        {"op":"link","path":"/a","parent":"/d","name":"é"},
+        {"op":"remove_ea","path":"/d/é","name":"Z"},
+        {"op":"remove_ea","path":"/a","name":"z"},
+        {"op":"remove_ea","path":"/a","name":""},
+        {"op":"write_ea","path":"/a","name":"","flags":0,"value":[1]},
+        {"op":"write_ea","path":"/missing","name":"a","flags":0,"value":[1]},
+        {"op":"write_ea","path":"/a/x","name":"a","flags":0,"value":[1]},
+        {"op":"remove_ea","path":"/missing","name":"a"},
+        {"op":"write_at","path":"/a","offset":3,"data":[4]}
+    ]}"#
+        .as_bytes(),
+    )
+    .unwrap();
+    let value = |len: usize, seed: usize| -> Vec<u8> {
+        (0..len).map(|i| ((i * 7 + seed) % 251) as u8).collect()
+    };
+    let write = |path: &str, name: &str, flags: u8, value: Vec<u8>| Op::WriteEa {
+        path: path.into(),
+        name: name.into(),
+        flags,
+        value,
+    };
+    let remove = |path: &str, name: &str| Op::RemoveEa {
+        path: path.into(),
+        name: name.into(),
+    };
+    operations.extend([
+        // 254 bytes is the longest name, and n and N are one name.
+        write("/a", &"n".repeat(254), 0, vec![1]),
+        write("/a", &"N".repeat(254), 128, vec![2]),
+        write("/a", &"n".repeat(255), 0, vec![3]),
+        // More than a 1024-byte record holds resident: into clusters.
+        write("/a", "big", 0, value(3000, 1)),
+        // USER.X, the long name and BIG pack to 12 + 260 + 3008 bytes, so
+        // 63,000 more is past 64 KiB and 62,000 is not.
+        write("/a", "huge", 0, value(63_000, 2)),
+        write("/a", "huge", 128, value(62_000, 3)),
+        // A set that shrinks, then grows to exactly 65,535 packed bytes:
+        // 260 + 62,009 + 5 + 6 + 3,255. One byte more is refused.
+        remove("/a", "BIG"),
+        write("/a", "user.x", 0, value(3255, 4)),
+        write("/a", "user.x", 0, value(3256, 5)),
+        // Removing every EA gives the clusters back, and so does the last
+        // name of a file that still has them.
+        Op::Create {
+            parent: "/".into(),
+            name: "b".into(),
+        },
+        write("/b", "big", 0, value(5000, 6)),
+        remove("/b", "big"),
+        write("/b", "big", 0, value(5000, 7)),
+        Op::Unlink { path: "/b".into() },
+        Op::Unlink {
+            path: "/d/é".into(),
+        },
+    ]);
+    let mut h = harness::Harness::new("eas");
+    for op in operations {
+        h.step(op);
+    }
+    let expected = vec![
+        (b"HUGE".to_vec(), 128, value(62_000, 3)),
+        ("N".repeat(254).into_bytes(), 128, vec![2]),
+        (b"USER.X".to_vec(), 0, value(3255, 4)),
+    ];
+    assert_eq!(h.model.eas("/a").unwrap(), expected);
+    assert_eq!(h.model.read("/a").unwrap(), &[1, 2, 3, 4]);
+    let (accepted, refused) = h.counts;
+    assert_eq!((accepted[11], refused[11]), (10, 6), "EA writes");
+    assert_eq!((accepted[12], refused[12]), (3, 3), "EA removals");
+
+    // The same opcodes from raw generator bytes, on /a's full set: a fresh
+    // EA is refused, the removal of its first EA makes room for it, then
+    // refusals on a missing path, a file used as a directory and a value
+    // no set can hold.
+    let mut input = Vec::new();
+    for (verb, target, flags, name, length, class, data) in [
+        (11, 2, 1, 13, 2u16, 0, vec![7, 8]),
+        (12, 2, 0, 12, 0, 0, vec![]),
+        (11, 2, 1, 13, 2, 0, vec![7, 8]),
+        (11, 0, 0, 0, 1, 0, vec![9]),
+        (12, 1, 0, 0, 0, 0, vec![]),
+        (11, 2, 0, 0, u16::MAX, 3, vec![]),
+    ] {
+        input.extend([verb, target, flags, name]);
+        input.extend(length.to_le_bytes());
+        input.extend([class, 0]);
+        input.extend(data);
+    }
+    let counts = h.generated(&input);
+    assert_eq!((counts.0[11], counts.1[11]), (1, 3), "generated EA writes");
+    assert_eq!(
+        (counts.0[12], counts.1[12]),
+        (1, 1),
+        "generated EA removals"
+    );
+    assert_eq!(
+        h.model.eas("/a").unwrap()[0],
+        (b"EA3".to_vec(), model::NEED_EA, vec![7, 8])
+    );
+    assert_eq!(h.model.eas("/a").unwrap().len(), 3);
+    h.finish();
+}
+
 #[test]
 fn persisted_byte_mutation_is_detected_without_writer_state() {
     let mut h = harness::Harness::new("byte-control");
