@@ -267,6 +267,7 @@ fs.ntfs disk.img ls -R --max-depth 8 --limit 1000 /Users
 fs.ntfs disk.img stat /notes.txt   # one path: record, links, sizes, every time
 fs.ntfs disk.img streams /notes.txt   # named data streams; JSON or --text
 fs.ntfs disk.img read /notes.txt > notes.txt
+fs.ntfs disk.img read --stream Zone.Identifier /notes.txt
 fs.ntfs disk.img get label --text
 fs.ntfs disk.img write /notes.txt < notes.txt
 fs.ntfs disk.img write --at 4095 /notes.txt < patch.bin   # patch without truncating
@@ -296,6 +297,14 @@ as UTF-8 bytes, including streams held in extension records. Directories
 can have named streams. Links are inspected without following them, and a
 colon in PATH is never reinterpreted as a stream selector. The command opens
 the source read-only. Plain `read` continues to return the unnamed stream.
+`read --stream NAME PATH` reads one named stream with Windows case-insensitive
+name lookup. It uses the same bounded chunks and `-o FILE` atomic copy as
+plain `read`; a missing stream exits 1 naming NAME, without stdout or changes
+to an existing output file. Directories and links keep `read`'s refusal rules.
+Selection requires `--stream`: a colon in PATH never selects a stream.
+The installed CLI stream tests need ntfs-3g's `ntfscp` to author independent
+fixtures (`apt-get install ntfs-3g`); the Windows oracle tier compares each
+stream with bytes captured by `Get-Content -Stream NAME -AsByteStream`.
 
 `ls --recursive` (`-R`) walks depth first with each directory's names sorted
 as bytes. Entries add `path` from the volume root and `depth`; the starting

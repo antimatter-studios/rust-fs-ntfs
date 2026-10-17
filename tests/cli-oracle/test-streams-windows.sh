@@ -27,7 +27,7 @@ for fixture in ntfs-attrlist ntfs-stat; do
             'all(.[]; .resident == (.allocated < 4096))' "$SANDBOX/out"
         rows=$((rows + $(wc -l <"$SANDBOX/want")))
     done <"$SANDBOX/paths"
-    while IFS="$(printf '\t')" read -r item name size allocated leaf; do
+    while IFS="$(printf '\t')" read -r item name size _allocated leaf; do
         check "Windows captured the bytes for $fixture $item $name" test -f "$oracle.bytes/$leaf"
         fs.ntfs "$img" read --stream "$name" "$item" >"$SANDBOX/read" 2>"$SANDBOX/err"
         rc=$?
