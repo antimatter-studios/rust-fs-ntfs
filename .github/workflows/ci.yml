@@ -458,8 +458,9 @@ jobs:
             op-sequence-reference-model op-sequence-reference-model "$lines" "$bytes" -- \
             cargo test --release --locked --test op_sequence_reference_model
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/op-sequence-reference-model.log | awk '{s+=$4} END{print s+0}')
-          # Eight declared contracts in #680; zero selected is never a pass.
-          test "$n" -ge 8 || { echo "::error::model contracts: $n executed, floor 8"; exit 1; }
+          # Eight declared contracts in #680 and #731's named streams; zero
+          # selected is never a pass.
+          test "$n" -ge 9 || { echo "::error::model contracts: $n executed, floor 9"; exit 1; }
 
       - name: Arbitrary-input operation generator and replay contracts
         run: |
@@ -468,9 +469,9 @@ jobs:
             op-sequence-generator op-sequence-generator "$lines" "$bytes" -- \
             cargo test --release --locked --test op_sequence_generator
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/op-sequence-generator.log | awk '{s+=$4} END{print s+0}')
-          # Eight declared fixture-free contracts in #681 and #684's pin format,
-          # on every host leg.
-          test "$n" -ge 9 || { echo "::error::generator contracts: $n executed, floor 9"; exit 1; }
+          # Eight declared fixture-free contracts in #681, #684's pin format
+          # and #731's stream opcodes, on every host leg.
+          test "$n" -ge 10 || { echo "::error::generator contracts: $n executed, floor 10"; exit 1; }
 
       - name: Generated operations and fresh-reopen comparisons
         run: |
@@ -480,8 +481,9 @@ jobs:
             cargo test --release --locked --test op_sequence_readback
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/op-sequence-readback.log | awk '{s+=$4} END{print s+0}')
           # Four original seeds, four declared #682 image-harness contracts,
-          # #683's corpus replay and #684's three shrink and capture contracts.
-          test "$n" -ge 12 || { echo "::error::readback contracts: $n executed, floor 12"; exit 1; }
+          # #683's corpus replay, #684's three shrink and capture contracts
+          # and #731's named-stream case.
+          test "$n" -ge 13 || { echo "::error::readback contracts: $n executed, floor 13"; exit 1; }
 
       - name: Operation sequences against ntfs-3g
         if: matrix.os == 'ubuntu-latest'
@@ -976,10 +978,11 @@ jobs:
         run: |
           bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli,harness --no-fail-fast
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
-          # Previous floor 1370 plus the #644 recursive-walk fault contract.
-          echo "tests executed: $n (floor 1371)"
-          if [ "$n" -lt 1371 ]; then
-              echo "::error::only $n tests executed, floor is 1371 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680, eight generator contracts in #681, four image-harness contracts in #682 and one recursive-walk fault contract in #644. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
+          # Previous floor 1370 plus the #644 recursive-walk fault contract
+          # and three declared #731 named-stream contracts.
+          echo "tests executed: $n (floor 1374)"
+          if [ "$n" -lt 1374 ]; then
+              echo "::error::only $n tests executed, floor is 1374 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680, eight generator contracts in #681, four image-harness contracts in #682, one recursive-walk fault contract in #644 and three named-stream contracts in #731. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
               exit 1
           fi
       - run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness -- -D warnings

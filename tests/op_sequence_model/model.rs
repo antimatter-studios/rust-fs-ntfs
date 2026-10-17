@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 /// A workload bound, not a claim about NTFS's maximum file size.
 pub const MAX_FILE_BYTES: usize = 1024 * 1024;
 type Directory = BTreeMap<Vec<u16>, (String, usize)>;
+/// Named `$DATA` streams by `$UpCase` key: stored spelling and bytes.
+type Streams = BTreeMap<Vec<u16>, (String, Vec<u8>)>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -29,6 +31,8 @@ enum Kind {
 struct Node {
     kind: Kind,
     links: usize,
+    /// A node's streams, not a name's: every hard link shares them (#731).
+    streams: Streams,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +61,7 @@ impl Model {
         let root = Node {
             kind: Kind::Directory(BTreeMap::new()),
             links: 1,
+            streams: Streams::new(),
         };
         Ok(Self {
             nodes: BTreeMap::from([(0, root)]),
@@ -178,7 +183,14 @@ impl Model {
         } else {
             Kind::File(Vec::new())
         };
-        self.nodes.insert(id, Node { kind, links: 1 });
+        self.nodes.insert(
+            id,
+            Node {
+                kind,
+                links: 1,
+                streams: Streams::new(),
+            },
+        );
         self.next += 1;
         self.dir_mut(parent).insert(key, (name.into(), id));
         Ok(id)
@@ -242,19 +254,52 @@ impl Model {
         Ok(())
     }
 
+    /// A name Windows can open as a stream: at most 255 UTF-16 units, no
+    /// reserved or control character, and no trailing space or period,
+    /// which Win32 path parsing strips.
+    fn valid_stream_name(name: &str) -> bool {
+        Self::valid_name(name)
+            && !name.chars().any(|c| (c as u32) < 0x20)
+            && !name.ends_with(' ')
+            && !name.ends_with('.')
+    }
+
     /// Create or replace the named `$DATA` stream `name` of `path` (#731).
-    pub fn write_stream(&mut self, _path: &str, _name: &str, _bytes: &[u8]) -> Result<(), Error> {
-        unimplemented!("named streams are modeled in #731")
+    /// A name equal under `$UpCase` to an existing one names that stream,
+    /// and its first spelling is kept. A directory holds streams too.
+    pub fn write_stream(&mut self, path: &str, name: &str, bytes: &[u8]) -> Result<(), Error> {
+        if !Self::valid_stream_name(name) {
+            return Err(Error::InvalidName);
+        }
+        let id = self.lookup(path)?;
+        if bytes.len() > MAX_FILE_BYTES {
+            return Err(Error::FileTooLarge);
+        }
+        let key = self.key(name);
+        let streams = &mut self.nodes.get_mut(&id).unwrap().streams;
+        let spelling = streams.get(&key).map_or(name.into(), |(n, _)| n.clone());
+        streams.insert(key, (spelling, bytes.to_vec()));
+        Ok(())
     }
 
     /// Delete the named `$DATA` stream `name` of `path` (#731).
-    pub fn delete_stream(&mut self, _path: &str, _name: &str) -> Result<(), Error> {
-        unimplemented!("named streams are modeled in #731")
+    pub fn delete_stream(&mut self, path: &str, name: &str) -> Result<(), Error> {
+        if name.is_empty() {
+            return Err(Error::InvalidName);
+        }
+        let id = self.lookup(path)?;
+        let key = self.key(name);
+        let streams = &mut self.nodes.get_mut(&id).unwrap().streams;
+        streams.remove(&key).map(|_| ()).ok_or(Error::Missing)
     }
 
     /// The named streams of `path`, in `$UpCase` key order (#731).
-    pub fn streams(&self, _path: &str) -> Result<Vec<(String, Vec<u8>)>, Error> {
-        unimplemented!("named streams are modeled in #731")
+    pub fn streams(&self, path: &str) -> Result<Vec<(String, Vec<u8>)>, Error> {
+        Ok(self.nodes[&self.lookup(path)?]
+            .streams
+            .values()
+            .cloned()
+            .collect())
     }
 
     /// Rename within a directory, matching the initial workload's API.

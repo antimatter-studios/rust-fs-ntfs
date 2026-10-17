@@ -289,6 +289,37 @@ fn name(model: &Model, parent: &str, selector: u8, step: usize) -> String {
     }
 }
 
+/// Streams stay on files in this slice (#731): a directory's are modeled,
+/// but rmdir does not yet give back a stream's clusters unless the
+/// directory has index blocks (#735). Wrong type is a file used as a
+/// directory, which no stream operation can open.
+fn stream_path(model: &Model, selector: u8) -> String {
+    match selector % 4 {
+        0 => select(model, 0, false, false),
+        1 => join(&select(model, selector | 2, false, false), "x"),
+        _ => select(model, selector, false, false),
+    }
+}
+/// The file-name pool's cases, for stream names (#731).
+fn stream_name(model: &Model, path: &str, selector: u8, step: usize) -> String {
+    const NAMES: &[&str] = &[
+        "s", "S", "σ", "Σ", "é", "É", "中", "😀", "", ".", "..", "a:b", "a/b", "x.", "x ", "\u{1}",
+    ];
+    match selector % 21 {
+        n @ 0..=15 => NAMES[n as usize].into(),
+        16 => "n".repeat(255),
+        17 => "😀".repeat(127) + "x",
+        18 => "😀".repeat(128),
+        19 => model
+            .streams(path)
+            .ok()
+            .and_then(|s| s.into_iter().next())
+            .map(|(n, _)| n)
+            .unwrap_or_else(|| "s".into()),
+        _ => format!("stream{step}"),
+    }
+}
+
 pub struct Generator<'a> {
     remaining: &'a [u8],
     steps: usize,
@@ -312,8 +343,12 @@ impl<'a> Generator<'a> {
         h[..n].copy_from_slice(&self.remaining[..n]);
         self.remaining = &self.remaining[n..];
         self.steps += 1;
-        let verb = h[0] % 9;
-        let path = select(model, h[1], verb == 7, false);
+        let verb = h[0] % 11;
+        let path = if verb >= 9 {
+            stream_path(model, h[1])
+        } else {
+            select(model, h[1], verb == 7, false)
+        };
         let parent = select(model, h[2], true, true);
         let rename_parent = path
             .rsplit_once('/')
@@ -327,7 +362,7 @@ impl<'a> Generator<'a> {
         );
         let raw = u16::from_le_bytes([h[4], h[5]]);
         let mut data = Vec::new();
-        if verb == 2 || verb == 3 {
+        if matches!(verb, 2 | 3 | 9) {
             let len = (raw as usize % (MAX_DATA + 1)).min(self.remaining.len());
             data.extend_from_slice(&self.remaining[..len]);
             self.remaining = &self.remaining[len..];
@@ -354,7 +389,16 @@ impl<'a> Generator<'a> {
             },
             6 => Op::Unlink { path },
             7 => Op::Rmdir { path },
-            _ => Op::Link { path, parent, name },
+            8 => Op::Link { path, parent, name },
+            9 => Op::WriteStream {
+                stream: stream_name(model, &path, h[3], self.steps),
+                path,
+                data,
+            },
+            _ => Op::DeleteStream {
+                stream: stream_name(model, &path, h[3], self.steps),
+                path,
+            },
         })
     }
 }
