@@ -25,7 +25,7 @@
 #   scripts     101 / 2,669 (11 shell tests, rebased 2026-09-26)  135 / 3,500
 #   matrix      1,381 / 100,339 green (72 cases, 2026-10-10)       1,850 / 135,000
 #   cli         27 / 1,035 (estimate: CI's 5-file run + test-docs)  36 / 1,380
-#   cli-oracle  15 / 741 (CI Linux, 2026-09-29, 2 files, 3 tools) 20 / 990
+#   cli-oracle  21 / 955 (CI Linux, 2026-10-21, 4 files)         21 / 990
 #   cli-host    21 / 1,569 (arm64 Pi, 2026-10-12, 20 scenarios)   28 / 2,100
 #
 # THE CLIPPY ROW MOVED ON 2026-09-19, from 150/5,000 to 260/11,500. Adding
@@ -93,6 +93,17 @@
 # not change between the real run and the budget replay. Evidence and hashes:
 # docs/testing/windows-full-matrix-2026-10-10/.
 #
+# THE CLI-ORACLE ROW MOVED ON 2026-10-21, from 20/990 to 21/990.
+# Run 39677780603, job 119498725938, passed all four oracle files and 275
+# checks. Its retained cli-oracle.log is 21 lines / 955 bytes; the wrapper
+# then correctly failed the old 20-line limit with exit 65. The added
+# recursive Windows listing oracle (#644) contributes its normal three
+# verdict lines. No test output is suppressed. The new line cap is exactly
+# the measured output, with no extra headroom; the byte cap stays 990.
+# The matching chores.yml execution floor rises from 87 to 273: 240 fixed
+# checks plus the recursive fixture's asserted minimum of 33.
+# Evidence: https://github.com/antimatter-studios/rust-fs-ntfs/actions/runs/39677780603/job/119498725938
+
 # THE CLI ROW is the installed tools' suite (scripts/test-cli.sh): a line
 # naming the binary, doctor's line per tool, and three lines per passing
 # file (its name, its count, its trailing line). It is small by design, so a
@@ -113,5 +124,5 @@ scripts       135    3500
 semver         40    4000
 matrix       1850  135000
 cli            36    1380
-cli-oracle     20     990
+cli-oracle     21     990
 cli-host       28    2100

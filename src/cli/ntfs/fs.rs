@@ -7,13 +7,14 @@
 //! answers `not implemented` with exit status 3, so a script moved between
 //! filesystems fails loudly instead of meaning something else.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::Write;
 
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command as Cmd};
 
 use super::device::{self, Device};
-use fs_core::cli::{CliError, Json, Outcome, Tool};
+use fs_core::cli::{CliError, Format, Json, Outcome, Tool};
 use fs_ntfs::attr_io::{self, AttrType};
 use fs_ntfs::error::{Error, Kind};
 use fs_ntfs::read::{self, VolumeInfo};
@@ -105,6 +106,21 @@ fn command() -> Cmd {
             Cmd::new("ls")
                 .about("List a directory: name, type, size, mode, mtime (and a link's target)")
                 .arg(
+                    Arg::new("recursive").long("recursive").short('R')
+                        .action(ArgAction::SetTrue)
+                        .help("Walk depth first, names sorted as bytes; never follow a reparse point"),
+                )
+                .arg(
+                    Arg::new("max-depth").long("max-depth").value_name("N")
+                        .value_parser(value_parser!(u64)).requires("recursive")
+                        .help("How deep --recursive may go (default: 64); a directory's entries are depth 1"),
+                )
+                .arg(
+                    Arg::new("limit").long("limit").value_name("N")
+                        .value_parser(value_parser!(u64)).requires("recursive")
+                        .help("How many entries --recursive may list (default: 100000)"),
+                )
+                .arg(
                     Arg::new("path")
                         .value_name("PATH")
                         .default_value("/")
@@ -120,7 +136,17 @@ fn command() -> Cmd {
                 .after_help(
                     "Examples:\n  fs.ntfs disk.img ls /Users\n  \
                      fs.ntfs disk.img ls / | jq -r '.[].name'\n  \
-                     fs.ntfs disk.img ls --all --text /",
+                     fs.ntfs disk.img ls --all --text /\n  \
+                     fs.ntfs disk.img ls -R --max-depth 8 --limit 1000 /Users\n\n\
+                     With --recursive each entry adds its path from the root of the volume and \
+                     its depth: PATH's entries are depth 1. A non-directory or reparse PATH is \
+                     listed alone at depth 0. Symlinks, junctions and all other reparse points \
+                     are never entered. An already visited directory record is listed with \
+                     revisited: true and not entered again. A tree that exactly fits succeeds; \
+                     one more entry past a bound, or an unreadable directory, exits 1 with \
+                     the entries so far on stdout and the bound or path named on stderr. \
+                     --limit 0 allows no entry; --max-depth 0 none below PATH. \
+                     Plain ls lists only the directory's entries, without path or depth.",
                 ),
         )
         .subcommand(
@@ -313,7 +339,12 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         }
         "ls" => {
             let (mut dev, _) = device::mount(target, offset, false)?;
-            ls(&mut dev, path_arg(sub)?, sub.get_flag("all"))
+            if sub.get_flag("recursive") {
+                let format = Format::of(matches, &std::env::args_os().collect::<Vec<_>>());
+                ls_recursive(&mut dev, path_arg(sub)?, sub, format)
+            } else {
+                ls(&mut dev, path_arg(sub)?, sub.get_flag("all"))
+            }
         }
         "stat" => {
             let (mut dev, _) = device::mount(target, offset, false)?;
@@ -399,6 +430,12 @@ fn mode(kind: &str) -> &'static str {
 /// string), mtime (seconds since the epoch, number), and target (string)
 /// for a link -- plus NTFS's own record number and attribute bits.
 fn entry(dev: &mut Device, name: &str, record: u64) -> Result<Json, Error> {
+    entry_info(dev, name, record).map(|(item, _)| item)
+}
+
+/// The existing entry and whether it is a directory safe to enter. Even
+/// an unknown reparse tag, or a reparse flag without its data, is a leaf.
+fn entry_info(dev: &mut Device, name: &str, record: u64) -> Result<(Json, bool), Error> {
     let st = read::read_stat(dev, record)?;
     let reparse = read::read_attribute_value_if_present(dev, record, AttrType::ReparsePoint, None)?;
     let tag = reparse
@@ -421,7 +458,8 @@ fn entry(dev: &mut Device, name: &str, record: u64) -> Result<Json, Error> {
             Json::from(reparse.as_deref().and_then(fs_ntfs::reparse_link_target)),
         ));
     }
-    Ok(Json::object(fields))
+    let descend = st.is_dir && reparse.is_none() && st.file_attributes & 0x400 == 0;
+    Ok((Json::object(fields), descend))
 }
 
 fn entry_text(e: &Json) -> String {
@@ -431,10 +469,15 @@ fn entry_text(e: &Json) -> String {
         type_char(&field("type")),
         field("mode"),
         field("size"),
-        field("name")
+        e.get("path")
+            .map(Json::to_text)
+            .unwrap_or_else(|| field("name"))
     );
     if let Some(target) = e.get("target") {
         line.push_str(&format!(" -> {}", target.to_text()));
+    }
+    if e.get("revisited") == Some(&Json::Bool(true)) {
+        line.push_str(" [revisited]");
     }
     line
 }
@@ -467,6 +510,119 @@ fn ls(dev: &mut Device, path: &str, all: bool) -> Result<Outcome, CliError> {
         .collect::<Vec<_>>()
         .join("\n");
     Ok(Outcome::report(Json::Arr(entries)).with_text(text))
+}
+
+/// The remaining children of one directory, in byte order. Dot entries
+/// never participate in a recursive listing, including with --all.
+fn sorted_children(
+    dev: &mut Device,
+    record: u64,
+    path: &str,
+    all: bool,
+) -> Result<std::vec::IntoIter<read::DirEntry>, CliError> {
+    let mut children = read::read_dir_entries(dev, record).map_err(|e| ntfs_error(path, e))?;
+    children.retain(|e| {
+        e.name != "." && e.name != ".." && (all || e.record_number >= FIRST_USER_RECORD)
+    });
+    children.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+    Ok(children.into_iter())
+}
+
+fn recursive_entry(item: Json, path: String, depth: u64, revisited: bool) -> Json {
+    let Json::Obj(mut fields) = item else {
+        unreachable!("an ls entry is an object")
+    };
+    fields.push(("path".into(), Json::from(path)));
+    fields.push(("depth".into(), Json::from(depth)));
+    if revisited {
+        fields.push(("revisited".into(), Json::from(true)));
+    }
+    Json::Obj(fields)
+}
+
+/// An iterative depth-first walk: one directory's remaining entries per
+/// level on the heap, with directory records visited globally. Bounds
+/// refuse the next entry, so exact fits (including empty trees) succeed.
+fn ls_recursive(
+    dev: &mut Device,
+    path: &str,
+    sub: &ArgMatches,
+    format: Format,
+) -> Result<Outcome, CliError> {
+    let record = read::resolve_path(dev, path).map_err(|e| ntfs_error(path, e))?;
+    let start = format!(
+        "/{}",
+        path.split('/')
+            .filter(|c| !c.is_empty())
+            .collect::<Vec<_>>()
+            .join("/")
+    );
+    let (first, descend) = entry_info(dev, start.rsplit('/').next().unwrap_or(""), record)
+        .map_err(|e| ntfs_error(path, e))?;
+    let max_depth = sub.get_one::<u64>("max-depth").copied().unwrap_or(64);
+    let limit = sub.get_one::<u64>("limit").copied().unwrap_or(100_000);
+    let all = sub.get_flag("all");
+    let reached = |bound: &str, value: u64, at: &str| {
+        CliError::failed(format!("{bound} {value} reached at {at}"))
+    };
+    let mut entries = Vec::new();
+    let walked = (|| {
+        if !descend {
+            if limit == 0 {
+                return Err(reached("--limit", limit, &start));
+            }
+            entries.push(recursive_entry(first, start, 0, false));
+            return Ok(());
+        }
+        let mut visited = HashSet::from([record]);
+        let mut stack = vec![(
+            start.clone(),
+            0u64,
+            sorted_children(dev, record, &start, all)?,
+        )];
+        while let Some((parent, parent_depth, children)) = stack.last_mut() {
+            let Some(child) = children.next() else {
+                stack.pop();
+                continue;
+            };
+            let path = format!("{}/{}", parent.trim_end_matches('/'), child.name);
+            let depth = *parent_depth + 1;
+            if entries.len() as u64 >= limit {
+                return Err(reached("--limit", limit, &path));
+            }
+            if depth > max_depth {
+                return Err(reached("--max-depth", max_depth, &path));
+            }
+            let (item, descend) = entry_info(dev, &child.name, child.record_number)
+                .map_err(|e| ntfs_error(&path, e))?;
+            let revisited = descend && !visited.insert(child.record_number);
+            entries.push(recursive_entry(item, path.clone(), depth, revisited));
+            if descend && !revisited {
+                let next = sorted_children(dev, child.record_number, &path, all)?;
+                stack.push((path, depth, next));
+            }
+        }
+        Ok(())
+    })();
+    let text = entries
+        .iter()
+        .map(entry_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let report = Outcome::report(Json::Arr(entries)).with_text(text);
+    match walked {
+        Ok(()) => Ok(report),
+        Err(error) => {
+            // The shared outcome carries a report or an error, so render
+            // the complete partial report before returning the error.
+            let partial = fs_core::cli::output::render(TOOL.name, format, Ok(report));
+            let mut out = std::io::stdout().lock();
+            out.write_all(partial.stdout.as_bytes())
+                .and_then(|()| out.flush())
+                .map_err(|e| CliError::failed(format!("write: {e}")))?;
+            Err(error)
+        }
+    }
 }
 
 /// The file attribute bits MS-FSCC 2.6 documents, by the names `stat`
