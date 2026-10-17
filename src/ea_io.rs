@@ -294,14 +294,15 @@ mod tests {
     }
 
     #[test]
-    fn encode_last_entry_has_zero_next_offset() {
+    fn encode_last_entry_has_its_aligned_length() {
         let eas = vec![ea(b"A", b"1"), ea(b"B", b"2")];
         let bytes = encode(&eas).unwrap();
         // first entry's next_off = entry_encoded_size(1, 1) = align4(8+1+1+1)=12
         let first_len = entry_encoded_size(1, 1);
-        // second entry's next_off (at bytes[first_len..first_len+4]) must be 0
+        // Windows stores the aligned length even on the terminal on-disk
+        // entry; zero is the terminator of an API input buffer (#745).
         let last_next_off = u32::from_le_bytes(bytes[first_len..first_len + 4].try_into().unwrap());
-        assert_eq!(last_next_off, 0);
+        assert_eq!(last_next_off, first_len as u32);
     }
 
     #[test]
