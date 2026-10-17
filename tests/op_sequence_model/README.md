@@ -78,8 +78,8 @@ nested replay and deliberate persisted byte/name mutations. All eight readback
 tests run on each native CI host with an explicit floor, and the Ubuntu hook
 requires all three reference tools. Scratch images use the shared panic-safe
 owner. Concrete prefixes, input bytes, geometry and refusals are retained under
-`tmp/op-sequence-model/`. Windows chkdsk, ADS/EAs and
-minimization remain under #484; this test-only slice changes no format code.
+`tmp/op-sequence-model/`. Windows chkdsk and ADS/EAs
+remain under #484; this test-only slice changes no format code.
 
 The committed `fuzz/corpus/operation_sequence/*.json` corpus uses the generator's
 strict JSON v1 format. `committed_corpus_replays_every_seed` enumerates every
@@ -110,3 +110,58 @@ OPSEQ_REFERENCE_TOOLS=1 cargo +nightly fuzz run operation_sequence /absolute/pat
 
 For a fresh bounded run on Linux with cargo-fuzz, coreutils and ntfs-3g:
 `OPSEQ_FUZZ_SEED=683 bash scripts/fuzz-op-sequence.sh 120`.
+
+## A failing sequence becomes a permanent regression (#684)
+
+One command, run from the repository root on a retained `reproducer.json`
+or a raw libFuzzer input, minimizes the failure and pins it in the corpus:
+
+```sh
+cargo run --release --example op_sequence_capture -- tmp/op-sequence-model/explorer/reproducer.json truncate-keeps-old-size
+```
+
+A mismatch is its kind and its step. The kind is the failure message's first
+line, after any `assertion ... failed: ` prefix, up to the first `: `, path
+(` /`), `{` or `"`, so paths, values and operands do not count. The step is
+the number of operations executed when it was seen. `shrink.rs` keeps the
+operations through that step, then deletes runs of earlier operations in
+halving chunks and shortens write payloads (keeping their prefix), write
+offsets and truncate sizes, smallest candidate first, until neither changes
+anything. A candidate counts only when the same kind follows its own last
+operation. Paths and names are never rewritten, because later operations name
+them. Every candidate is a whole replay on a fresh image; nothing depends on
+the generator's bytes, a seed or a PRNG.
+
+The result is `fuzz/corpus/operation_sequence/<name>-v1.json`: the strict v1
+operations plus a `regression` object pinning the kind, the step, the image
+geometry (`format_filesystem`'s size, cluster, record, label and serial) and
+the original input's path and operation count. Replay ignores the pin.
+`committed_corpus_replays_every_seed` replays the entry in every suite run,
+prints the seed and its pin if it fails, retains its evidence under
+`tmp/op-sequence-model/corpus-<name>-v1/`, and refuses a pin recorded on other
+geometry. Capture never overwrites an entry and only reads its input. An
+input that replays cleanly or no longer reproduces from its own prefix, or
+that lies in the capture's scratch directory
+(`tmp/op-sequence-model/capture-<name>/`), fails with the input named and
+unchanged, and pins nothing.
+
+For a real finding, commit the entry alone first: the suite fails on it with
+the pinned kind. Then fix it on the same branch, leaving the entry untouched.
+Our model and our readers share one interpretation of NTFS, so before fixing,
+attach evidence from readers that are not ours to the issue. The failing run
+leaves `failure.img` beside the entry's evidence: grade it with ntfs-3g's
+`ntfsfix -n`, list and read the paths the pinned operation touched with
+`ntfsls -a -p` and `ntfscat`, and keep those reports with the image's SHA-256.
+When the finding is about bytes on the volume, also grade the image with
+Windows chkdsk (`windows-test-skill`) or Linux's ntfs3 (`chore test:kernel`).
+If the independent readers agree with the driver, the model is wrong: fix the
+model, never the pinned entry. Once fixed, `chore test:op-sequence-oracle`
+grades the entry's final image with ntfs-3g on every CI run.
+
+`op_sequence_readback.rs` proves the loop with a test-only `StaleTruncate`
+wrapper that keeps reporting a file's old size after a shrinking truncate. An
+eighteen-operation workload of every kind shrinks to a create, a one-byte write
+and a truncate to zero, which the real model and the disk agree on. Capture
+contracts cover raw generator bytes, the written pin and refused overwrites,
+clean inputs, scratch-directory inputs and names. The pin format has its own
+fixture-free contract in `op_sequence_generator.rs`.

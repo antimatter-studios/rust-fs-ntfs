@@ -9,6 +9,8 @@ mod generator;
 mod harness;
 #[path = "op_sequence_model/model.rs"]
 mod model;
+#[path = "op_sequence_model/shrink.rs"]
+mod shrink;
 
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::{fsck, mkfs, read, write};
@@ -20,6 +22,8 @@ use std::time::{Duration, Instant};
 
 const STEPS: usize = 120;
 const SIZE: u64 = 64 * 1024 * 1024;
+/// The committed seeds and captured regressions, replayed by the gate.
+const CORPUS: &str = "fuzz/corpus/operation_sequence";
 
 struct Rng(u64);
 impl Rng {
@@ -117,6 +121,14 @@ fn reference_tools(image: &str, model: &BTreeMap<String, Vec<u8>>, artifacts: &P
         );
         assert_eq!(&output.stdout, expected, "ntfs-3g contents of {path}");
     }
+}
+
+/// The capture command (#684), run from the repository root:
+/// `cargo run --release --example op_sequence_capture -- INPUT NAME`.
+#[allow(dead_code)]
+pub fn capture(original: &Path, name: &str) -> Result<std::path::PathBuf, String> {
+    shrink::quiet_panics();
+    harness::capture(original, name, Path::new(CORPUS), |model| model)
 }
 
 /// Shared with libFuzzer: valid JSON replays concretely; other bytes use the
@@ -272,7 +284,7 @@ fn seeded_readback_boundary() {
 
 #[test]
 fn committed_corpus_replays_every_seed() {
-    let corpus = Path::new("fuzz/corpus/operation_sequence");
+    let corpus = Path::new(CORPUS);
     for required in [
         "basic-write-v1.json",
         "namespace-v1.json",
@@ -287,10 +299,23 @@ fn committed_corpus_replays_every_seed() {
         .collect();
     seeds.sort();
     assert!(!seeds.is_empty(), "no operation sequences selected");
-    for (index, seed) in seeds.iter().enumerate() {
-        let operations = generator::decode_replay(&fs::read(seed).unwrap()).unwrap();
+    for seed in &seeds {
+        // Shown only if this test fails: which seed, and what it pins.
+        eprintln!("replaying {}", seed.display());
+        let (operations, pinned) = generator::decode_regression(&fs::read(seed).unwrap()).unwrap();
         assert!(!operations.is_empty(), "empty seed {}", seed.display());
-        let mut h = harness::Harness::new(&format!("corpus-{index}"));
+        if let Some(pinned) = pinned {
+            eprintln!("pinned: {} after operation {}", pinned.kind, pinned.step);
+            assert_eq!(
+                pinned.geometry,
+                harness::geometry(),
+                "{} was captured on another image: recapture it",
+                seed.display()
+            );
+        }
+        // Evidence lands in tmp/op-sequence-model/corpus-<file stem>/.
+        let stem = seed.file_stem().unwrap().to_str().unwrap();
+        let mut h = harness::Harness::new(&format!("corpus-{stem}"));
         for operation in operations {
             h.step(operation);
         }
@@ -403,4 +428,263 @@ fn persisted_name_mutation_is_detected_without_writer_state() {
     write::rename(Path::new(&h.image), "/a", "wrong").unwrap();
     File::open(&h.image).unwrap().sync_all().unwrap();
     assert!(std::panic::catch_unwind(|| h.verify()).is_err());
+}
+
+/// Test-only divergence (#684): after a truncate that shrinks a file, this
+/// wrapper keeps reporting the old size. The real model is never changed.
+#[derive(Clone)]
+struct StaleTruncate {
+    model: model::Model,
+    stale: BTreeMap<usize, usize>,
+}
+
+impl harness::Expected for StaleTruncate {
+    fn tree(&self) -> &model::Model {
+        &self.model
+    }
+
+    fn apply(&mut self, op: &generator::Op) -> Result<(), model::Error> {
+        use generator::Op;
+        let before = match op {
+            Op::Write { path, .. } | Op::WriteAt { path, .. } | Op::Truncate { path, .. } => {
+                self.model.stat(path).ok()
+            }
+            _ => None,
+        };
+        op.apply(&mut self.model)?;
+        if let Some(before) = before {
+            match op {
+                Op::Truncate { size, .. } if (*size as usize) < before.size => {
+                    self.stale.insert(before.id, before.size);
+                }
+                _ => {
+                    self.stale.remove(&before.id);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn stat(&self, path: &str) -> Result<model::Stat, model::Error> {
+        let mut stat = self.model.stat(path)?;
+        if let Some(size) = self.stale.get(&stat.id) {
+            stat.size = *size;
+        }
+        Ok(stat)
+    }
+}
+
+fn stale_truncate(model: model::Model) -> StaleTruncate {
+    StaleTruncate {
+        model,
+        stale: BTreeMap::new(),
+    }
+}
+
+/// Eighteen operations of every kind, one refusal among them. Only three
+/// matter to the divergence: `/a` is created, written once, then shrunk.
+fn stale_truncate_workload() -> Vec<generator::Op> {
+    let mut operations = generator::decode_replay(
+        br#"{"version":1,"operations":[
+        {"op":"mkdir","parent":"/","name":"d"},
+        {"op":"create","parent":"/d","name":"f"},
+        {"op":"create","parent":"/","name":"a"},
+        {"op":"write","path":"/d/f","data":[10,20,30]},
+        {"op":"link","path":"/d/f","parent":"/","name":"alias"},
+        {"op":"create","parent":"/","name":"b"},
+        {"op":"truncate","path":"/b","size":300},
+        {"op":"write_at","path":"/b","offset":100,"data":[1,2,3]},
+        {"op":"rename","path":"/d","name":"moved","replace":false},
+        {"op":"rmdir","path":"/moved"},
+        {"op":"mkdir","parent":"/","name":"e"},
+        {"op":"rmdir","path":"/e"},
+        {"op":"unlink","path":"/alias"},
+        {"op":"rename","path":"/b","name":"c","replace":false},
+        {"op":"truncate","path":"/a","size":1000},
+        {"op":"create","parent":"/","name":"z"},
+        {"op":"unlink","path":"/moved/f"}
+    ]}"#,
+    )
+    .unwrap();
+    let data = (0..4096).map(|i| (i % 251) as u8 + 1).collect();
+    operations.insert(
+        5,
+        generator::Op::Write {
+            path: "/a".into(),
+            data,
+        },
+    );
+    operations
+}
+
+/// The smallest sequence that still shows the divergence: a file must hold
+/// a byte before a truncate can shrink it, and zero is the smallest size.
+fn stale_truncate_minimum() -> Vec<generator::Op> {
+    use generator::Op;
+    vec![
+        Op::Create {
+            parent: "/".into(),
+            name: "a".into(),
+        },
+        Op::Write {
+            path: "/a".into(),
+            data: vec![1],
+        },
+        Op::Truncate {
+            path: "/a".into(),
+            size: 0,
+        },
+    ]
+}
+
+#[test]
+fn mismatch_kind_ignores_paths_values_and_operands() {
+    for (message, kind) in [
+        (
+            "assertion `left == right` failed: size of /a/b\n  left: 1\n right: 0",
+            "size of",
+        ),
+        (
+            "assertion `left == right` failed: names/kinds in /d\n  left: []",
+            "names/kinds in",
+        ),
+        (
+            "disk accepted model refusal: Create { parent: \"/\", name: \"a\" }: Exists",
+            "disk accepted model refusal",
+        ),
+        (
+            "fresh reopen differs after Truncate { path: \"/a\", size: 0 }",
+            "fresh reopen differs after Truncate",
+        ),
+        ("check_io: [Finding]", "check_io"),
+        (
+            "called `Result::unwrap()` on an `Err` value: Io",
+            "called `Result::unwrap()` on an `Err` value",
+        ),
+        (
+            "assertion failed: report.findings.is_empty()",
+            "report.findings.is_empty()",
+        ),
+        ("sequence deadline", "sequence deadline"),
+        ("", "panic"),
+    ] {
+        assert_eq!(shrink::kind(message), kind, "{message:?}");
+    }
+    let payload = std::panic::catch_unwind(|| std::panic::panic_any(7u8)).unwrap_err();
+    assert_eq!(shrink::kind_of(&*payload), "panic");
+    let payload = std::panic::catch_unwind(|| panic!("size of {}", "/x")).unwrap_err();
+    assert_eq!(shrink::kind_of(&*payload), "size of");
+}
+
+#[test]
+fn shrinker_reduces_a_known_divergence_to_its_minimal_sequence() {
+    let workload = stale_truncate_workload();
+    let found = harness::replay("shrink-control", &workload, stale_truncate)
+        .expect("the wrapper's deliberate divergence");
+    assert_eq!(
+        found,
+        shrink::Mismatch {
+            kind: "size of".into(),
+            step: 16,
+        },
+        "the shrinking truncate of /a is the sixteenth operation"
+    );
+    let mut replays = 0;
+    let minimal = shrink::shrink(&workload, &found, |candidate| {
+        replays += 1;
+        harness::replay("shrink-control", candidate, stale_truncate)
+    })
+    .unwrap();
+    assert_eq!(minimal, stale_truncate_minimum());
+    // About twenty replays: runs are deleted in halving chunks first.
+    assert!(replays <= 30, "{replays} replays to shrink 16 operations");
+    assert_eq!(
+        harness::replay("shrink-control", &minimal, stale_truncate),
+        Some(shrink::Mismatch {
+            kind: "size of".into(),
+            step: 3,
+        })
+    );
+    // The divergence is the wrapper's: the real model agrees with the disk.
+    assert_eq!(
+        harness::replay("shrink-control", &minimal, |model| model),
+        None
+    );
+}
+
+#[test]
+fn capture_pins_a_minimized_regression_and_never_discards_the_original() {
+    let root = Path::new("tmp/op-sequence-model/capture-control");
+    let _ = fs::remove_dir_all(root);
+    let corpus = root.join("corpus");
+    fs::create_dir_all(&corpus).unwrap();
+    // Raw generator bytes, as libFuzzer saves them: create /a, write five
+    // bytes to it, mkdir /b, then shrink /a to two bytes.
+    let mut input = Vec::new();
+    for (frame, data) in [
+        ([0, 2, 2, 0, 0, 0, 0, 0], &[][..]),
+        ([2, 2, 2, 0, 5, 0, 0, 0], &[9, 8, 7, 6, 5][..]),
+        ([1, 2, 2, 2, 0, 0, 0, 0], &[][..]),
+        ([4, 2, 2, 0, 2, 0, 0, 0], &[][..]),
+    ] {
+        input.extend(frame);
+        input.extend(data);
+    }
+    let original = root.join("crash-input.bin");
+    fs::write(&original, &input).unwrap();
+    let pinned =
+        harness::capture(&original, "stale-truncate-size", &corpus, stale_truncate).unwrap();
+    assert_eq!(pinned, corpus.join("stale-truncate-size-v1.json"));
+    assert_eq!(fs::read(&original).unwrap(), input, "original kept");
+    let captured = fs::read(&pinned).unwrap();
+    let (operations, regression) = generator::decode_regression(&captured).unwrap();
+    let mut minimum = stale_truncate_minimum();
+    minimum[1] = generator::Op::Write {
+        path: "/a".into(),
+        data: vec![9],
+    };
+    assert_eq!(operations, minimum);
+    let regression = regression.expect("the pinned mismatch");
+    assert_eq!((regression.kind.as_str(), regression.step), ("size of", 3));
+    assert_eq!(regression.geometry, harness::geometry());
+    assert_eq!(regression.original, original.display().to_string());
+    assert_eq!(regression.original_operations, 4);
+    // The pinned file replays to exactly the mismatch it records.
+    assert_eq!(
+        harness::replay("capture-replay", &operations, stale_truncate),
+        Some(shrink::Mismatch {
+            kind: regression.kind,
+            step: regression.step,
+        })
+    );
+
+    // A name already in the corpus is never overwritten.
+    let error =
+        harness::capture(&original, "stale-truncate-size", &corpus, stale_truncate).unwrap_err();
+    assert!(error.contains("exists"), "{error}");
+    assert_eq!(fs::read(&pinned).unwrap(), captured);
+
+    // An input that does not fail pins nothing and is left as it was.
+    let passing = root.join("passing-v1.json");
+    let bytes = generator::encode(&minimum).unwrap();
+    fs::write(&passing, &bytes).unwrap();
+    let error = harness::capture(&passing, "passing", &corpus, |model| model).unwrap_err();
+    assert!(error.contains(&passing.display().to_string()), "{error}");
+    assert_eq!(fs::read(&passing).unwrap(), bytes);
+    assert!(!corpus.join("passing-v1.json").exists());
+
+    // An input inside the capture's own scratch directory would be
+    // overwritten by its replays, so it is refused before any of them.
+    let scratch = Path::new("tmp/op-sequence-model/capture-inside");
+    fs::create_dir_all(scratch).unwrap();
+    let inside = scratch.join("reproducer.json");
+    fs::write(&inside, &bytes).unwrap();
+    let error = harness::capture(&inside, "inside", &corpus, stale_truncate).unwrap_err();
+    assert!(error.contains(&inside.display().to_string()), "{error}");
+    assert_eq!(fs::read(&inside).unwrap(), bytes);
+
+    // Corpus names describe the finding: lowercase words and hyphens only.
+    for name in ["", "Stale", "../escape", "a b", "trailing-"] {
+        assert!(harness::capture(&original, name, &corpus, stale_truncate).is_err());
+    }
 }
