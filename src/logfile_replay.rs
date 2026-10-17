@@ -88,6 +88,12 @@
 //!   leaves the block's LSN as it was too: both of `$Q`'s blocks keep their
 //!   LSN on the pre-image and after Windows' restart, which redid many
 //!   charges in them (`test-disks/windows-interrupted-quota-spilled`).
+//! * `UpdateFileNameRoot` and `UpdateFileNameAllocation`, which refresh
+//!   the copy of a file's `$FILE_NAME` an index entry holds, leave the
+//!   record's or block's LSN as it was too: on every
+//!   `test-disks/windows-interrupted-*` capture, a record or block whose
+//!   newest redo is one of them keeps, after Windows' restart, the LSN of
+//!   its newest other change, or the pre-image's (#643).
 //! * `DeleteIndexEntryAllocation` moves the entries after it down and
 //!   leaves the bytes past the block's new end as they were; the block's
 //!   update sequence array, which records the end of every sector, shows
@@ -1181,8 +1187,16 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
         // index blocks, keep an LSN older than every UpdateRecordDataRoot
         // or UpdateRecordDataAllocation they hold, on the pre-image and
         // after Windows' restart (`test-disks/windows-interrupted-quota`,
-        // `test-disks/windows-interrupted-quota-spilled`).
-        if !matches!(op, UPDATE_RECORD_DATA_ROOT | UPDATE_RECORD_DATA_ALLOCATION) {
+        // `test-disks/windows-interrupted-quota-spilled`). Its restart does
+        // the same when it redoes the `$FILE_NAME` copy an index entry
+        // holds: on every `test-disks/windows-interrupted-*` capture, a
+        // record or block whose newest redo is an UpdateFileNameRoot or
+        // UpdateFileNameAllocation keeps the LSN of its newest other change,
+        // or the pre-image's. Undo still stamps it, so that a rerun can tell
+        // a block it rolled back.
+        let keeps_lsn = matches!(op, UPDATE_RECORD_DATA_ROOT | UPDATE_RECORD_DATA_ALLOCATION)
+            || (!undoing && matches!(op, UPDATE_FILE_NAME_ROOT | UPDATE_FILE_NAME_ALLOCATION));
+        if !keeps_lsn {
             put_u64(
                 &mut block.bytes,
                 0x08,
