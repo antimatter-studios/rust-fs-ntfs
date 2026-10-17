@@ -2394,6 +2394,80 @@
       "image": "nfs-win-format-win-write-objids-mac-delete-win-chkdsk.img",
       "_notes": "Windows writes sixty files and gives each an object id, which grows $Extend\\$ObjId:$O past its root into INDX blocks. This crate unlinks nine of them spread across the index, so their entries come out of leaves and of interior nodes, and chkdsk grades the index (#571)."
     },
+    "win-format-win-quota-mac-delete-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "QUOTA",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-quota-track",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-size",
+          "path": "/gone.bin",
+          "size_bytes": "300000",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-size",
+          "path": "/kept.bin",
+          "size_bytes": "100000",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-mkdir",
+          "path": "/gone-dir",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "mac-rm",
+          "path": "/gone.bin"
+        },
+        {
+          "op": "mac-rmdir",
+          "path": "/gone-dir"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-quota-verify",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-win-format-win-quota-mac-delete-win-chkdsk.img",
+      "_notes": "Windows turns quota tracking on and writes two files and a directory, each charged to its owner in $Extend\\$Quota:$Q. This crate unlinks one file and removes the directory. chkdsk grades the volume, and Windows then counts every file again from scratch: each owner's usage as the volume held it must be what that count gives, so a delete that left its owner charged shows (#674, part of #510)."
+    },
     "win-format-win-usn-journal-mac-write-win-usn-retired-chkdsk": {
       "status": "pending",
       "volume_params": {
