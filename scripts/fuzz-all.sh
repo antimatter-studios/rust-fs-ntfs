@@ -14,7 +14,7 @@ set -uo pipefail
 
 budget="${1:-60}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$here"
+cd "$here" || exit 1
 
 targets=$(sed -n 's/^name = "\(.*\)"$/\1/p' fuzz/Cargo.toml | tail -n +2)
 [ -n "$targets" ] || { echo "no fuzz targets declared in fuzz/Cargo.toml" >&2; exit 1; }
@@ -25,6 +25,13 @@ trap 'rm -rf "$scratch"' EXIT
 failed=""
 for target in $targets; do
     echo "::group::fuzz $target (${budget}s)"
+    if [ "$target" = operation_sequence ]; then
+        if ! bash scripts/fuzz-op-sequence.sh "$budget"; then
+            failed="$failed $target"
+        fi
+        echo "::endgroup::"
+        continue
+    fi
     # The committed corpus is a seed, not a scratch pad. libFuzzer
     # writes every coverage-expanding input back into the FIRST corpus
     # directory it is given, so it gets a throwaway one and the

@@ -23,6 +23,10 @@ on:
         description: "Seconds per target"
         required: false
         default: "120"
+      seed:
+        description: "Deterministic operation explorer seed (1..4294967295)"
+        required: false
+        default: "683"
   schedule:
     - cron: "0 3 * * *"
 
@@ -81,7 +85,12 @@ jobs:
           find fuzz/corpus -type f | sort
           echo "total: $(find fuzz/corpus -type f | wc -l) seeds"
 
+      - name: Install operation-sequence reference tools
+        run: sudo apt-get update -qq && sudo apt-get install -y ntfs-3g
+
       - name: Fuzz
+        env:
+          OPSEQ_FUZZ_SEED: ${{ inputs.seed || '683' }}
         run: ./scripts/fuzz-all.sh "${{ inputs.seconds || '120' }}"
 
       # WITHOUT THIS THE FINDING IS LOST. A crash reproducer lives in
@@ -90,10 +99,13 @@ jobs:
       # caused it would be gone, leaving the next person to re-derive an
       # input the fuzzer had already found.
       - name: Keep the reproducers
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-artifacts
-          path: fuzz/artifacts/
-          if-no-files-found: ignore
+          path: |
+            fuzz/artifacts/
+            tmp/op-sequence-model/explorer/
+            tmp/logs/op-sequence-explorer.log
+          if-no-files-found: error
           retention-days: 90
