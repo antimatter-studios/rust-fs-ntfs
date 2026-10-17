@@ -56,10 +56,25 @@ def write(kind, name, data):
     with open(os.path.join(root, kind, name), 'wb') as f:
         f.write(data)
 
+def zero_boot_code(img):
+    """mkntfs copies its own boot code, from GPL source, into the boot
+    sector, `$Boot`'s other fifteen sectors and the backup boot sector.
+    Nothing here or in chkdsk reads it, so no committed seed carries it
+    (#487): the code areas are zeroed, and the BPB and signatures kept.
+    scripts/check-interrupted-bootstrap.py refuses a seed that has it."""
+    img = bytearray(img)
+    sector, = struct.unpack_from('<H', img, 11)
+    backup = struct.unpack_from('<Q', img, 40)[0] * sector
+    img[84:510] = bytes(426)
+    img[512:16 * sector] = bytes(16 * sector - 512)
+    img[backup + 84:backup + 510] = bytes(426)
+    return bytes(img)
+
 records = indexes = 0
 for img_name in sorted(os.listdir(os.path.join(root, 'image'))):
     stem = img_name[:-len('.img')]
-    img = open(os.path.join(root, 'image', img_name), 'rb').read()
+    img = zero_boot_code(open(os.path.join(root, 'image', img_name), 'rb').read())
+    write('image', img_name, img)
 
     boot = img[:SECTOR]
     assert boot[3:11] == OEM, f"{img_name}: no NTFS OEM name in the boot sector"
