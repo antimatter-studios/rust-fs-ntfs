@@ -2376,6 +2376,57 @@ fn a_replay_stopped_after_any_write_reaches_the_same_volume_when_run_again() {
     assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
 
+#[path = "replay_stop/mod.rs"]
+mod replay_stop;
+
+#[test]
+fn a_replay_stopped_after_its_first_undo_write_leaves_the_log_holding_work() {
+    // The image the Windows scenarios attach (#755) is what a power cut
+    // right after the replay's first undo write leaves (#754): that write
+    // and every one before it landed, none after, and the log still holds
+    // the work Windows' own restart will then find (#648).
+    for k in RERUN {
+        let img = unpack(&format!("windows-interrupted-{k}"));
+        let base = std::fs::read(&img).unwrap();
+        std::fs::remove_file(&img).unwrap();
+
+        let stamp = replay_stop::undo_stamp(&mut Overlay::new(&base, None))
+            .unwrap_or_else(|e| panic!("{k}: undo's stamp: {e}"));
+        let mut stopped = Overlay::new(&base, None);
+        let n = replay_stop::stop_after_first_undo(&mut stopped)
+            .unwrap_or_else(|e| panic!("{k}: stop: {e}"));
+
+        // Exactly what the power cut after `n` writes leaves.
+        let mut cut = Overlay::new(&base, Some(n));
+        assert!(
+            fsck::fsck_io(&mut cut, None).is_err(),
+            "{k}: a replay cut after {n} writes reported success"
+        );
+        assert!(
+            stopped.written == cut.written,
+            "{k}: the stop after {n} writes differs from a power cut after {n}"
+        );
+
+        // The last write landed is a block undo rolled back.
+        let undone: Vec<u64> = stopped
+            .written
+            .iter()
+            .filter(|(_, s)| matches!(&s[..4], b"FILE" | b"INDX") && le(s, 8, 8) == stamp)
+            .map(|(&n, _)| n * 512)
+            .collect();
+        assert!(
+            !undone.is_empty(),
+            "{k}: no block written carries undo's stamp {stamp:#x}"
+        );
+
+        let state = fsck::logfile_state_io(&mut stopped).expect("read $LogFile");
+        assert!(
+            state.needs_replay(),
+            "{k}: after the stop the log no longer holds work: {state:?}"
+        );
+    }
+}
+
 /// Every capture whose `$LogFile` holds work, with the last LSN it holds.
 fn captures_holding_work() -> Vec<(&'static str, u64)> {
     [
