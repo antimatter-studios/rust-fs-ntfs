@@ -87,6 +87,30 @@ try {
                     $report += "ok   file $($f[1]) ($length bytes)"
                 }
             }
+            'write-at' {
+                $target = "${letter}:" + ($f[1] -replace '/', '\')
+                $reference = Join-Path $Diag 'write-at-windows-reference.bin'
+                $bytes = New-Object byte[] ([int]$f[2])
+                for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = 90 }
+                [System.IO.File]::WriteAllBytes($reference, $bytes)
+                $patch = New-Object byte[] ([int]$f[4])
+                for ($i = 0; $i -lt $patch.Length; $i++) { $patch[$i] = 81 }
+                $stream = [System.IO.File]::OpenWrite($reference)
+                try {
+                    $stream.Position = [int64]$f[3]
+                    $stream.Write($patch, 0, $patch.Length)
+                } finally { $stream.Dispose() }
+                $want = (Get-FileHash -LiteralPath $reference -Algorithm SHA256).Hash
+                $got = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+                $length = (Get-Item -LiteralPath $target -Force).Length
+                $size = (Get-Item -LiteralPath $reference).Length
+                if ($length -ne $size -or $got -ne $want) {
+                    $report += "FAIL write-at $($f[1]): $length bytes, SHA256 $got; Windows gives $size bytes, SHA256 $want"
+                    $failures++
+                } else {
+                    $report += "ok   write-at $($f[1]): length and content match Windows positioned Write"
+                }
+            }
             'truncate' {
                 $target = "${letter}:" + ($f[1] -replace '/', '\')
                 $reference = Join-Path $Diag 'truncate-windows-reference.bin'
