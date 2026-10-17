@@ -14,6 +14,8 @@ collection use the copies at `{vm.workdir}/scripts/fs-windows-test-harness/`.
 - `_chkdsk-verdict.ps1` — what a set of chkdsk passes says about a volume,
   including a `/scan` that could not take its snapshot. Dot-sourced by
   `win-chkdsk.ps1`; tested with no VM by `tests/scripts/chkdsk-verdict.ps1`.
+- `_quota.ps1` — what `fsutil quota` and WMI say about a volume's quota
+  accounting. Dot-sourced by `win-quota-track.ps1` and `win-quota-verify.ps1`.
 
 ### Test operation scripts
 Invoked per scenario step by the harness runner (via SSH). Each maps
@@ -31,6 +33,10 @@ to one `[ops.win-*]` entry in `fs-windows-test-harness.toml`.
 - `win-read.ps1` — read a byte range from a file
 - `win-repeat-mount.ps1` — mount/dismount N times, no I/O
 - `win-format.ps1` — format a blank `.img` with Windows NTFS
+- `win-quota-track.ps1` — turn quota tracking on and wait for Windows'
+  scan
+- `win-quota-verify.ps1` — compare each owner's quota usage with what
+  Windows counts when it scans the volume again
 
 ### Result-collection scripts
 Called by `scripts/_matrix-collect-vm.sh` after each matrix run.
