@@ -3,7 +3,7 @@
 //! one per object id (#478).
 //!
 //! A view index is an index whose entries carry a key and data of their
-//! own rather than a `$FILE_NAME` (MS-FSCC §2.4). Both of these collate
+//! own rather than a `$FILE_NAME`. Both of these collate
 //! `COLLATION_NTOFS_ULONGS`: the key compared as an array of little-endian
 //! 32-bit words, word by word. Their entries, as Windows writes them
 //! (measured on `test-disks/windows-interrupted-quota.recovered.img`):

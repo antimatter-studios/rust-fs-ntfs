@@ -9,12 +9,12 @@
 //! torn-write at the primary copy.
 //!
 //! References:
-//!   * MS-FSCC §2.4 ("$Secure" system file; SDH/SII view indexes).
+//!   * The Linux-NTFS documentation's `$Secure` page (`$SDS`, and the
+//!     `$SDH` and `$SII` view indexes).
 //!   * MS-DTYP §2.4.6 (`SECURITY_DESCRIPTOR_RELATIVE`).
-//!   * Windows Internals, 7th ed., ch. "NTFS On-Disk Structure".
 //!
-//! The hash function below is implementation-defined per MS-FSCC —
-//! observed via byte-diff against Microsoft `Format-Volume`'s
+//! No documentation this crate uses specifies the hash function below —
+//! it was observed via byte-diff against Microsoft `Format-Volume`'s
 //! `$Secure:$SDS` output (NTFS v3.1 reference). All 12 sampled entries
 //! from a fresh reference matched a 32-bit rotate-3-and-add over the
 //! SD bytes; that is the algorithm implemented here.
@@ -50,8 +50,8 @@ pub const SDS_MIRROR_GAP: u64 = 0x40000;
 
 /// SDH/SII hash of a security-descriptor blob.
 ///
-/// MS-FSCC §2.4 declares the SDH hash algorithm implementation-
-/// specific; this implementation was derived purely by observing
+/// No documentation this crate uses specifies the SDH hash algorithm;
+/// this implementation was derived purely by observing
 /// Microsoft `Format-Volume`'s `$Secure:$SDS` byte output and
 /// brute-checking 32-bit hash candidates against the resulting
 /// SD bytes (12 entries from a fresh NTFS v3.1 reference all matched).

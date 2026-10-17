@@ -40,6 +40,11 @@ check kernel-header-without-url fail '//! The layout follows Linux ntfs3 ntfs.h.
 check historical-claim fail '//! References (no GPL code consulted): a layout.'
 check wrapped-claim fail $'//! No GPL implementation\n//! was consulted.'
 check tool-name-ban fail 'No mention of ntfs-3g anywhere in documentation.'
+check fscc-reparse pass '//! REPARSE_DATA_BUFFER (MS-FSCC §2.1.2): u32 ReparseTag.'
+check fscc-attributes pass '/// FILE_ATTRIBUTE_SPARSE_FILE (MS-FSCC 2.6).'
+check fscc-information-class fail '/// Full $STANDARD_INFORMATION value (MS-FSCC §2.4.2).'
+check fscc-fsctl fail '/// Attribute offsets are 8-aligned (MS-FSCC §2.3).'
+check windows-internals fail '// Offsets per Windows Internals 7th ed.'
 
 python3 "$ROOT/scripts/check-source-policy.py"
 result=$?

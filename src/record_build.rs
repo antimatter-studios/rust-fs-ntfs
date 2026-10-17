@@ -78,7 +78,7 @@ const FILE_FLAG_IS_DIRECTORY: u16 = 0x0002;
 /// Index entry flags field value for the LAST sentinel entry.
 const INDEX_ENTRY_FLAG_LAST: u16 = 0x0002;
 
-/// $INDEX_ROOT collation rule for $FILE_NAME ordering (MS-FSCC §2.4.3.1).
+/// $INDEX_ROOT collation rule for $FILE_NAME ordering (Linux-NTFS documentation, collation table).
 const COLLATION_FILE_NAME: u32 = 1;
 
 /// File-attribute bits stored in `$STANDARD_INFORMATION` and `$FILE_NAME`
@@ -93,7 +93,7 @@ pub(crate) const FA_NTFS_DIRECTORY: u32 = 0x1000_0000;
 /// Set on view-index records (`$ObjId`, `$Reparse`) after `chkdsk` repair (bit 29).
 pub(crate) const FA_NTFS_VIEW_INDEX: u32 = 0x2000_0000;
 
-/// `$FILE_NAME.namespace` values per MS-FSCC §2.4.4. Picking the
+/// `$FILE_NAME.namespace` values per the Linux-NTFS documentation. Picking the
 /// wrong value for a given name is what chkdsk reports as
 /// "An invalid filename X (N) was found in directory M / All
 /// filenames for File N are invalid / Minor file name errors"
@@ -679,7 +679,7 @@ const ATTR_REPARSE_POINT: u32 = 0xC0;
 const ATTR_OBJECT_ID: u32 = 0x40;
 
 /// Build a resident `$OBJECT_ID` (type 0x40) attribute carrying a
-/// 16-byte GUID. Per MS-FSCC §2.4.6 the on-disk layout starts with the
+/// 16-byte GUID. Per the Linux-NTFS documentation the on-disk layout starts with the
 /// `object_id` GUID and may optionally carry three more 16-byte GUIDs
 /// (`birth_volume_id`, `birth_object_id`, `birth_domain_id`); this
 /// builder emits only the mandatory 16-byte prefix, which is all
@@ -690,7 +690,7 @@ pub fn build_resident_object_id_attribute(attr_id: u16, object_id: &[u8; 16]) ->
     build_resident_object_id_attribute_full(attr_id, object_id, None)
 }
 
-/// Full `$OBJECT_ID` attribute layout per MS-FSCC §2.4.6:
+/// Full `$OBJECT_ID` attribute layout per the Linux-NTFS documentation:
 ///
 /// ```text
 ///   +0x00  object_id        u8[16]   (mandatory)
@@ -845,7 +845,9 @@ pub fn build_named_resident_data_attribute(
 /// Round `n` up to the next 8-byte boundary.
 ///
 /// NTFS requires all attribute headers and values to start at offsets that
-/// are a multiple of 8 within the MFT record (MS-FSCC §2.3). The formula
+/// are a multiple of 8 within the MFT record. No documentation this crate
+/// uses states the rule; it is measured: all 927 attributes and 703 resident
+/// values in `windows-interrupted-1.recovered` are 8-byte aligned. The formula
 /// `(n + 7) & !7` is the standard power-of-two alignment trick: adding 7
 /// ensures we cross the next boundary, then masking off the low 3 bits
 /// snaps back to it.

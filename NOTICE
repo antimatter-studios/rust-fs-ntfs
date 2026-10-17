@@ -1,0 +1,15 @@
+rust-fs-ntfs is licensed under the MIT license or the Apache License 2.0, at
+your option (LICENSE-MIT, LICENSE-APACHE). Two data files embedded in the
+crate are captured output of Microsoft Windows rather than original work:
+
+- src/upcase-canonical.bin: the NTFS $UpCase table, 128 KiB, read from a
+  volume that Windows format.com made.
+- src/logfile-canonical-12k.bin: the first 12 KiB of an NTFS $LogFile that
+  Windows wrote.
+
+Both are functional data that the NTFS on-disk format requires an
+implementation to reproduce exactly for interoperability: chkdsk rejects any
+other upcase table, and Windows reads the log's restart area when it mounts a
+volume. The upcase table is also independently reproducible: its 65,536
+entries are identical to the table mkntfs generates on its own. Their origin
+and the measurements behind these statements are in docs/provenance.md.

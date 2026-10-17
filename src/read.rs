@@ -1196,7 +1196,7 @@ pub fn read_parent_record<T: BlockIo + ?Sized>(
 const VOLUME_RECORD_NUMBER: u64 = 3;
 
 /// `$VOLUME_INFORMATION` value layout: reserved(8) + major(1) + minor(1) +
-/// flags(2). (MS-FSCC / Windows Internals 7th ed.)
+/// flags(2). (Linux-NTFS documentation, `$VOLUME_INFORMATION`.)
 const VI_MAJOR: usize = 8;
 const VI_FLAGS: usize = 10;
 
