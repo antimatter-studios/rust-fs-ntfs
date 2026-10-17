@@ -1039,6 +1039,12 @@ pub enum CheckFinding {
     ClustersInUseMarkedFree { clusters: u64, first_lcn: u64 },
     /// `$Bitmap` could not be read, so no cluster was accounted for.
     BitmapUnreadable { reason: String },
+    /// The `$ATTRIBUTE_LIST` of this base record names a record that is not
+    /// one of the file's: one `$MFT`'s bitmap marks free, whose header is
+    /// not in use, whose sequence number is not the entry's, or whose base
+    /// reference names another file (#820). A reader following the list
+    /// reads another file's attributes, or none.
+    BadAttributeList { record: u64, reason: String },
 }
 
 /// What [`check_io`] read, and what it found.
@@ -1106,7 +1112,8 @@ pub fn logfile_state_io<T: FsckIo>(io: &mut T) -> Result<LogfileState, Error> {
 /// `$LogFile` is empty, `$MFTMirr` against `$MFT`, the header and attribute
 /// chain of every MFT record `$MFT`'s bitmap marks in use (#515), and
 /// `$Bitmap` against the clusters every run list in those records claims
-/// (#517).
+/// (#517), and the records every base record's `$ATTRIBUTE_LIST` names
+/// (#820).
 ///
 /// NOT A STRUCTURAL CHECKER. It does not follow indexes; a volume this calls clean is one on
 /// which none of THESE is wrong, and Windows' chkdsk remains the authority.
@@ -1148,11 +1155,13 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
                 findings.push(CheckFinding::BadRecord { record, reason });
                 every_claim_known = false;
             }
-            Ok(rec) if account => {
-                every_claim_known &=
-                    claims_of(record, &rec, volume_clusters, &mut claims, &mut findings);
+            Ok(rec) => {
+                if account {
+                    every_claim_known &=
+                        claims_of(record, &rec, volume_clusters, &mut claims, &mut findings);
+                }
+                check_list_records(io, &bitmap, record, &rec, &mut findings);
             }
-            Ok(_) => {}
         }
     }
 
@@ -1244,6 +1253,116 @@ fn read_in_use_record<T: FsckIo>(
         Some(reason) => Err(reason),
         None => Ok(rec),
     }
+}
+
+/// The record-number half of an MFT reference; the top 16 bits are the
+/// sequence number.
+const RECORD_NUMBER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+const REC_SEQUENCE: usize = 0x10;
+/// Where an `$ATTRIBUTE_LIST` entry keeps its length and the MFT reference
+/// of the record holding its attribute.
+const LIST_ENTRY_LENGTH: usize = 4;
+const LIST_ENTRY_REFERENCE: usize = 0x10;
+const LIST_ENTRY_MIN: usize = 0x1A;
+
+/// Report a `BadAttributeList` for base record `base` when its
+/// `$ATTRIBUTE_LIST` names a record that is not one of the file's (#820):
+/// one `$MFT`'s bitmap marks free, that does not read, whose header is not
+/// in use, whose sequence number is not the entry's, or whose base
+/// reference names another file. `rec` is the fixed-up base record. A
+/// record with no list, or an extension record, is left alone.
+fn check_list_records<T: FsckIo>(
+    io: &mut T,
+    bitmap: &crate::mft_bitmap::MftBitmap,
+    base: u64,
+    rec: &[u8],
+    findings: &mut Vec<CheckFinding>,
+) {
+    if u64_le(rec, REC_BASE_REFERENCE) != 0
+        || crate::attr_io::find_attribute(rec, AttrType::AttributeList, None).is_none()
+    {
+        return;
+    }
+    let mut report = |reason: String| {
+        findings.push(CheckFinding::BadAttributeList {
+            record: base,
+            reason,
+        })
+    };
+    let value = match crate::read::read_attribute_value(io, base, AttrType::AttributeList, None) {
+        Ok(value) => value,
+        Err(e) => return report(format!("its $ATTRIBUTE_LIST does not read: {e}")),
+    };
+    let mut references: Vec<u64> = Vec::new();
+    let mut at = 0;
+    while at + LIST_ENTRY_MIN <= value.len() {
+        let length = u16::from_le_bytes([
+            value[at + LIST_ENTRY_LENGTH],
+            value[at + LIST_ENTRY_LENGTH + 1],
+        ]) as usize;
+        if length < LIST_ENTRY_MIN || at + length > value.len() {
+            return report(format!(
+                "its $ATTRIBUTE_LIST entry at {at} has length {length}, which the list's {} \
+                 bytes cannot hold",
+                value.len()
+            ));
+        }
+        let reference = u64_le(&value, at + LIST_ENTRY_REFERENCE);
+        if !references.contains(&reference) {
+            references.push(reference);
+        }
+        at += length;
+    }
+    for reference in references {
+        let n = reference & RECORD_NUMBER_MASK;
+        let sequence = (reference >> 48) as u16;
+        match crate::mft_bitmap::is_allocated_io(io, bitmap, n) {
+            Ok(true) => {}
+            Ok(false) => {
+                report(format!(
+                    "its $ATTRIBUTE_LIST names record {n}, which $MFT's bitmap marks free"
+                ));
+                continue;
+            }
+            Err(e) => {
+                report(format!(
+                    "its $ATTRIBUTE_LIST names record {n}, past $MFT's bitmap: {e}"
+                ));
+                continue;
+            }
+        }
+        let named = match crate::mft_io::read_mft_record_io(io, n) {
+            Ok((_, named)) => named,
+            Err(e) => {
+                report(format!(
+                    "its $ATTRIBUTE_LIST names record {n}, which does not read: {e}"
+                ));
+                continue;
+            }
+        };
+        if crate::mft_io::record_flags(&named) & crate::mft_io::MFT_FLAG_IN_USE == 0 {
+            report(format!(
+                "its $ATTRIBUTE_LIST names record {n}, which is not in use"
+            ));
+        }
+        let stored = u16::from_le_bytes([named[REC_SEQUENCE], named[REC_SEQUENCE + 1]]);
+        if stored != sequence {
+            report(format!(
+                "its $ATTRIBUTE_LIST names record {n} with sequence {sequence}, and the record's \
+                 sequence is {stored}"
+            ));
+        }
+        let owner = u64_le(&named, REC_BASE_REFERENCE) & RECORD_NUMBER_MASK;
+        if n != base && owner != base {
+            report(format!(
+                "its $ATTRIBUTE_LIST names record {n}, whose base record is {owner}"
+            ));
+        }
+    }
+}
+
+fn u64_le(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().expect("8 bytes"))
 }
 
 /// Record-header and attribute-header offsets the walk below reads.
