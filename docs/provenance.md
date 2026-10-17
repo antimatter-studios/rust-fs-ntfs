@@ -37,6 +37,16 @@ the usage text and exit constants of the MIT-licensed
 `src/tools/bin/ntfs-chkdsk.rs`. None of it is a source of this crate's
 knowledge of NTFS.
 
+The rescue scan (`src/rescue.rs`, #720) follows the behaviour of Slate's
+sector rescue, read in its MIT-licensed `src/tools/recovery_io.rs` at
+`579dfeb` (its rescue, surface-scan and rescue-archive functions and the
+code beside them, not the rest of the file): bulk reads retried one sector
+at a time on a media error, and append-only checksummed records with
+explicit unreadable spans. No code was copied, and the archive
+format is this crate's own (`docs/rescue-archive.md`). The scan reads raw
+sectors and interprets no NTFS structure, so this too is no source of the
+crate's knowledge of the format.
+
 ## Citations in the source
 
 The first source files (April 2026) cited the Linux-NTFS documentation page by
@@ -168,7 +178,9 @@ Windows-authored `$EA_INFORMATION` values with zero, one and two `NEED_EA`
 entries (`ea_information_windows_oracle`, #611). The source policy in
 `AGENTS.md` now forbids opening copyleft implementation source at all.
 
-One permissively licensed implementation file has been opened since, for its
-command-line contract and not for the format: the usage text and exit
-constants of Slate's MIT-licensed `src/tools/bin/ntfs-chkdsk.rs`, to drive
-it as an oracle (#687; see Sources).
+Two permissively licensed implementation files have been opened since, and
+neither for the format: the usage text and exit constants of Slate's
+MIT-licensed `src/tools/bin/ntfs-chkdsk.rs`, to drive it as an oracle (#687),
+and the sector-rescue functions of its MIT-licensed
+`src/tools/recovery_io.rs`, for the rescue scan's behaviour (#720; see
+Sources for both).
