@@ -20,7 +20,7 @@ extents, four directory levels, 4096 path bytes and 256 UTF-16 name units
 
 `encode` / `decode_replay` store concrete operations in strict version-1 JSON,
 capped at 4 MiB. The named `reproducers/basic-write-v1.json` golden is consumed
-by `tests/op_sequence_generator.rs`; future libFuzzer replay targets can call
+by `tests/op_sequence_generator.rs`; the libFuzzer operation target calls
 the same decoder. Replay does not reselect paths when steps are removed.
 Eight fixture-free CI contracts run on every host leg with an executed floor.
 
@@ -78,5 +78,35 @@ nested replay and deliberate persisted byte/name mutations. All eight readback
 tests run on each native CI host with an explicit floor, and the Ubuntu hook
 requires all three reference tools. Scratch images use the shared panic-safe
 owner. Concrete prefixes, input bytes, geometry and refusals are retained under
-`tmp/op-sequence-model/`. Windows chkdsk, ADS/EAs, explorer ranges and
+`tmp/op-sequence-model/`. Windows chkdsk, ADS/EAs and
 minimization remain under #484; this test-only slice changes no format code.
+
+The committed `fuzz/corpus/operation_sequence/*.json` corpus uses the generator's
+strict JSON v1 format. `committed_corpus_replays_every_seed` enumerates every
+JSON seed, requires all three named baseline seeds, and writes its executed
+manifest to `tmp/op-sequence-model/corpus-executed.json`. The ordinary
+`chore test:suite`, native readback CI step and ntfs-3g hook all replay it.
+Existing test floors and measured output budgets remain unchanged; raise a
+floor only after a CI measurement. Missing seeds or tools fail.
+
+The existing `fuzz.yml` workflow also runs libFuzzer's `operation_sequence`
+target, preserving all byte-decoder targets. `seconds` (1..3600, default 120)
+sets exploration time; `seed` (1..4294967295, default 683) is logged before
+execution. Each input has a 90-second limit, 768 MiB allocation limit and
+1024 MiB RSS limit. A process-group watchdog allows one final input, then
+terminates at `seconds + 90` and kills at `seconds + 95`; any timeout fails.
+Compilation is outside that clock. The explorer inherits the measured suite
+output budget, keeps the complete raw log and requires executed input stats.
+
+Artifacts retain the run seed/budgets, raw input, concrete JSON prefix,
+geometry, per-opcode counts, cumulative accepted/refused histogram, ntfs-3g
+reports and a failure image when available, on success and failure alike.
+Histogram arrays follow opcode order above, accepted first, refused second.
+Replay an uploaded raw input or `reproducer.json` from the repository root:
+
+```sh
+OPSEQ_REFERENCE_TOOLS=1 cargo +nightly fuzz run operation_sequence /absolute/path/to/input.bin -- -runs=1 -timeout=90 -rss_limit_mb=1024
+```
+
+For a fresh bounded run on Linux with cargo-fuzz, coreutils and ntfs-3g:
+`OPSEQ_FUZZ_SEED=683 bash scripts/fuzz-op-sequence.sh 120`.
