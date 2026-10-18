@@ -2,7 +2,7 @@
 //! without mounting it.
 //!
 //! The verbs include `ls`, `stat`, `streams`, `xattr`, `read`, `write`, `mkdir`,
-//! `export`, `truncate`, `rm`, `rmdir`, `mv`, `ln`, `get`/`info`, `set`, `resize`. Metadata is JSON
+//! `export`, `import`, `truncate`, `rm`, `rmdir`, `mv`, `ln`, `get`/`info`, `set`, `resize`. Metadata is JSON
 //! (or `--text`); file content is raw bytes. A verb the library cannot do
 //! yet still exists and answers `not implemented` with exit status 3, so a
 //! script moved between filesystems fails loudly instead of meaning
@@ -235,6 +235,25 @@ fn command() -> Cmd {
                      Directories and reparse points are refused. Compressed and encrypted \
                      streams are unsupported by export. Use read for compressed files. \
                      Only single files are supported.",
+                ),
+        )
+        .subcommand(
+            Cmd::new("import")
+                .about("Import one regular file or stdin through bounded staged writes")
+                .arg(Arg::new("source").value_name("SRC").required(true).value_parser(value_parser!(OsString)))
+                .arg(Arg::new("path").value_name("PATH").required(true))
+                .arg(Arg::new("replace").long("replace").action(ArgAction::SetTrue))
+                .arg(Arg::new("verify").long("verify").action(ArgAction::SetTrue))
+                .after_help(
+                    "Examples:\n  fs.ntfs disk.img import --verify backup.tar /backup.tar\n  \
+                     cat backup.tar | fs.ntfs disk.img import - /backup.tar\n\n\
+                     Files use fixed chunks into a .dj-import-*.partial name beside PATH and \
+                     are renamed to PATH only when complete. SRC - is spooled to a private \
+                     temporary host file first. --verify reopens the image and checks the \
+                     staged SHA-256 before publication. An existing PATH is refused; \
+                     --replace exits 3, since this driver's rename cannot replace a name in \
+                     one step. A kill may leave the .partial file, visible through ls. Only \
+                     single files are supported.",
                 ),
         )
         .subcommand(
@@ -571,6 +590,15 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
             let (mut dev, _) = device::mount(target, offset, false)?;
             export(&mut dev, &request)
         }
+        "import" => super::import::run(
+            target,
+            offset,
+            path_arg(sub)?,
+            sub.get_one::<OsString>("source")
+                .expect("clap requires source"),
+            sub.get_flag("replace"),
+            sub.get_flag("verify"),
+        ),
         "read" => {
             let (mut dev, _) = device::mount(target, offset, false)?;
             read(
@@ -655,7 +683,7 @@ fn text_arg<'a>(sub: &'a ArgMatches, id: &str) -> Result<&'a str, CliError> {
     })
 }
 
-fn ntfs_error(path: &str, e: Error) -> CliError {
+pub(super) fn ntfs_error(path: &str, e: Error) -> CliError {
     CliError::failed(format!("{path}: {e}"))
 }
 
@@ -1578,7 +1606,7 @@ fn set(target: &OsString, offset: u64, sub: &ArgMatches) -> Result<Outcome, CliE
 
 /// Split an absolute path into its parent and its last name, refusing the
 /// root and the names that are not names (`.`, `..`).
-fn split_path(path: &str) -> Result<(String, &str), CliError> {
+pub(super) fn split_path(path: &str) -> Result<(String, &str), CliError> {
     let trimmed = path.trim_end_matches('/');
     let (parent, name) = trimmed.rsplit_once('/').ok_or_else(|| {
         CliError::usage(format!("{path}: give the path from the root, as /{path}"))
@@ -1613,7 +1641,7 @@ fn edit<T>(
 
 /// What [`edit`] does to an open volume, before it syncs: the preparation,
 /// then `edit`. Over a [`device::Rehearsal`] it is a rehearsal of the edit.
-fn prepared<D: BlockIo, T>(
+pub(super) fn prepared<D: BlockIo, T>(
     dev: &mut D,
     what: &str,
     edit: impl FnOnce(&mut D) -> Result<T, Error>,
