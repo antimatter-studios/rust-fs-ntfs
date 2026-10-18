@@ -936,18 +936,47 @@ pub fn read_archive<R: Read>(archive: &mut R) -> Result<ArchiveContents, String>
 }
 
 /// What an export wrote.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportReport {
     /// The image's length: the archived source's size.
     pub bytes: u64,
     /// The SHA-256 of the image's bytes.
     pub sha256: [u8; 32],
+    /// The `(offset, length)` source spans no data record held, sorted by
+    /// offset: written as zeros and listed in the error manifest at
+    /// [`export_manifest_path`]. Empty for a complete image.
+    pub missing: Vec<(u64, u64)>,
+}
+
+impl ExportReport {
+    /// Whether every byte of the image came from a data record. An image
+    /// with any missing span is never complete, however few bytes it lacks.
+    pub fn is_complete(&self) -> bool {
+        self.missing.is_empty()
+    }
+}
+
+/// How an export treats an archive that lacks some source bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExportOptions {
+    /// Export an incomplete archive anyway, writing its missing spans as
+    /// zeros and listing them in an error manifest beside the image. Off by
+    /// default: an incomplete archive is refused.
+    pub allow_incomplete: bool,
 }
 
 /// Where [`export_to_path`] writes before renaming into `destination`.
 pub fn export_temp_path(destination: &Path) -> std::path::PathBuf {
     let mut name = destination.as_os_str().to_owned();
     name.push(".partial");
+    name.into()
+}
+
+/// Where an incomplete export lists its missing spans: beside the image,
+/// one `offset length` line per span in bytes, after `#` comment lines.
+pub fn export_manifest_path(destination: &Path) -> std::path::PathBuf {
+    let mut name = destination.as_os_str().to_owned();
+    name.push(".missing.txt");
     name.into()
 }
 
@@ -960,6 +989,23 @@ pub fn export_temp_path(destination: &Path) -> std::path::PathBuf {
 /// data record, and only then renamed into place. An existing destination
 /// is refused, and the archive is only ever read.
 pub fn export_to_path(archive: &Path, destination: &Path) -> Result<ExportReport, String> {
+    export_with(archive, destination, ExportOptions::default())
+}
+
+/// [`export_to_path`], with `options` saying whether an incomplete archive
+/// exports.
+///
+/// With [`ExportOptions::allow_incomplete`], an archive lacking some source
+/// bytes exports with those spans as zeros, and an error manifest listing
+/// every span by byte offset and length is written to
+/// [`export_manifest_path`] before the image is renamed into place. The
+/// report then names the spans and [`ExportReport::is_complete`] is false.
+/// An existing manifest is refused like an existing destination.
+pub fn export_with(
+    archive: &Path,
+    destination: &Path,
+    options: ExportOptions,
+) -> Result<ExportReport, String> {
     let input = File::open(archive)
         .map_err(|e| format!("open the archive '{}': {e}", archive.display()))?;
     let contents = read_archive(&mut io::BufReader::new(&input))?;
@@ -970,16 +1016,26 @@ pub fn export_to_path(archive: &Path, destination: &Path) -> Result<ExportReport
         .copied()
         .collect();
     held.sort_by_key(|r| r.offset);
-    if let Some(&(start, end)) = missing(&held, 0, contents.source_size).first() {
+    let gaps: Vec<(u64, u64)> = missing(&held, 0, contents.source_size)
+        .into_iter()
+        .map(|(start, end)| (start, end - start))
+        .collect();
+    if let (Some(&(start, len)), false) = (gaps.first(), options.allow_incomplete) {
         return Err(format!(
-            "the archive holds no data for source bytes {start}+{}; only a complete archive exports",
-            end - start
+            "the archive holds no data for source bytes {start}+{len}; only a complete archive exports"
         ));
     }
     if destination.symlink_metadata().is_ok() {
         return Err(format!(
             "the destination '{}' exists; an export never replaces a file",
             destination.display()
+        ));
+    }
+    let manifest = export_manifest_path(destination);
+    if !gaps.is_empty() && manifest.symlink_metadata().is_ok() {
+        return Err(format!(
+            "the error manifest '{}' exists; an export never replaces a file",
+            manifest.display()
         ));
     }
     let temp = export_temp_path(destination);
@@ -989,18 +1045,29 @@ pub fn export_to_path(archive: &Path, destination: &Path) -> Result<ExportReport
         .create_new(true)
         .open(&temp)
         .map_err(|e| format!("create '{}': {e}", temp.display()))?;
-    let written = write_image(&input, &held, &mut out, contents.source_size).and_then(|report| {
-        drop(out);
-        if destination.symlink_metadata().is_ok() {
-            return Err(format!(
-                "the destination '{}' appeared during the export",
-                destination.display()
-            ));
-        }
-        std::fs::rename(&temp, destination)
-            .map_err(|e| format!("rename into '{}': {e}", destination.display()))?;
-        Ok(report)
-    });
+    let written =
+        write_image(&input, &held, &gaps, &mut out, contents.source_size).and_then(|report| {
+            drop(out);
+            if destination.symlink_metadata().is_ok() {
+                return Err(format!(
+                    "the destination '{}' appeared during the export",
+                    destination.display()
+                ));
+            }
+            // The manifest lands first: an incomplete image never sits
+            // where a reader could take it for whole without its list of
+            // missing spans beside it.
+            if !report.is_complete() {
+                write_manifest(&manifest, &report)?;
+            }
+            std::fs::rename(&temp, destination).map_err(|e| {
+                if !report.is_complete() {
+                    let _ = std::fs::remove_file(&manifest);
+                }
+                format!("rename into '{}': {e}", destination.display())
+            })?;
+            Ok(report)
+        });
     match written {
         Ok(report) => {
             sync_parent(destination)?;
@@ -1013,11 +1080,52 @@ pub fn export_to_path(archive: &Path, destination: &Path) -> Result<ExportReport
     }
 }
 
-/// Write each data record of `archive` into `out` at its offset, flush,
-/// read every record's span back against its payload, and hash the image.
+/// Write `report`'s missing spans to the error manifest at `path` through a
+/// flushed temporary file, refusing to replace one that exists.
+fn write_manifest(path: &Path, report: &ExportReport) -> Result<(), String> {
+    let total: u64 = report.missing.iter().map(|&(_, len)| len).sum();
+    let mut text = format!(
+        "# rescue export error manifest: {} spans, {total} of {} image bytes held by no data record, written as zeros\n# offset length\n",
+        report.missing.len(),
+        report.bytes
+    );
+    for &(offset, len) in &report.missing {
+        text.push_str(&format!("{offset} {len}\n"));
+    }
+    let temp = export_temp_path(path);
+    let written = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .and_then(|mut out| {
+            out.write_all(text.as_bytes())?;
+            out.sync_all()
+        })
+        .map_err(|e| format!("write the error manifest '{}': {e}", temp.display()))
+        .and_then(|()| {
+            if path.symlink_metadata().is_ok() {
+                return Err(format!(
+                    "the error manifest '{}' appeared during the export",
+                    path.display()
+                ));
+            }
+            std::fs::rename(&temp, path)
+                .map_err(|e| format!("rename into '{}': {e}", path.display()))
+        });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
+}
+
+/// Write each data record of `archive` into `out` at its offset, leaving
+/// the `gaps` no record holds as zeros, flush, read every record's span
+/// back against its payload and every gap back as zeros, and hash the
+/// image.
 fn write_image(
     mut archive: &File,
     held: &[ArchivedRecord],
+    gaps: &[(u64, u64)],
     out: &mut File,
     size: u64,
 ) -> Result<ExportReport, String> {
@@ -1053,6 +1161,22 @@ fn write_image(
             ));
         }
     }
+    let mut zeros = vec![0u8; DEFAULT_CHUNK];
+    for &(offset, len) in gaps {
+        let mut at = offset;
+        while at < offset + len {
+            let n = (offset + len - at).min(zeros.len() as u64) as usize;
+            out.seek(SeekFrom::Start(at))
+                .and_then(|_| out.read_exact(&mut zeros[..n]))
+                .map_err(|e| format!("read the image back: {e}"))?;
+            if zeros[..n].iter().any(|&b| b != 0) {
+                return Err(format!(
+                    "the image holds non-zero bytes in the missing span {offset}+{len}"
+                ));
+            }
+            at += n as u64;
+        }
+    }
     let mut hash = Sha256::new();
     out.seek(SeekFrom::Start(0)).map_err(write_err)?;
     let mut buf = vec![0u8; DEFAULT_CHUNK];
@@ -1067,6 +1191,7 @@ fn write_image(
     Ok(ExportReport {
         bytes: size,
         sha256: hash.finalize().into(),
+        missing: gaps.to_vec(),
     })
 }
 
