@@ -8297,8 +8297,10 @@ fn rename_replace_unstamped_io<T: BlockIo + ?Sized>(
     )?;
     // The entry carries the namespace the record's renamed $FILE_NAME
     // takes. The builder derives one from the name alone, which disagrees
-    // with the record for one half of a WIN32 + DOS pair (#492).
-    if let Some(old) = file_name_namespace(&file_record_bytes, &old_basename) {
+    // with the record for one half of a WIN32 + DOS pair (#492). The name
+    // may be held in an extension record, so it is looked for there too
+    // (#785).
+    if let Some(old) = file_name_namespace_io(io, file_rec, &file_record_bytes, &old_basename)? {
         index_io::set_entry_namespace(
             &mut new_entry_bytes,
             crate::record_build::fn_namespace_after_rename(old, new_basename),
@@ -8543,6 +8545,25 @@ fn replace_existing_dest_io<T: BlockIo + ?Sized>(
 /// The namespace of `record`'s `$FILE_NAME` called `name`, if it has one.
 fn file_name_namespace(record: &[u8], name: &str) -> Option<u8> {
     find_file_name_by_name(record, name).map(|(_, namespace)| namespace)
+}
+
+/// The namespace of the file's `$FILE_NAME` called `name`, read from `record`,
+/// its base record, or from the extension record that holds it when the
+/// file has an `$ATTRIBUTE_LIST` (#785).
+fn file_name_namespace_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_rec: u64,
+    record: &[u8],
+    name: &str,
+) -> Result<Option<u8>, Error> {
+    if let Some(namespace) = file_name_namespace(record, name) {
+        return Ok(Some(namespace));
+    }
+    if attr_io::find_attribute(record, AttrType::AttributeList, None).is_none() {
+        return Ok(None);
+    }
+    let listed = crate::attr_list::ListedFile::open(io, file_rec)?;
+    Ok(listed.file_name_namespace(name))
 }
 
 /// The first `$FILE_NAME` in `record` whose name is `name`, and its
