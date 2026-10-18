@@ -432,11 +432,11 @@ jobs:
           bash ../rust-fs-core/scripts/tier.sh --refuse-skips unit -- cargo test --release --locked --lib
           # Previous floor 601 plus two listed-directory index contracts in #816.
           # The two contracts ran with 777 unit cases on 2026-10-18.
-          # The #817 fold-back and #821 entry-identity contracts add two cases: floor 605.
+          # The #817, #821 and #822 contracts add three cases: floor 606.
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/unit.log | awk '{s+=$4} END{print s+0}')
-          echo "tests executed: $n (floor 605)"
-          if [ "$n" -lt 605 ]; then
-              echo "::error::only $n unit tests executed, floor is 605 -- 637 ran on 2026-09-17 in run 34985102618, plus the directory-stream contract in #815 and two directory-index contracts in #816 and one fold-back contract in #817 and one entry-identity contract in #821, and a run that executes less than that stopped early rather than passed"
+          echo "tests executed: $n (floor 606)"
+          if [ "$n" -lt 606 ]; then
+              echo "::error::only $n unit tests executed, floor is 606 -- 637 ran on 2026-09-17 in run 34985102618, plus the directory-stream contract in #815 and two directory-index contracts in #816 and one fold-back contract in #817 and one entry-identity contract in #821 and one unlisted-extension contract in #822, and a run that executes less than that stopped early rather than passed"
               exit 1
           fi
       # The floor here is 15 out of a measured 16, which looks like no margin at
@@ -588,11 +588,11 @@ jobs:
           bash ../rust-fs-core/scripts/tier.sh --refuse-skips unit-debug -- cargo test --locked --lib
           # Previous floor 601 plus two listed-directory index contracts in #816.
           # The two contracts ran with 777 unit cases on 2026-10-18.
-          # The #817 fold-back and #821 entry-identity contracts add two cases: floor 605.
+          # The #817, #821 and #822 contracts add three cases: floor 606.
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/unit-debug.log | awk '{s+=$4} END{print s+0}')
-          echo "tests executed: $n (floor 605)"
-          if [ "$n" -lt 605 ]; then
-              echo "::error::only $n unit tests executed under overflow checks, floor is 605 -- 637 ran on 2026-09-17 in run 34985102618, plus the directory-stream contract in #815 and two directory-index contracts in #816 and one fold-back contract in #817 and one entry-identity contract in #821, and a run that executes less than that stopped early rather than passed"
+          echo "tests executed: $n (floor 606)"
+          if [ "$n" -lt 606 ]; then
+              echo "::error::only $n unit tests executed under overflow checks, floor is 606 -- 637 ran on 2026-09-17 in run 34985102618, plus the directory-stream contract in #815 and two directory-index contracts in #816 and one fold-back contract in #817 and one entry-identity contract in #821 and one unlisted-extension contract in #822, and a run that executes less than that stopped early rather than passed"
               exit 1
           fi
         env:
@@ -685,7 +685,7 @@ jobs:
         run: |
           cargo test --locked --test check_io_attribute_list_attributes
           if ($LASTEXITCODE -ne 0) { throw 'attribute-list checker disagreed with its cases' }
-          foreach ($case in @('clean', 'type', 'name', 'vcn', 'instance')) {
+          foreach ($case in @('clean', 'type', 'name', 'vcn', 'instance', 'unlisted-attribute', 'unlisted-record')) {
             $shape = if ($case -eq 'clean') { 'Clean' } else { 'Damaged' }
             pwsh -File scripts/fs-windows-test-harness/win-chkdsk.ps1 `
               -ImagePath (Join-Path $PWD "tmp/list-check/$case.img") `
@@ -1049,10 +1049,11 @@ jobs:
           # `fsck.ntfs --dry-run --plan` CLI contract and one #815
           # directory-stream contract and two #816 directory-index contracts,
           # plus two #983 rescue-resume comparison contracts and one #984
-          # foreign-capture resume contract, plus one #817 listed-index fold-back contract and three #821 attribute-list contracts.
-          echo "tests executed: $n (floor 1396)"
-          if [ "$n" -lt 1396 ]; then
-              echo "::error::only $n tests executed, floor is 1396 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680, eight generator contracts in #681, four image-harness contracts in #682, one recursive-walk fault contract in #644, three named-stream contracts in #731, three EA contracts in #732 two CLI EA JSON contracts in #658 one fsck --apply CLI contract in #910 one fsck --apply --in-place CLI contract in #922 four journal device-relationship contracts in #948 one fsck --dry-run --plan CLI contract in #906 and one directory-stream contract in #815 and two directory-index contracts in #816 and two rescue-resume comparison contracts in #983 and one foreign-capture resume contract in #984 and one listed-index fold-back contract in #817 and three attribute-list contracts in #821. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
+          # foreign-capture resume contract, plus one #817 listed-index fold-back contract,
+          # three #821 attribute-list contracts and three #822 unlisted-extension contracts.
+          echo "tests executed: $n (floor 1399)"
+          if [ "$n" -lt 1399 ]; then
+              echo "::error::only $n tests executed, floor is 1399 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680, eight generator contracts in #681, four image-harness contracts in #682, one recursive-walk fault contract in #644, three named-stream contracts in #731, three EA contracts in #732 two CLI EA JSON contracts in #658 one fsck --apply CLI contract in #910 one fsck --apply --in-place CLI contract in #922 four journal device-relationship contracts in #948 one fsck --dry-run --plan CLI contract in #906 and one directory-stream contract in #815 and two directory-index contracts in #816 and two rescue-resume comparison contracts in #983 and one foreign-capture resume contract in #984 and one listed-index fold-back contract in #817 and three attribute-list contracts in #821 and three unlisted-extension contracts in #822. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
               exit 1
           fi
       - run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness -- -D warnings
@@ -1216,11 +1217,11 @@ jobs:
           #
           # Measured 2026-09-17 from run 34985102618 (job 104435065061): 637
           # executed, the same `--lib` set the stable legs run. Previous
-          # floor 601 plus two #816, one #817 and one #821 contracts is 605.
+          # floor 601 plus two #816, one #817, one #821 and one #822 contracts is 606.
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/asan.log | awk '{s+=$4} END{print s+0}')
-          echo "tests executed under ASan: $n (floor 605)"
-          if [ "$n" -lt 605 ]; then
-              echo "::error::only $n tests executed under ASan, floor is 605 -- 637 ran on 2026-09-17 in run 34985102618, plus the directory-stream contract in #815 and two directory-index contracts in #816 and one fold-back contract in #817 and one entry-identity contract in #821, and a run that executes less than that sanitized nothing rather than passed"
+          echo "tests executed under ASan: $n (floor 606)"
+          if [ "$n" -lt 606 ]; then
+              echo "::error::only $n tests executed under ASan, floor is 606 -- 637 ran on 2026-09-17 in run 34985102618, plus the directory-stream contract in #815 and two directory-index contracts in #816 and one fold-back contract in #817 and one entry-identity contract in #821 and one unlisted-extension contract in #822, and a run that executes less than that sanitized nothing rather than passed"
               exit 1
           fi
       - name: upload test logs
