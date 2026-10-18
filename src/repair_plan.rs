@@ -351,6 +351,111 @@ pub fn load_plan(bytes: &[u8]) -> Result<SavedPlan, PlanFileError> {
     })
 }
 
+/// Why a source was refused for a plan.
+#[cfg(feature = "plan-file")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanSourceError {
+    /// The source's size is not the size the plan was made from.
+    Size { source: u64, plan: u64 },
+    /// The source's volume serial number is not the plan's.
+    Serial { source: u64, plan: u64 },
+    /// The source does not hold a write's before-image at its turn.
+    BeforeImage {
+        unit: usize,
+        write: usize,
+        offset: u64,
+    },
+    /// The source could not be read.
+    Read(String),
+}
+
+#[cfg(feature = "plan-file")]
+impl std::fmt::Display for PlanSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Size { source, plan } => write!(
+                f,
+                "source size is {source} bytes, the plan was made from {plan}"
+            ),
+            Self::Serial { source, plan } => write!(
+                f,
+                "source volume serial is {source:#018x}, the plan was made from {plan:#018x}"
+            ),
+            Self::BeforeImage {
+                unit,
+                write,
+                offset,
+            } => write!(
+                f,
+                "plan unit {unit} write {write}: the source does not hold its before-image at byte {offset}"
+            ),
+            Self::Read(e) => write!(f, "reading the source: {e}"),
+        }
+    }
+}
+
+#[cfg(feature = "plan-file")]
+impl std::error::Error for PlanSourceError {}
+
+/// Check `plan` against the `source` it is about to be applied to, reading
+/// only: the source's size and volume serial number must be the plan's,
+/// and every write's before-image must be what the source holds at that
+/// write's turn, that is with the after-images of the plan's earlier writes
+/// over the source's own bytes. The first mismatch is refused.
+#[cfg(feature = "plan-file")]
+pub fn check_plan_source<T: BlockIo + ?Sized>(
+    plan: &SavedPlan,
+    source: &mut T,
+) -> Result<(), PlanSourceError> {
+    let size = source.size();
+    if size != plan.source_size {
+        return Err(PlanSourceError::Size {
+            source: size,
+            plan: plan.source_size,
+        });
+    }
+    let mut serial = [0u8; 8];
+    source
+        .read_exact_at(VOLUME_SERIAL_OFFSET, &mut serial)
+        .map_err(PlanSourceError::Read)?;
+    let serial = u64::from_le_bytes(serial);
+    if serial != plan.volume_serial {
+        return Err(PlanSourceError::Serial {
+            source: serial,
+            plan: plan.volume_serial,
+        });
+    }
+    let mut earlier: Vec<&PlannedWrite> = Vec::new();
+    for (u, unit) in plan.units.iter().enumerate() {
+        for (w, write) in unit.writes.iter().enumerate() {
+            let mut held = vec![0u8; write.before.len()];
+            source
+                .read_exact_at(write.offset, &mut held)
+                .map_err(PlanSourceError::Read)?;
+            let end = write.offset + held.len() as u64;
+            for e in &earlier {
+                let from = e.offset.max(write.offset);
+                let to = (e.offset + e.after.len() as u64).min(end);
+                if from < to {
+                    held[(from - write.offset) as usize..(to - write.offset) as usize]
+                        .copy_from_slice(
+                            &e.after[(from - e.offset) as usize..(to - e.offset) as usize],
+                        );
+                }
+            }
+            if let Some(i) = held.iter().zip(&write.before).position(|(a, b)| a != b) {
+                return Err(PlanSourceError::BeforeImage {
+                    unit: u,
+                    write: w,
+                    offset: write.offset + i as u64,
+                });
+            }
+            earlier.push(write);
+        }
+    }
+    Ok(())
+}
+
 /// Reads little-endian fields in order; `None` past the end.
 #[cfg(feature = "plan-file")]
 struct Reader<'a> {

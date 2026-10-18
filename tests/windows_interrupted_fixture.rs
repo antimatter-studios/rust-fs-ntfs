@@ -2746,3 +2746,105 @@ fn a_saved_plan_loads_back_to_what_windows_recovered_and_only_when_intact() {
         std::fs::remove_file(&src).unwrap();
     }
 }
+
+/// A byte of write `w` in unit `u` that no earlier write of the plan
+/// covers, so the source alone decides what the plan expects there.
+#[cfg(feature = "plan-file")]
+fn uncovered_byte(units: &[fs_ntfs::repair_plan::PlanUnit], u: usize, w: usize) -> Option<u64> {
+    let earlier: Vec<&fs_ntfs::repair_plan::PlannedWrite> = units[..u]
+        .iter()
+        .flat_map(|x| &x.writes)
+        .chain(&units[u].writes[..w])
+        .collect();
+    let me = &units[u].writes[w];
+    (me.offset..me.offset + me.before.len() as u64).find(|&b| {
+        !earlier
+            .iter()
+            .any(|e| (e.offset..e.offset + e.after.len() as u64).contains(&b))
+    })
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn a_loaded_plan_is_checked_against_its_source_and_refused_on_the_first_mismatch() {
+    // A loaded plan is checked against the volume it is about to be
+    // applied to before anything is written (#908): the source's size,
+    // its volume serial number, and every write's before-image at that
+    // write's turn. A capture of Windows' own must check clean; the same
+    // capture with one byte changed, one sector shorter, or with another
+    // serial must be refused naming what differs, and never written.
+    use fs_ntfs::repair_plan::{check_plan_source, load_plan, plan_fsck_io, save_plan};
+    let volume = |bytes: Vec<u8>| RecordedRepair {
+        bytes,
+        units: Vec::new(),
+        open: Vec::new(),
+    };
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let pristine_sha = hex_sha256(&pristine);
+        let mut v = volume(pristine.clone());
+        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        assert!(
+            !loaded.units.is_empty(),
+            "{k}: a log holding work planned nothing"
+        );
+
+        check_plan_source(&loaded, &mut v)
+            .unwrap_or_else(|e| panic!("{k}: the capture it was made from was refused: {e}"));
+        assert_eq!(
+            hex_sha256(&v.bytes),
+            pristine_sha,
+            "{k}: the check wrote to the capture"
+        );
+
+        let refused = |what: &str, bytes: Vec<u8>, names: &str| {
+            let before = hex_sha256(&bytes);
+            let mut v = volume(bytes);
+            match check_plan_source(&loaded, &mut v) {
+                Ok(()) => panic!("{k}: {what}: checked clean"),
+                Err(e) => assert!(
+                    e.to_string().contains(names),
+                    "{k}: {what}: refused as {e}, not naming {names:?}"
+                ),
+            }
+            assert_eq!(hex_sha256(&v.bytes), before, "{k}: {what}: the check wrote");
+        };
+
+        let writes: Vec<(usize, usize)> = loaded
+            .units
+            .iter()
+            .enumerate()
+            .flat_map(|(u, unit)| (0..unit.writes.len()).map(move |w| (u, w)))
+            .collect();
+        let first = writes[0];
+        let last = *writes
+            .iter()
+            .rev()
+            .find(|&&(u, w)| uncovered_byte(&loaded.units, u, w).is_some())
+            .unwrap_or_else(|| panic!("{k}: every write is covered by an earlier one"));
+        for (u, w) in [first, last] {
+            let at = uncovered_byte(&loaded.units, u, w).unwrap() as usize;
+            let mut changed = pristine.clone();
+            changed[at] ^= 0xff;
+            refused(
+                &format!("byte {at} changed"),
+                changed,
+                &format!("unit {u} write {w}"),
+            );
+        }
+
+        let mut shorter = pristine.clone();
+        shorter.truncate(pristine.len() - 512);
+        refused("one sector shorter", shorter, "size");
+
+        let mut other = pristine.clone();
+        other[0x48] ^= 0xff;
+        refused("another volume serial", other, "serial");
+
+        std::fs::remove_file(&src).unwrap();
+    }
+}
