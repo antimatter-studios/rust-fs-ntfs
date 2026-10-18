@@ -381,3 +381,84 @@ fn write_at_into_the_unnamed_stream_in_an_extension_record_writes_it_there() {
     list_is_true(&img, rec);
     partial_writes(&img, rec);
 }
+
+fn free_clusters(img: &str) -> u64 {
+    let mut io = PathIo::open_ro(Path::new(img)).expect("open_ro");
+    let bm = fs_ntfs::bitmap::locate_bitmap_io(&mut io).expect("locate $Bitmap");
+    fs_ntfs::bitmap::count_free_io(&mut io, &bm).expect("count free clusters")
+}
+
+/// Truncate `/f` to `size` with `truncate_io`, apply the same to `model`,
+/// then check the list, the contents the `ntfs` crate reads, the streams
+/// beside it and the volume (#790).
+fn truncate_and_check(img: &str, rec: u64, model: &mut Vec<u8>, size: usize) {
+    model.resize(size, 0);
+    let mut io = PathIo::open_rw(Path::new(img)).expect("open_rw");
+    let new_size = write::truncate_io(&mut io, "/f", size as u64)
+        .unwrap_or_else(|e| panic!("truncate /f to {size} bytes: {e}"));
+    assert_eq!(new_size, size as u64);
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
+    drop(io);
+    list_is_true(img, rec);
+    let (ntfs, mut reader) = common::open(img);
+    let read_back = common::read_file_all(&ntfs, &mut reader, "/f");
+    assert!(
+        read_back == *model,
+        "after a truncate to {size}, the ntfs crate reads {} bytes of /f \
+         that differ from the {} expected",
+        read_back.len(),
+        model.len()
+    );
+    drop(reader);
+    let mut io = PathIo::open_ro(Path::new(img)).expect("open_ro");
+    assert_eq!(
+        read::read_attribute_value(&mut io, rec, AttrType::Data, Some("s3")).expect("read /f:s3"),
+        vec![b'd'; 120],
+        "truncating the unnamed stream changed a named one"
+    );
+    drop(io);
+    clean(img);
+}
+
+/// Truncates that grow and shrink the unnamed stream of a listed file,
+/// resident, promoted into clusters by a growing truncate, and in
+/// clusters, freeing the clusters past each new end.
+fn truncates(img: &str, rec: u64) {
+    let mut model = b"contents".to_vec();
+    truncate_and_check(img, rec, &mut model, 600);
+    write_at_and_check(img, rec, &mut model, 0, &pattern(600));
+    truncate_and_check(img, rec, &mut model, 3);
+    truncate_and_check(img, rec, &mut model, 9000);
+    write_at_and_check(img, rec, &mut model, 0, &pattern(9000));
+    truncate_and_check(img, rec, &mut model, 20_000);
+    write_at_and_check(img, rec, &mut model, 15_000, &pattern(5000));
+    let before = free_clusters(img);
+    truncate_and_check(img, rec, &mut model, 5000);
+    assert_eq!(
+        free_clusters(img),
+        before + 3,
+        "shrinking /f from five clusters to two did not free the three past its end"
+    );
+    truncate_and_check(img, rec, &mut model, 4096);
+    truncate_and_check(img, rec, &mut model, 0);
+    truncate_and_check(img, rec, &mut model, 700);
+}
+
+/// `truncate` of the unnamed `$DATA` of a listed file whose stream is in
+/// its base record goes through the list as it grows and shrinks (#790).
+#[test]
+fn truncating_the_unnamed_stream_of_a_listed_file_keeps_the_list_true() {
+    let (img, rec) = volume_with_a_listed_file("trunc_base");
+    truncates(&img, rec);
+}
+
+/// `truncate` of a Windows-made file whose unnamed `$DATA` lives in an
+/// extension record resizes it there, not refused for want of one in the
+/// base record (#790).
+#[test]
+fn truncating_the_unnamed_stream_in_an_extension_record_resizes_it_there() {
+    let (img, rec) = volume_with_a_listed_file("trunc_ext");
+    move_unnamed_data_to_extension(&img, rec);
+    list_is_true(&img, rec);
+    truncates(&img, rec);
+}
