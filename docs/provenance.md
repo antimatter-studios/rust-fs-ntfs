@@ -160,6 +160,14 @@ The Windows verdict has not been measured locally. Name collation (#1044)
 and same-name lowest-VCN order (#1045) are separate, pending checks; this
 change makes no assumption about Windows' attribute-name collation.
 
+The name-collation measurement (#1047, part of #1044) asks Windows rather
+than a specification. Windows writes one file's named `$DATA` streams into an
+`$ATTRIBUTE_LIST`, with names chosen so ordinal UTF-16, upcase-folded,
+length-first and code-point ordering each give a different sequence. CI keeps
+the order Windows wrote and `chkdsk`'s verdict on that untouched list; it
+judges neither. Inversion verdicts (#1048) and the checker comparison (#1049)
+follow the retained measurement.
+
 The listed-directory cycle (#818) uses Windows' own enumeration, EA query,
 stream readback and `chkdsk` to grade the grown and folded indexes. Directory
 stream readback uses the documented [FindFirstStreamW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirststreamw),

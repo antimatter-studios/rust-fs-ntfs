@@ -764,6 +764,32 @@ jobs:
             tmp/list-check/*/*.txt
             tmp/list-check/*/verdict.json
           if-no-files-found: error
+      # The order Windows wrote collation-separating stream names in (#1047),
+      # recorded rather than judged, and chkdsk's verdict on that untouched
+      # list. Inversions are graded in #1048; the checker follows in #1049.
+      - name: Record Windows' attribute-list name order
+        shell: pwsh
+        env:
+          NTFS_ATTRLIST_NAME_ORDER: tmp/attrlist-names
+        run: |
+          cargo test --locked --test attrlist_name_order_windows
+          if ($LASTEXITCODE -ne 0) { throw 'Windows did not list every stream name it was handed' }
+          Copy-Item test-disks/ntfs-attrlist-names.img tmp/attrlist-names/clean.img
+          pwsh -File scripts/fs-windows-test-harness/win-chkdsk.ps1 `
+            -ImagePath (Join-Path $PWD 'tmp/attrlist-names/clean.img') `
+            -Diag 'tmp/attrlist-names/clean' -Modes readonly -VerdictShape Clean
+          if ($LASTEXITCODE -ne 0) { throw 'chkdsk did not grade the untouched name-order list clean' }
+      - name: Retain Windows' attribute-list name order
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attribute-list-name-order
+          path: |
+            test-disks/ntfs-attrlist-names.names.tsv
+            tmp/attrlist-names/observed-order.tsv
+            tmp/attrlist-names/clean/*.txt
+            tmp/attrlist-names/clean/verdict.json
+          if-no-files-found: error
       # The rescue scan's allocated, free and tail bytes of ntfs-cli-read.img
       # against the cluster counts fsutil reported for that volume (#970).
       - name: Rescue scan totals agree with fsutil fsinfo ntfsinfo
@@ -928,6 +954,8 @@ jobs:
             test-disks/ntfs-attrlist.img
             test-disks/ntfs-attrlist.streams.tsv
             test-disks/ntfs-attrlist.streams.tsv.bytes/
+            test-disks/ntfs-attrlist-names.img
+            test-disks/ntfs-attrlist-names.names.tsv
             test-disks/ntfs-compressed.img
             test-disks/ntfs-symlink.img
             test-disks/ntfs-symlink.targets.tsv
@@ -1145,10 +1173,11 @@ jobs:
           # three #821 attribute-list contracts and three #822 unlisted-extension contracts,
           # plus three #993 rescue-export contracts and one #994 capture-export contract,
           # plus two #1000 incomplete-export contracts and three #1001 dirty-flag contracts,
-          # plus four #1015 rescue CLI contracts, two #1040 self-entry contracts and two #1043 type-order contracts.
-          echo "tests executed: $n (floor 1408)"
-          if [ "$n" -lt 1408 ]; then
-              echo "::error::only $n tests executed, floor is 1408 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680, eight generator contracts in #681, four image-harness contracts in #682, one recursive-walk fault contract in #644, three named-stream contracts in #731, three EA contracts in #732 two CLI EA JSON contracts in #658 one fsck --apply CLI contract in #910 one fsck --apply --in-place CLI contract in #922 four journal device-relationship contracts in #948 one fsck --dry-run --plan CLI contract in #906 and one directory-stream contract in #815 and two directory-index contracts in #816 and two rescue-resume comparison contracts in #983 and one foreign-capture resume contract in #984 and one listed-index fold-back contract in #817 and three attribute-list contracts in #821 and three unlisted-extension contracts in #822 and three rescue-export contracts in #993 and one capture-export contract in #994 and two incomplete-export contracts in #1000 and three dirty-flag contracts in #1001 and four rescue CLI contracts in #1015 and one rescue exit-status contract in #1020 and two self-entry contracts in #1040 and two type-order contracts in #1043. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
+          # plus four #1015 rescue CLI contracts, two #1040 self-entry contracts and two #1043 type-order contracts,
+          # plus one #1047 name-order measurement contract.
+          echo "tests executed: $n (floor 1409)"
+          if [ "$n" -lt 1409 ]; then
+              echo "::error::only $n tests executed, floor is 1409 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680, eight generator contracts in #681, four image-harness contracts in #682, one recursive-walk fault contract in #644, three named-stream contracts in #731, three EA contracts in #732 two CLI EA JSON contracts in #658 one fsck --apply CLI contract in #910 one fsck --apply --in-place CLI contract in #922 four journal device-relationship contracts in #948 one fsck --dry-run --plan CLI contract in #906 and one directory-stream contract in #815 and two directory-index contracts in #816 and two rescue-resume comparison contracts in #983 and one foreign-capture resume contract in #984 and one listed-index fold-back contract in #817 and three attribute-list contracts in #821 and three unlisted-extension contracts in #822 and three rescue-export contracts in #993 and one capture-export contract in #994 and two incomplete-export contracts in #1000 and three dirty-flag contracts in #1001 and four rescue CLI contracts in #1015 and one rescue exit-status contract in #1020 and two self-entry contracts in #1040 and two type-order contracts in #1043 and one name-order measurement contract in #1047. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
               exit 1
           fi
       - run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness -- -D warnings
