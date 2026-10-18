@@ -57,7 +57,16 @@
 #                               non-resident length. These are the shapes
 #                               behind the redo operations no capture has
 #                               held yet (UpdateRecordData*, the view
-#                               indexes, WriteEndOfFileRecordSegment).
+#                               indexes).
+#   -Mix tails                  the files mix with small, resident files,
+#                               each of which then has its $DATA -- the
+#                               last attribute in its record -- cut and
+#                               regrown in place four times, and a named
+#                               stream added after it and removed again
+#                               each time: the end of the file record
+#                               segment is rewritten over and over, the
+#                               shape behind WriteEndOfFileRecordSegment,
+#                               which neither other mix produced (#764).
 #
 # Run elevated on Windows (GitHub's windows-latest is). Windows PowerShell 5.1
 # or PowerShell 7.
@@ -68,7 +77,7 @@ param(
     [int]$ClusterSize = 4096,
     [int]$Writers = 1,
     [int]$LogKB = 0,
-    [ValidateSet('files', 'views')]
+    [ValidateSet('files', 'views', 'tails')]
     [string]$Mix = 'files',
     [switch]$CheckpointProbe,
     [string]$Out = 'logfile-oracle'
@@ -194,9 +203,26 @@ while ((Get-Date) -lt $end) {
     # captured image is small enough to commit.
     $unit = [System.Text.Encoding]::ASCII.GetBytes(('<{0:D7}>' -f $i))
     $len = $rng.Next(1, 32768)
+    # Small enough that $DATA stays resident in a 1 KiB record.
+    if ($Mix -eq 'tails') { $len = $rng.Next(1, 600) }
     $buf = New-Object byte[] $len
     for ($j = 0; $j -lt $len; $j++) { $buf[$j] = $unit[$j % $unit.Length] }
     [System.IO.File]::WriteAllBytes($file, $buf)
+    if ($Mix -eq 'tails') {
+        # The file stays a prefix of its own pattern: each cut is followed
+        # by the pattern's next bytes from where it was cut.
+        for ($k = 0; $k -lt 4; $k++) {
+            $cut = $rng.Next(0, $len)
+            $fs = [System.IO.File]::Open($file, 'Open', 'Write')
+            try {
+                $fs.SetLength($cut)
+                $fs.Position = $cut
+                $fs.Write($buf, $cut, $rng.Next(1, $len - $cut + 1))
+            } finally { $fs.Dispose() }
+            Set-Content -LiteralPath $file -Stream 'tail' -Value ('{0:D7}' -f $i)
+            Remove-Item -LiteralPath $file -Stream 'tail'
+        }
+    }
     if ($Mix -eq 'views') {
         # A descriptor no other file has: an allow entry for a SID that
         # names this file's index, which needs no such account to exist.
