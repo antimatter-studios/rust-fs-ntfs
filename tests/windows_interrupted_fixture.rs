@@ -5359,3 +5359,151 @@ fn fsck_apply_in_place_repairs_a_copy_through_an_external_journal() {
         std::fs::remove_file(&src).unwrap();
     }
 }
+
+#[cfg(feature = "cli")]
+#[test]
+fn fsck_apply_in_place_resume_finishes_a_stopped_repair_from_its_journal() {
+    // `fsck.ntfs --apply PLAN --in-place --resume --journal FILE TARGET`
+    // (#963): an in-place apply stopped halfway through a Windows
+    // interrupted capture's plan leaves a journal; resumed from the CLI on
+    // the same journal, the copy must reach the files and metadata Windows'
+    // own restart reached, and the journal must mark every unit applied.
+    // `--resume` naming no journal is a usage error that writes nothing.
+    use fs_ntfs::block_io::PathIo;
+    use fs_ntfs::repair_journal::{
+        apply_in_place_observed, progress, read_journal, ApplyObserver, InPlaceError,
+        JournalBinding,
+    };
+    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use std::path::Path;
+
+    /// Asks for a stop once `stop` units have begun.
+    struct StopAt {
+        asked: usize,
+        stop: usize,
+    }
+    impl ApplyObserver for StopAt {
+        fn cancel_requested(&mut self) -> bool {
+            self.asked += 1;
+            self.asked > self.stop
+        }
+    }
+
+    for (k, log_end) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let mut v = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        let units = loaded.units.len();
+        assert!(units > 0, "{k}: a log holding work planned nothing");
+        let plan_file = format!("{src}.resume.plan");
+        std::fs::write(&plan_file, &saved).unwrap();
+        let journal_dir = format!("{src}.resume.d");
+        let _ = std::fs::remove_dir_all(&journal_dir);
+        std::fs::create_dir(&journal_dir).unwrap();
+        let journal = format!("{journal_dir}/repair.journal");
+        let pristine_sha = hex_sha256(&pristine);
+        let device = format!("{src}.resume.img");
+        std::fs::write(&device, &pristine).unwrap();
+        drop(pristine);
+
+        // `--resume` with no journal to resume is refused before anything
+        // is written.
+        let (code, said) = fsck_cli(&[
+            "--apply",
+            &plan_file,
+            "--in-place",
+            "--resume",
+            "--journal",
+            &journal,
+            &device,
+        ]);
+        assert_eq!(
+            code, 16,
+            "{k}: --resume with no journal exited {code}: {said}"
+        );
+        assert_eq!(
+            hex_sha256(&std::fs::read(&device).unwrap()),
+            pristine_sha,
+            "{k}: --resume with no journal changed the copy"
+        );
+        assert!(
+            !Path::new(&journal).exists(),
+            "{k}: --resume with no journal created one"
+        );
+
+        // Stop the apply after half the units, as a cancel would.
+        let stop = units / 2;
+        std::fs::write(&journal, b"").unwrap();
+        {
+            let mut device = PathIo::open_rw(Path::new(&device)).unwrap();
+            let mut jrn = PathIo::open_rw(Path::new(&journal)).unwrap();
+            let sha: [u8; 32] = Sha256::digest(&saved).into();
+            match apply_in_place_observed(
+                &loaded,
+                sha,
+                &mut device,
+                &mut jrn,
+                &mut StopAt { asked: 0, stop },
+            ) {
+                Err(InPlaceError::Cancelled { applied }) => {
+                    assert_eq!(applied as usize, stop, "{k}: units applied before the stop")
+                }
+                other => panic!("{k}: the apply stopped at {stop} of {units} gave {other:?}"),
+            }
+        }
+
+        let (code, said) = fsck_cli(&[
+            "--apply",
+            &plan_file,
+            "--in-place",
+            "--resume",
+            "--journal",
+            &journal,
+            &device,
+        ]);
+        assert_eq!(
+            code, 0,
+            "{k}: --apply --in-place --resume exited {code}: {said}"
+        );
+        let binding = JournalBinding::of(&saved).unwrap();
+        let read = read_journal(&std::fs::read(&journal).unwrap(), &binding)
+            .unwrap_or_else(|e| panic!("{k}: the journal read back refused: {e:?}"));
+        assert_eq!(read.torn, None, "{k}: the journal ends in a torn record");
+        let done = progress(&read, &loaded).unwrap_or_else(|e| panic!("{k}: progress: {e:?}"));
+        assert_eq!(
+            (done.applied as usize, done.open),
+            (units, None),
+            "{k}: the resumed journal does not mark every unit applied"
+        );
+        let want = manifest(k);
+        let got = walk(&device);
+        assert!(
+            got == want,
+            "{k}: {} files after --resume, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+        let recovered = unpack(&format!("windows-interrupted-{k}.recovered"));
+        oracle::same_metadata_as_windows(
+            k,
+            &Image::read(&src),
+            &Image::read(&device),
+            &Image::read(&recovered),
+            log_end,
+        );
+
+        std::fs::remove_file(&recovered).unwrap();
+        std::fs::remove_dir_all(&journal_dir).unwrap();
+        std::fs::remove_file(&plan_file).unwrap();
+        std::fs::remove_file(&device).unwrap();
+        std::fs::remove_file(&src).unwrap();
+    }
+}
