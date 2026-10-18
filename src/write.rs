@@ -4856,11 +4856,12 @@ fn finish_data_write_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<(),
     recharge_quota_io(io, rec)
 }
 
-/// What Windows charges a file on a volume tracking quotas: its MFT record
-/// plus the allocated size of each of its non-resident `$DATA` streams,
-/// read from the stream's first extent. Resident attributes add nothing
-/// beyond the record (measured on
-/// `test-disks/windows-interrupted-quota.recovered`).
+/// What Windows charges a file on a volume tracking quotas: its MFT record,
+/// another record-sized charge for each named `$DATA` stream (even resident
+/// or empty), and each non-resident stream's allocated size, read from its
+/// first extent. Measured with 1024- and 4096-byte Windows file records;
+/// see `docs/quota-charge-findings.md` and
+/// `test-disks/windows-interrupted-quota.recovered`.
 fn quota_charge_due(record: &[u8], record_size: u64) -> u64 {
     let field = |at: usize| {
         record
@@ -4869,9 +4870,23 @@ fn quota_charge_due(record: &[u8], record_size: u64) -> u64 {
     };
     record_size
         + attr_io::iter_attributes(record)
-            .filter(|a| a.type_code == AttrType::Data as u32 && !a.is_resident)
-            .filter(|a| field(a.attr_offset + NR_LOWEST_VCN) == 0)
-            .map(|a| field(a.attr_offset + NR_ALLOCATED_SIZE))
+            .filter(|attribute| attribute.type_code == AttrType::Data as u32)
+            .filter(|attribute| {
+                attribute.is_resident || field(attribute.attr_offset + NR_LOWEST_VCN) == 0
+            })
+            .map(|attribute| {
+                let stream_record = if attribute.name_length == 0 {
+                    0
+                } else {
+                    record_size
+                };
+                let allocation = if attribute.is_resident {
+                    0
+                } else {
+                    field(attribute.attr_offset + NR_ALLOCATED_SIZE)
+                };
+                stream_record + allocation
+            })
             .sum::<u64>()
 }
 
@@ -6020,7 +6035,8 @@ pub fn write_named_stream_resident_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     write_named_stream_resident_unstamped_io(io, file_path, stream_name, data)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    stamp_written_io(io, rec)
+    stamp_written_io(io, rec)?;
+    recharge_quota_io(io, rec)
 }
 
 /// [`write_named_stream_resident_io`] without advancing the file's times; see
@@ -6123,7 +6139,8 @@ pub fn write_named_stream_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     write_named_stream_unstamped_io(io, file_path, stream_name, data)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    stamp_written_io(io, rec)
+    stamp_written_io(io, rec)?;
+    recharge_quota_io(io, rec)
 }
 
 /// [`write_named_stream_io`] without advancing the file's times; see
@@ -6496,7 +6513,8 @@ pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     delete_named_stream_unstamped_io(io, file_path, stream_name)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    stamp_written_io(io, rec)
+    stamp_written_io(io, rec)?;
+    recharge_quota_io(io, rec)
 }
 
 /// [`delete_named_stream_io`] without advancing the file's times; see

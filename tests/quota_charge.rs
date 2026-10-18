@@ -8,9 +8,9 @@
 //! `$Extend\$Quota:$Q` holds each owner's usage, keyed by owner id.
 //! Measured on that volume, every one of its 709 files with an owner is
 //! charged its MFT record plus the allocated size of its non-resident
-//! `$DATA`: resident attributes and a directory's index blocks are charged
-//! nothing beyond the record. Each owner's usage is the sum of what its
-//! files are charged.
+//! `$DATA`: these files have no named data streams, and their resident
+//! attributes and directory index blocks add nothing beyond the record.
+//! Each owner's usage is the sum of what its files are charged.
 //!
 //! Unlinking a file's last name, removing a directory and renaming over a
 //! file each free a charged record, and have to take its charge off the
@@ -32,6 +32,15 @@
 //! (#848, part of #676). The Windows matrix scenario
 //! `win-format-win-quota-mac-create-win-chkdsk` grades the same creates on a
 //! volume Windows made.
+//!
+//! Writing or deleting a named stream changes a file's allocation as much as
+//! writing its unnamed one, and has to move its charge the same way (#851,
+//! part of #677). The Windows matrix scenario
+//! `win-format-win-quota-mac-streams-win-chkdsk` has Windows charge named
+//! streams of its own first, and its recount grades the same writes.
+//! Windows also charges each named stream one file-record-sized amount,
+//! even for a resident or empty stream. Measurements with 1024- and
+//! 4096-byte Windows file records are in `docs/quota-charge-findings.md`.
 
 mod common;
 
@@ -305,18 +314,23 @@ fn charged_files(img: &str, name: &str) -> Vec<String> {
         .collect()
 }
 
-/// `path` is charged its record and the allocation of its data, and every
-/// owner's usage is what its files are charged.
+/// `path` is charged its record, another record for every named stream,
+/// and its data allocation; every owner's usage is what its files are charged.
 fn assert_in_step(img: &str, path: &str, what: &str) {
     let vol = Vol::read(img);
     let rec = vol.record(record_of(img, path)).unwrap();
     let (owner, qc) = charge(&rec);
+    let named_streams = attrs(&rec)
+        .iter()
+        .filter(|attribute| attribute.ty == DATA && !attribute.name.is_empty())
+        .filter(|attribute| !attribute.non_resident || le(&rec, attribute.at + 0x10, 8) == 0)
+        .count() as u64;
     assert_ne!(owner, 0, "{what}: {path} lost its owner");
     assert_eq!(
         qc,
-        vol.record + data_allocated(&rec),
-        "{what}: {path} is charged {qc}, not its {}-byte record and the {} bytes its data \
-         has allocated",
+        (1 + named_streams) * vol.record + data_allocated(&rec),
+        "{what}: {path} is charged {qc}, not its {}-byte record, {named_streams} named \
+         stream record charges, and the {} bytes its data has allocated",
         vol.record,
         data_allocated(&rec)
     );
@@ -526,4 +540,103 @@ fn a_file_or_directory_created_in_a_charged_directory_is_charged_to_its_owner() 
         "owner {owner}'s usage did not grow by the two records created"
     );
     assert_eq!(usage(&vol).0, charged(&vol));
+}
+
+#[test]
+fn a_nonresident_named_stream_is_charged_its_allocation_and_its_own_record() {
+    let img = unpack(TRACKED, "named_record_charge");
+    let path = charged_files(&img, TRACKED).swap_remove(0);
+    let before = Vol::read(&img);
+    let (owner, original_charge) = charge(&before.record(record_of(&img, &path)).unwrap());
+    let original_usage = usage(&before).0[&owner];
+    let stream_allocation = 70_000u64.div_ceil(before.cluster) * before.cluster;
+
+    fs_ntfs::write::write_named_stream(Path::new(&img), &path, "s1", &vec![0x5A; 70_000])
+        .unwrap_or_else(|error| panic!("write {path}:s1: {error}"));
+
+    let after = Vol::read(&img);
+    let expected_increase = stream_allocation + before.record;
+    assert_eq!(
+        charge(&after.record(record_of(&img, &path)).unwrap()),
+        (owner, original_charge + expected_increase),
+        "Windows charges a named stream its allocation plus a separate record charge"
+    );
+    assert_eq!(usage(&after).0[&owner], original_usage + expected_increase);
+    assert_eq!(usage(&after).0, charged(&after));
+}
+
+#[test]
+fn resident_and_empty_named_streams_each_have_a_record_charge() {
+    let img = unpack(TRACKED, "resident_stream_charge");
+    let parent = "/junction-target";
+    let path = "/junction-target/resident-streams.txt";
+    fs_ntfs::write::create_file(Path::new(&img), parent, "resident-streams.txt").unwrap();
+    let before = Vol::read(&img);
+    let (owner, original_charge) = charge(&before.record(record_of(&img, path)).unwrap());
+    let original_usage = usage(&before).0[&owner];
+    assert_eq!(original_charge, before.record);
+
+    fs_ntfs::write::write_named_stream_resident(Path::new(&img), path, "s1", &[0x5A; 100]).unwrap();
+    let after = Vol::read(&img);
+    assert_eq!(
+        charge(&after.record(record_of(&img, path)).unwrap()),
+        (owner, 2 * before.record)
+    );
+    assert_eq!(usage(&after).0[&owner], original_usage + before.record);
+
+    fs_ntfs::write::write_named_stream(Path::new(&img), path, "s2", &[]).unwrap();
+    let after = Vol::read(&img);
+    let record = after.record(record_of(&img, path)).unwrap();
+    assert_eq!(data_allocated(&record), 0);
+    assert_eq!(charge(&record), (owner, 3 * before.record));
+    assert_eq!(usage(&after).0[&owner], original_usage + 2 * before.record);
+
+    fs_ntfs::write::write_named_stream_resident(Path::new(&img), path, "s1", &[0xA5; 80]).unwrap();
+    let after = Vol::read(&img);
+    assert_eq!(
+        charge(&after.record(record_of(&img, path)).unwrap()),
+        (owner, 3 * before.record),
+        "rewriting a resident stream must not charge for another stream"
+    );
+    assert_eq!(usage(&after).0[&owner], original_usage + 2 * before.record);
+
+    fs_ntfs::write::delete_named_stream(Path::new(&img), path, "s1").unwrap();
+    let after = Vol::read(&img);
+    assert_eq!(
+        charge(&after.record(record_of(&img, path)).unwrap()),
+        (owner, 2 * before.record)
+    );
+    assert_eq!(usage(&after).0[&owner], original_usage + before.record);
+    assert_eq!(usage(&after).0, charged(&after));
+
+    fs_ntfs::write::delete_named_stream(Path::new(&img), path, "s2").unwrap();
+    let after = Vol::read(&img);
+    assert_eq!(
+        charge(&after.record(record_of(&img, path)).unwrap()),
+        (owner, original_charge)
+    );
+    assert_eq!(usage(&after).0[&owner], original_usage);
+    assert_eq!(usage(&after).0, charged(&after));
+}
+
+#[test]
+fn writing_and_deleting_a_named_stream_moves_its_files_charge() {
+    let img = unpack(TRACKED, "streams");
+    let path = charged_files(&img, TRACKED).swap_remove(0);
+    for size in [200_000usize, 70_000, 100] {
+        fs_ntfs::write::write_named_stream(Path::new(&img), &path, "s1", &vec![0x5A; size])
+            .unwrap_or_else(|e| panic!("write {size} bytes to {path}:s1: {e}"));
+        assert_in_step(
+            &img,
+            &path,
+            &format!("its stream s1 written to {size} bytes"),
+        );
+    }
+
+    fs_ntfs::write::write_named_stream(Path::new(&img), &path, "s2", &vec![0xA5; 90_000])
+        .unwrap_or_else(|e| panic!("write {path}:s2: {e}"));
+    assert_in_step(&img, &path, "a second stream s2 written");
+    fs_ntfs::write::delete_named_stream(Path::new(&img), &path, "s2")
+        .unwrap_or_else(|e| panic!("delete {path}:s2: {e}"));
+    assert_in_step(&img, &path, "its stream s2 deleted");
 }
