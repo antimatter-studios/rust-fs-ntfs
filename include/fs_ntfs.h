@@ -740,6 +740,65 @@ int fs_ntfs_fsck_with_fs_core_device(
     uint8_t  *out_dirty_cleared,
     uint32_t flags);
 
+/* ---- In-place repair apply (rust-fs-ntfs#957) ---- */
+
+/*
+ * Told how far an in-place repair has gone: `units` of `units_total`
+ * plan units marked applied, their writes holding `bytes` of the plan's
+ * `bytes_total`. Called once before the first unit and again after each
+ * unit is marked applied; the reports never fall.
+ */
+typedef void (*fs_ntfs_repair_progress_fn)(void *context,
+                                           uint32_t units, uint32_t units_total,
+                                           uint64_t bytes, uint64_t bytes_total);
+
+/*
+ * Asked before each unit of an in-place repair begins whether to stop:
+ * nonzero stops. A unit already begun is finished, read back and marked
+ * applied first, so a stop never leaves half a unit.
+ */
+typedef int (*fs_ntfs_repair_cancel_fn)(void *context);
+
+/* The status of an in-place repair its cancellation callback stopped. */
+#define FS_NTFS_REPAIR_CANCELLED 1
+
+/*
+ * Repair the device at `device_path` in place by the plan file at
+ * `plan_path` (saved by `fsck.ntfs --dry-run --plan FILE`), journalling
+ * into a new file at `journal_path` outside that device, as
+ * `fsck.ntfs --apply PLAN --in-place --journal FILE` does. The journal
+ * location, the plan and the device are checked before the journal is
+ * created; the device is opened exclusively.
+ *
+ * `progress_cb` and `cancel_cb` may be NULL; both receive `context`.
+ * `out_units_applied` (may be NULL) receives the units marked applied.
+ *
+ * fs_ntfs_repair_resume_in_place continues the repair from the journal a
+ * stopped or cancelled apply left: units marked applied that read back
+ * are skipped, and the open unit is finished without asking `cancel_cb`.
+ *
+ * Returns 0 once every unit is applied, FS_NTFS_REPAIR_CANCELLED when
+ * `cancel_cb` stopped it (the journal resumes it), -1 on error: EINVAL
+ * for a refused journal location, plan or device, nothing written; EIO
+ * when I/O failed, the journal holding how far the repair got.
+ *
+ * Unix only, and only in a build with the `plan-file` feature.
+ */
+int fs_ntfs_repair_apply_in_place(const char *device_path,
+                                  const char *plan_path,
+                                  const char *journal_path,
+                                  fs_ntfs_repair_progress_fn progress_cb,
+                                  fs_ntfs_repair_cancel_fn cancel_cb,
+                                  void *context,
+                                  uint32_t *out_units_applied);
+int fs_ntfs_repair_resume_in_place(const char *device_path,
+                                   const char *plan_path,
+                                   const char *journal_path,
+                                   fs_ntfs_repair_progress_fn progress_cb,
+                                   fs_ntfs_repair_cancel_fn cancel_cb,
+                                   void *context,
+                                   uint32_t *out_units_applied);
+
 /* ---- In-place writes (phase W1) ---- */
 
 /*
