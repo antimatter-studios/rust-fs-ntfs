@@ -10900,6 +10900,113 @@ mod tests {
     }
 
     #[test]
+    fn directory_named_streams_overflow_into_an_attribute_list() {
+        use crate::mft_io;
+        use ntfs::NtfsReadSeek;
+        use std::collections::BTreeMap;
+
+        let size = 16 * 1024 * 1024;
+        let mut dev = MemDev { buf: vec![0; size] };
+        format_filesystem(&mut dev, size as u64, 4096, 1024, None, Some(1)).unwrap();
+        let rec = mkdir_io(&mut dev, "/", "d").unwrap();
+        for name in ["a", "b"] {
+            create_file_io(&mut dev, "/d", name).unwrap();
+        }
+        let (_, record) = read_mft_record_io(&mut dev, rec).unwrap();
+        assert!(attr_io::find_attribute(&record, AttrType::AttributeList, None).is_none());
+
+        let mut streams = BTreeMap::new();
+        for i in 0..24 {
+            let name = format!("s{i:02}");
+            let value = vec![i as u8; 120];
+            write_named_stream_io(&mut dev, "/d", &name, &value)
+                .unwrap_or_else(|e| panic!("write /d:{name}: {e}"));
+            streams.insert(name, value);
+        }
+
+        // Check both directions: each list entry names an attribute where
+        // it lives, and every attribute except the list has one entry.
+        let list = crate::read::read_attribute_value(&mut dev, rec, AttrType::AttributeList, None)
+            .unwrap();
+        let entries = crate::read::parse_attribute_list(&list).unwrap();
+        let mut records: Vec<_> = entries.iter().map(|e| e.record_number).collect();
+        records.sort_unstable();
+        records.dedup();
+        assert!(records.contains(&rec));
+        assert!(records.len() > 1, "no stream left the base record");
+        let mut held = 0;
+        for number in records {
+            let (_, record) = read_mft_record_io(&mut dev, number).unwrap();
+            assert_ne!(mft_io::record_flags(&record) & mft_io::MFT_FLAG_IN_USE, 0);
+            let owner =
+                u64::from_le_bytes(record[0x20..0x28].try_into().unwrap()) & 0x0000_FFFF_FFFF_FFFF;
+            assert_eq!(owner, if number == rec { 0 } else { rec });
+            for loc in attr_io::iter_attributes(&record) {
+                if loc.type_code == AttrType::AttributeList as u32 {
+                    continue;
+                }
+                held += 1;
+                let name = attr_io::decode_attr_name(&record, &loc);
+                assert_eq!(
+                    entries
+                        .iter()
+                        .filter(|e| {
+                            e.record_number == number
+                                && e.type_code == loc.type_code
+                                && e.attribute_id == loc.attribute_id
+                                && e.name.as_deref().unwrap_or("") == name
+                        })
+                        .count(),
+                    1,
+                    "attribute {:#x} {name:?} in record {number}",
+                    loc.type_code
+                );
+                if loc.type_code == AttrType::IndexRoot as u32
+                    || loc.type_code == AttrType::FileName as u32
+                {
+                    assert_eq!(number, rec, "a directory's index or name moved");
+                }
+            }
+        }
+        assert_eq!(held, entries.len());
+
+        // Read every stream and directory entry through the independent
+        // MIT/Apache-licensed ntfs crate, over a fresh view of the bytes.
+        let mut reader = std::io::Cursor::new(&dev.buf);
+        let mut ntfs = ntfs::Ntfs::new(&mut reader).unwrap();
+        ntfs.read_upcase_table(&mut reader).unwrap();
+        let dir = ntfs.file(&mut reader, rec).unwrap();
+        for (name, expected) in streams {
+            let item = dir.data(&mut reader, &name).unwrap().unwrap();
+            let attr = item.to_attribute().unwrap();
+            let mut value = attr.value(&mut reader).unwrap();
+            let mut actual = Vec::new();
+            let mut chunk = [0; 4096];
+            loop {
+                let n = value.read(&mut reader, &mut chunk).unwrap();
+                if n == 0 {
+                    break;
+                }
+                actual.extend_from_slice(&chunk[..n]);
+            }
+            assert_eq!(actual, expected, "the ntfs crate reads /d:{name}");
+        }
+        let index = dir.directory_index(&mut reader).unwrap();
+        let mut iter = index.entries();
+        let mut names = Vec::new();
+        while let Some(entry) = iter.next(&mut reader) {
+            let entry = entry.unwrap();
+            if let Some(key) = entry.key() {
+                names.push(key.unwrap().name().to_string_lossy());
+            }
+        }
+        names.sort();
+        assert_eq!(names, ["a", "b"]);
+        let report = crate::fsck::check_io(&mut dev).unwrap();
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+    }
+
+    #[test]
     fn write_named_stream_high_level_io_resident() {
         let mut dev = fresh_vol();
         create_file_io(&mut dev, "/", "ads.txt").unwrap();
