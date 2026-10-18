@@ -1965,13 +1965,19 @@
           "delete_every": "0"
         },
         {
+          "op": "mac-touch-many",
+          "parent": "/d",
+          "prefix": "listed_",
+          "count": "80"
+        },
+        {
           "op": "ship-to-vm",
           "src": "{image_dir}/{run_id}/{scenario.image}",
           "dest": "{vm.workdir}/{scenario.image}"
         },
         {
           "op": "win-enumerate",
-          "required_paths": "d/a,d/b",
+          "required_paths": "d/a,d/b,d/listed_0000.txt,d/listed_0079.txt",
           "keep_image": "true"
         },
         {
@@ -1982,7 +1988,7 @@
         }
       ],
       "image": "nfs-mac-format-directory-streams-win-chkdsk.img",
-      "_notes": "130 named streams overflow a directory's base record and its resident $ATTRIBUTE_LIST. Windows must enumerate both original children and chkdsk must accept the directory, its extension records and the list (#815, part of #666). Stream contents are independently read by the ntfs crate in the unit regression."
+      "_notes": "130 named streams overflow a directory's base record and its resident $ATTRIBUTE_LIST (#815). Adding 80 children afterwards promotes its resident index into INDX blocks and splits the first leaf; the list must name the new $INDEX_ALLOCATION and $BITMAP (#816, part of #666). Windows must enumerate the original children and the new range, and chkdsk must accept the directory, its extension records and the list. The independent ntfs crate lists every entry in the unit regression."
     },
     "mac-format-mac-write-streams-win-chkdsk": {
       "status": "pending",
