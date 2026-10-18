@@ -64,5 +64,23 @@ Assert-GeometryFailure { Assert-FormatGeometryRows $rows } 'all-refusal infrastr
 $rows | ForEach-Object { $_.accepted = ($_.allocation_unit_bytes -eq 4096) }
 $rows[0].error_id = ''
 Assert-GeometryFailure { Assert-FormatGeometryRows $rows } 'refusal without diagnostic fails'
-if ($checks -ne 24) { throw "only $checks geometry contracts executed, expected 24" }
-Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 24)"
+$layoutRequests = @(Get-LargeClusterLayoutRequests)
+Assert-Geometry (($layoutRequests -join ',') -eq '65536,131072,262144,524288,1048576,2097152') '64 KiB control and five large clusters'
+$extents = @([pscustomobject]@{ vcn = 0; next_vcn = 2; lcn = 40 }, [pscustomobject]@{ vcn = 2; next_vcn = 5; lcn = 90 })
+$run = ConvertFrom-RetrievalExtents $extents
+Assert-Geometry ($run.lcn -eq 40 -and $run.clusters -eq 5 -and $run.extents.Count -eq 2) 'first LCN and total clusters'
+Assert-GeometryFailure { ConvertFrom-RetrievalExtents @() } 'no extents fails'
+Assert-GeometryFailure { ConvertFrom-RetrievalExtents @([pscustomobject]@{ vcn = 0; next_vcn = 1; lcn = -1 }) } 'unallocated extent fails'
+Assert-GeometryFailure { ConvertFrom-RetrievalExtents @($extents[0], [pscustomobject]@{ vcn = 3; next_vcn = 5; lcn = 90 }) } 'VCN gap fails'
+$layoutRows = @($layoutRequests | ForEach-Object {
+    [pscustomobject]@{ allocation_unit_bytes = $_; accepted = $true; mftmirr = $run; sds = $run; root_index = $run }
+})
+Assert-LargeClusterLayoutRows $layoutRows
+$checks++
+Assert-GeometryFailure { Assert-LargeClusterLayoutRows $layoutRows[0..4] } 'missing large-cluster size fails'
+$layoutRows[3].sds = $null
+Assert-GeometryFailure { Assert-LargeClusterLayoutRows $layoutRows } 'missing layout field fails'
+$layoutRows[3].sds = $run; $layoutRows[0].accepted = $false
+Assert-GeometryFailure { Assert-LargeClusterLayoutRows $layoutRows } 'failed 64 KiB control fails'
+if ($checks -ne 33) { throw "only $checks geometry contracts executed, expected 33" }
+Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 33)"
