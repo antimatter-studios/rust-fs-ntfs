@@ -676,6 +676,11 @@ jobs:
       - name: Build Windows-authored fixtures
         shell: pwsh
         run: pwsh -File test-disks/build-windows-native-read-fixtures.ps1
+      # The rescue scan's allocated, free and tail bytes of ntfs-cli-read.img
+      # against the cluster counts fsutil reported for that volume (#970).
+      - name: Rescue scan totals agree with fsutil fsinfo ntfsinfo
+        shell: pwsh
+        run: cargo test --locked --test rescue_scan_windows
       - name: Ctrl-C interrupts the inventory CLI process
         shell: pwsh
         run: cargo test --locked --features cli,harness --test cli_inventory_ctrl_c
