@@ -1,0 +1,3 @@
+### Added
+
+- **A repair journal is an append-only external file of checksummed records, read back only up to its last whole record (#918).** `repair_journal::header_record`, `intent_record` and `applied_record` write a journal's header (bound to a plan file's SHA-256 and its source's size and volume serial number), each unit's intent (every write's offset, preimage and redo) and each unit's applied record; `repair_journal::read_journal` returns the records in order, reports a final record cut short as torn and ignores it, and refuses anything else, naming the record: a changed record, a record out of order, a header for another plan or source, or a newer format version. It is behind the `plan-file` feature. The format is `docs/repair-journal-file.md`.
