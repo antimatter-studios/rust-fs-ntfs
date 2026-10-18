@@ -2848,3 +2848,93 @@ fn a_loaded_plan_is_checked_against_its_source_and_refused_on_the_first_mismatch
         std::fs::remove_file(&src).unwrap();
     }
 }
+
+/// A byte of write `w` that no earlier write of its own unit covers, so
+/// the device alone decides what the unit expects there at its turn.
+#[cfg(feature = "plan-file")]
+fn uncovered_in_unit(unit: &fs_ntfs::repair_plan::PlanUnit, w: usize) -> Option<u64> {
+    let me = &unit.writes[w];
+    (me.offset..me.offset + me.before.len() as u64).find(|&b| {
+        !unit.writes[..w]
+            .iter()
+            .any(|e| (e.offset..e.offset + e.after.len() as u64).contains(&b))
+    })
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn a_plan_unit_is_checked_on_the_device_about_to_receive_it_at_its_turn() {
+    // Each unit is checked on the device about to receive it, with the
+    // plan's earlier units already written there (#913). Applied unit by
+    // unit to a copy of Windows' own capture, every unit must check clean
+    // at its turn; one byte changed inside the first, a middle or the last
+    // unit's ranges must be refused naming that write's range, and the
+    // check must never write.
+    use fs_ntfs::repair_plan::{check_unit_on_device, load_plan, plan_fsck_io, save_plan};
+    let volume = |bytes: Vec<u8>| RecordedRepair {
+        bytes,
+        units: Vec::new(),
+        open: Vec::new(),
+    };
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let mut v = volume(pristine.clone());
+        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        let n = loaded.units.len();
+        assert!(n > 0, "{k}: a log holding work planned nothing");
+
+        let mut copy = volume(pristine.clone());
+        for u in 0..n {
+            let before = hex_sha256(&copy.bytes);
+            check_unit_on_device(&loaded, u, &mut copy)
+                .unwrap_or_else(|e| panic!("{k}: unit {u} was refused at its turn: {e}"));
+            assert_eq!(
+                hex_sha256(&copy.bytes),
+                before,
+                "{k}: unit {u}: the check wrote"
+            );
+            apply_plan(k, &mut copy.bytes, &loaded.units[u..u + 1]);
+        }
+
+        let mut positions = vec![0, n / 2, n - 1];
+        positions.dedup();
+        for u in positions {
+            let unit = &loaded.units[u];
+            let (w, at) = (0..unit.writes.len())
+                .find_map(|w| uncovered_in_unit(unit, w).map(|b| (w, b as usize)))
+                .unwrap_or_else(|| panic!("{k}: unit {u} has no byte its own writes do not cover"));
+            let mut copy = volume(pristine.clone());
+            apply_plan(k, &mut copy.bytes, &loaded.units[..u]);
+            copy.bytes[at] ^= 0xff;
+            let before = hex_sha256(&copy.bytes);
+            let write = &unit.writes[w];
+            let range = format!(
+                "{}..{}",
+                write.offset,
+                write.offset + write.before.len() as u64
+            );
+            match check_unit_on_device(&loaded, u, &mut copy) {
+                Ok(()) => panic!("{k}: unit {u}: byte {at} changed, checked clean"),
+                Err(e) => {
+                    let e = e.to_string();
+                    assert!(
+                        e.contains(&format!("unit {u} write {w}")) && e.contains(&range),
+                        "{k}: unit {u}: byte {at} changed, refused as {e}, not naming write {w} \
+                         and bytes {range}"
+                    );
+                }
+            }
+            assert_eq!(
+                hex_sha256(&copy.bytes),
+                before,
+                "{k}: unit {u}: the refused check wrote"
+            );
+        }
+
+        std::fs::remove_file(&src).unwrap();
+    }
+}
