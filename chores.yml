@@ -645,8 +645,10 @@ tasks:
     # checks, damaged-data cleanup and source immutability, counted from
     # passing paths: 843 + 120 sets the floor to 963.
     # #669's import scenario adds 21: 963 + 21 sets the floor to 984.
+    # #845 adds four for --verify on the 64 MiB import: 984 + 4 sets the
+    # floor to 988.
     cmds:
-      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=984 scripts/test-cli.sh'
+      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=988 scripts/test-cli.sh'
 
   test:cli:host:
     desc: 'The host half of the cli scenarios in the Windows matrix, without the VM: every step each runs before its first Windows step (scripts/cli-oracle.sh)'
