@@ -11,7 +11,9 @@
 
 mod common;
 
-use fs_ntfs::rescue::{scan, scan_to_path, FileSource, ReadFailure, RescueSource, ScanOptions};
+use fs_ntfs::rescue::{
+    scan, scan_to_path, FileSource, RangeClass, ReadFailure, RescueSource, ScanOptions,
+};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
@@ -108,6 +110,9 @@ struct Record {
     offset: u64,
     len: u64,
     kind: u32,
+    /// The class of space the span was in: 0 unclassified, 1 NTFS
+    /// metadata, 2 allocated, 3 free, 4 the tail past the last cluster.
+    class: u32,
 }
 
 struct Archive {
@@ -162,7 +167,7 @@ fn parse(path: &str, mut payload: impl FnMut(u64, &[u8])) -> Archive {
     let mut head = [0u8; 32];
     r.read_exact(&mut head).expect("the archive header");
     assert_eq!(&head[0..8], b"NTRESCUE", "the archive's magic");
-    assert_eq!(le32(&head[8..12]), 1, "the archive's version");
+    assert_eq!(le32(&head[8..12]), 2, "the archive's version");
     assert_eq!(le32(&head[24..28]), 0, "the header's reserved bytes");
     assert_eq!(
         le32(&head[28..32]),
@@ -176,15 +181,17 @@ fn parse(path: &str, mut payload: impl FnMut(u64, &[u8])) -> Archive {
     };
     let mut bytes = Vec::new();
     loop {
-        let mut rh = [0u8; 24];
+        let mut rh = [0u8; 28];
         match read_up_to(&mut r, &mut rh) {
             0 => break,
-            24 => {}
+            28 => {}
             n => panic!("the archive ends {n} bytes into a record header"),
         }
         let (offset, len, kind) = (le64(&rh[0..8]), le64(&rh[8..16]), le32(&rh[16..20]));
+        let class = le32(&rh[20..24]);
+        assert!(class <= 4, "the record at {offset} has class {class}");
         let mut crc = crc32fast::Hasher::new();
-        crc.update(&rh[..20]);
+        crc.update(&rh[..24]);
         match kind {
             1 => {
                 assert!(len <= 64 << 20, "a {len}-byte data record at {offset}");
@@ -196,14 +203,19 @@ fn parse(path: &str, mut payload: impl FnMut(u64, &[u8])) -> Archive {
             k => panic!("the record at {offset} has kind {k}"),
         }
         assert_eq!(
-            le32(&rh[20..24]),
+            le32(&rh[24..28]),
             crc.finalize(),
             "the CRC-32 of the record at {offset}+{len}"
         );
         if kind == 1 {
             payload(offset, &bytes);
         }
-        archive.records.push(Record { offset, len, kind });
+        archive.records.push(Record {
+            offset,
+            len,
+            kind,
+            class,
+        });
     }
     archive
 }
@@ -382,6 +394,32 @@ fn unreadable_sectors_are_recorded_exactly_and_every_other_byte_is_kept() {
     assert_eq!(report.readable_bytes, report.source_size - lost_bytes);
     assert_eq!(report.unreadable_spans, 5, "{report:?}");
     assert!(!report.is_complete());
+
+    // A linear scan knows no layout: every record, and every byte the
+    // report counts, is unclassified.
+    for r in &parsed.records {
+        assert_eq!(
+            r.class, 0,
+            "the record at {}+{} has a class",
+            r.offset, r.len
+        );
+    }
+    let none = report.class(RangeClass::Unclassified);
+    assert_eq!(none.archived, report.readable_bytes, "{report:?}");
+    assert_eq!(none.unreadable, lost_bytes, "{report:?}");
+    for class in [
+        RangeClass::Metadata,
+        RangeClass::Allocated,
+        RangeClass::Free,
+        RangeClass::Tail,
+    ] {
+        let bytes = report.class(class);
+        assert_eq!(
+            bytes.archived + bytes.unreadable,
+            0,
+            "{class:?}: {report:?}"
+        );
+    }
 
     // Chunks 0, 1, 5, 6 and 7 and the last, shorter one hold a bad sector.
     // Only those are read again, one sector at a time.
