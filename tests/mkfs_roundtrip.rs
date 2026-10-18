@@ -909,3 +909,88 @@ fn secure_sds_is_one_contiguous_unflagged_run() {
         );
     }
 }
+
+/// One MFT record with its update-sequence fixups applied, so a structure
+/// that crosses a sector's last two bytes reads as written.
+fn fixed_up_record(dev: &MemDev, record_number: u64) -> Vec<u8> {
+    let bytes_per_sector = u16::from_le_bytes(dev.buf[0x0B..0x0D].try_into().unwrap()) as usize;
+    let cluster_size = bytes_per_sector * dev.buf[0x0D] as usize;
+    let mft_lcn = u64::from_le_bytes(dev.buf[0x30..0x38].try_into().unwrap()) as usize;
+    let record_size = 4096usize;
+    let at = mft_lcn * cluster_size + record_number as usize * record_size;
+    let mut record = dev.buf[at..at + record_size].to_vec();
+    let usa_at = u16::from_le_bytes(record[4..6].try_into().unwrap()) as usize;
+    let usa_count = u16::from_le_bytes(record[6..8].try_into().unwrap()) as usize;
+    for i in 1..usa_count {
+        let end = i * bytes_per_sector;
+        let saved = [record[usa_at + 2 * i], record[usa_at + 2 * i + 1]];
+        record[end - 2..end].copy_from_slice(&saved);
+    }
+    record
+}
+
+/// The resident value of the first attribute of `attr_type` in a record.
+fn resident_value(record: &[u8], attr_type: u32) -> Vec<u8> {
+    let mut at = u16::from_le_bytes(record[0x14..0x16].try_into().unwrap()) as usize;
+    loop {
+        let ty = u32::from_le_bytes(record[at..at + 4].try_into().unwrap());
+        assert_ne!(ty, 0xFFFF_FFFF, "attribute {attr_type:#x} not found");
+        let len = u32::from_le_bytes(record[at + 4..at + 8].try_into().unwrap()) as usize;
+        if ty == attr_type {
+            let value_len =
+                u32::from_le_bytes(record[at + 0x10..at + 0x14].try_into().unwrap()) as usize;
+            let value_at =
+                u16::from_le_bytes(record[at + 0x14..at + 0x16].try_into().unwrap()) as usize;
+            return record[at + value_at..at + value_at + value_len].to_vec();
+        }
+        at += len;
+    }
+}
+
+/// `$Extend`'s `$I30` entries for `$ObjId`, `$Reparse` and `$Quota` carry
+/// the same duplicated information as each child's own `$FILE_NAME`: the
+/// four times, both sizes and the file attributes. Windows `format` writes
+/// them that way (the `win-4k` slate-oracle case of #696 keys each child
+/// with its record's times and flags 0x20000006); this crate wrote zeroed
+/// keys, which Slate reports as `index-duplicate-information` against
+/// records 16 to 18 (#838).
+#[test]
+fn extend_index_keys_duplicate_child_file_names() {
+    for cluster_size in [4096u32, 65536] {
+        let mut dev = MemDev::new(VOL_SIZE);
+        format_filesystem(&mut dev, VOL_SIZE, cluster_size, 4096, Some("EXT"), None)
+            .expect("format");
+        let root = resident_value(&fixed_up_record(&dev, rec::EXTEND as u64), 0x90);
+        let mut at = 0x10 + u32::from_le_bytes(root[0x10..0x14].try_into().unwrap()) as usize;
+        let mut seen = Vec::new();
+        loop {
+            let entry_len = u16::from_le_bytes(root[at + 8..at + 10].try_into().unwrap()) as usize;
+            let key_len = u16::from_le_bytes(root[at + 10..at + 12].try_into().unwrap()) as usize;
+            let entry_flags = u32::from_le_bytes(root[at + 12..at + 16].try_into().unwrap());
+            if entry_flags & 0x02 != 0 {
+                break;
+            }
+            let child = u64::from_le_bytes(root[at..at + 8].try_into().unwrap()) & 0xFFFF_FFFF_FFFF;
+            let key = &root[at + 0x10..at + 0x10 + key_len];
+            let file_name = resident_value(&fixed_up_record(&dev, child), 0x30);
+            assert_eq!(
+                &key[0x08..0x40],
+                &file_name[0x08..0x40],
+                "{cluster_size}: $Extend index key for record {child} differs from its $FILE_NAME"
+            );
+            let attributes = u32::from_le_bytes(key[0x38..0x3C].try_into().unwrap());
+            assert_eq!(
+                attributes, 0x2000_0006,
+                "{cluster_size}: record {child} index key attributes"
+            );
+            seen.push(child);
+            at += entry_len;
+        }
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            [rec::OBJID as u64, rec::REPARSE as u64, rec::QUOTA as u64],
+            "{cluster_size}: $Extend children"
+        );
+    }
+}
