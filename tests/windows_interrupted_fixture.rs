@@ -2938,3 +2938,207 @@ fn a_plan_unit_is_checked_on_the_device_about_to_receive_it_at_its_turn() {
         std::fs::remove_file(&src).unwrap();
     }
 }
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn a_copy_repair_reaches_what_windows_recovered_and_never_writes_its_source() {
+    // A checked plan is applied by copy-repair (#909): the source is opened
+    // read-only and checked, and only then is a new target created, the
+    // source copied into it and the plan applied there. From each Windows
+    // capture the target must reach what Windows' own restart reached and
+    // the capture must keep its SHA-256; a source the check refuses must
+    // leave no target behind, and a target that already exists is refused
+    // and kept as it was.
+    use fs_ntfs::repair_plan::{copy_repair, load_plan, plan_fsck_io, save_plan};
+    use std::path::Path;
+    for (k, log_end) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let pristine_sha = hex_sha256(&pristine);
+        let mut v = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        assert!(
+            !loaded.units.is_empty(),
+            "{k}: a log holding work planned nothing"
+        );
+
+        let target = format!("{src}.copy-repaired");
+        let _ = std::fs::remove_file(&target);
+        copy_repair(&loaded, Path::new(&src), Path::new(&target))
+            .unwrap_or_else(|e| panic!("{k}: copy-repair: {e}"));
+        assert_eq!(
+            hex_sha256(&std::fs::read(&src).unwrap()),
+            pristine_sha,
+            "{k}: copy-repair wrote to its source"
+        );
+        let want = manifest(k);
+        let got = walk(&target);
+        assert!(
+            got == want,
+            "{k}: {} files after copy-repair, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+        let recovered = unpack(&format!("windows-interrupted-{k}.recovered"));
+        oracle::same_metadata_as_windows(
+            k,
+            &Image::read(&src),
+            &Image::read(&target),
+            &Image::read(&recovered),
+            log_end,
+        );
+        std::fs::remove_file(&recovered).unwrap();
+
+        // The target now exists: a second copy-repair onto it is refused
+        // and leaves it as it was.
+        let kept = hex_sha256(&std::fs::read(&target).unwrap());
+        match copy_repair(&loaded, Path::new(&src), Path::new(&target)) {
+            Ok(()) => panic!("{k}: copy-repair onto an existing target went ahead"),
+            Err(e) => assert!(
+                e.to_string().contains("exists"),
+                "{k}: an existing target refused as {e}, not as existing"
+            ),
+        }
+        assert_eq!(
+            hex_sha256(&std::fs::read(&target).unwrap()),
+            kept,
+            "{k}: the refused copy-repair changed the existing target"
+        );
+        std::fs::remove_file(&target).unwrap();
+
+        // One before-image byte changed in the source: the check refuses
+        // it, and no target is created.
+        let at = uncovered_byte(&loaded.units, 0, 0)
+            .unwrap_or_else(|| panic!("{k}: the first write has no byte of its own"))
+            as usize;
+        let mut changed = pristine.clone();
+        changed[at] ^= 0xff;
+        let changed_src = format!("{src}.changed");
+        std::fs::write(&changed_src, &changed).unwrap();
+        let changed_sha = hex_sha256(&changed);
+        let refused_target = format!("{src}.refused");
+        let _ = std::fs::remove_file(&refused_target);
+        match copy_repair(&loaded, Path::new(&changed_src), Path::new(&refused_target)) {
+            Ok(()) => panic!("{k}: byte {at} changed, copy-repair went ahead"),
+            Err(e) => assert!(
+                e.to_string().contains("unit 0 write 0"),
+                "{k}: byte {at} changed, refused as {e}, not naming unit 0 write 0"
+            ),
+        }
+        assert!(
+            !Path::new(&refused_target).exists(),
+            "{k}: a refused copy-repair left a target behind"
+        );
+        assert_eq!(
+            hex_sha256(&std::fs::read(&changed_src).unwrap()),
+            changed_sha,
+            "{k}: the refused copy-repair wrote to its source"
+        );
+        std::fs::remove_file(&changed_src).unwrap();
+
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
+/// A target that records each write's offset, and each sync as `None`, in
+/// the order they reach it.
+#[cfg(feature = "plan-file")]
+struct CountingTarget {
+    bytes: Vec<u8>,
+    events: Vec<Option<u64>>,
+}
+
+#[cfg(feature = "plan-file")]
+impl fs_ntfs::block_io::BlockIo for CountingTarget {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        let at = offset as usize;
+        let there = self
+            .bytes
+            .get(at..at + buf.len())
+            .ok_or("read past the end")?;
+        buf.copy_from_slice(there);
+        Ok(())
+    }
+
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        let at = offset as usize;
+        self.bytes
+            .get_mut(at..at + buf.len())
+            .ok_or("write past the end")?
+            .copy_from_slice(buf);
+        self.events.push(Some(offset));
+        Ok(())
+    }
+
+    fn size(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn sync(&mut self) -> Result<(), String> {
+        self.events.push(None);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn a_copy_repair_syncs_after_every_unit_and_never_inside_one() {
+    // A unit is what is applied and flushed as a whole (#909): applied to a
+    // counting target, every unit's writes must land in order with one
+    // sync after them and none among them, and the target must end holding
+    // what this test's own writes of the plan leave.
+    use fs_ntfs::repair_plan::{apply_plan_units, load_plan, plan_fsck_io, save_plan};
+    let mut most_units = 0;
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let mut v = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        most_units = most_units.max(loaded.units.len());
+
+        let mut target = CountingTarget {
+            bytes: pristine.clone(),
+            events: Vec::new(),
+        };
+        apply_plan_units(&loaded, &mut target)
+            .unwrap_or_else(|e| panic!("{k}: applying the plan: {e}"));
+        let want: Vec<Option<u64>> = loaded
+            .units
+            .iter()
+            .flat_map(|unit| unit.writes.iter().map(|w| Some(w.offset)).chain([None]))
+            .collect();
+        assert!(
+            target.events == want,
+            "{k}: {} writes and syncs reached the target, {} expected: a sync missing after a \
+             unit, or one inside it",
+            target.events.len(),
+            want.len()
+        );
+        let mut expected = pristine.clone();
+        apply_plan(k, &mut expected, &loaded.units);
+        assert!(
+            target.bytes == expected,
+            "{k}: the target holds other bytes than the plan leaves"
+        );
+
+        std::fs::remove_file(&src).unwrap();
+    }
+    assert!(
+        most_units > 1,
+        "no capture planned more than one unit, so no boundary between units was tested"
+    );
+}
