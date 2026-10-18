@@ -44,6 +44,18 @@ check "stdin import with --verify exits 0 ($(cat "$SANDBOX/err"))" test "$status
 jq_check "--verify is reported" '.verified == true and .bytes == 10' "$SANDBOX/out"
 check "ntfscat /stdin.txt has the piped bytes" test "$(ntfscat "$img" /stdin.txt 2>/dev/null)" = "from stdin"
 
+# --verify reads the staged file back before the rename; on the 64 MiB file
+# that readback spans many bounded transfer buffers, not one short write.
+hash="$(sha256 <"$SANDBOX/big")"
+fs.ntfs "$img" import "$SANDBOX/big" /d/verified --verify >"$SANDBOX/out" 2>"$SANDBOX/err"
+check "64 MiB import with --verify exits 0 ($(cat "$SANDBOX/err"))" test $? -eq 0
+jq_check "--verify on the 64 MiB file is reported" \
+    ".verified == true and .bytes == 67108864 and .sha256 == \"$hash\"" "$SANDBOX/out"
+check "ntfscat /d/verified has the source's SHA-256" \
+    test "$(ntfscat "$img" /d/verified 2>/dev/null | sha256)" = "$hash"
+check "ntfsls -p /d lists big and verified, and no staging name" \
+    test "$(ntfsls -p /d "$img" 2>/dev/null | sort | tr '\n' ' ')" = "big verified "
+
 before="$(sha256 <"$img")"
 fs.ntfs "$img" import "$SANDBOX/one" /one >"$SANDBOX/out" 2>"$SANDBOX/err"
 check "an existing destination is refused" test $? -eq 1
