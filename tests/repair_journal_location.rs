@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use fs_ntfs::repair_journal::{
-    check_journal_location, directory_on_target, JournalLocationError, LocationStat,
+    bsd_device_record, check_journal_location, device_relation, directory_on_target,
+    sysfs_device_record, DeviceRecord, DeviceRelation, JournalLocationError, LocationStat,
 };
 use sha2::{Digest, Sha256};
 
@@ -228,4 +229,125 @@ fn a_journal_directory_on_a_filesystem_the_target_device_holds_is_on_the_target(
         message.contains("on a filesystem the device being repaired holds"),
         "the refusal names the reason: {message}"
     );
+}
+
+/// A device named `name` on the whole disk `whole_disk`.
+fn device(name: &str, whole_disk: &str) -> DeviceRecord {
+    DeviceRecord {
+        name: name.into(),
+        whole_disk: whole_disk.into(),
+    }
+}
+
+#[test]
+fn the_journal_device_is_related_to_the_target_device_by_disk_and_partition() {
+    let disk2 = device("disk2", "disk2");
+    let disk2s1 = device("disk2s1", "disk2");
+    let disk2s2 = device("disk2s2", "disk2");
+    let disk3s1 = device("disk3s1", "disk3");
+
+    assert_eq!(
+        device_relation(&disk2, &disk2),
+        DeviceRelation::Same,
+        "a journal on the whole disk being repaired"
+    );
+    assert_eq!(
+        device_relation(&disk2s1, &disk2s1),
+        DeviceRelation::Same,
+        "a journal on the partition being repaired"
+    );
+    assert_eq!(
+        device_relation(&disk2s1, &disk2),
+        DeviceRelation::PartitionOfTarget,
+        "a journal on /dev/disk2s1 while /dev/disk2 is repaired"
+    );
+    assert_eq!(
+        device_relation(&disk2, &disk2s1),
+        DeviceRelation::TargetOnJournalDisk,
+        "a journal on /dev/disk2 while its partition /dev/disk2s1 is repaired"
+    );
+    assert_eq!(
+        device_relation(&disk3s1, &disk2),
+        DeviceRelation::Unrelated,
+        "a journal on another disk"
+    );
+    assert_eq!(
+        device_relation(&disk2s2, &disk2s1),
+        DeviceRelation::Unrelated,
+        "a journal on another partition of the disk that holds the target"
+    );
+}
+
+#[test]
+fn every_related_device_is_refused_naming_its_relationship() {
+    assert_eq!(
+        DeviceRelation::Same.refusal(),
+        Some(JournalLocationError::OnTargetDevice)
+    );
+    assert_eq!(DeviceRelation::Unrelated.refusal(), None);
+
+    let partition = DeviceRelation::PartitionOfTarget
+        .refusal()
+        .expect("a partition of the target is refused");
+    assert_eq!(partition, JournalLocationError::OnTargetPartition);
+    let message = partition.to_string();
+    assert!(
+        message.contains("on a partition of the disk being repaired"),
+        "the refusal names the relationship: {message}"
+    );
+
+    let whole = DeviceRelation::TargetOnJournalDisk
+        .refusal()
+        .expect("the disk holding the target is refused");
+    assert_eq!(whole, JournalLocationError::OnTargetWholeDisk);
+    let message = whole.to_string();
+    assert!(
+        message.contains("on the disk that holds the partition being repaired"),
+        "the refusal names the relationship: {message}"
+    );
+}
+
+#[test]
+fn a_bsd_device_name_resolves_to_its_whole_disk() {
+    assert_eq!(bsd_device_record("disk2"), device("disk2", "disk2"));
+    assert_eq!(bsd_device_record("disk2s1"), device("disk2s1", "disk2"));
+    assert_eq!(bsd_device_record("disk10s3"), device("disk10s3", "disk10"));
+    assert_eq!(bsd_device_record("disk3s1s1"), device("disk3s1s1", "disk3"));
+    // The raw (character) device is the same device as the block one.
+    assert_eq!(bsd_device_record("rdisk2"), device("disk2", "disk2"));
+    assert_eq!(bsd_device_record("rdisk2s1"), device("disk2s1", "disk2"));
+    // A name that is not a disk is its own whole disk.
+    assert_eq!(bsd_device_record("vn0"), device("vn0", "vn0"));
+}
+
+#[test]
+fn a_sysfs_block_tree_resolves_a_partition_to_its_disk() {
+    let root = PathBuf::from(common::temp_image_path("journal_location_sysfs"));
+    let _ = std::fs::remove_dir_all(&root);
+    let sda = root.join("devices/pci0000:00/block/sda");
+    std::fs::create_dir_all(sda.join("sda1")).unwrap();
+    std::fs::write(sda.join("sda1/partition"), "1\n").unwrap();
+    std::fs::create_dir_all(root.join("dev/block")).unwrap();
+    std::os::unix::fs::symlink(
+        "../../devices/pci0000:00/block/sda",
+        root.join("dev/block/8:0"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        "../../devices/pci0000:00/block/sda/sda1",
+        root.join("dev/block/8:1"),
+    )
+    .unwrap();
+
+    assert_eq!(sysfs_device_record(&root, 8, 0), Some(device("sda", "sda")));
+    assert_eq!(
+        sysfs_device_record(&root, 8, 1),
+        Some(device("sda1", "sda"))
+    );
+    assert_eq!(
+        sysfs_device_record(&root, 0, 42),
+        None,
+        "a device sysfs does not list (tmpfs, NFS) has no record"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
 }
