@@ -1319,7 +1319,22 @@ pub fn format_filesystem(
         for &(child_rec, child_name) in &extend_children {
             let child_seq: u16 = child_rec as u16;
             let child_ref = encode_file_reference(child_rec as u64, child_seq);
-            let stream = build_skeleton_fn_stream(extend_ref, child_name, NAMESPACE_POSIX)?;
+            // Unlike the root's skeleton keys, Windows `format` keys each
+            // $Extend child with the duplicated information of the child's
+            // own $FILE_NAME: its times, zero sizes and attributes
+            // 0x20000006 (#838, the win-4k slate-oracle case of #696).
+            let mut stream = build_file_name_stream(
+                extend_ref,
+                mft_record_layout.nt_time,
+                child_name,
+                false,
+                true,
+                0,
+                0,
+                NAMESPACE_POSIX,
+            )?;
+            let attributes = u32::from_le_bytes(stream[56..60].try_into().expect("4 bytes"));
+            stream[56..60].copy_from_slice(&(attributes | FA_NTFS_VIEW_INDEX).to_le_bytes());
             entries_blob.extend_from_slice(&build_index_entry(child_ref, &stream, false));
         }
         entries_blob.extend_from_slice(&build_index_entry(0, &[], true));
