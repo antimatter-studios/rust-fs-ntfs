@@ -790,6 +790,14 @@ impl<M: Expected> Harness<M> {
                 }
             }
             reference_tools(&self.image, &files, &self.artifacts);
+            // The named samples keep their image beside ntfsfix.txt and
+            // geometry.txt for Windows chkdsk to grade (#1034, #1035).
+            let name = self.artifacts.file_name().unwrap().to_string_lossy();
+            let retained = std::env::var("OPSEQ_RETAIN_SAMPLES").unwrap_or_default();
+            if retained.split(',').any(|sample| sample == name) {
+                fs::copy(&self.image, self.artifacts.join("sample.img"))
+                    .expect("retain operation sample image");
+            }
         }
         assert!(
             self.started.elapsed() < Duration::from_secs(90),
