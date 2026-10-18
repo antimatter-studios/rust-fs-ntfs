@@ -60,6 +60,7 @@ if ($Scenario) {
         [pscustomobject]@{ Vhd = $script:VhdPath }
     }
     function Mount-VhdAndGetLetter { param($Vhd) 'Q' }
+    function Resize-FixturePartition { param($DriveLetter, $Size) $DriveLetter }
     function Format-Volume {
         param($DriveLetter, $FileSystem, $AllocationUnitSize,
               $NewFileSystemLabel, [switch]$Force, $Confirm)

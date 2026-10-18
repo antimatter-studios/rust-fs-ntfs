@@ -115,6 +115,37 @@ function Dismount-ScratchVhd {
     }
 }
 
+# Initialize-VhdFromImg gives its partition the whole scratch VHD, which is
+# larger than the image, and Sync-VhdToImg keeps only the image's length of
+# that partition. Format-Volume formats the whole partition, so a fixture
+# made on it is a volume larger than the image it is kept in: chkdsk counted
+# 77919 clusters of 4096 bytes, 311679 KB, on the 262144 KB
+# ntfs-cli-read.img (#1237). The partition is still raw here, so it is made
+# again at exactly the image's size before Windows formats it. Returns the
+# drive letter the new partition was given.
+function Resize-FixturePartition {
+    param(
+        [Parameter(Mandatory=$true)] [string]$DriveLetter,
+        [Parameter(Mandatory=$true)] [long]$Size
+    )
+    $part = Get-Partition -DriveLetter $DriveLetter -ErrorAction Stop
+    if ($part.Size -eq $Size) { return $DriveLetter }
+    $disk = $part.DiskNumber
+    $part | Remove-Partition -Confirm:$false -ErrorAction Stop
+    $part = New-Partition -DiskNumber $disk -Size $Size -AssignDriveLetter -ErrorAction Stop
+    $letter = "$($part.DriveLetter)".Trim([char]0, ' ')
+    for ($i = 0; $i -lt 10 -and -not $letter; $i++) {
+        Start-Sleep -Seconds 1
+        $part = Get-Partition -DiskNumber $disk -PartitionNumber $part.PartitionNumber -ErrorAction Stop
+        $letter = "$($part.DriveLetter)".Trim([char]0, ' ')
+    }
+    if (-not $letter) { throw "the partition made again on disk $disk has no drive letter" }
+    if ($part.Size -ne $Size) {
+        throw "the partition made again on disk $disk is $($part.Size) bytes, not the image's $Size"
+    }
+    $letter
+}
+
 function New-WindowsFixture {
     param(
         [Parameter(Mandatory=$true)] [string]$ImagePath,
@@ -157,6 +188,12 @@ function New-WindowsFixture {
         Write-FixturePhase $fixture $phase
         $letter = Invoke-FixturePhase $phase -PhaseTimeoutSeconds $timeout {
             Mount-VhdAndGetLetter -Vhd $vhd
+        }
+        $phase = 'partition'
+        Write-FixturePhase $fixture "$phase letter=$letter"
+        $size = (Get-Item -LiteralPath $image).Length
+        $letter = Invoke-FixturePhase $phase -PhaseTimeoutSeconds $timeout {
+            Resize-FixturePartition -DriveLetter $letter -Size $size
         }
         $phase = 'format'
         Write-FixturePhase $fixture "$phase letter=$letter"
