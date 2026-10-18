@@ -32,6 +32,12 @@
 //! (#848, part of #676). The Windows matrix scenario
 //! `win-format-win-quota-mac-create-win-chkdsk` grades the same creates on a
 //! volume Windows made.
+//!
+//! Writing or deleting a named stream changes a file's allocation as much as
+//! writing its unnamed one, and has to move its charge the same way (#851,
+//! part of #677). The Windows matrix scenario
+//! `win-format-win-quota-mac-streams-win-chkdsk` has Windows charge named
+//! streams of its own first, and its recount grades the same writes.
 
 mod common;
 
@@ -526,4 +532,26 @@ fn a_file_or_directory_created_in_a_charged_directory_is_charged_to_its_owner() 
         "owner {owner}'s usage did not grow by the two records created"
     );
     assert_eq!(usage(&vol).0, charged(&vol));
+}
+
+#[test]
+fn writing_and_deleting_a_named_stream_moves_its_files_charge() {
+    let img = unpack(TRACKED, "streams");
+    let path = charged_files(&img, TRACKED).swap_remove(0);
+    for size in [200_000usize, 70_000, 100] {
+        fs_ntfs::write::write_named_stream(Path::new(&img), &path, "s1", &vec![0x5A; size])
+            .unwrap_or_else(|e| panic!("write {size} bytes to {path}:s1: {e}"));
+        assert_in_step(
+            &img,
+            &path,
+            &format!("its stream s1 written to {size} bytes"),
+        );
+    }
+
+    fs_ntfs::write::write_named_stream(Path::new(&img), &path, "s2", &vec![0xA5; 90_000])
+        .unwrap_or_else(|e| panic!("write {path}:s2: {e}"));
+    assert_in_step(&img, &path, "a second stream s2 written");
+    fs_ntfs::write::delete_named_stream(Path::new(&img), &path, "s2")
+        .unwrap_or_else(|e| panic!("delete {path}:s2: {e}"));
+    assert_in_step(&img, &path, "its stream s2 deleted");
 }
