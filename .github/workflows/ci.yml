@@ -991,10 +991,11 @@ jobs:
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
           # Previous floor 1370 plus the #644 recursive-walk fault contract,
           # three declared #731 named-stream contracts and three #732 EA
-          # contracts, plus two native EA CLI JSON contracts in #658.
-          echo "tests executed: $n (floor 1379)"
-          if [ "$n" -lt 1379 ]; then
-              echo "::error::only $n tests executed, floor is 1379 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680, eight generator contracts in #681, four image-harness contracts in #682, one recursive-walk fault contract in #644, three named-stream contracts in #731, three EA contracts in #732 and two CLI EA JSON contracts in #658. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
+          # contracts, plus two native EA CLI JSON contracts in #658, plus
+          # the #910 `fsck.ntfs --apply --to` CLI contract.
+          echo "tests executed: $n (floor 1380)"
+          if [ "$n" -lt 1380 ]; then
+              echo "::error::only $n tests executed, floor is 1380 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680, eight generator contracts in #681, four image-harness contracts in #682, one recursive-walk fault contract in #644, three named-stream contracts in #731, three EA contracts in #732 two CLI EA JSON contracts in #658 and one fsck --apply CLI contract in #910. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
               exit 1
           fi
       - run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness -- -D warnings
