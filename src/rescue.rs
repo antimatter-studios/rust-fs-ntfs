@@ -284,7 +284,14 @@ pub fn scan<S: RescueSource + ?Sized>(
 /// Resume an interrupted scan of `source` in `archive`, an archive of that
 /// source opened for reading and writing.
 ///
-/// The archive is read back to its last whole record and the torn record
+/// Before the archive is changed, each data record's span is read from the
+/// source again and compared with its payload. A sector that reads and
+/// differs refuses the resume, naming its offset, with the archive untouched:
+/// the source has changed, or is another one (the boot sector is the first
+/// record, so another volume is refused too). A sector that no longer reads
+/// is no difference, so a failing medium can still be resumed.
+///
+/// The archive is then read back to its last whole record and the torn record
 /// after it, if any, is cut away; nothing before the cut is rewritten. The
 /// scan then runs in the order it would have, but reads only the ranges of
 /// the source no data record holds: the ranges the interrupted pass never
@@ -293,7 +300,8 @@ pub fn scan<S: RescueSource + ?Sized>(
 ///
 /// The layout reads an NTFS scan starts with are served from the archive's
 /// data records where those hold the bytes, so no range already archived is
-/// read from the source again. The report counts what this pass appended.
+/// read from the source again after the comparison. The report counts what
+/// this pass appended.
 pub fn resume<S: RescueSource + ?Sized>(
     source: &mut S,
     archive: &mut File,
@@ -317,6 +325,7 @@ pub fn resume<S: RescueSource + ?Sized>(
             contents.sector_size, options.sector_size
         ));
     }
+    compare_retained(source, archive, &contents.records, options)?;
     archive
         .set_len(contents.whole_len)
         .and_then(|()| archive.sync_all())
@@ -348,6 +357,70 @@ pub fn resume<S: RescueSource + ?Sized>(
         }
     }
     out.finish()
+}
+
+/// Read each data record's span of `source` again, in archive order, and
+/// compare it with the record's payload. A bulk read the medium refuses is
+/// retried a sector at a time, and a sector that still does not read is
+/// skipped: an unreadable sector is no difference.
+fn compare_retained<S: RescueSource + ?Sized>(
+    source: &mut S,
+    archive: &mut File,
+    records: &[ArchivedRecord],
+    options: ScanOptions,
+) -> Result<(), String> {
+    let sector = options.sector_size as usize;
+    let mut now = vec![0u8; options.chunk_size];
+    let mut kept = vec![0u8; options.chunk_size];
+    for r in records.iter().filter(|r| r.kind == KIND_DATA) {
+        let end = r.offset + r.len;
+        let mut at = r.offset;
+        while at < end {
+            let n = (end - at).min(now.len() as u64) as usize;
+            let from = r.position + RECORD_HEADER_LEN as u64 + (at - r.offset);
+            archive
+                .seek(SeekFrom::Start(from))
+                .and_then(|_| archive.read_exact(&mut kept[..n]))
+                .map_err(|e| format!("read the archived {}+{}: {e}", r.offset, r.len))?;
+            match source.read_at(at, &mut now[..n]) {
+                Ok(()) => same_sectors(at, &now[..n], &kept[..n], sector)?,
+                Err(ReadFailure::Unreadable(_)) => {
+                    for (i, old) in kept[..n].chunks(sector).enumerate() {
+                        let offset = at + (i * sector) as u64;
+                        let buf = &mut now[..old.len()];
+                        match source.read_at(offset, buf) {
+                            Ok(()) => same_sectors(offset, buf, old, sector)?,
+                            Err(ReadFailure::Unreadable(_)) => {}
+                            Err(ReadFailure::Failed(e)) => {
+                                return Err(format!("the comparison with the archive stopped: {e}"))
+                            }
+                        }
+                    }
+                }
+                Err(ReadFailure::Failed(e)) => {
+                    return Err(format!("the comparison with the archive stopped: {e}"))
+                }
+            }
+            at += n as u64;
+        }
+    }
+    Ok(())
+}
+
+/// Refuse `now`, read from the source at `offset`, if it differs from `kept`,
+/// the archive's copy, naming the offset of the first sector that differs.
+fn same_sectors(offset: u64, now: &[u8], kept: &[u8], sector: usize) -> Result<(), String> {
+    match now.iter().zip(kept).position(|(a, b)| a != b) {
+        None => Ok(()),
+        Some(i) => {
+            let byte = offset + i as u64;
+            let at = byte - byte % sector as u64;
+            Err(format!(
+                "the source's sector at byte {at} differs from the archive's copy: \
+                 the source changed since it was archived, or is another source"
+            ))
+        }
+    }
 }
 
 /// The parts of `start..end` no record of `held`, sorted by offset, covers.
