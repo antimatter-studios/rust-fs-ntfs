@@ -4,6 +4,7 @@ pub(crate) mod common;
 #[allow(dead_code)]
 #[path = "generator.rs"]
 pub(crate) mod generator;
+#[allow(dead_code)]
 #[path = "harness.rs"]
 pub(crate) mod harness;
 #[path = "model.rs"]
@@ -67,16 +68,29 @@ pub fn capture(original: &Path, name: &str) -> Result<std::path::PathBuf, String
 /// Valid JSON replays concretely; other bytes use the live generator.
 #[allow(dead_code)]
 pub fn fuzz_input(input: &[u8]) {
-    let mut h = harness::Harness::new("explorer");
+    // Raw bytes choose the image they run on (#1024), a pin replays on its
+    // own, and geometry.txt beside every finding names it.
+    let (replayed, geometry, rest) = match generator::decode_regression(input) {
+        Ok((operations, pinned)) => (
+            Some(operations),
+            pinned.map_or_else(harness::geometry, |pinned| pinned.geometry),
+            input,
+        ),
+        Err(_) => {
+            let (geometry, rest) = generator::decode_geometry(input);
+            (None, geometry, rest)
+        }
+    };
+    let mut h = harness::Harness::on("explorer", &geometry);
     fs::write("tmp/op-sequence-model/explorer/input.bin", input).unwrap();
-    match generator::decode_replay(input) {
-        Ok(operations) => {
+    match replayed {
+        Some(operations) => {
             for operation in operations {
                 h.step(operation);
             }
         }
-        Err(_) => {
-            h.generated(input);
+        None => {
+            h.generated(rest);
         }
     }
     h.finish();
