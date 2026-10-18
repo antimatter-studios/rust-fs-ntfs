@@ -540,6 +540,10 @@ pub enum InPlaceError {
     Progress(ProgressError),
     /// Writing, reading or flushing the device or the journal failed.
     Io(String),
+    /// The observer asked for a stop (#956). Units `0..applied` are
+    /// written, read back and marked applied; no unit is open, and the
+    /// journal resumes the apply from unit `applied`.
+    Cancelled { applied: u32 },
 }
 
 impl std::fmt::Display for InPlaceError {
@@ -578,11 +582,73 @@ impl std::fmt::Display for InPlaceError {
             Self::Journal(e) => write!(f, "the journal: {e}"),
             Self::Progress(e) => write!(f, "the journal: {e}"),
             Self::Io(e) => write!(f, "{e}"),
+            Self::Cancelled { applied } => write!(
+                f,
+                "the repair was cancelled after {applied} units were applied; its journal resumes it"
+            ),
         }
     }
 }
 
 impl std::error::Error for InPlaceError {}
+
+/// How far an in-place apply has gone (#956): the units marked applied
+/// and the bytes their writes hold, of the plan's whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApplyProgress {
+    /// Units marked applied in the journal.
+    pub units: u32,
+    /// Bytes the applied units' writes hold.
+    pub bytes: u64,
+    /// Units in the plan.
+    pub units_total: u32,
+    /// Bytes every unit's writes hold.
+    pub bytes_total: u64,
+}
+
+impl ApplyProgress {
+    /// Nothing of `plan` applied.
+    fn of(plan: &SavedPlan) -> Self {
+        Self {
+            units: 0,
+            bytes: 0,
+            units_total: u32::try_from(plan.units.len())
+                .expect("a plan holds at most u32::MAX units"),
+            bytes_total: plan.units.iter().map(unit_bytes).sum(),
+        }
+    }
+
+    /// One more unit, `unit`, marked applied.
+    fn past(&mut self, unit: &PlanUnit) {
+        self.units += 1;
+        self.bytes += unit_bytes(unit);
+    }
+}
+
+/// The bytes `unit`'s writes hold.
+fn unit_bytes(unit: &PlanUnit) -> u64 {
+    unit.writes.iter().map(|w| w.after.len() as u64).sum()
+}
+
+/// Watches an in-place apply (#956). It is told the progress once before
+/// the first unit and again after each unit is marked applied, and asked
+/// before each unit begins whether to stop. A stop asked for while a unit
+/// is being written is seen at the next boundary, so the unit is finished
+/// first: an apply never stops with half a unit.
+pub trait ApplyObserver {
+    /// The apply has reached `at`.
+    fn progress(&mut self, _at: ApplyProgress) {}
+
+    /// Whether to stop before the next unit begins.
+    fn cancel_requested(&mut self) -> bool {
+        false
+    }
+}
+
+/// The observer of an apply nobody watches.
+struct Unwatched;
+
+impl ApplyObserver for Unwatched {}
 
 /// Apply `plan` in place to `device`, the source it was made from,
 /// through `journal`, an empty journal outside that device. The plan
@@ -610,6 +676,21 @@ pub fn apply_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
     device: &mut D,
     journal: &mut J,
 ) -> Result<(), InPlaceError> {
+    apply_in_place_observed(plan, plan_sha256, device, journal, &mut Unwatched)
+}
+
+/// [`apply_in_place`], telling `observer` the progress before the first
+/// unit and after each unit is marked applied, and asking it before each
+/// unit begins whether to stop (#956). A stop returns
+/// [`InPlaceError::Cancelled`] with every unit begun marked applied and
+/// none open, and [`resume_in_place`] continues from there.
+pub fn apply_in_place_observed<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
+    plan: &SavedPlan,
+    plan_sha256: [u8; SHA256_LEN],
+    device: &mut D,
+    journal: &mut J,
+    observer: &mut dyn ApplyObserver,
+) -> Result<(), InPlaceError> {
     let binding = JournalBinding {
         plan_sha256,
         source_size: plan.source_size,
@@ -617,8 +698,17 @@ pub fn apply_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
     };
     let mut at = 0u64;
     append_durably(journal, &mut at, &header_record(&binding), None)?;
+    let mut done = ApplyProgress::of(plan);
+    observer.progress(done);
     for u in 0..plan.units.len() {
+        if observer.cancel_requested() {
+            return Err(InPlaceError::Cancelled {
+                applied: done.units,
+            });
+        }
         apply_unit(plan, u, device, journal, &mut at)?;
+        done.past(&plan.units[u]);
+        observer.progress(done);
     }
     Ok(())
 }
@@ -663,6 +753,22 @@ pub fn resume_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
     plan_sha256: [u8; SHA256_LEN],
     device: &mut D,
     journal: &mut J,
+) -> Result<(), InPlaceError> {
+    resume_in_place_observed(plan, plan_sha256, device, journal, &mut Unwatched)
+}
+
+/// [`resume_in_place`], telling `observer` the progress once the stopped
+/// apply's units are read back and after each unit is marked applied, and
+/// asking it whether to stop before each later unit begins (#956). The
+/// open unit, begun before the stop, is finished without asking. A stop
+/// returns [`InPlaceError::Cancelled`] as [`apply_in_place_observed`]
+/// does.
+pub fn resume_in_place_observed<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
+    plan: &SavedPlan,
+    plan_sha256: [u8; SHA256_LEN],
+    device: &mut D,
+    journal: &mut J,
+    observer: &mut dyn ApplyObserver,
 ) -> Result<(), InPlaceError> {
     let binding = JournalBinding {
         plan_sha256,
@@ -727,6 +833,10 @@ pub fn resume_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
         }
     }
 
+    let mut done = ApplyProgress::of(plan);
+    for unit in &plan.units[..applied] {
+        done.past(unit);
+    }
     let mut next = applied;
     if let Some(o) = open {
         let unit = &plan.units[o];
@@ -745,11 +855,21 @@ pub fn resume_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
                 });
             }
         }
+        observer.progress(done);
         write_unit(plan, o, device, journal, &mut at)?;
+        done.past(unit);
         next += 1;
     }
+    observer.progress(done);
     for u in next..plan.units.len() {
+        if observer.cancel_requested() {
+            return Err(InPlaceError::Cancelled {
+                applied: done.units,
+            });
+        }
         apply_unit(plan, u, device, journal, &mut at)?;
+        done.past(&plan.units[u]);
+        observer.progress(done);
     }
     Ok(())
 }
