@@ -92,9 +92,9 @@ public static class WindowsEaQuery {
 # holds them all.
 function Read-WindowsEas([string]$file) {
     # FILE_READ_EA | SYNCHRONIZE, OPEN_EXISTING: a synchronous handle, which
-    # NtQueryEaFile needs.
+    # NtQueryEaFile needs. FILE_FLAG_BACKUP_SEMANTICS permits directories too.
     $handle = [WindowsEaQuery]::CreateFileW($file, [uint32]0x100008, [uint32]7, [IntPtr]::Zero,
-        [uint32]3, [uint32]0x80, [IntPtr]::Zero)
+        [uint32]3, [uint32]0x02000080, [IntPtr]::Zero)
     if ($handle.IsInvalid) {
         throw "open $file for EAs: Win32 error $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
