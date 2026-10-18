@@ -1463,6 +1463,17 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      # Windows refusing a write past an owner's enforced hard limit: the
+      # error, the file's length and the owner's $Q entry before and after
+      # land in the diagnostics, measured before a write here matches it
+      # (#867).
+      - name: Measure a write past an enforced quota limit on Windows
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh win-format-win-quota-enforce-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       # A file and a directory Windows charged to their owner with quota
       # tracking on, deleted here: chkdsk grades the volume, and Windows'
       # own recount of each owner's usage must be what $Quota held (#674).
