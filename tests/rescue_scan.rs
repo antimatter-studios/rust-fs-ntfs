@@ -500,7 +500,7 @@ fn a_source_that_ends_inside_a_sector_keeps_its_last_bytes() {
     let archive = common::temp_image_path("rescue_archive");
     let mut out = new_file(&archive);
     let options = ScanOptions {
-        sector_size: 512,
+        sector_size: Some(512),
         chunk_size: 1024,
     };
     let report = scan(&mut source, &mut out, options).expect("scan");
@@ -856,7 +856,7 @@ fn cut_fixture() -> (Vec<u8>, Archive, Vec<u64>) {
     };
     let archive = common::temp_image_path("rescue_archive");
     let options = ScanOptions {
-        sector_size: 512,
+        sector_size: Some(512),
         chunk_size: 256 << 10,
     };
     scan(&mut source, &mut new_file(&archive), options).expect("scan the prefix");
@@ -965,7 +965,7 @@ impl RescueSource for Untouched {
 fn resuming_a_damaged_archive_is_refused_and_leaves_it_unchanged() {
     let (bytes, parsed, starts) = cut_fixture();
     let options = ScanOptions {
-        sector_size: 512,
+        sector_size: Some(512),
         chunk_size: 256 << 10,
     };
     // A data record and an unreadable record, neither the last, so a
@@ -1067,7 +1067,7 @@ fn a_resumed_scan_reads_again_only_ranges_with_no_data_record() {
         .write_all(&head)
         .expect("write the prefix");
     let options = ScanOptions {
-        sector_size: 512,
+        sector_size: Some(512),
         chunk_size: 256 << 10,
     };
     let healed: BTreeSet<u64> = BTreeSet::from([100, 101]);
@@ -1215,7 +1215,7 @@ fn cut_linear_archive(name: &str) -> (String, Vec<u8>, String) {
     new_file(&src).write_all(&bytes).expect("write the source");
     let archive = common::temp_image_path(format!("{name}_archive"));
     let options = ScanOptions {
-        sector_size: 512,
+        sector_size: Some(512),
         chunk_size: 64 << 10,
     };
     let mut source = FileSource::open(Path::new(&src)).unwrap();
@@ -1246,7 +1246,7 @@ fn a_resume_refuses_a_source_whose_retained_bytes_changed_naming_the_sector() {
         &mut source,
         &mut out,
         ScanOptions {
-            sector_size: 512,
+            sector_size: Some(512),
             chunk_size: 64 << 10,
         },
     );
@@ -1288,7 +1288,7 @@ fn a_retained_sector_that_no_longer_reads_does_not_refuse_the_resume() {
         &mut source,
         &mut out,
         ScanOptions {
-            sector_size: 512,
+            sector_size: Some(512),
             chunk_size: 64 << 10,
         },
     );
