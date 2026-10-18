@@ -16,8 +16,9 @@ mod common;
 use fs_ntfs::attr_io::{self, AttrType};
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
-use fs_ntfs::{fsck, mft_io, read, write};
-use ntfs::structured_values::NtfsFileName;
+use fs_ntfs::{fsck, idx_block, index_io, mft_io, read, write};
+use ntfs::indexes::NtfsFileNameIndex;
+use ntfs::structured_values::{NtfsFileName, NtfsFileNamespace};
 use ntfs::NtfsAttributeType;
 use std::fs::File;
 use std::path::Path;
@@ -245,4 +246,165 @@ fn shorter_renames_follow_the_list() {
     assert_eq!(ntfs_names(&img, rec), expected(|i| renamed(i, false)));
     every_name_reads(&img, |i| renamed(i, false));
     clean(&img);
+}
+
+const WIN32: u8 = 1;
+const DOS: u8 = 2;
+const WIN32_NAME: &str = "long-name-0000";
+const DOS_NAME: &str = "LONGNA~1";
+
+/// The `$FILE_NAME` called `name` in `record`: the offset of its value.
+fn file_name_value(record: &[u8], name: &str) -> Option<usize> {
+    let wanted: Vec<u16> = name.encode_utf16().collect();
+    attr_io::iter_attributes(record)
+        .filter(|loc| loc.type_code == AttrType::FileName as u32)
+        .find_map(|loc| {
+            let value = loc.attr_offset + loc.resident_value_offset? as usize;
+            let length = record[value + 0x40] as usize;
+            let units: Vec<u16> = record[value + 0x42..value + 0x42 + length * 2]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            (units == wanted).then_some(value)
+        })
+}
+
+/// Put `/name`'s `$FILE_NAME`, in whichever record holds it, and its
+/// entry in the root's index into `namespace`. Neither this crate's link
+/// nor create makes a WIN32 + DOS pair, so the pair Windows makes is
+/// written over the two names a link made.
+fn set_namespace(img: &str, rec: u64, name: &str, namespace: u8) {
+    let mut io = PathIo::open_rw(Path::new(img)).expect("open_rw");
+    let list = read::read_attribute_value(&mut io, rec, AttrType::AttributeList, None)
+        .expect("/f has an $ATTRIBUTE_LIST");
+    let mut numbers: Vec<u64> = read::parse_attribute_list(&list)
+        .expect("parse the list")
+        .iter()
+        .map(|e| e.record_number)
+        .collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    let mut held = false;
+    for n in numbers {
+        let (_, record) = mft_io::read_mft_record_io(&mut io, n).expect("read a listed record");
+        if file_name_value(&record, name).is_none() {
+            continue;
+        }
+        mft_io::update_mft_record_io(&mut io, n, |record| {
+            let value = file_name_value(record, name).expect("the name is still there");
+            record[value + 0x41] = namespace;
+            Ok(())
+        })
+        .expect("set the $FILE_NAME's namespace");
+        held = true;
+    }
+    assert!(held, "no record of /f holds a $FILE_NAME called {name}");
+    // The key's namespace is the byte after its name length, 0x41 into
+    // the $FILE_NAME that follows the 16-byte entry header.
+    const KEY_NAMESPACE: usize = 0x10 + 0x41;
+    let (_, root) = mft_io::read_mft_record_io(&mut io, 5).expect("read the root");
+    if let Some(entry) = index_io::find_index_entry(&root, name, None).expect("search the root") {
+        mft_io::update_mft_record_io(&mut io, 5, |record| {
+            record[entry.record_offset + KEY_NAMESPACE] = namespace;
+            Ok(())
+        })
+        .expect("set the root entry's namespace");
+    } else {
+        let ia = idx_block::load_for_directory_io(&mut io, 5).expect("the root's INDX blocks");
+        let mut found = false;
+        for vcn in ia.allocated_block_vcns() {
+            let block = idx_block::read_indx_block_io(&mut io, &ia, vcn).expect("read INDX");
+            let Some(entry) =
+                index_io::find_entry_in_indx_block(&block, name, None).expect("search INDX")
+            else {
+                continue;
+            };
+            idx_block::update_indx_block_io(&mut io, &ia, vcn, |block| {
+                block[entry.record_offset + KEY_NAMESPACE] = namespace;
+                Ok(())
+            })
+            .expect("set the INDX entry's namespace");
+            found = true;
+            break;
+        }
+        assert!(found, "the root has no index entry for {name}");
+    }
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
+}
+
+/// The namespace of the root's index entry for `name`, as the `ntfs` crate
+/// decodes it.
+fn index_namespace(img: &str, name: &str) -> u8 {
+    let (ntfs, mut reader) = common::open(img);
+    let root = ntfs.root_directory(&mut reader).expect("the root");
+    let index = root.directory_index(&mut reader).expect("the root's index");
+    let mut finder = index.finder();
+    let entry = NtfsFileNameIndex::find(&mut finder, &ntfs, &mut reader, name)
+        .unwrap_or_else(|| panic!("/{name} has no index entry"))
+        .expect("read the index entry");
+    match entry
+        .key()
+        .expect("a key")
+        .expect("decode the key")
+        .namespace()
+    {
+        NtfsFileNamespace::Posix => 0,
+        NtfsFileNamespace::Win32 => 1,
+        NtfsFileNamespace::Dos => 2,
+        NtfsFileNamespace::Win32AndDos => 3,
+    }
+}
+
+/// A rename to another length rebuilds the parent's index entry, and the
+/// entry keeps the namespace the old name had wherever its `$FILE_NAME`
+/// lives (#785). The WIN32 half of a WIN32 + DOS pair stays WIN32: its DOS
+/// partner still names the file. The namespace was read from the base
+/// record alone, so a name held in an extension record took the one
+/// derived from the new name, POSIX, and the index disagreed with the
+/// file.
+#[test]
+fn a_renamed_win32_name_in_an_extension_keeps_its_namespace() {
+    let (img, rec) = listed_file_with_names_in_extensions("win32");
+    add_links_named(&img, &[WIN32_NAME, DOS_NAME]);
+    {
+        let mut io = PathIo::open_ro(Path::new(&img)).expect("open_ro");
+        let (_, base) = mft_io::read_mft_record_io(&mut io, rec).expect("read /f");
+        assert!(
+            file_name_value(&base, WIN32_NAME).is_none(),
+            "the base record holds {WIN32_NAME}, so no extension record does"
+        );
+    }
+    set_namespace(&img, rec, WIN32_NAME, WIN32);
+    set_namespace(&img, rec, DOS_NAME, DOS);
+    assert_eq!(index_namespace(&img, WIN32_NAME), WIN32);
+
+    let new = "long-name-00000";
+    {
+        let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
+        write::rename_io(&mut io, &format!("/{WIN32_NAME}"), new)
+            .unwrap_or_else(|e| panic!("rename /{WIN32_NAME} to {new}: {e}"));
+        <PathIo as BlockIo>::sync(&mut io).expect("sync");
+    }
+    assert_eq!(
+        index_namespace(&img, new),
+        WIN32,
+        "the rebuilt index entry for {new} does not keep {WIN32_NAME}'s WIN32 namespace"
+    );
+    list_is_true(&img, rec);
+    assert!(ntfs_names(&img, rec).contains(&new.to_string()));
+    let (ntfs, mut reader) = common::open(&img);
+    assert_eq!(
+        common::read_file_all(&ntfs, &mut reader, &format!("/{new}")),
+        b"contents"
+    );
+    clean(&img);
+}
+
+/// Link `/f` under each of `names`.
+fn add_links_named(img: &str, names: &[&str]) {
+    let mut io = PathIo::open_rw(Path::new(img)).expect("open_rw");
+    for name in names {
+        write::link_io(&mut io, "/f", "/", name).unwrap_or_else(|e| panic!("link /{name}: {e}"));
+    }
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
 }
