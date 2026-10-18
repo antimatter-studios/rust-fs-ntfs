@@ -420,7 +420,9 @@ case "$step" in
         renamed /naive.txt "/na$(printf '\303\257')ve-$(printf '\346\227\245\346\234\254').txt"
         # A seeded third of /big: case only, longer (sorting last) and
         # shorter (sorting first), so entries move between index blocks.
-        awk 'BEGIN { srand(645) } { print rand() "\t" $0 }' "$work/names" | sort | cut -f2 | head -n 100 >"$work/order"
+        # sed, not head: head stops reading after its hundredth line, and
+        # under pipefail a cut still writing then dies of SIGPIPE (exit 141).
+        awk 'BEGIN { srand(645) } { print rand() "\t" $0 }' "$work/names" | sort | cut -f2 | sed -n 1,100p >"$work/order"
         n=0
         while read -r name; do
             n=$((n + 1))
