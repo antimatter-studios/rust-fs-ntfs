@@ -6122,7 +6122,8 @@ pub fn write_named_stream_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     write_named_stream_unstamped_io(io, file_path, stream_name, data)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    stamp_written_io(io, rec)
+    stamp_written_io(io, rec)?;
+    recharge_quota_io(io, rec)
 }
 
 /// [`write_named_stream_io`] without advancing the file's times; see
@@ -6495,7 +6496,8 @@ pub fn delete_named_stream_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     delete_named_stream_unstamped_io(io, file_path, stream_name)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    stamp_written_io(io, rec)
+    stamp_written_io(io, rec)?;
+    recharge_quota_io(io, rec)
 }
 
 /// [`delete_named_stream_io`] without advancing the file's times; see
