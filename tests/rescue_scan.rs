@@ -897,6 +897,102 @@ fn a_whole_record_with_a_bad_checksum_is_refused_as_damage() {
     assert_eq!(got.records.len(), i);
 }
 
+/// A source of the right size that counts the reads it is asked for and
+/// serves none of them.
+struct Untouched {
+    size: u64,
+    reads: u64,
+}
+
+impl RescueSource for Untouched {
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), ReadFailure> {
+        self.reads += 1;
+        Err(ReadFailure::Failed(format!(
+            "a refused resume read {offset}+{}",
+            buf.len()
+        )))
+    }
+}
+
+#[test]
+fn resuming_a_damaged_archive_is_refused_and_leaves_it_unchanged() {
+    let (bytes, parsed, starts) = cut_fixture();
+    let options = ScanOptions {
+        sector_size: 512,
+        chunk_size: 256 << 10,
+    };
+    // A data record and an unreadable record, neither the last, so a
+    // flipped length cannot pass for a torn tail.
+    let n = parsed.records.len();
+    let data = (1..n - 1)
+        .find(|&i| parsed.records[i].kind == 1)
+        .expect("a data record before the last");
+    let lost = (1..n - 1)
+        .find(|&i| parsed.records[i].kind == 2)
+        .expect("an unreadable record before the last");
+    // The header's magic, version, sector size, source size, reserved bytes
+    // and checksum; then each record's offset, length, kind, class, checksum
+    // and, for the data record, its payload.
+    let mut flips: Vec<(String, u64)> = [0, 8, 12, 16, 24, 28]
+        .into_iter()
+        .map(|at| (format!("header byte {at}"), at))
+        .collect();
+    for i in [data, lost] {
+        for (part, at) in [
+            ("offset", 0),
+            ("length", 8),
+            ("kind", 16),
+            ("class", 20),
+            ("checksum", 24),
+        ] {
+            flips.push((format!("record {i}'s {part}"), starts[i] + at));
+        }
+    }
+    flips.push((
+        format!("record {data}'s payload"),
+        starts[data] + 28 + parsed.records[data].len / 2,
+    ));
+
+    let archive = common::temp_image_path("rescue_resume_damaged");
+    for (what, at) in flips {
+        let mut damaged = bytes.clone();
+        damaged[at as usize] ^= 0x01;
+        new_file(&archive)
+            .write_all(&damaged)
+            .expect("write the damaged archive");
+        let before = file_sha256(&archive);
+        let mut source = Untouched {
+            size: parsed.size,
+            reads: 0,
+        };
+        let mut out = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&archive)
+            .expect("open the damaged archive");
+        let got = resume(&mut source, &mut out, options);
+        drop(out);
+        assert!(
+            got.is_err(),
+            "{what} flipped: the resume was not refused: {got:?}"
+        );
+        assert_eq!(
+            source.reads, 0,
+            "{what} flipped: the refused resume read the source"
+        );
+        assert_eq!(
+            file_sha256(&archive),
+            before,
+            "{what} flipped: the refused resume changed the archive"
+        );
+        std::fs::remove_file(&archive).expect("remove the damaged archive");
+    }
+}
+
 /// A source that logs every read it is asked for, as (offset, length).
 struct Logged {
     inner: Faulty,
