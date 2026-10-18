@@ -104,11 +104,20 @@ pub(crate) fn read_directory_record_io<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
 ) -> Result<(crate::mft_io::BootParams, Vec<u8>), Error> {
+    read_index_record_io(io, record_number, crate::mkfs::stream::I30)
+}
+
+/// [`read_directory_record_io`] for any index a record holds, such as
+/// `$Secure`'s `$SII`, whose attributes `$ATTRIBUTE_LIST` can move too.
+pub(crate) fn read_index_record_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    index_name: &str,
+) -> Result<(crate::mft_io::BootParams, Vec<u8>), Error> {
     let (params, mut record) = read_mft_record_io(io, record_number)?;
     if attr_io::find_attribute(&record, AttrType::AttributeList, None).is_none() {
         return Ok((params, record));
     }
-    let i30 = crate::mkfs::stream::I30;
     let wanted = [
         AttrType::IndexRoot,
         AttrType::IndexAllocation,
@@ -116,19 +125,19 @@ pub(crate) fn read_directory_record_io<T: BlockIo + ?Sized>(
     ];
     if wanted
         .iter()
-        .all(|&ty| attr_io::find_attribute(&record, ty, Some(i30)).is_some())
+        .all(|&ty| attr_io::find_attribute(&record, ty, Some(index_name)).is_some())
     {
         return Ok((params, record));
     }
     let list = read_attribute_value(io, record_number, AttrType::AttributeList, None)?;
     let entries = parse_attribute_list(&list)?;
     for ty in wanted {
-        if attr_io::find_attribute(&record, ty, Some(i30)).is_some() {
+        if attr_io::find_attribute(&record, ty, Some(index_name)).is_some() {
             continue;
         }
         let segments: Vec<&AttrListEntry> = entries
             .iter()
-            .filter(|e| e.type_code == ty as u32 && e.name.as_deref() == Some(i30))
+            .filter(|e| e.type_code == ty as u32 && e.name.as_deref() == Some(index_name))
             .collect();
         let entry = match segments.as_slice() {
             [] => continue,
@@ -136,7 +145,7 @@ pub(crate) fn read_directory_record_io<T: BlockIo + ?Sized>(
             [_] => continue,
             more => {
                 return Err(Error::io(format!(
-                    "directory record {record_number}: its {ty:?}:$I30 is split across {} \
+                    "directory record {record_number}: its {ty:?}:{index_name} is split across {} \
                      records, which is not read yet",
                     more.len()
                 )))
@@ -147,7 +156,7 @@ pub(crate) fn read_directory_record_io<T: BlockIo + ?Sized>(
             .find(|l| l.type_code == ty as u32 && l.attribute_id == entry.attribute_id)
             .ok_or_else(|| {
                 Error::io(format!(
-                    "directory record {record_number}: $ATTRIBUTE_LIST puts its {ty:?}:$I30 in \
+                    "directory record {record_number}: $ATTRIBUTE_LIST puts its {ty:?}:{index_name} in \
                      record {} as attribute {}, and it is not there",
                     entry.record_number, entry.attribute_id
                 ))
