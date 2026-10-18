@@ -595,6 +595,7 @@ pub fn write_at_io<T: BlockIo + ?Sized>(
     // Refused before the record's `$DATA` is looked at: a metafile such as
     // `$Extend` has none, and would otherwise fail on that instead.
     refuse_metafile_io(io, rec, "write_at")?;
+    check_quota_recharge_io(io, rec)?;
     let end = offset
         .checked_add(data.len() as u64)
         .ok_or(Error::io("offset + len overflow"))?;
@@ -1046,6 +1047,7 @@ pub fn truncate_io<T: BlockIo + ?Sized>(
 ) -> Result<u64, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     refuse_metafile_io(io, rec, "truncate")?;
+    check_quota_recharge_io(io, rec)?;
     // A FILE WITH AN $ATTRIBUTE_LIST IS RESIZED THROUGH IT.
     //
     // Its unnamed `$DATA` may be in an extension record, where the base
@@ -5087,6 +5089,28 @@ fn recharge_quota_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<(), Er
     })
 }
 
+/// Refuse a write to the file at `rec` whose recharge could not succeed,
+/// before any of its data lands (#1081): its owner has no `$Q` entry, or is
+/// charged less than the file is. Worked out with nothing written, so the
+/// refused write leaves the file and `$Q` as they were; checked after the
+/// data write, the error would come with the file already changed.
+///
+/// Passes whatever [`recharge_quota_io`] leaves alone: a volume not
+/// tracking quotas, a file charged to owner 0 or charged nothing, and one
+/// with an `$ATTRIBUTE_LIST`.
+fn check_quota_recharge_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<(), Error> {
+    let (_, record) = read_mft_record_io(io, rec)?;
+    let Some((owner, charged)) = quota_charge_of(&record).filter(|&(o, c)| o != 0 && c != 0) else {
+        return Ok(());
+    };
+    if attr_io::find_attribute(&record, AttrType::AttributeList, None).is_some() {
+        return Ok(());
+    }
+    quota_move_io(io, owner, charged, 0)
+        .map(|_| ())
+        .map_err(|e| e.context("write refused before any data was written"))
+}
+
 /// The directory `path` names its last component in.
 fn parent_path_of(path: &str) -> String {
     let p = path.trim_end_matches('/');
@@ -7243,6 +7267,8 @@ pub fn write_file_contents_io<T: BlockIo + ?Sized>(
     file_path: &str,
     new_data: &[u8],
 ) -> Result<u64, Error> {
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    check_quota_recharge_io(io, rec)?;
     let written = write_file_contents_unrefreshed_io(io, file_path, new_data)?;
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     finish_data_write_io(io, rec)?;
