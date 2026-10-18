@@ -2825,6 +2825,82 @@
       "image": "nfs-win-format-win-quota-mac-create-win-chkdsk.img",
       "_notes": "Windows makes a directory and a file in it, then turns quota tracking on, charging each to its owner in $Extend\\$Quota:$Q. This crate creates a file, a directory and a file inside that directory in the charged directory, a file in the root, and then grows the created file out of its record. Each new record has to be charged to its owner, as Windows charges the files it creates. chkdsk grades the volume, and Windows then counts every file again from scratch: each owner's usage as the volume held it must be what that count gives (#848, part of #676)."
     },
+    "win-format-win-quota-mac-streams-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "QUOTA",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-content",
+          "path": "/plain.txt",
+          "content": "plain",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-quota-track",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-streams",
+          "path": "/win-streams.txt",
+          "count": "2",
+          "size_bytes": "70000",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "mac-write-streams",
+          "path": "/win-streams.txt",
+          "count": "2",
+          "size_bytes": "20000",
+          "delete_every": "2"
+        },
+        {
+          "op": "mac-write-streams",
+          "path": "/plain.txt",
+          "count": "2",
+          "size_bytes": "20000",
+          "delete_every": "0"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-quota-verify",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-win-format-win-quota-mac-streams-win-chkdsk.img",
+      "_notes": "Windows writes a file, turns quota tracking on, then writes a file with two non-resident named streams, charging both to their owner in $Extend\\$Quota:$Q as Windows itself charges named streams. This crate shrinks one of Windows' streams, deletes the other, and gives the first file two non-resident named streams of its own, each a change of allocation its owner has to be charged. chkdsk grades the volume, and Windows then counts every file again from scratch: each owner's usage as the volume held it must be what that count gives, so a named stream charged other than as Windows charges it shows as a difference (#851, part of #677)."
+    },
     "win-format-win-usn-journal-mac-write-win-usn-retired-chkdsk": {
       "status": "pending",
       "volume_params": {
