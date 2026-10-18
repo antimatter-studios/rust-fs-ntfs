@@ -34,6 +34,19 @@
 #       OUT/slate-writes.tsv one row per case. At least FLOOR cases must be
 #       written.
 #
+#   slate-oracle.sh replay CAPTURES REPLAYER OUT FLOOR
+#       Slate's offline journal recovery on every Windows interrupted-write
+#       capture (#871). A capture is each CAPTURES/windows-interrupted-<case>
+#       .img.gz other than Windows' own .recovered.img.gz, and it must have
+#       Windows' .recovered.manifest beside it. REPLAYER runs as ntfs-chkdsk
+#       does, `REPLAYER --replay-to SOURCE NEW`, with SOURCE a read-only
+#       decompressed copy, so the capture itself is never handed to it. Exit 0
+#       with NEW written is `replayed`; any other exit is `refused`, recorded
+#       as such and never counted as a replay. A changed source, or exit 0 with
+#       no NEW, fails by name. OUT/images/<case>.img keeps each replayed image,
+#       OUT/<case>.replay.txt the replayer's output and OUT/slate-replays.tsv
+#       one row per capture. At least FLOOR captures must be replayed.
+#
 #   slate-oracle.sh compare CASES IMAGES CHECKER OUT FLOOR
 #       CASES is the Windows job's table, a header and then one
 #       `case origin image sha256 windows_verdict windows_exit` row per image
@@ -54,7 +67,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
-    echo "usage: slate-oracle.sh fetch DEST | build SRC [BIN] | compare CASES IMAGES CHECKER OUT FLOOR | write WRITES IMAGES WRITER OUT FLOOR" >&2
+    echo "usage: slate-oracle.sh fetch DEST | build SRC [BIN] | compare CASES IMAGES CHECKER OUT FLOOR | write WRITES IMAGES WRITER OUT FLOOR | replay CAPTURES REPLAYER OUT FLOOR" >&2
     exit 2
 }
 die() { echo "slate-oracle: $*" >&2; exit 1; }
@@ -186,6 +199,79 @@ write() {
     echo "slate-oracle: $written of $rows cases written on copies (floor $floor); table in $out/slate-writes.tsv"
 }
 
+replay() {
+    [ "$#" -eq 4 ] || usage
+    local captures=$1 replayer=$2 out=$3 floor=$4
+    [[ $floor =~ ^[0-9]+$ ]] || usage
+    [ -d "$captures" ] || die "no capture directory at $captures"
+    [ -x "$replayer" ] || die "no replayer at $replayer"
+    mkdir -p "$out/work" "$out/images" || die "cannot create $out"
+    printf 'case\tsource_sha256\treplayed_sha256\treplayer_exit\toutcome\n' >"$out/slate-replays.tsv"
+
+    local rows=0 replayed=0 problems=0 capture
+    for capture in "$captures"/windows-interrupted-*.img.gz; do
+        [ -f "$capture" ] || continue
+        case "$capture" in *.recovered.img.gz) continue ;; esac
+        rows=$((rows + 1))
+        local name
+        name="$(basename "$capture" .img.gz)"
+        name="${name#windows-interrupted-}"
+        local packed staged="$out/work/$name.source.img" new="$out/images/$name.img"
+        local report="$out/$name.replay.txt" digest=- after=- status=- outcome
+        packed="$(sha "$capture")"
+        rm -f "$new"
+
+        if [ ! -f "$captures/windows-interrupted-$name.recovered.manifest" ]; then
+            outcome='no-windows-manifest'
+            echo "FAIL $name: no Windows recovered manifest beside $capture"
+        else
+            if ! gzip -dc "$capture" >"$staged" || ! chmod 0444 "$staged"; then
+                die "cannot make a read-only copy of $capture"
+            fi
+            digest="$(sha "$staged")"
+            "$replayer" --replay-to "$staged" "$new" >"$report" 2>&1
+            status=$?
+            [ -f "$new" ] && after="$(sha "$new")"
+            if [ "$(sha "$capture")" != "$packed" ] || [ "$(sha "$staged")" != "$digest" ]; then
+                outcome='source-changed'
+                echo "FAIL $name: the replayer changed the source it was given, not only its new image"
+            elif [ "$status" -ne 0 ]; then
+                # A refusal is Slate's answer, not a failure of the run; it
+                # is never counted as a replay.
+                outcome=refused
+                after=-
+            elif [ "$after" = - ]; then
+                outcome='no-image'
+                echo "FAIL $name: the replayer exited 0 and left no image at $new"
+            else
+                outcome=replayed
+                replayed=$((replayed + 1))
+            fi
+        fi
+        # The capture stays in CAPTURES and the replayed image in OUT/images;
+        # the staged copy is not kept.
+        chmod u+w "$staged" 2>/dev/null
+        rm -f "$staged"
+        case "$outcome" in replayed | refused) ;; *) problems=$((problems + 1)) ;; esac
+        printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$digest" "$after" "$status" "$outcome" \
+            >>"$out/slate-replays.tsv"
+    done
+
+    if [ "$rows" -eq 0 ]; then
+        echo "FAIL no windows-interrupted-*.img.gz capture in $captures"
+        problems=$((problems + 1))
+    fi
+    if [ "$replayed" -lt "$floor" ]; then
+        echo "FAIL $replayed of $rows captures were replayed, below the floor of $floor"
+        problems=$((problems + 1))
+    fi
+    if [ "$problems" -gt 0 ]; then
+        echo "slate-oracle: $problems problem(s) in $rows captures; table in $out/slate-replays.tsv"
+        return 1
+    fi
+    echo "slate-oracle: $replayed of $rows captures replayed into new images (floor $floor); table in $out/slate-replays.tsv"
+}
+
 compare() {
     [ "$#" -eq 5 ] || usage
     local cases=$1 images=$2 checker=$3 out=$4 floor=$5
@@ -271,5 +357,6 @@ case "$command" in
     build) build "$@" ;;
     compare) compare "$@" ;;
     write) write "$@" ;;
+    replay) replay "$@" ;;
     *) usage ;;
 esac

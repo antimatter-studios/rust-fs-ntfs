@@ -203,6 +203,86 @@ write 2
 [ "$?" -ne 0 ] && ok || bad "one written case against a floor of two: exit 0, want a failure"
 grep -q 'floor' "$WORK/log" && ok || bad "a write run below its floor says so: $(cat "$WORK/log")"
 
+# replay (#871): Slate's offline journal recovery on every Windows
+# interrupted-write capture. A stand-in replayer acts on the first line of
+# the capture it is given: `replay` writes NEW, `refuse` exits 4 without
+# writing, `scribble` changes its source, `noimage` exits 0 and writes nothing.
+cat >"$WORK/replayer" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = --replay-to ] || { echo "stand-in: expected --replay-to, got $*" >&2; exit 16; }
+case "$(head -n 1 "$2")" in
+    replay) { cat "$2"; echo replayed; } >"$3"; exit 0 ;;
+    refuse) echo "transaction to undo: not replayed" >&2; exit 4 ;;
+    scribble) chmod u+w "$2" && echo changed >>"$2"; cp "$2" "$3"; exit 0 ;;
+    noimage) exit 0 ;;
+    *) exit 16 ;;
+esac
+SH
+chmod +x "$WORK/replayer"
+
+# captures NAME:CONTENT...: a fresh capture directory, each NAME a
+# windows-interrupted-NAME.img.gz with Windows' recovered image and manifest.
+captures() {
+    rm -rf "$WORK/captures"
+    mkdir -p "$WORK/captures"
+    for spec in "$@"; do
+        local name="${spec%%:*}" content="${spec#*:}"
+        printf '%s\n' "$content" | gzip -n >"$WORK/captures/windows-interrupted-$name.img.gz"
+        printf 'recovered\n' | gzip -n >"$WORK/captures/windows-interrupted-$name.recovered.img.gz"
+        printf 'd000/f.bin\t1\t%064d\n' 0 >"$WORK/captures/windows-interrupted-$name.recovered.manifest"
+    done
+}
+replay() {
+    rm -rf "$WORK/rout"
+    bash "$ROOT/scripts/slate-oracle.sh" replay "$WORK/captures" "$WORK/replayer" "$WORK/rout" "$1" \
+        >"$WORK/log" 2>&1
+}
+
+captures one:replay undo:refuse
+before="$(sha "$WORK/captures/windows-interrupted-one.img.gz")"
+replay 1
+rc=$?
+[ "$rc" -eq 0 ] && ok || bad "one replayed capture and one refusal: exit $rc, want 0: $(cat "$WORK/log")"
+[ "$(sha "$WORK/captures/windows-interrupted-one.img.gz")" = "$before" ] && ok ||
+    bad "the capture's SHA-256 is unchanged after a replay"
+[ "$(tail -n 1 "$WORK/rout/images/one.img" 2>/dev/null)" = replayed ] && ok ||
+    bad "the replayed image is kept in OUT/images/<case>.img"
+grep -q $'^one\t[0-9a-f]\\{64\\}\t[0-9a-f]\\{64\\}\t0\treplayed$' "$WORK/rout/slate-replays.tsv" 2>/dev/null && ok ||
+    bad "slate-replays.tsv records case, both hashes, exit and outcome: $(cat "$WORK/rout/slate-replays.tsv" 2>/dev/null)"
+grep -q $'^undo\t[0-9a-f]\\{64\\}\t-\t4\trefused$' "$WORK/rout/slate-replays.tsv" 2>/dev/null && ok ||
+    bad "a refusal is recorded as refused, not as a replay: $(cat "$WORK/rout/slate-replays.tsv" 2>/dev/null)"
+[ "$(grep -c . "$WORK/rout/slate-replays.tsv" 2>/dev/null)" = 3 ] && ok ||
+    bad "Windows' recovered images are not replayed as captures: $(cat "$WORK/rout/slate-replays.tsv" 2>/dev/null)"
+[ -s "$WORK/rout/undo.replay.txt" ] && ok || bad "the replayer's own output is kept for each case"
+
+captures one:replay undo:refuse
+replay 2
+[ "$?" -ne 0 ] && ok || bad "one replay against a floor of two: exit 0, want a failure"
+grep -q 'floor' "$WORK/log" && ok || bad "a replay run below its floor says so: $(cat "$WORK/log")"
+
+captures one:replay scrib:scribble
+before="$(sha "$WORK/captures/windows-interrupted-scrib.img.gz")"
+replay 1
+[ "$?" -ne 0 ] && ok || bad "a replayer that changes its source: exit 0, want a failure"
+grep -q 'FAIL scrib:' "$WORK/log" && ok || bad "a changed source is named by case: $(cat "$WORK/log")"
+[ "$(sha "$WORK/captures/windows-interrupted-scrib.img.gz")" = "$before" ] && ok ||
+    bad "the replayer is never handed the capture itself"
+
+captures one:replay empty:noimage
+replay 1
+[ "$?" -ne 0 ] && ok || bad "a replayer that exits 0 and writes no image: exit 0, want a failure"
+grep -q 'FAIL empty:' "$WORK/log" && ok || bad "a missing replayed image is named by case: $(cat "$WORK/log")"
+
+captures one:replay lone:replay
+rm -f "$WORK/captures/windows-interrupted-lone.recovered.manifest"
+replay 1
+[ "$?" -ne 0 ] && ok || bad "a capture without Windows' recovered manifest: exit 0, want a failure"
+grep -q 'FAIL lone:' "$WORK/log" && ok || bad "a capture with no Windows outcome is named by case: $(cat "$WORK/log")"
+
+captures
+replay 0
+[ "$?" -ne 0 ] && ok || bad "a directory holding no captures: exit 0, want a failure"
+
 # fetch: a local repository stands in for Slate's.
 src="$WORK/slate-src"
 mkdir -p "$src/src/tools"
