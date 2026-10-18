@@ -97,6 +97,19 @@ refuses the unit when:
 
 The first mismatch, in the unit's write order, is the one named.
 
+## Applying a plan by copy-repair
+
+`repair_plan::copy_repair` opens the source read-only and checks it against
+the plan first. Only once the check passes does it create the target, with
+`create_new`, so a path that already exists is refused and left as it was;
+it copies the source into the target, flushes the copy, and applies the
+plan's units there in order with `apply_plan_units`. The source is never
+opened for writing, and a refused check leaves no target behind.
+
+`apply_plan_units` writes each unit's writes in order and then flushes the
+device: a flush at every unit boundary and none inside a unit, so the
+device holds whole units whenever a flush has returned.
+
 ## Tests
 
 `a_saved_plan_loads_back_to_what_windows_recovered_and_only_when_intact` in
@@ -121,3 +134,17 @@ without the copy changing. It then changes one byte, which no earlier
 write of the same unit covers, inside the first, a middle and the last
 unit's ranges after the earlier units are written, and checks that each is
 refused naming that write's byte range and that the copy is not written.
+
+`a_copy_repair_reaches_what_windows_recovered_and_never_writes_its_source`
+copy-repairs each Windows capture into a new target and checks that the
+capture keeps its SHA-256 and the target reaches the files Windows'
+`.recovered.manifest` lists and the metadata of Windows' `.recovered`
+image. It then copy-repairs onto the target that now exists, and from a
+copy of the capture with one before-image byte changed, and checks that
+each is refused, that the existing target keeps its SHA-256 and that the
+refused check leaves no target.
+
+`a_copy_repair_syncs_after_every_unit_and_never_inside_one` applies a plan
+from each Windows capture to a counting target and checks that every
+unit's writes arrive in order with one flush after them and none among
+them.
