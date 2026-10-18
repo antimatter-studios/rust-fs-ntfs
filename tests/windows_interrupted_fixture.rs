@@ -3422,7 +3422,9 @@ type IoLog = std::rc::Rc<std::cell::RefCell<Vec<(bool, IoEvent)>>>;
 /// One side of a recording pair: in-memory bytes, and every write, sync
 /// and read pushed to a log shared with the other side, tagged
 /// `journal` or not. `drop_write` names one write, by its order among
-/// this side's writes, that is recorded but never lands.
+/// this side's writes, that is recorded but never lands. `cut_after`
+/// cuts the power once that many writes have landed on either side: every
+/// later write fails and lands nothing.
 #[cfg(feature = "plan-file")]
 struct RecordingIo {
     bytes: Vec<u8>,
@@ -3430,6 +3432,7 @@ struct RecordingIo {
     log: IoLog,
     writes: usize,
     drop_write: Option<usize>,
+    cut_after: Option<usize>,
 }
 
 #[cfg(feature = "plan-file")]
@@ -3446,6 +3449,17 @@ impl fs_ntfs::block_io::BlockIo for RecordingIo {
     }
 
     fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        if let Some(n) = self.cut_after {
+            let landed = self
+                .log
+                .borrow()
+                .iter()
+                .filter(|(_, e)| *e == IoEvent::Write)
+                .count();
+            if landed >= n {
+                return Err("the power was cut".into());
+            }
+        }
         let at = offset as usize;
         if self.journal && self.bytes.len() < at + buf.len() {
             self.bytes.resize(at + buf.len(), 0);
@@ -3480,6 +3494,7 @@ fn recording_pair(pristine: &[u8], drop_write: Option<usize>) -> (RecordingIo, R
         log: log.clone(),
         writes: 0,
         drop_write,
+        cut_after: None,
     };
     let journal = RecordingIo {
         bytes: Vec::new(),
@@ -3487,6 +3502,7 @@ fn recording_pair(pristine: &[u8], drop_write: Option<usize>) -> (RecordingIo, R
         log: log.clone(),
         writes: 0,
         drop_write: None,
+        cut_after: None,
     };
     (device, journal, log)
 }
@@ -3696,6 +3712,186 @@ fn a_repair_journal_reports_the_units_applied_and_the_unit_left_open_at_every_cu
                 .contains("plan unit 0 write 0"),
             "{k}: the refusal does not name the unit and write"
         );
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
+/// Cut the power on both sides of a recording pair once `n` writes have
+/// landed, or restore it with `None`.
+#[cfg(feature = "plan-file")]
+fn cut_pair(device: &mut RecordingIo, journal: &mut RecordingIo, n: Option<usize>) {
+    device.cut_after = n;
+    journal.cut_after = n;
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn an_in_place_repair_stopped_after_any_write_resumes_to_the_uninterrupted_volume() {
+    // A power cut can stop an in-place apply after any device write or
+    // journal append (#927). Resumed on the same device and journal, it
+    // must leave the device byte for byte where an uninterrupted apply
+    // leaves it, and the journal holding exactly one intent and one
+    // applied record per unit, in order. The cuts fall between whole
+    // writes, as the replay's do in
+    // a_replay_stopped_after_any_write_reaches_the_same_volume_when_run_again;
+    // the resumed device must then reach the files and metadata Windows'
+    // own restart reached.
+    use fs_ntfs::repair_journal::{
+        apply_in_place, read_journal, resume_in_place, JournalBinding, JournalRecord,
+    };
+    for (k, log_end) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+        let (mut device, mut journal, log) = recording_pair(&pristine, None);
+        apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+            .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+        let whole = device.bytes;
+        let writes = log
+            .borrow()
+            .iter()
+            .filter(|(_, e)| *e == IoEvent::Write)
+            .count();
+        let binding = JournalBinding {
+            plan_sha256,
+            source_size: loaded.source_size,
+            volume_serial: loaded.volume_serial,
+        };
+        let every_unit: Vec<u32> = (0..loaded.units.len() as u32).collect();
+
+        let mut bad = Vec::new();
+        let mut resumed = None;
+        for stop in 0..writes {
+            let (mut device, mut journal, _) = recording_pair(&pristine, None);
+            cut_pair(&mut device, &mut journal, Some(stop));
+            if apply_in_place(&loaded, plan_sha256, &mut device, &mut journal).is_ok() {
+                bad.push(format!("stop after {stop}: the cut apply reported success"));
+                continue;
+            }
+            cut_pair(&mut device, &mut journal, None);
+            if let Err(e) = resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
+                bad.push(format!("stop after {stop}: the resume refused: {e}"));
+                continue;
+            }
+            if device.bytes != whole {
+                bad.push(format!(
+                    "stop after {stop}: the device holds other bytes than an uninterrupted apply"
+                ));
+                continue;
+            }
+            let read = match read_journal(&journal.bytes, &binding) {
+                Ok(read) => read,
+                Err(e) => {
+                    bad.push(format!("stop after {stop}: the journal reads back as {e}"));
+                    continue;
+                }
+            };
+            let intents: Vec<u32> = read
+                .records
+                .iter()
+                .filter_map(|r| match r {
+                    JournalRecord::Intent { unit, .. } => Some(*unit),
+                    _ => None,
+                })
+                .collect();
+            let applied: Vec<u32> = read
+                .records
+                .iter()
+                .filter_map(|r| match r {
+                    JournalRecord::Applied { unit } => Some(*unit),
+                    _ => None,
+                })
+                .collect();
+            if intents != every_unit || applied != every_unit || read.torn.is_some() {
+                bad.push(format!(
+                    "stop after {stop}: the journal holds intents {intents:?}, applied \
+                     {applied:?} and torn {:?}",
+                    read.torn
+                ));
+                continue;
+            }
+            resumed = Some(device.bytes);
+        }
+        assert!(
+            bad.is_empty(),
+            "{k}: of {writes} stops, {} did not resume to the uninterrupted apply:\n{}",
+            bad.len(),
+            bad.iter().take(6).cloned().collect::<Vec<_>>().join("\n")
+        );
+
+        let device = format!("{src}.resumed");
+        std::fs::write(&device, resumed.expect("no stop resumed")).unwrap();
+        let want = manifest(k);
+        let got = walk(&device);
+        assert!(
+            got == want,
+            "{k}: {} files after the resumed repair, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+        let recovered = unpack(&format!("windows-interrupted-{k}.recovered"));
+        oracle::same_metadata_as_windows(
+            k,
+            &Image::read(&src),
+            &Image::read(&device),
+            &Image::read(&recovered),
+            log_end,
+        );
+        std::fs::remove_file(&recovered).unwrap();
+        std::fs::remove_file(&device).unwrap();
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn a_resumed_in_place_repair_writes_nothing_to_the_device_for_a_unit_marked_applied() {
+    // A resume (#927) reads back each unit its journal marks applied and
+    // writes none of them again. Cut right after each unit's applied
+    // record, the resume writes exactly the later units' writes to the
+    // device; resuming a finished apply writes nothing to the device or
+    // the journal.
+    use fs_ntfs::repair_journal::{apply_in_place, resume_in_place};
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+        let units = loaded.units.len();
+        // The header, then each unit's intent, writes and applied record.
+        let mut cut = 1;
+        for done in 0..=units {
+            let (mut device, mut journal, log) = recording_pair(&pristine, None);
+            cut_pair(&mut device, &mut journal, Some(cut));
+            let stopped = apply_in_place(&loaded, plan_sha256, &mut device, &mut journal);
+            assert_eq!(
+                stopped.is_ok(),
+                done == units,
+                "{k}: cut after {cut} writes, {done} of {units} units applied"
+            );
+            cut_pair(&mut device, &mut journal, None);
+            let from = log.borrow().len();
+            resume_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+                .unwrap_or_else(|e| panic!("{k}: {done} units applied: the resume refused: {e}"));
+            let count = |side: bool| {
+                log.borrow()[from..]
+                    .iter()
+                    .filter(|&&e| e == (side, IoEvent::Write))
+                    .count()
+            };
+            let later: usize = loaded.units[done..].iter().map(|u| u.writes.len()).sum();
+            assert_eq!(
+                count(false),
+                later,
+                "{k}: {done} of {units} units applied: the resume's device writes"
+            );
+            if done == units {
+                assert_eq!(
+                    count(true),
+                    0,
+                    "{k}: a finished apply resumed wrote the journal"
+                );
+            } else {
+                cut += loaded.units[done].writes.len() + 2;
+            }
+        }
         std::fs::remove_file(&src).unwrap();
     }
 }
