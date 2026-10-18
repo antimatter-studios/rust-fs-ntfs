@@ -40,16 +40,39 @@ discontinuous extent, a refused request or a missing size fails the capture,
 naming the file and cluster size. #700's formatter work (#893) lays these
 files out against those measurements instead of extrapolating 64 KiB.
 
+Issue #896 adds Windows' own NTFS format of a disk whose logical sector
+size is 4096 bytes (4Kn), the reference #701's formatter work grades against.
+A dynamic VHD only exposes 512-byte sectors, so the collector tries, in
+order, `New-VHD -LogicalSectorSizeBytes 4096 -PhysicalSectorSizeBytes 4096`
+(present only where the Hyper-V module is), then a diskpart VHDX whose two
+sector size metadata items are set to 4096. Every attempt and its diagnostic
+is kept in `sector-4096.json` (or `sector-4096-attempts.json` when none
+worked), and `Get-Disk` on the attached image must report 4096-byte logical
+sectors before anything is formatted, so a 512-byte disk cannot pass as 4Kn.
+The volume is made by `Format-Volume` at its default allocation unit. The
+row records `Get-Disk`'s logical and physical sector sizes; `fsutil`'s bytes
+per sector, physical sector, cluster and file record and both MFT LCNs; the
+4096-byte boot sector's raw fields and `NumberSectors`; which of the two
+documented backup locations (`NumberSectors` sectors in, and the partition's
+last sector) hold a copy of the boot sector; and the update sequence offset
+and count of `$MFT` record 0 and of the root directory's first index block,
+read raw through `PhysicalDrive`, from which the stride Windows uses on 4Kn
+follows. Only those fixed header fields are read: the stride is measured,
+not assumed. `sector-4096-provenance.json` and `sector-4096-ntfsinfo.txt`
+are kept beside the row; the scratch VHDX is detached and removed in
+`finally`.
+
 This slice deliberately does not supply invented measurements. #888 adds
 native `$LogFile` size, #889 measures maximum cluster-count boundaries,
 and #890 retains the measured table under this directory, checks for
 regeneration drift and grades `plan_format`. No planner parity or largest
 supported volume claim is made by the capture workflow.
 
-The 33 fixture-free PowerShell contracts cover request coverage, signed
+The 48 fixture-free PowerShell contracts cover request coverage, signed
 encoding boundaries, malformed BPBs, native field parsing, disagreement,
-duplicates, missing rows, the control formats, extent decoding and complete
-large-cluster layout rows. These synthetic bytes
+duplicates, missing rows, the control formats, extent decoding, complete
+large-cluster layout rows, 4096-byte boot sectors, update sequence headers
+and complete 4Kn rows from a disk that reports 4096-byte sectors. These synthetic bytes
 test collector mechanics; Microsoft's formatter supplies the actual oracle.
 
 Sources: Microsoft's [Format-Volume documentation](https://learn.microsoft.com/en-us/powershell/module/storage/format-volume)
