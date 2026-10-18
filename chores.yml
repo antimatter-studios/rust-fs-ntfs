@@ -80,6 +80,19 @@ vars:
   # crates.io at the version its lockfile names (#462).
   IMG_VHD_REF: v0.6.1
 
+  # Slate, a third NTFS implementation, whose offline checker grades the
+  # same images Windows chkdsk grades in .github/workflows/slate-oracle.yml
+  # (#687, part of #580). Not a cargo dependency and never linked: a tool
+  # built and run as a separate process. scripts/slate-oracle.sh reads these
+  # three lines and refuses a checkout that is not this commit, whose LICENSE
+  # does not have this SHA-256, or whose core or tools crate does not declare
+  # MIT. Only those two MIT crates are built; ntfs_utils (MIT AND
+  # GPL-2.0-or-later), kernel/ and kernel/patches/ never are. The commit is
+  # the baseline #579 was reviewed against; moving it is a deliberate edit.
+  SLATE_URL: https://github.com/NullMagic2/slate-ntfs.git
+  SLATE_REF: 579dfebe45d0e34514d92576ad2a4da9b04a46df
+  SLATE_LICENSE_SHA256: 553c34aabda1d996b35f0a321ff20745beee53001cfa039638973d7bcb4cde39
+
   # THE WINDOWS TEST VM is fs-windows-test-harness's persistent Windows ARM64
   # guest under QEMU, driven by scripts/vm.sh through the harness's
   # scripts/local-vm.py. See that file and docs/qemu-vm.md in the harness.
