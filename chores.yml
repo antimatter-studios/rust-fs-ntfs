@@ -633,8 +633,11 @@ tasks:
     # per queried EA (18), one exact count and one immutable image: floor 657.
     # #832 adds 120: 11 per Windows file (8), boundary/offset/refusal checks,
     # damaged-data cleanup and source immutability, counted from passing paths.
+    # #842 adds 21 import checks (798, counted by hand); #845 adds four for
+    # --verify on the 64 MiB import: floor 802, also counted by hand until a
+    # green run on a branch carrying #844 measures it.
     cmds:
-      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=798 scripts/test-cli.sh'
+      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=802 scripts/test-cli.sh'
 
   test:cli:host:
     desc: 'The host half of the cli scenarios in the Windows matrix, without the VM: every step each runs before its first Windows step (scripts/cli-oracle.sh)'
