@@ -200,3 +200,44 @@ fn a_reparse_point_on_a_file_with_a_list_is_set_and_removed_through_it() {
     );
     clean(&img);
 }
+
+/// A reparse point too large for the room left in the base record goes to
+/// an extension record, and the driver's own reader finds it there through
+/// the list, with the tag and bytes written, as the `ntfs` crate does
+/// (#812). `read_reparse_point_io` read the base record alone and reported
+/// no reparse point at all.
+#[test]
+fn a_reparse_point_in_an_extension_record_is_read_back_through_the_list() {
+    let (img, rec) = volume_with_a_listed_file("ext");
+    let path = format!("C:\\{}", "long-directory-name\\".repeat(8));
+    let target = format!("\\??\\{path}");
+    let data = build_symlink_reparse_data(&target, Some(&path), false);
+    {
+        let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
+        write::write_reparse_point_io(&mut io, "/f", reparse_tag::SYMLINK, &data)
+            .unwrap_or_else(|e| panic!("set a reparse point on /f: {e}"));
+        <PathIo as BlockIo>::sync(&mut io).expect("sync");
+    }
+    let records = listed_reparse_records(&img, rec);
+    assert_eq!(records.len(), 1, "the list names one $REPARSE_POINT");
+    assert_ne!(
+        records[0], rec,
+        "the $REPARSE_POINT fit in the base record; the test no longer reads one from an extension"
+    );
+    assert_eq!(
+        ntfs_crate_symlink(&img, "/f"),
+        Some((reparse_tag::SYMLINK, target.clone())),
+        "the ntfs crate"
+    );
+    let mut io = PathIo::open_ro(Path::new(&img)).expect("open_ro");
+    assert_eq!(
+        write::read_reparse_point_io(&mut io, "/f").expect("read the reparse point of /f"),
+        Some(write::ReparsePoint {
+            reparse_tag: reparse_tag::SYMLINK,
+            data,
+        }),
+        "the driver's own reader"
+    );
+    drop(io);
+    clean(&img);
+}
