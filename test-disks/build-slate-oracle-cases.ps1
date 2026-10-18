@@ -45,13 +45,15 @@ $ErrorActionPreference = 'Stop'
 
 . "$PSScriptRoot\..\scripts\fs-windows-test-harness\_lib.ps1"
 . "$PSScriptRoot\windows-fixture.ps1"
+. "$PSScriptRoot\capture-slate-windows-manifest.ps1"
 
 $cli = (Resolve-Path -LiteralPath $Cli).Path
 $winChkdsk = (Resolve-Path "$PSScriptRoot\..\scripts\fs-windows-test-harness\win-chkdsk.ps1").Path
 $out = [System.IO.Path]::GetFullPath($OutDir)
 $images = Join-Path $out 'images'
 $scratch = Join-Path $out 'scratch'
-New-Item -ItemType Directory -Force -Path $images, $scratch | Out-Null
+$manifests = Join-Path $out 'windows-read'
+New-Item -ItemType Directory -Force -Path $images, $scratch, $manifests | Out-Null
 
 function Get-Sha256([string]$Path) {
     (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
@@ -98,7 +100,7 @@ foreach ($case in $cases) {
     $length = (Get-Item -LiteralPath $image).Length
     $geometry = Get-NtfsGeometryBytes $image
     if ($geometry -gt $length) {
-        throw "$($case.Name) is $length bytes but its boot sector describes $geometry: the volume was cut short"
+        throw "$($case.Name) is $length bytes but its boot sector describes ${geometry}: the volume was cut short"
     }
 }
 
@@ -136,6 +138,43 @@ $rows = @("case`torigin`timage`tsha256`twindows_verdict`twindows_exit")
 foreach ($case in $cases) {
     $image = Join-Path $images "$($case.Name).img"
     $digest = Get-Sha256 $image
+    # Windows reads a separate wrapper. Never sync its mount-time changes
+    # into the original image that Slate will inspect (#856).
+    $readCopy = Join-Path $scratch "$($case.Name)-read.img"
+    $readVhd = [IO.Path]::ChangeExtension($readCopy, '.vhd')
+    $manifestPath = Join-Path $manifests "$($case.Name).json"
+    if ((Test-Path -LiteralPath $manifestPath) -or (Test-Path -LiteralPath $readVhd)) {
+        throw "Stale Windows read capture for $($case.Name); use a fresh OutDir"
+    }
+    Copy-Item -LiteralPath $image -Destination $readCopy -Force
+    if ((Get-Sha256 $readCopy) -ne $digest) { throw "Read copy differs for $($case.Name)" }
+    try {
+        $manifest = Invoke-FixturePhase "$($case.Name)-windows-read" -PhaseTimeoutSeconds 600 {
+            $readDiag = Join-Path $out "windows-read-diag\$($case.Name)"
+            New-Item -ItemType Directory -Force -Path $readDiag | Out-Null
+            $state = Initialize-VhdFromImg -ImagePath $readCopy -Diag $readDiag
+            $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
+            Get-SlateWindowsManifest -Root "${letter}:\" -Case $case.Name -ImageSha256 $digest
+        }
+    } finally {
+        # Bound and verify cleanup; a leaked mount is a failure, including
+        # when enumeration or hashing failed. The helper never syncs back.
+        Invoke-FixturePhase "$($case.Name)-read-cleanup" -PhaseTimeoutSeconds 180 {
+            if (Test-Path -LiteralPath $readVhd) {
+                if (@(Get-DiskImage -ImagePath $readVhd -ErrorAction Stop | Where-Object Attached).Count) {
+                    Dismount-ScratchVhd -Vhd $readVhd -TimeoutSeconds 120
+                }
+                if (@(Get-DiskImage -ImagePath $readVhd -ErrorAction Stop | Where-Object Attached).Count) {
+                    throw "Windows read wrapper remains mounted: $readVhd"
+                }
+                Remove-Item -LiteralPath $readVhd -Force -ErrorAction Stop
+            }
+            Remove-Item -LiteralPath $readCopy -Force -ErrorAction Stop
+        }
+    }
+    if ((Get-Sha256 $image) -ne $digest) { throw "$($case.Name) changed during Windows read capture" }
+    [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 10),
+        [Text.UTF8Encoding]::new($false))
     $copy = Join-Path $scratch "$($case.Name).img"
     Copy-Item -LiteralPath $image -Destination $copy -Force
     $diag = Join-Path $out "chkdsk\$($case.Name)"

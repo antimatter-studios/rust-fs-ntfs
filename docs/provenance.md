@@ -40,6 +40,15 @@ the usage text and exit constants of the MIT-licensed
 `src/tools/bin/ntfs-chkdsk.rs`. None of it is a source of this crate's
 knowledge of NTFS.
 
+The Windows read manifests for the Slate tier (#856, part of #689) use
+Windows' own `Get-ChildItem`, `Get-Item -Stream *` and
+[`Get-FileHash -InputStream`](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/get-filehash).
+Microsoft's [`Get-Item` documentation](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/get-item)
+documents stream enumeration, including directories in PowerShell 7.2 and
+later. Each path, stream size and SHA-256 is observed through Windows on a
+disposable mount; the manifest binds to the original raw image's SHA-256.
+No additional Slate implementation source was read for this capture.
+
 To locate the `InvalidSecurity` finding on a fresh volume (#837), the
 conditions of Slate's MIT-licensed `src/ondisk/security_store.rs` at
 `579dfeb` were read: it refuses a `$Secure` stream whose attribute carries any
