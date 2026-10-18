@@ -558,6 +558,28 @@ impl ListedFile {
         Ok(bytes)
     }
 
+    /// Add `attr`, a whole `$FILE_NAME` attribute, wherever [`Self::add`]
+    /// puts it, and count one hard link more in the base record (#779).
+    /// Windows keeps names in extension records too, so one the base
+    /// record has no room for goes to an extension record, with its entry.
+    pub(crate) fn add_file_name<T: BlockIo + ?Sized>(
+        &mut self,
+        io: &mut T,
+        attr: Vec<u8>,
+    ) -> Result<(), Error> {
+        self.add(io, attr)?;
+        let base = &mut self.segments[0];
+        let links = u16_at(&base.bytes, 0x12).saturating_add(1);
+        base.bytes[0x12..0x14].copy_from_slice(&links.to_le_bytes());
+        base.dirty = true;
+        Ok(())
+    }
+
+    /// Whether `len` more bytes fit in the record `record`.
+    pub(crate) fn record_has_room(record: &[u8], len: usize) -> bool {
+        free_space(record) >= len
+    }
+
     /// Take out the `$FILE_NAME` that names the file `basename` in the
     /// directory `parent_reference`, from whichever record holds it, with
     /// its entry, and count one hard link fewer in the base record (#778).
