@@ -28,7 +28,8 @@ case "${1:-}" in
         # ci-ok green (#409). rust-fs-core's ci-gate holds `needs:` to every
         # job in ci.yml.
         filter='def full: ["windows-native-read-fixtures", "integration",
-                "cli", "kernel", "python-volume-info-windows"];
+                "cli", "kernel", "python-volume-info-windows",
+                "op-sequence-chkdsk"];
             def ok($job): .result == "success" or
                 ($code == "false" and .result == "skipped" and
                  (full | index($job)) != null);
