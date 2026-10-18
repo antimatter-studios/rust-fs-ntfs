@@ -401,6 +401,100 @@ impl<'a> Fields<'a> {
     }
 }
 
+/// Where an in-place apply stopped, as its journal says (#926).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    /// Units `0..applied` each have an applied record.
+    pub applied: u32,
+    /// The unit whose intent record is in the journal with no applied
+    /// record after it; always unit `applied` when there is one.
+    pub open: Option<u32>,
+}
+
+/// Why a journal's records do not fit the plan it is read against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgressError {
+    /// An intent for a unit the plan, of `units` units, does not hold.
+    UnitNotInPlan { unit: u32, units: usize },
+    /// An intent with `journal` writes for a plan unit of `plan` writes.
+    WriteCount {
+        unit: u32,
+        journal: usize,
+        plan: usize,
+    },
+    /// An intent whose write `write` has another offset, preimage or redo
+    /// than the plan unit's.
+    WriteDiffers { unit: u32, write: usize },
+}
+
+impl std::fmt::Display for ProgressError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnitNotInPlan { unit, units } => write!(
+                f,
+                "plan unit {unit}: the journal holds an intent for it, and the plan holds {units} units"
+            ),
+            Self::WriteCount {
+                unit,
+                journal,
+                plan,
+            } => write!(
+                f,
+                "plan unit {unit}: its intent record holds {journal} writes, and the plan unit {plan}"
+            ),
+            Self::WriteDiffers { unit, write } => write!(
+                f,
+                "plan unit {unit} write {write}: its intent record holds another offset, preimage or redo than the plan"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProgressError {}
+
+/// Where the in-place apply that wrote `journal`, already accepted by
+/// [`read_journal`], stopped against `plan`: the units it marked applied
+/// and the unit it left open. Every intent must carry exactly its plan
+/// unit's writes, or the journal is refused naming the unit and write. A
+/// journal with no whole record has nothing applied and nothing open.
+/// Reads no device.
+pub fn progress(journal: &Journal, plan: &SavedPlan) -> Result<Progress, ProgressError> {
+    let mut at = Progress {
+        applied: 0,
+        open: None,
+    };
+    for record in &journal.records {
+        match record {
+            JournalRecord::Header(_) => {}
+            JournalRecord::Intent { unit, writes } => {
+                let planned =
+                    plan.units
+                        .get(*unit as usize)
+                        .ok_or(ProgressError::UnitNotInPlan {
+                            unit: *unit,
+                            units: plan.units.len(),
+                        })?;
+                if writes.len() != planned.writes.len() {
+                    return Err(ProgressError::WriteCount {
+                        unit: *unit,
+                        journal: writes.len(),
+                        plan: planned.writes.len(),
+                    });
+                }
+                if let Some(write) = writes.iter().zip(&planned.writes).position(|(j, p)| j != p) {
+                    return Err(ProgressError::WriteDiffers { unit: *unit, write });
+                }
+                at.open = Some(*unit);
+            }
+            JournalRecord::Applied { .. } => {
+                at.open = None;
+                at.applied += 1;
+            }
+        }
+    }
+    Ok(at)
+}
+
 /// Why an in-place repair was refused, or stopped. Every unit before the
 /// one named is written, read back and marked applied in the journal; the
 /// unit named is not marked applied.
