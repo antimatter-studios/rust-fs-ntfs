@@ -935,6 +935,141 @@ pub fn read_archive<R: Read>(archive: &mut R) -> Result<ArchiveContents, String>
     }
 }
 
+/// What an export wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportReport {
+    /// The image's length: the archived source's size.
+    pub bytes: u64,
+    /// The SHA-256 of the image's bytes.
+    pub sha256: [u8; 32],
+}
+
+/// Where [`export_to_path`] writes before renaming into `destination`.
+pub fn export_temp_path(destination: &Path) -> std::path::PathBuf {
+    let mut name = destination.as_os_str().to_owned();
+    name.push(".partial");
+    name.into()
+}
+
+/// Export the source a complete archive holds to a new image at
+/// `destination`.
+///
+/// An archive with any source byte no data record holds is refused before
+/// anything is created, naming the first missing span. Otherwise the image
+/// is written to [`export_temp_path`], flushed, read back against every
+/// data record, and only then renamed into place. An existing destination
+/// is refused, and the archive is only ever read.
+pub fn export_to_path(archive: &Path, destination: &Path) -> Result<ExportReport, String> {
+    let input = File::open(archive)
+        .map_err(|e| format!("open the archive '{}': {e}", archive.display()))?;
+    let contents = read_archive(&mut io::BufReader::new(&input))?;
+    let mut held: Vec<ArchivedRecord> = contents
+        .records
+        .iter()
+        .filter(|r| r.kind == KIND_DATA)
+        .copied()
+        .collect();
+    held.sort_by_key(|r| r.offset);
+    if let Some(&(start, end)) = missing(&held, 0, contents.source_size).first() {
+        return Err(format!(
+            "the archive holds no data for source bytes {start}+{}; only a complete archive exports",
+            end - start
+        ));
+    }
+    if destination.symlink_metadata().is_ok() {
+        return Err(format!(
+            "the destination '{}' exists; an export never replaces a file",
+            destination.display()
+        ));
+    }
+    let temp = export_temp_path(destination);
+    let mut out = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|e| format!("create '{}': {e}", temp.display()))?;
+    let written = write_image(&input, &held, &mut out, contents.source_size).and_then(|report| {
+        drop(out);
+        if destination.symlink_metadata().is_ok() {
+            return Err(format!(
+                "the destination '{}' appeared during the export",
+                destination.display()
+            ));
+        }
+        std::fs::rename(&temp, destination)
+            .map_err(|e| format!("rename into '{}': {e}", destination.display()))?;
+        Ok(report)
+    });
+    match written {
+        Ok(report) => {
+            sync_parent(destination)?;
+            Ok(report)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp);
+            Err(e)
+        }
+    }
+}
+
+/// Write each data record of `archive` into `out` at its offset, flush,
+/// read every record's span back against its payload, and hash the image.
+fn write_image(
+    mut archive: &File,
+    held: &[ArchivedRecord],
+    out: &mut File,
+    size: u64,
+) -> Result<ExportReport, String> {
+    use sha2::{Digest, Sha256};
+    let write_err = |e: io::Error| format!("write the image: {e}");
+    let mut payload = Vec::new();
+    let mut payload_of = |r: &ArchivedRecord, payload: &mut Vec<u8>| {
+        payload.resize(r.len as usize, 0);
+        archive
+            .seek(SeekFrom::Start(r.position + RECORD_HEADER_LEN as u64))
+            .and_then(|_| archive.read_exact(payload))
+            .map_err(|e| format!("read the record at archive byte {}: {e}", r.position))
+    };
+    out.set_len(size).map_err(write_err)?;
+    for r in held {
+        payload_of(r, &mut payload)?;
+        out.seek(SeekFrom::Start(r.offset))
+            .and_then(|_| out.write_all(&payload))
+            .map_err(write_err)?;
+    }
+    out.sync_all().map_err(write_err)?;
+    let mut back = Vec::new();
+    for r in held {
+        payload_of(r, &mut payload)?;
+        back.resize(payload.len(), 0);
+        out.seek(SeekFrom::Start(r.offset))
+            .and_then(|_| out.read_exact(&mut back))
+            .map_err(|e| format!("read the image back: {e}"))?;
+        if back != payload {
+            return Err(format!(
+                "the image disagrees with the record at archive byte {} over source bytes {}+{}",
+                r.position, r.offset, r.len
+            ));
+        }
+    }
+    let mut hash = Sha256::new();
+    out.seek(SeekFrom::Start(0)).map_err(write_err)?;
+    let mut buf = vec![0u8; DEFAULT_CHUNK];
+    let mut left = size;
+    while left > 0 {
+        let n = left.min(buf.len() as u64) as usize;
+        out.read_exact(&mut buf[..n])
+            .map_err(|e| format!("read the image back: {e}"))?;
+        hash.update(&buf[..n]);
+        left -= n as u64;
+    }
+    Ok(ExportReport {
+        bytes: size,
+        sha256: hash.finalize().into(),
+    })
+}
+
 /// Read as many bytes as `r` has, up to `buf.len()`.
 fn read_up_to<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<usize, String> {
     let mut n = 0;
