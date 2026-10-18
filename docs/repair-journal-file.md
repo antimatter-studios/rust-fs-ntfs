@@ -184,9 +184,12 @@ is left after it. Then:
 3. Every later unit is applied exactly as the apply applies it.
 
 A journal holding no whole record is started again from its header. A
-range of the open unit holding anything else stops the resume, naming the
-unit, the write and its byte range, with nothing of it written again; an
-applied unit that does not read back stops it the same way.
+range of the open unit holding anything else stops the resume, and so does
+an applied unit that does not read back: something changed the device
+while the apply was stopped. The refusal names the unit, the write and the
+bytes that fail, from the first to the last, not the whole range. It comes
+before anything is written to the device or appended to the journal, so
+both are left exactly as the cut left them.
 
 ## Tests
 
@@ -234,3 +237,9 @@ each capture's apply during every device write, landing the first half of
 that write's new bytes with the rest unchanged, then only the second
 half, and checks the resumed device is byte for byte where an
 uninterrupted apply leaves it.
+`a_resume_refuses_a_unit_whose_range_changed_while_stopped_and_names_the_byte`
+cuts each capture's apply after every device write and changes one byte to
+a value that is neither its preimage nor what the journal says belongs
+there, first in the open unit's range and then in a unit marked applied.
+The resume must refuse naming that unit, write and one-byte range, with
+the device's SHA-256 and the journal's length unchanged.
