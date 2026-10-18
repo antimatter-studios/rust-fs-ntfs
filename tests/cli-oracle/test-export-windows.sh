@@ -3,7 +3,9 @@ source "$(dirname "$0")/../cli/lib.sh"
 
 img="$REPO/test-disks/ntfs-cli-read.img"
 oracle="$REPO/test-disks/ntfs-cli-read.sha256.tsv"
-for file in "$img" "$oracle" "$REPO/test-disks/ntfs-symlink.img" "$REPO/test-disks/ntfs-compressed.img"; do
+compressed="$REPO/test-disks/ntfs-compressed.img"
+compressed_oracle="$REPO/test-disks/ntfs-compressed.sha256.tsv"
+for file in "$img" "$oracle" "$REPO/test-disks/ntfs-symlink.img" "$compressed" "$compressed_oracle"; do
     if [ ! -s "$file" ]; then
         fail "$file missing: run test-disks/build-windows-native-read-fixtures.ps1 (CI: windows-native-read-fixtures)"
         finish
@@ -51,12 +53,32 @@ for item in / /sub /missing; do
     check "refusal publishes nothing" test ! -e "$SANDBOX/refused"
     check "refusal has no stdout" test ! -s "$SANDBOX/out"
 done
-for fixture in 'ntfs-symlink.img /rel-file' 'ntfs-compressed.img /comp.txt'; do
+for fixture in 'ntfs-symlink.img /rel-file'; do
     read -r source item <<<"$fixture"
     fs.ntfs "$REPO/test-disks/$source" export "$item" "$SANDBOX/refused" >"$SANDBOX/out" 2>"$SANDBOX/err"
     check "export refuses transformed or linked data" test $? -ne 0
     check "refused transformed data publishes nothing" test ! -e "$SANDBOX/refused"
 done
+
+# LZNT1 streams Windows compressed export one compression unit at a time:
+# mixed.bin holds compressed, deallocated and raw-stored units and a
+# partial last unit, each graded against the digest Windows computed.
+compressed_rows=0
+while IFS="$(printf '\t')" read -r item size hash; do
+    compressed_rows=$((compressed_rows + 1))
+    dest="$SANDBOX/compressed-$compressed_rows"
+    fs.ntfs "$compressed" export "$item" "$dest" >"$SANDBOX/out" 2>"$SANDBOX/err"
+    check "compressed export $item succeeds ($(cat "$SANDBOX/err"))" test $? -eq 0
+    check "compressed export $item publishes Windows' size" test "$(wc -c <"$dest")" -eq "$size"
+    check "compressed export $item matches Windows SHA-256" test "$(sha256 <"$dest")" = "$hash"
+    jq_check "compressed export reports Windows' byte count and digest" \
+        ".bytes == $size and .sha256 == \"$hash\"" "$SANDBOX/out"
+    fs.ntfs "$compressed" export "$item" - >"$SANDBOX/stdout" 2>"$SANDBOX/err"
+    check "compressed stdout export has Windows' bytes" test "$(sha256 <"$SANDBOX/stdout")" = "$hash"
+done <"$compressed_oracle"
+check "both Windows-compressed files were exported" test "$compressed_rows" -eq 2
+check "the mixed fixture spans more than six compression units" \
+    awk -F '\t' '$1 == "/mixed.bin" && $2 > 6 * 65536 { found=1 } END { exit !found }' "$compressed_oracle"
 fs.ntfs "$img" export /empty.bin - --replace >"$SANDBOX/out" 2>"$SANDBOX/err"
 check "--replace with stdout is a usage error" test $? -eq 2
 fs.ntfs "$img" export /empty.bin >"$SANDBOX/out" 2>"$SANDBOX/err"
