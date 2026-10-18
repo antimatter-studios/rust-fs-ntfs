@@ -1491,6 +1491,16 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      # Files Windows charged to their owner with quota tracking on,
+      # grown, shrunk and cut here: chkdsk grades the volume, and Windows'
+      # own recount of each owner's usage must be what $Quota held (#675).
+      - name: Validate quota charges moved by writes on Windows
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh win-format-win-quota-mac-write-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       # A volume Windows journals, written here: Windows must not report
       # the same journal afterwards, which would promise consumers a record
       # of every change that this crate's changes are not in (#479).
@@ -1537,6 +1547,15 @@ jobs:
       # the steps above do.
       - name: Build the command-line tools (Windows)
         run: cargo build --release --locked --features cli --bin rust-fs-ntfs
+      # Its named stream is written with rust-ntfs, built above, so it is
+      # not in the cli group, whose host half runs where that binary is not.
+      - name: Validate a fragmented file whose attribute grew, on Windows
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh cli-fragmented-data-win-verify-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       - name: Validate the command-line tools on Windows
         shell: bash
         run: |

@@ -71,6 +71,42 @@ fn align_up_8(n: usize) -> usize {
     (n + 7) & !7
 }
 
+/// Grow a non-resident attribute so `mapping_len` bytes of mapping pairs fit
+/// after its header, shifting the attributes after it. The new bytes are
+/// zero, which ends the mapping pairs. Returns `false`, with the record
+/// untouched, when the record has no room for it.
+pub(crate) fn grow_non_resident_for_mapping(
+    record: &mut [u8],
+    attr_offset: usize,
+    mapping_offset: usize,
+    mapping_len: usize,
+) -> bool {
+    let read_u32 = |record: &[u8], at: usize| {
+        u32::from_le_bytes([record[at], record[at + 1], record[at + 2], record[at + 3]]) as usize
+    };
+    let old_attr_length = read_u32(record, attr_offset + attr_off::LENGTH);
+    let bytes_used = read_u32(record, REC_OFF_BYTES_USED);
+    let bytes_allocated = read_u32(record, REC_OFF_BYTES_ALLOCATED);
+    let new_attr_length = align_up_8(mapping_offset + mapping_len);
+    if new_attr_length <= old_attr_length {
+        return true;
+    }
+    let diff = new_attr_length - old_attr_length;
+    if bytes_used + diff > bytes_allocated {
+        return false;
+    }
+    record.copy_within(
+        attr_offset + old_attr_length..bytes_used,
+        attr_offset + new_attr_length,
+    );
+    record[attr_offset + old_attr_length..attr_offset + new_attr_length].fill(0);
+    record[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4]
+        .copy_from_slice(&((bytes_used + diff) as u32).to_le_bytes());
+    record[attr_offset + attr_off::LENGTH..attr_offset + attr_off::LENGTH + 4]
+        .copy_from_slice(&(new_attr_length as u32).to_le_bytes());
+    true
+}
+
 /// Resize a resident attribute so its value becomes `new_value_length`
 /// bytes. Does not touch the value's contents — caller writes those
 /// after (via `write_resident_value_bytes` or by hand).
@@ -680,5 +716,44 @@ mod tests {
         let (mut rec, _) = one_attr_record(b"x");
         let bad_attr = vec![0u8; 7]; // not 8-aligned
         assert!(insert_attribute_sorted(&mut rec, &bad_attr).is_err());
+    }
+}
+
+#[cfg(test)]
+mod grow_for_mapping_tests {
+    use super::*;
+
+    /// A record holding a 72-byte non-resident attribute, then a 24-byte one
+    /// and the end marker, with `allocated` bytes to hold them.
+    fn record(allocated: u32) -> Vec<u8> {
+        let mut r = vec![0u8; allocated as usize];
+        r[REC_OFF_BYTES_ALLOCATED..REC_OFF_BYTES_ALLOCATED + 4]
+            .copy_from_slice(&allocated.to_le_bytes());
+        r[REC_OFF_BYTES_USED..REC_OFF_BYTES_USED + 4]
+            .copy_from_slice(&(56u32 + 72 + 24 + 8).to_le_bytes());
+        r[56 + attr_off::LENGTH..56 + attr_off::LENGTH + 4].copy_from_slice(&72u32.to_le_bytes());
+        r[128..132].copy_from_slice(&0x80u32.to_le_bytes());
+        r[128 + attr_off::LENGTH..128 + attr_off::LENGTH + 4].copy_from_slice(&24u32.to_le_bytes());
+        r[152..156].copy_from_slice(&u32::MAX.to_le_bytes());
+        r
+    }
+
+    #[test]
+    fn the_attributes_after_it_move_and_the_end_marker_follows() {
+        let mut r = record(1024);
+        assert!(grow_non_resident_for_mapping(&mut r, 56, 64, 11));
+        let at = |r: &[u8], i: usize| u32::from_le_bytes(r[i..i + 4].try_into().unwrap());
+        assert_eq!(at(&r, 56 + attr_off::LENGTH), 80);
+        assert_eq!(at(&r, REC_OFF_BYTES_USED), 56 + 80 + 24 + 8);
+        assert_eq!(at(&r, 136), 0x80);
+        assert_eq!(at(&r, 160), u32::MAX);
+    }
+
+    #[test]
+    fn a_record_with_no_room_is_left_as_it_was() {
+        let mut r = record(160);
+        let before = r.clone();
+        assert!(!grow_non_resident_for_mapping(&mut r, 56, 64, 11));
+        assert_eq!(r, before);
     }
 }

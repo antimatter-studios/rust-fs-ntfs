@@ -64,6 +64,8 @@ check "mkfs.ntfs made the small image" test -s "$small"
 printf keep | fs.ntfs "$small" write /keep >/dev/null 2>&1
 fs.ntfs "$small" import "$SANDBOX/big" /big >"$SANDBOX/out" 2>"$SANDBOX/err"
 check "an import that runs out of space fails" test $? -eq 1
+check "it fails for want of space, not for want of room in the record" \
+    test -z "$(grep -F 'mapping_pairs' "$SANDBOX/err")"
 check "ntfscat /keep is untouched after the failed import" test "$(ntfscat "$small" /keep 2>/dev/null)" = keep
 check "ntfsls / lists keep alone: the staging file was removed" \
     test "$(ntfsls "$small" 2>/dev/null | tr '\n' ' ')" = "keep "
