@@ -84,6 +84,7 @@ fn every_verb_documents_itself_on_stdout() {
         "symlink",
         "objid",
         "layout",
+        "directory-layout",
         "stream",
         "ea",
     ] {
@@ -363,6 +364,7 @@ fn the_help_lists_every_verb_that_exists() {
         "remove",
         "set-dirty",
         "layout",
+        "directory-layout",
     ] {
         assert!(
             help.contains(verb),
@@ -382,6 +384,7 @@ fn a_missing_argument_is_a_usage_error() {
         vec!["write", &img],
         vec!["link", &img],
         vec!["rename", &img],
+        vec!["directory-layout", &img],
     ] {
         let out = run(&args);
         assert_ne!(
