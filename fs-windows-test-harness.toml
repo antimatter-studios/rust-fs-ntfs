@@ -59,6 +59,7 @@ cli = [
   "cli-empty-directory-win-verify-chkdsk",
   "cli-rename-win-verify-chkdsk",
   "cli-link-win-verify-chkdsk",
+  "cli-mkdir-parents-win-verify-chkdsk",
   "cli-windows-interrupted-1-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-6-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-1-write-after-replay-win-verify-chkdsk",
@@ -391,6 +392,19 @@ expect_exit = 0
 # win-cli-verify.
 host = "host"
 command = "bash scripts/cli-oracle.sh link {image_dir}/{run_id}/{scenario.image}"
+expect_exit = 0
+
+[ops.cli-mkdir-parents]
+# fs.ntfs mkdir -p makes missing chains -- three levels, under existing
+# directories through names in another case, through `.` and `..`, twelve
+# levels, Unicode names, and one into each of 300 directories filled past
+# one index level -- and finds a chain already there, writing nothing. A
+# file in the way, names Windows cannot address and a metafile's directory
+# are refused, writing nothing; then a clean fsck.ntfs. Writes
+# <image>.manifest: every directory made and its exact case, the name `..`
+# passed over, and the chains Windows must refuse too, for win-cli-verify.
+host = "host"
+command = "bash scripts/cli-oracle.sh mkdir-parents {image_dir}/{run_id}/{scenario.image}"
 expect_exit = 0
 
 [ops.cli-replay]

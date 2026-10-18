@@ -1,0 +1,3 @@
+## Interfaces
+
+| `fs.ntfs mkdir --parents`: every missing directory on the way to a path, through the library's `mkdir` in one writable open; one already there is success, names are found as Windows finds them and `.` and `..` read from the text as Windows reads them; a file or symbolic link in the way, a name Windows cannot address and a dirty volume refused before the image is opened for writing, so no partial chain is made (`--features cli`) | Supported; no link is followed, and a name with a trailing space or period is refused rather than trimmed | Unreleased | #647 | `tests/cli/test-write.sh`, `cli-mkdir-parents-win-verify-chkdsk` |
