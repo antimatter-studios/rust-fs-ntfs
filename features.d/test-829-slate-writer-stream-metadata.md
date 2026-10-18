@@ -1,0 +1,3 @@
+## Interfaces
+
+| Slate stream and metadata write oracle (test support) | Experimental: the advisory checker tier also captures the existing named-stream and extended-attribute matrix recipes (an `$ATTRIBUTE_LIST` grown by twelve streams and an EA, and a split `$DATA` carrying its own streams and EA) before Windows mounts their images, keeps the symbolic-link reparse point captured, retains each source scenario and SHA-256 beside Windows read-only chkdsk's verdict, and compares Slate with Windows over thirteen cases | Unreleased | #829, #688 | `tests/scripts/slate-stream-metadata-capture.sh`, `.github/workflows/slate-oracle.yml` |
