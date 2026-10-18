@@ -1483,6 +1483,16 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      # Files and directories created here in a directory Windows charged
+      # with quota tracking on: chkdsk grades the volume, and Windows' own
+      # recount of each owner's usage must be what $Quota held (#848).
+      - name: Validate quota charges of created files on Windows
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh win-format-win-quota-mac-create-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       # A volume Windows journals, written here: Windows must not report
       # the same journal afterwards, which would promise consumers a record
       # of every change that this crate's changes are not in (#479).

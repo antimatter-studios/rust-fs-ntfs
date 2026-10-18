@@ -2402,7 +2402,9 @@ pub fn create_file_io<T: BlockIo + ?Sized>(
     parent_path: &str,
     basename: &str,
 ) -> Result<u64, Error> {
+    let charge = quota_charge_for_create_io(io, parent_path)?;
     let rec = create_file_unstamped_io(io, parent_path, basename)?;
+    charge_created_io(io, rec, charge)?;
     let parent = resolve_path_to_record_number_io(io, parent_path)?;
     stamp_written_io(io, parent)?;
     Ok(rec)
@@ -3290,7 +3292,9 @@ pub fn mkdir_io<T: BlockIo + ?Sized>(
     parent_path: &str,
     basename: &str,
 ) -> Result<u64, Error> {
+    let charge = quota_charge_for_create_io(io, parent_path)?;
     let rec = mkdir_unstamped_io(io, parent_path, basename)?;
+    charge_created_io(io, rec, charge)?;
     let parent = resolve_path_to_record_number_io(io, parent_path)?;
     stamp_written_io(io, parent)?;
     Ok(rec)
@@ -4305,6 +4309,55 @@ fn quota_move_io<T: BlockIo + ?Sized>(
         owner,
         data,
     }))
+}
+
+/// What a file or directory created in `parent_path` is charged, and the
+/// `$Q` entry that charges it, worked out before anything is written
+/// (#848).
+///
+/// With tracking on, Windows charges a new file its MFT record (measured on
+/// `test-disks/windows-interrupted-quota.recovered`). The owner is the
+/// parent directory's, standing in for the owner of the new file's security
+/// descriptor (#849). `None` when the volume does not track quotas or the
+/// parent is charged to owner 0, or has the 48-byte
+/// `$STANDARD_INFORMATION`: the new file is then charged to nobody, as
+/// before.
+fn quota_charge_for_create_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_path: &str,
+) -> Result<Option<(QuotaRefund, u64)>, Error> {
+    let parent = resolve_path_to_record_number_io(io, parent_path)?;
+    let (params, record) = read_mft_record_io(io, parent)?;
+    let Some((owner, _)) = quota_charge_of(&record).filter(|&(o, _)| o != 0) else {
+        return Ok(None);
+    };
+    let charge = params.file_record_size;
+    Ok(quota_move_io(io, owner, 0, charge)?.map(|entry| (entry, charge)))
+}
+
+/// Charge the record `rec` just created what
+/// [`quota_charge_for_create_io`] worked out, and write its owner's `$Q`
+/// entry.
+fn charge_created_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    charge: Option<(QuotaRefund, u64)>,
+) -> Result<(), Error> {
+    let Some((entry, charged)) = charge else {
+        return Ok(());
+    };
+    let owner = entry.owner;
+    update_mft_record_io(io, rec, |record| {
+        let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
+            .ok_or_else(|| Error::io("no $STANDARD_INFORMATION to charge"))?;
+        let start = attr_io::resident_value_start(&loc)
+            .filter(|_| loc.resident_value_length.unwrap_or(0) as usize >= SI_QUOTA + 8)
+            .ok_or_else(|| Error::io("a $STANDARD_INFORMATION with no quota fields"))?;
+        record[start + SI_OWNER_ID..start + SI_OWNER_ID + 4].copy_from_slice(&owner.to_le_bytes());
+        record[start + SI_QUOTA..start + SI_QUOTA + 8].copy_from_slice(&charged.to_le_bytes());
+        Ok(())
+    })?;
+    give_back_quota_io(io, Some(entry))
 }
 
 /// Write the `$Q` entry [`quota_refund_io`] worked out, in the root or the
