@@ -17,8 +17,12 @@ use fs_core::cli::{CliError, Json, Outcome};
 use fs_ntfs::rescue::{self, FileSource, RangeClass, ReadFailure, RescueSource, ScanOptions};
 
 /// Exit status: the rescue ran and the archive still lacks some of the
-/// source.
-pub const EXIT_INCOMPLETE: u8 = 4;
+/// source. The family's CLI contract has no status for "completed with
+/// unrecovered data" yet, and its 4 means a state refusal with nothing
+/// done, so this is 5, which the contract gives no other meaning.
+/// rust-fs-core#357 proposes it as core's `EXIT_PARTIAL`; this constant
+/// gives way to that one once it is released.
+pub const EXIT_INCOMPLETE: u8 = 5;
 
 pub fn command() -> Cmd {
     Cmd::new("rescue")
@@ -50,7 +54,7 @@ pub fn command() -> Cmd {
              The source is only ever read. Metadata is read first, then allocated \
              clusters, then free ones. An existing archive is refused unless --resume \
              is given, and a resume first checks every archived sector still reads the \
-             same from the source. Exit status: 0 the archive holds every byte, 4 some \
+             same from the source. Exit status: 0 the archive holds every byte, 5 some \
              spans are still unreadable, 1 the rescue failed or was refused.",
         )
 }
