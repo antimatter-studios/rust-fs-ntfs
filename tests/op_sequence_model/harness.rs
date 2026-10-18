@@ -749,7 +749,17 @@ pub fn replay<M: Expected>(
     operations: &[Op],
     wrap: impl FnOnce(Model) -> M,
 ) -> Option<Mismatch> {
-    let mut h = Harness::with(name, wrap);
+    replay_on(name, &geometry(), operations, wrap)
+}
+
+/// `replay` on an image formatted at `geometry`, such as a pin's (#1024).
+pub fn replay_on<M: Expected>(
+    name: &str,
+    geometry: &Geometry,
+    operations: &[Op],
+    wrap: impl FnOnce(Model) -> M,
+) -> Option<Mismatch> {
+    let mut h = Harness::formatted(name, geometry, wrap);
     let outcome = shrink::quietly(|| {
         panic::catch_unwind(AssertUnwindSafe(|| {
             for op in operations {
@@ -767,8 +777,13 @@ pub fn replay<M: Expected>(
 
 /// Raw generator bytes become the operations the harness ran from them,
 /// up to and including any that failed.
-fn concretize<M: Expected>(name: &str, input: &[u8], wrap: impl FnOnce(Model) -> M) -> Vec<Op> {
-    let mut h = Harness::with(name, wrap);
+fn concretize<M: Expected>(
+    name: &str,
+    geometry: &Geometry,
+    input: &[u8],
+    wrap: impl FnOnce(Model) -> M,
+) -> Vec<Op> {
+    let mut h = Harness::formatted(name, geometry, wrap);
     let _ = shrink::quietly(|| panic::catch_unwind(AssertUnwindSafe(|| h.generated(input))));
     h.operations.clone()
 }
@@ -797,20 +812,27 @@ pub fn capture<M: Expected>(
             return Err(kept("the capture's replays write here: move it first"));
         }
     }
-    let operations = match generator::decode_replay(&input) {
-        Ok(operations) => operations,
-        Err(_) => concretize(&scratch, &input, &wrap),
+    // Raw bytes choose their image (#1024); a replay keeps its pin's.
+    let (operations, geometry) = match generator::decode_regression(&input) {
+        Ok((operations, pinned)) => (
+            operations,
+            pinned.map_or_else(geometry, |pinned| pinned.geometry),
+        ),
+        Err(_) => {
+            let (geometry, input) = generator::decode_geometry(&input);
+            (concretize(&scratch, &geometry, input, &wrap), geometry)
+        }
     };
-    let found = replay(&scratch, &operations, &wrap)
+    let found = replay_on(&scratch, &geometry, &operations, &wrap)
         .ok_or_else(|| kept("it replays without a mismatch"))?;
     let minimal = shrink::shrink(&operations, &found, |candidate| {
-        replay(&scratch, candidate, &wrap)
+        replay_on(&scratch, &geometry, candidate, &wrap)
     })
     .map_err(|e| kept(&e))?;
     let regression = Regression {
         kind: found.kind,
         step: minimal.len(),
-        geometry: geometry(),
+        geometry,
         original: original.display().to_string(),
         original_operations: operations.len(),
     };

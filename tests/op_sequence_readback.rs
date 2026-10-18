@@ -135,16 +135,29 @@ pub fn capture(original: &Path, name: &str) -> Result<std::path::PathBuf, String
 /// live generator. The gate above always decodes its JSON strictly.
 #[allow(dead_code)]
 pub fn fuzz_input(input: &[u8]) {
-    let mut h = harness::Harness::new("explorer");
+    // Raw bytes choose the image they run on (#1024), a pin replays on its
+    // own, and geometry.txt beside every finding names it.
+    let (replayed, geometry, rest) = match generator::decode_regression(input) {
+        Ok((operations, pinned)) => (
+            Some(operations),
+            pinned.map_or_else(harness::geometry, |pinned| pinned.geometry),
+            input,
+        ),
+        Err(_) => {
+            let (geometry, rest) = generator::decode_geometry(input);
+            (None, geometry, rest)
+        }
+    };
+    let mut h = harness::Harness::on("explorer", &geometry);
     fs::write("tmp/op-sequence-model/explorer/input.bin", input).unwrap();
-    match generator::decode_replay(input) {
-        Ok(operations) => {
+    match replayed {
+        Some(operations) => {
             for operation in operations {
                 h.step(operation);
             }
         }
-        Err(_) => {
-            h.generated(input);
+        None => {
+            h.generated(rest);
         }
     }
     h.finish();
@@ -836,9 +849,10 @@ fn capture_pins_a_minimized_regression_and_never_discards_the_original() {
     let _ = fs::remove_dir_all(root);
     let corpus = root.join("corpus");
     fs::create_dir_all(&corpus).unwrap();
-    // Raw generator bytes, as libFuzzer saves them: create /a, write five
-    // bytes to it, mkdir /b, then shrink /a to two bytes.
-    let mut input = Vec::new();
+    // Raw generator bytes, as libFuzzer saves them: a zero geometry header
+    // (the default image, #1024), then create /a, write five bytes to it,
+    // mkdir /b, and shrink /a to two bytes.
+    let mut input = vec![0; generator::GEOMETRY_HEADER];
     for (frame, data) in [
         ([0, 2, 2, 0, 0, 0, 0, 0], &[][..]),
         ([2, 2, 2, 0, 5, 0, 0, 0], &[9, 8, 7, 6, 5][..]),
