@@ -213,6 +213,15 @@ host = "host"
 command = "{binary} write {image_dir}/{run_id}/{scenario.image} {step.path} --content '{step.content}'"
 expect_exit = 0
 
+[ops.mac-write-bytes]
+# rust-ntfs write with `--bytes`: replace an existing file's `$DATA` with
+# `{step.bytes}` bytes of an incrementing pattern, so its allocation grows
+# or shrinks to fit. Quota tracking charges the change to the file's owner
+# (#675, part of #510).
+host = "host"
+command = "{binary} write {image_dir}/{run_id}/{scenario.image} {step.path} --bytes {step.bytes} --pattern incrementing"
+expect_exit = 0
+
 [ops.mac-write-sparse]
 # rust-ntfs sparse writes an existing file's $DATA as a SPARSE stream:
 # cluster-aligned all-zero regions become holes (no clusters allocated).
