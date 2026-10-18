@@ -19,7 +19,7 @@
 
 use crate::block_io::BlockIo;
 use crate::error::Error;
-use crate::fsck::{fsck_io_with, FsckOptions, FsckReport};
+use crate::fsck::{fsck_io_with, set_dirty_io, FsckOptions, FsckReport};
 
 /// One write a repair would make.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +60,37 @@ pub fn plan_fsck_io<T: BlockIo + ?Sized>(
         units: Vec::new(),
         open: PlanUnit::default(),
     };
+    let report = fsck_io_with(&mut planning, options, None)?;
+    planning.close_unit();
+    Ok(RepairPlan {
+        units: planning.units,
+        report,
+    })
+}
+
+/// Plan an in-place repair of `io`: what [`plan_fsck_io`] plans, opened by
+/// the writes [`set_dirty_io`] makes -- `$Volume`'s flags, then its
+/// `$MFTMirr` copy -- each a unit of its own, flushed before the repair's
+/// first write (#939). On a volume whose flag is already set nothing is
+/// added. Writes nothing.
+///
+/// An in-place repair keeps the volume dirty until it has been audited
+/// (#716), so a cut at any unit leaves a volume Windows checks at its next
+/// mount. The flag is set by units of the plan rather than beside it, so
+/// the in-place apply journals, checks and resumes them like any other,
+/// and nothing reaches the device outside the plan's ranges. Copy-repair
+/// keeps [`plan_fsck_io`]'s plan.
+pub fn plan_in_place_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    options: FsckOptions,
+) -> Result<RepairPlan, Error> {
+    let mut planning = Planning {
+        io,
+        units: Vec::new(),
+        open: PlanUnit::default(),
+    };
+    set_dirty_io(&mut planning)?;
+    planning.close_unit();
     let report = fsck_io_with(&mut planning, options, None)?;
     planning.close_unit();
     Ok(RepairPlan {
