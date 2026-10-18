@@ -90,6 +90,7 @@ dependencies = [
  "libc",
  "log",
  "rust-fs-core",
+ "sha2",
 ]
 
 [[package]]
