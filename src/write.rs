@@ -3376,7 +3376,8 @@ fn mkdir_unstamped_io<T: BlockIo + ?Sized>(
 // ---------------------------------------------------------------------------
 
 /// Upsert (add or replace by case-insensitive name) a single extended
-/// attribute. EAs are stored resident only in this MVP.
+/// attribute. A set too large for a resident `$EA` is stored in
+/// clusters, as Windows stores it (#661).
 ///
 /// The name is stored upper-cased, as NTFS stores a name set through
 /// Windows' `NtSetEaFile`: `user.a` is kept as `USER.A` (#482, graded by
@@ -3498,6 +3499,12 @@ pub fn list_ea_keys_io<T: BlockIo + ?Sized>(
 /// as before. A directory keeps the base-record path, as
 /// [`crate::attr_list::ListedFile`] does not move a directory's
 /// attributes.
+///
+/// A SET NO RECORD HOLDS RESIDENT GOES INTO CLUSTERS. A file's EAs may
+/// total 64 KiB, and Windows keeps a set too large for a resident `$EA`
+/// non-resident (#661, graded by `tests/non_resident_ea.rs`). A file whose
+/// `$EA` is already non-resident takes the list path too, which keeps it
+/// in clusters whatever its size.
 fn change_eas_io<T, F>(io: &mut T, rec: u64, change: F) -> Result<(), Error>
 where
     T: BlockIo + ?Sized,
@@ -3507,7 +3514,9 @@ where
     let is_directory =
         crate::mft_io::record_flags(&record) & crate::mft_io::MFT_FLAG_DIRECTORY != 0;
     let listed = attr_io::find_attribute(&record, AttrType::AttributeList, None).is_some();
-    if !is_directory && listed {
+    let nonresident = attr_io::find_attribute(&record, AttrType::ExtendedAttribute, None)
+        .is_some_and(|loc| !loc.is_resident);
+    if !is_directory && (listed || nonresident) {
         return write_listed_eas_io(io, rec, &change);
     }
     let mut eas = crate::ea_io::read_from_record(&record)?;
@@ -3547,18 +3556,30 @@ fn eas_fit_record(record: &[u8], eas: &[crate::ea_io::Ea]) -> Result<bool, Error
 /// and go wherever [`crate::attr_list::ListedFile::add`] puts them when
 /// they do not; no EAs left takes both out. A write refused before the
 /// records are written gives back what it allocated.
+///
+/// An `$EA` no empty record holds resident goes into clusters (#661), and
+/// one already in clusters stays there when the set shrinks, as a stream
+/// does. Each change writes the set to newly allocated clusters and frees
+/// the old ones only once the records no longer name them.
 fn write_listed_eas_io<T, F>(io: &mut T, rec: u64, change: &F) -> Result<(), Error>
 where
     T: BlockIo + ?Sized,
     F: Fn(&mut Vec<crate::ea_io::Ea>) -> Result<(), Error>,
 {
     let mut file = crate::attr_list::ListedFile::open(io, rec)?;
-    let mut eas = match file.find(AttrType::ExtendedAttribute, "")? {
+    let found = file.find(AttrType::ExtendedAttribute, "")?;
+    let (old_runs, was_nonresident) = match &found {
+        Some(found) => (file.runs(found)?, !found.loc.is_resident),
+        None => (Vec::new(), false),
+    };
+    let mut eas = match found {
         None => Vec::new(),
+        // The reader refuses a compressed or encrypted value, so a
+        // transformed `$EA` is refused before anything is written.
         Some(found) if !found.loc.is_resident => {
-            return Err(Error::refused(format!(
-                "record {rec}: its $EA is non-resident, which this driver does not write"
-            )))
+            let value =
+                crate::read::read_attribute_value(io, rec, AttrType::ExtendedAttribute, None)?;
+            crate::ea_io::decode(&value)?
         }
         Some(found) => {
             let attr = file.attribute_bytes(&found);
@@ -3574,18 +3595,22 @@ where
         }
     };
     change(&mut eas)?;
-    if let Err(e) = place_listed_eas_io(io, &mut file, &eas) {
+    if let Err(e) = place_listed_eas_io(io, &mut file, &eas, was_nonresident) {
         return Err(file.abandon(io, e));
     }
-    file.commit(io)
+    file.commit(io)?;
+    free_old_runs_io(io, "the $EA", "rewritten", old_runs)
 }
 
 /// Put `eas` in `file` as its `$EA_INFORMATION` and `$EA`, replacing the
-/// ones it has, or take both out when `eas` is empty.
+/// ones it has, or take both out when `eas` is empty. The `$EA` is
+/// resident when it fits in an empty extension record and `was_nonresident`
+/// is false, else in clusters allocated and written here.
 fn place_listed_eas_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file: &mut crate::attr_list::ListedFile,
     eas: &[crate::ea_io::Ea],
+    was_nonresident: bool,
 ) -> Result<(), Error> {
     let kinds = [
         AttrType::ExtendedAttributeInformation,
@@ -3603,7 +3628,18 @@ fn place_listed_eas_io<T: BlockIo + ?Sized>(
     for ty in kinds {
         let attr = match ty {
             AttrType::ExtendedAttribute => {
-                crate::record_build::build_resident_ea_attribute(0, &packed)?
+                let resident = crate::record_build::build_resident_ea_attribute(0, &packed)?;
+                if !was_nonresident && resident.len() <= file.max_attribute_len() {
+                    resident
+                } else {
+                    listed_nonresident_attribute_io(
+                        io,
+                        file,
+                        AttrType::ExtendedAttribute,
+                        None,
+                        &packed,
+                    )?
+                }
             }
             _ => crate::record_build::build_resident_ea_information_attribute(0, &info)?,
         };
@@ -5566,7 +5602,13 @@ fn write_listed_named_stream_io<T: BlockIo + ?Sized>(
     let attr = if !was_nonresident && resident.len() <= file.max_attribute_len() {
         resident
     } else {
-        match listed_nonresident_stream_io(io, &mut file, stream_name, data) {
+        match listed_nonresident_attribute_io(
+            io,
+            &mut file,
+            AttrType::Data,
+            Some(stream_name),
+            data,
+        ) {
             Ok(attr) => attr,
             Err(e) => return Err(file.abandon(io, e)),
         }
@@ -5582,13 +5624,14 @@ fn write_listed_named_stream_io<T: BlockIo + ?Sized>(
     free_named_stream_runs_io(io, stream_name, "rewritten", old_runs)
 }
 
-/// A non-resident `$DATA` named `stream_name` holding `data`, in clusters
-/// allocated and written here and counted among those `file` gives back if
-/// the change is abandoned.
-fn listed_nonresident_stream_io<T: BlockIo + ?Sized>(
+/// A non-resident attribute of type `ty` named `name` holding `data`, in
+/// clusters allocated and written here and counted among those `file`
+/// gives back if the change is abandoned.
+fn listed_nonresident_attribute_io<T: BlockIo + ?Sized>(
     io: &mut T,
     file: &mut crate::attr_list::ListedFile,
-    stream_name: &str,
+    ty: AttrType,
+    name: Option<&str>,
     data: &[u8],
 ) -> Result<Vec<u8>, Error> {
     let params = *file.params();
@@ -5613,8 +5656,8 @@ fn listed_nonresident_stream_io<T: BlockIo + ?Sized>(
         lcn: Some(lcn),
     }])?;
     crate::record_build::build_nonresident_attribute(
-        AttrType::Data as u32,
-        Some(stream_name),
+        ty as u32,
+        name,
         0,
         size,
         allocated,
@@ -5789,6 +5832,17 @@ fn free_named_stream_runs_io<T: BlockIo + ?Sized>(
     done: &str,
     runs: Vec<(u64, u64)>,
 ) -> Result<(), Error> {
+    free_old_runs_io(io, &format!("the named stream '{stream_name}'"), done, runs)
+}
+
+/// Free the clusters `runs` an attribute, `what`, held before it was
+/// `done`, once the records no longer name them.
+fn free_old_runs_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    what: &str,
+    done: &str,
+    runs: Vec<(u64, u64)>,
+) -> Result<(), Error> {
     if runs.is_empty() {
         return Ok(());
     }
@@ -5797,7 +5851,7 @@ fn free_named_stream_runs_io<T: BlockIo + ?Sized>(
         bitmap::free_io(io, &bm, lcn, n).map_err(|e| {
             e.map_message(|m| {
                 format!(
-                    "the named stream '{stream_name}' was {done}, but freeing its old clusters \
+                    "{what} was {done}, but freeing its old clusters \
                      [{lcn}..{}] failed ({m}): those clusters are still marked allocated \
                      and nothing owns them now",
                     lcn + n
