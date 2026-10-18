@@ -17,6 +17,11 @@ Nothing here is an NTFS structure, and an archive is never a repair plan.
   with a media error (`EIO`; on Windows `ERROR_CRC`, `ERROR_SECTOR_NOT_FOUND`,
   `ERROR_READ_FAULT` or `ERROR_IO_DEVICE`), the chunk is read again one
   sector at a time. One bad sector costs that sector, not the chunk.
+- The sector is the source's own: the bytes per sector an NTFS boot sector
+  names (512, 1024, 2048 or 4096), or 512 when the source has no readable
+  NTFS boot sector. A sector size the caller gives must match the boot
+  sector's, or the scan is refused before the archive is written. A resume
+  works in the same sector size, and refuses an archive scanned in another.
 - Records are written in class order on an NTFS source whose layout reads,
   and in source order otherwise (see the record classes below). Adjacent
   unreadable sectors of one class become one unreadable record, across chunk
