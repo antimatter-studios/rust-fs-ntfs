@@ -136,3 +136,36 @@ fn offset_rescues_the_partition_inside_a_whole_disk() {
     let whole = std::fs::read(&img).unwrap();
     assert_eq!(exported(&archive), whole[PARTITION as usize..]);
 }
+
+/// The CLI contract's `fs.<fs>` statuses (diskjockey docs/cli-tooling-design.md):
+/// 0 success, 1 failed, 2 usage, 3 unsupported, 4 refused by the volume's state.
+const CONTRACT_STATUSES: [u8; 5] = [0, 1, 2, 3, 4];
+
+/// The status an incomplete rescue exits with (#1020): the contract has none
+/// for "completed with unrecovered data" yet, so it must be one the contract
+/// gives no other meaning, never 4, which a caller reads as "refused,
+/// nothing done".
+const INCOMPLETE: u8 = 5;
+
+#[test]
+fn an_incomplete_rescue_exit_status_is_not_one_the_contract_already_uses() {
+    assert!(!CONTRACT_STATUSES.contains(&INCOMPLETE));
+    let out = Command::new(env!("CARGO_BIN_EXE_rust-fs-ntfs"))
+        .args(["fs", "source.img", "rescue", "--help"])
+        .output()
+        .expect("spawn fs.ntfs");
+    let help = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        help.contains(&format!("Exit status: 0 the archive holds every byte, {INCOMPLETE} some spans are still unreadable")),
+        "{help}"
+    );
+    for status in CONTRACT_STATUSES.iter().filter(|&&s| s > 1) {
+        assert!(
+            !help.contains(&format!(", {status} some spans are still unreadable")),
+            "{help}"
+        );
+    }
+}
