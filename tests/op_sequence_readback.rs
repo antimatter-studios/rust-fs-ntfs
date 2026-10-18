@@ -150,26 +150,52 @@ pub fn fuzz_input(input: &[u8]) {
     };
     // Keep totals across completed inputs as well as the current prefix's
     // per-opcode accepted/refused counts when a later input crashes, and
-    // the geometries the formatter refused, as the model expects (#1025).
+    // the geometries the formatter refused, as the model expects (#1025),
+    // and every refusal by operation and reason (#1031).
     use generator::OPCODES;
-    static TOTALS: std::sync::Mutex<(harness::Counts, usize)> =
-        std::sync::Mutex::new((([0; OPCODES], [0; OPCODES]), 0));
-    let histogram = |totals: &(harness::Counts, usize)| {
+    type Totals = (harness::Counts, usize, BTreeMap<(String, String), usize>);
+    static TOTALS: std::sync::Mutex<Totals> =
+        std::sync::Mutex::new((([0; OPCODES], [0; OPCODES]), 0, BTreeMap::new()));
+    let histogram = |totals: &Totals| {
         fs::write(
             "tmp/op-sequence-model/explorer/refusal-histogram.json",
             serde_json::to_vec(&(&totals.0 .0, &totals.0 .1, totals.1)).unwrap(),
         )
         .unwrap();
+        let reasons: String = totals
+            .2
+            .iter()
+            .map(|((operation, reason), count)| format!("{operation}\t{reason}\t{count}\n"))
+            .collect();
+        fs::write(
+            "tmp/op-sequence-model/explorer/refusal-reasons.tsv",
+            reasons,
+        )
+        .unwrap();
     };
-    if harness::refused_geometry("explorer", &geometry).is_some() {
+    // The explorer passes the run's seed; geometry.txt is written beside it.
+    let seed = std::env::var("OPSEQ_FUZZ_SEED").unwrap_or_else(|_| "unset".into());
+    let finding = |input: &[u8]| {
         fs::write("tmp/op-sequence-model/explorer/input.bin", input).unwrap();
+        fs::write(
+            "tmp/op-sequence-model/explorer/seed.txt",
+            format!("{seed}\n"),
+        )
+        .unwrap();
+    };
+    if let Some(error) = harness::refused_geometry("explorer", &geometry) {
+        finding(input);
         let mut totals = TOTALS.lock().unwrap();
         totals.1 += 1;
+        *totals
+            .2
+            .entry(("format".into(), format!("{:?}", error.kind())))
+            .or_default() += 1;
         histogram(&totals);
         return;
     }
     let mut h = harness::Harness::on("explorer", &geometry);
-    fs::write("tmp/op-sequence-model/explorer/input.bin", input).unwrap();
+    finding(input);
     match replayed {
         Some(operations) => {
             for operation in operations {
@@ -186,13 +212,23 @@ pub fn fuzz_input(input: &[u8]) {
         totals.0 .0[kind] += h.counts.0[kind];
         totals.0 .1[kind] += h.counts.1[kind];
     }
+    for (key, count) in &h.reasons {
+        *totals.2.entry(key.clone()).or_default() += count;
+    }
     histogram(&totals);
 }
+
+/// The explorer's tests share its artifacts and its image, so they take
+/// turns; libFuzzer itself runs one input at a time.
+static EXPLORER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// A geometry the formatter refuses (#1025) runs nothing: the explorer
 /// records the formatter's reason and counts it in its histogram.
 #[test]
 fn the_explorer_counts_a_refused_geometry_with_its_reason() {
+    let _turn = EXPLORER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     fuzz_input(&[0, 255, 0, 1, 2, 3]);
     let artifacts = Path::new("tmp/op-sequence-model/explorer");
     let geometry = fs::read_to_string(artifacts.join("geometry.txt")).unwrap();
@@ -206,6 +242,40 @@ fn the_explorer_counts_a_refused_geometry_with_its_reason() {
         serde_json::from_slice(&fs::read(artifacts.join("refusal-histogram.json")).unwrap())
             .expect("accepted and refused operations, then refused geometries");
     assert!(histogram.2 >= 1, "{histogram:?}");
+    // By reason too (#1031): a refused geometry is a `format` refusal.
+    let reasons = fs::read_to_string(artifacts.join("refusal-reasons.tsv")).unwrap();
+    assert!(
+        reasons
+            .lines()
+            .any(|row| row.starts_with("format\tInvalid\t")),
+        "{reasons}"
+    );
+    assert!(
+        artifacts.join("seed.txt").is_file(),
+        "the finding names no seed"
+    );
+}
+
+/// Every refusal is counted under its operation and reason (#1031), and
+/// the finding names the seed of the run beside its geometry.
+#[test]
+fn the_explorer_counts_refusals_by_operation_and_reason() {
+    let _turn = EXPLORER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    fuzz_input(
+        br#"{"version":1,"operations":[{"op":"create","parent":"/","name":"a"},{"op":"create","parent":"/","name":"a"}]}"#,
+    );
+    let artifacts = Path::new("tmp/op-sequence-model/explorer");
+    let reasons = fs::read_to_string(artifacts.join("refusal-reasons.tsv")).unwrap();
+    let duplicate = reasons
+        .lines()
+        .find_map(|row| row.strip_prefix("create\tExists\t"))
+        .unwrap_or_else(|| panic!("no create/Exists row: {reasons}"));
+    assert!(duplicate.parse::<usize>().unwrap() >= 1, "{reasons}");
+    assert!(artifacts.join("geometry.txt").is_file());
+    let seed = fs::read_to_string(artifacts.join("seed.txt")).expect("the finding names its seed");
+    assert!(!seed.trim().is_empty(), "empty seed");
 }
 
 fn sequence(seed: u64) {

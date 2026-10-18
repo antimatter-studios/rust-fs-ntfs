@@ -494,7 +494,8 @@ jobs:
           # #731's named-stream case, #732's EA case and #1025's refused
           # geometry. #1026 adds four fixed cluster/record boundary replays
           # and the contract that every committed seed names its geometry.
-          test "$n" -ge 20 || { echo "::error::readback contracts: $n executed, floor 20"; exit 1; }
+          # #1031 adds the refusals-by-operation-and-reason case.
+          test "$n" -ge 21 || { echo "::error::readback contracts: $n executed, floor 21"; exit 1; }
 
       - name: Operation sequences against ntfs-3g
         if: matrix.os == 'ubuntu-latest'

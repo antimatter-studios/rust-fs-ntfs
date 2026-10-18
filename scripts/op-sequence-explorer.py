@@ -73,7 +73,12 @@ def run(seconds, seed, corpus, output):
                         stdout=log,
                         stderr=subprocess.STDOUT,
                         timeout=seconds + 95,
-                        env={**os.environ, "OPSEQ_REFERENCE_TOOLS": "1"},
+                        env={
+                            **os.environ,
+                            "OPSEQ_REFERENCE_TOOLS": "1",
+                            # Every finding names the seed that found it.
+                            "OPSEQ_FUZZ_SEED": str(seed),
+                        },
                         check=False,
                     )
                 except subprocess.TimeoutExpired as error:

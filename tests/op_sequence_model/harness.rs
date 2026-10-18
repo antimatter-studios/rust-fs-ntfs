@@ -372,7 +372,7 @@ fn known_refusal(op: &Op, error: &Error) -> bool {
 /// be the one the model expects; `None` when both expect it formatted.
 /// The refusal goes in `name`'s artifacts with nothing run, replacing
 /// whatever an earlier input left there.
-pub fn refused_geometry(name: &str, geometry: &Geometry) -> Option<String> {
+pub fn refused_geometry(name: &str, geometry: &Geometry) -> Option<Error> {
     let expected = model::format_refusal(geometry.size, geometry.cluster, geometry.record);
     let planned = mkfs::plan_format(
         geometry.size,
@@ -421,7 +421,7 @@ pub fn refused_geometry(name: &str, geometry: &Geometry) -> Option<String> {
         serde_json::to_vec(&zero).unwrap(),
     )
     .unwrap();
-    Some(error.to_string())
+    Some(error)
 }
 
 /// Accepted then refused operations, one slot per opcode.
@@ -434,6 +434,8 @@ pub struct Harness<M = Model> {
     operations: Vec<Op>,
     refusals: Vec<String>,
     pub counts: Counts,
+    /// Refused operations by operation and reason (#1031).
+    pub reasons: BTreeMap<(String, String), usize>,
     started: Instant,
 }
 
@@ -511,6 +513,7 @@ impl<M: Expected> Harness<M> {
             operations: Vec::new(),
             refusals: Vec::new(),
             counts: ([0; OPCODES], [0; OPCODES]),
+            reasons: BTreeMap::new(),
             started: Instant::now(),
         }
     }
@@ -564,6 +567,14 @@ impl<M: Expected> Harness<M> {
                     self.refusals.join("\n"),
                 )
                 .unwrap();
+                let operation = serde_json::to_value(&op).unwrap()["op"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                *self
+                    .reasons
+                    .entry((operation, format!("{:?}", error.kind())))
+                    .or_default() += 1;
                 assert!(
                     expected.is_err() || known_refusal(&op, &error),
                     "unexpected disk refusal: {op:?}: {error}"
