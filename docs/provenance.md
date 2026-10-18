@@ -47,6 +47,11 @@ flag. The layout the fix writes comes from Windows, not from Slate: a
 Windows-formatted 256 MiB volume's `$SDS` is one contiguous run with flags 0,
 and its `$Secure` is not marked sparse.
 
+`$Extend`'s `$I30` keys for `$ObjId`, `$Reparse` and `$Quota` (#838) are
+written from a Windows-formatted 256 MiB volume's bytes: each key carries the
+child's `$FILE_NAME` times, zero sizes and attributes `0x20000006`. No Slate
+source was read for this; Slate only reported the disagreement.
+
 The rescue scan (`src/rescue.rs`, #720) follows the behaviour of Slate's
 sector rescue, read in its MIT-licensed `src/tools/recovery_io.rs` at
 `579dfeb` (its rescue, surface-scan and rescue-archive functions and the
