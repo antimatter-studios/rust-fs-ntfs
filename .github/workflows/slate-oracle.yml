@@ -24,6 +24,8 @@ on:
       - test-disks/build-slate-oracle-cases.ps1
       - test-disks/capture-slate-windows-manifest.ps1
       - tests/scripts/slate-windows-manifest.ps1
+      - test-disks/capture-slate-windows-allocation.ps1
+      - tests/scripts/slate-windows-allocation.ps1
       - chores.yml
       - src/**
   schedule:
@@ -87,6 +89,10 @@ jobs:
           if (-not $vhd) { throw 'IMG_VHD_REF is missing from chores.yml' }
           git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
           cargo install --locked --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
+      # The contracts' scratch volume goes through rust-img-vhd, so after it.
+      - name: Windows cluster allocation contracts (floor 14)
+        shell: pwsh
+        run: ./tests/scripts/slate-windows-allocation.ps1
       - name: Build the release CLI
         shell: bash
         env:
@@ -111,6 +117,7 @@ jobs:
             tmp/slate-oracle/*.mkfs.json
             tmp/slate-oracle/chkdsk/
             tmp/slate-oracle/windows-read/
+            tmp/slate-oracle/windows-alloc/
             tmp/slate-oracle/windows-read-diag/
           if-no-files-found: error
           retention-days: 7
