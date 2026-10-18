@@ -40,6 +40,13 @@ the usage text and exit constants of the MIT-licensed
 `src/tools/bin/ntfs-chkdsk.rs`. None of it is a source of this crate's
 knowledge of NTFS.
 
+To locate the `InvalidSecurity` finding on a fresh volume (#837), the
+conditions of Slate's MIT-licensed `src/ondisk/security_store.rs` at
+`579dfeb` were read: it refuses a `$Secure` stream whose attribute carries any
+flag. The layout the fix writes comes from Windows, not from Slate: a
+Windows-formatted 256 MiB volume's `$SDS` is one contiguous run with flags 0,
+and its `$Secure` is not marked sparse.
+
 The rescue scan (`src/rescue.rs`, #720) follows the behaviour of Slate's
 sector rescue, read in its MIT-licensed `src/tools/recovery_io.rs` at
 `579dfeb` (its rescue, surface-scan and rescue-archive functions and the
