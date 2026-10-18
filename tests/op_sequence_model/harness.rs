@@ -368,6 +368,62 @@ fn known_refusal(op: &Op, error: &Error) -> bool {
     capacity || listed || unmoved
 }
 
+/// A geometry the formatter refuses (#1025), with its reason, which must
+/// be the one the model expects; `None` when both expect it formatted.
+/// The refusal goes in `name`'s artifacts with nothing run, replacing
+/// whatever an earlier input left there.
+pub fn refused_geometry(name: &str, geometry: &Geometry) -> Option<String> {
+    let expected = model::format_refusal(geometry.size, geometry.cluster, geometry.record);
+    let planned = mkfs::plan_format(
+        geometry.size,
+        geometry.cluster,
+        geometry.record,
+        Some(&geometry.label),
+        Some(geometry.serial),
+    );
+    let error = match (planned, expected) {
+        (Ok(_), None) => return None,
+        (Ok(_), Some(reason)) => {
+            panic!("the formatter planned {geometry:?}, refused by the model: {reason}")
+        }
+        (Err(error), None) => panic!("unexpected format refusal of {geometry:?}: {error}"),
+        (Err(error), Some(reason)) => {
+            assert!(
+                error.to_string().contains(reason),
+                "{geometry:?} refused with {error}, not {reason}"
+            );
+            error
+        }
+    };
+    let artifacts = PathBuf::from(format!("tmp/op-sequence-model/{name}"));
+    fs::create_dir_all(&artifacts).unwrap();
+    fs::write(
+        artifacts.join("geometry.txt"),
+        format!(
+            "{}\t{}\t{}\t{}\n",
+            geometry.size, geometry.cluster, geometry.record, geometry.serial
+        ),
+    )
+    .unwrap();
+    fs::write(
+        artifacts.join("refusals.tsv"),
+        format!("format\t{:?}\t{error}\n", error.kind()),
+    )
+    .unwrap();
+    fs::write(
+        artifacts.join("reproducer.json"),
+        generator::encode(&[]).unwrap(),
+    )
+    .unwrap();
+    let zero: Counts = ([0; OPCODES], [0; OPCODES]);
+    fs::write(
+        artifacts.join("outcome-counts.json"),
+        serde_json::to_vec(&zero).unwrap(),
+    )
+    .unwrap();
+    Some(error.to_string())
+}
+
 /// Accepted then refused operations, one slot per opcode.
 pub type Counts = ([usize; OPCODES], [usize; OPCODES]);
 
@@ -820,6 +876,11 @@ pub fn capture<M: Expected>(
         ),
         Err(_) => {
             let (geometry, input) = generator::decode_geometry(&input);
+            if let Some(reason) = refused_geometry(&scratch, &geometry) {
+                return Err(kept(&format!(
+                    "the formatter refuses its geometry: {reason}"
+                )));
+            }
             (concretize(&scratch, &geometry, input, &wrap), geometry)
         }
     };
