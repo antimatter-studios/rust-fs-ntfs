@@ -13,10 +13,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Fixture-free decoding and coverage contracts (24 checks)
+      - name: Fixture-free decoding and coverage contracts (33 checks)
         shell: pwsh
         run: ./tests/scripts/windows-format-geometry.ps1
-      - name: Capture all 26 Windows format requests
+      - name: Capture all 26 Windows format requests and six large-cluster layouts
         shell: pwsh
         run: ./test-disks/capture-format-geometry.ps1
       - name: No generated image survives capture
