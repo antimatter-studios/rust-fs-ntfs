@@ -1,0 +1,3 @@
+### Added
+
+- **An in-place repair reports its progress and is cancelled only at a unit boundary (#956).** `repair_journal::apply_in_place_observed` and `resume_in_place_observed` take an `ApplyObserver`, which is told the units and bytes applied of the plan's total before the first unit and after each unit is marked applied, and asked before each unit begins whether to stop. A stop asked for while a unit is being written is honoured once that unit is written, read back and marked applied, so the apply returns `InPlaceError::Cancelled` with no unit open and its journal always resumes. `apply_in_place` and `resume_in_place` are the same calls with nobody watching. It is behind the `plan-file` feature.
