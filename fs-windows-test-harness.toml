@@ -744,6 +744,21 @@ host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-quota-track.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
+[ops.win-quota-enforce]
+# Turn quota tracking and enforcement on, give the file at `path` to an
+# owner with a hard limit `headroom_bytes` above its usage, and write
+# `write_bytes` to it: what Windows does with a write past the limit lands
+# in quota-enforce.txt. Fails when Windows accepts the write (#867).
+#
+# Step fields:
+#   path            — file path inside the volume (e.g. "/limited.bin")
+#   headroom_bytes  — how far above the owner's usage the limit sits
+#   write_bytes     — bytes to write; more than headroom_bytes
+#   keep_image?     — `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-quota-enforce.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -HeadroomBytes '{step.headroom_bytes}' -WriteBytes '{step.write_bytes}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
 [ops.win-quota-verify]
 # Read each owner's quota usage as the volume holds it, then have Windows
 # count every file again (tracking off and on) and read it again: the two
