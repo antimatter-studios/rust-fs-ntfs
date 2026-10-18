@@ -5,6 +5,9 @@ for tool in ntfsfix ntfsls ntfscat; do
     command -v "$tool" >/dev/null || { echo "$tool missing: install ntfs-3g" >&2; exit 1; }
 done
 export OPSEQ_REFERENCE_TOOLS=1
+# Keep the named samples' images for Windows chkdsk (#1034).
+OPSEQ_RETAIN_SAMPLES="$(bash scripts/check-op-sequence-samples.sh --list)"
+export OPSEQ_RETAIN_SAMPLES
 # Inherit the fixture-free tier's measured budget, retaining a separate log.
 read -r lines bytes < <(awk '$1 == "mkfs" { print $2, $3 }' scripts/tier-budgets.txt)
 bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored \
