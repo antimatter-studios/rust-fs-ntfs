@@ -1093,7 +1093,24 @@ fn a_resumed_scan_reads_again_only_ranges_with_no_data_record() {
     resume(&mut second, &mut out, options).expect("the resumed pass");
     drop(out);
 
-    for &(offset, len) in &second.log {
+    // The resume first reads each kept record's span again, in archive
+    // order, to compare it with the archive (#983). Only the scan after that
+    // comparison is held to the ranges no data record covers.
+    let mut i = 0;
+    for &(a, b) in &kept {
+        let mut at = a;
+        while at < b {
+            assert_eq!(
+                second.log.get(i).map(|r| r.0),
+                Some(at),
+                "the comparison did not read the kept record {a}..{b} in order"
+            );
+            at += second.log[i].1;
+            i += 1;
+        }
+        assert_eq!(at, b, "the comparison read past the kept record {a}..{b}");
+    }
+    for &(offset, len) in &second.log[i..] {
         for &(a, b) in &kept {
             assert!(
                 offset + len <= a || offset >= b,
@@ -1151,6 +1168,112 @@ fn a_resumed_scan_reads_again_only_ranges_with_no_data_record() {
         "the resumed pass's unreadable record"
     );
     for path in [&src, &prefix, &archive] {
+        std::fs::remove_file(path).expect("remove a scratch file");
+    }
+}
+
+/// A 1 MiB source that is no NTFS volume, archived in 64 KiB records, with
+/// the archive cut halfway through its last record's payload. Returns the
+/// source's path, its bytes and the archive's path.
+fn cut_linear_archive(name: &str) -> (String, Vec<u8>, String) {
+    let bytes: Vec<u8> = (0..1u32 << 20)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect();
+    let src = common::temp_image_path(format!("{name}_source"));
+    new_file(&src).write_all(&bytes).expect("write the source");
+    let archive = common::temp_image_path(format!("{name}_archive"));
+    let options = ScanOptions {
+        sector_size: 512,
+        chunk_size: 64 << 10,
+    };
+    let mut source = FileSource::open(Path::new(&src)).unwrap();
+    scan(&mut source, &mut new_file(&archive), options).expect("the first pass");
+    let len = std::fs::metadata(&archive).unwrap().len();
+    OpenOptions::new()
+        .write(true)
+        .open(&archive)
+        .and_then(|f| f.set_len(len - (32 << 10)))
+        .expect("cut the archive");
+    (src, bytes, archive)
+}
+
+#[test]
+fn a_resume_refuses_a_source_whose_retained_bytes_changed_naming_the_sector() {
+    let (src, mut bytes, archive) = cut_linear_archive("rescue_resume_changed");
+    // A byte inside the fifth record, in sector 585.
+    bytes[300_001] ^= 0x01;
+    std::fs::write(&src, &bytes).expect("change one byte of the source");
+    let before = file_sha256(&archive);
+    let mut source = FileSource::open(Path::new(&src)).unwrap();
+    let mut out = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&archive)
+        .expect("open the cut archive");
+    let got = resume(
+        &mut source,
+        &mut out,
+        ScanOptions {
+            sector_size: 512,
+            chunk_size: 64 << 10,
+        },
+    );
+    drop(out);
+    let err = got.expect_err("a source whose retained bytes changed was resumed");
+    assert!(
+        err.contains(&(585 * SECTOR).to_string()),
+        "the refusal does not name the changed sector's offset {}: {err}",
+        585 * SECTOR
+    );
+    assert_eq!(
+        file_sha256(&archive),
+        before,
+        "the refused resume changed the archive"
+    );
+    for path in [&src, &archive] {
+        std::fs::remove_file(path).expect("remove a scratch file");
+    }
+}
+
+#[test]
+fn a_retained_sector_that_no_longer_reads_does_not_refuse_the_resume() {
+    let (src, mut bytes, archive) = cut_linear_archive("rescue_resume_unreadable");
+    // Sector 585 changes and stops reading: an unreadable sector is no
+    // difference.
+    bytes[300_001] ^= 0x01;
+    std::fs::write(&src, &bytes).expect("change one byte of the source");
+    let mut source = Faulty {
+        inner: FileSource::open(Path::new(&src)).unwrap(),
+        bad: BTreeSet::from([585]),
+        reads: 0,
+    };
+    let mut out = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&archive)
+        .expect("open the cut archive");
+    let got = resume(
+        &mut source,
+        &mut out,
+        ScanOptions {
+            sector_size: 512,
+            chunk_size: 64 << 10,
+        },
+    );
+    drop(out);
+    got.expect("a retained sector that no longer reads refused the resume");
+    let parsed = parse(&archive, |_, _| {});
+    assert_eq!(
+        parsed
+            .records
+            .iter()
+            .filter(|r| r.kind == 1)
+            .map(|r| r.len)
+            .sum::<u64>(),
+        parsed.size,
+        "the resumed archive does not hold every byte of the source"
+    );
+    for path in [&src, &archive] {
         std::fs::remove_file(path).expect("remove a scratch file");
     }
 }
