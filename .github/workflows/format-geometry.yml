@@ -13,18 +13,23 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Fixture-free decoding and coverage contracts (33 checks)
+      - name: Fixture-free decoding and coverage contracts (48 checks)
         shell: pwsh
         run: ./tests/scripts/windows-format-geometry.ps1
       - name: Capture all 26 Windows format requests and six large-cluster layouts
         shell: pwsh
         run: ./test-disks/capture-format-geometry.ps1
+      - name: Capture Windows' own NTFS format of a 4096-byte-sector disk
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: ./test-disks/capture-sector-geometry.ps1
       - name: No generated image survives capture
         if: always()
         shell: pwsh
         run: |
-          if (Get-ChildItem tmp/format-geometry -Filter '*.vhd' -ErrorAction SilentlyContinue) {
-            throw 'a scratch geometry VHD survived cleanup'
+          if (Get-ChildItem tmp/format-geometry -File -ErrorAction SilentlyContinue |
+              Where-Object Extension -in '.vhd', '.vhdx') {
+            throw 'a scratch geometry VHD or VHDX survived cleanup'
           }
       - name: Retain native measurements and provenance, including partial failures
         if: always()
