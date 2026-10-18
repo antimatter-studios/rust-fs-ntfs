@@ -26,6 +26,12 @@
 //! difference, as Windows does (#675). The Windows matrix scenario
 //! `win-format-win-quota-mac-write-win-chkdsk` grades the same kinds of
 //! write on a volume Windows made.
+//!
+//! A file or directory created in a charged directory is charged its record
+//! to that directory's owner, and the owner's usage grows by the charge
+//! (#848, part of #676). The Windows matrix scenario
+//! `win-format-win-quota-mac-create-win-chkdsk` grades the same creates on a
+//! volume Windows made.
 
 mod common;
 
@@ -484,4 +490,40 @@ fn truncating_and_extending_a_charged_file_moves_its_charge() {
     fs_ntfs::write::write_at(Path::new(&img), &path, 300_000, b"past the end")
         .unwrap_or_else(|e| panic!("write past the end of {path}: {e}"));
     assert_in_step(&img, &path, "extended past 300000 bytes");
+}
+
+#[test]
+fn a_file_or_directory_created_in_a_charged_directory_is_charged_to_its_owner() {
+    let img = unpack(TRACKED, "create");
+    let parent = "/junction-target";
+    let vol = Vol::read(&img);
+    let (owner, _) = charge(&vol.record(record_of(&img, parent)).unwrap());
+    assert_ne!(owner, 0, "{parent} is charged to no owner");
+    let before = usage(&vol).0[&owner];
+
+    fs_ntfs::write::create_file(Path::new(&img), parent, "created.txt")
+        .unwrap_or_else(|e| panic!("create {parent}/created.txt: {e}"));
+    fs_ntfs::write::mkdir(Path::new(&img), parent, "created-dir")
+        .unwrap_or_else(|e| panic!("mkdir {parent}/created-dir: {e}"));
+
+    let vol = Vol::read(&img);
+    for name in ["created.txt", "created-dir"] {
+        let path = format!("{parent}/{name}");
+        let (got, qc) = charge(&vol.record(record_of(&img, &path)).unwrap());
+        assert_eq!(
+            got, owner,
+            "{path} is charged to owner {got}, not {parent}'s {owner}"
+        );
+        assert_eq!(
+            qc, vol.record,
+            "{path} is charged {qc}, not its {}-byte record",
+            vol.record
+        );
+    }
+    assert_eq!(
+        usage(&vol).0[&owner],
+        before + 2 * vol.record,
+        "owner {owner}'s usage did not grow by the two records created"
+    );
+    assert_eq!(usage(&vol).0, charged(&vol));
 }
