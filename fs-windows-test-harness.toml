@@ -250,6 +250,11 @@ host = "host"
 command = "{binary} rm {image_dir}/{run_id}/{scenario.image} {step.path}"
 expect_exit = 0
 
+[ops.mac-rm-many]
+host = "host"
+command = "bash scripts/mac-rm-many.sh {binary} {image_dir}/{run_id}/{scenario.image} {step.parent} {step.prefix} {step.count}"
+expect_exit = 0
+
 [ops.mac-rmdir]
 host = "host"
 command = "{binary} rmdir {image_dir}/{run_id}/{scenario.image} {step.path}"
