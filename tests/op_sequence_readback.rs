@@ -327,6 +327,69 @@ fn seeded_readback_boundary() {
 }
 
 #[test]
+fn every_committed_corpus_seed_names_its_geometry() {
+    for entry in fs::read_dir(CORPUS).expect("restore the committed operation corpus") {
+        let seed = entry.unwrap().path();
+        if seed.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let (_, pinned) = generator::decode_regression(&fs::read(&seed).unwrap()).unwrap();
+        let pinned = pinned.unwrap_or_else(|| panic!("{} has no geometry", seed.display()));
+        assert_eq!(
+            model::format_refusal(
+                pinned.geometry.size,
+                pinned.geometry.cluster,
+                pinned.geometry.record
+            ),
+            None,
+            "{} must name a supported geometry",
+            seed.display()
+        );
+    }
+}
+
+fn boundary_corpus_replay(cluster: u32, record: u32) {
+    let stem = format!("geometry-c{cluster}-r{record}-v1");
+    let seed = Path::new(CORPUS).join(format!("{stem}.json"));
+    let (operations, pinned) = generator::decode_regression(
+        &fs::read(&seed).unwrap_or_else(|error| panic!("missing seed {}: {error}", seed.display())),
+    )
+    .unwrap();
+    let geometry = pinned
+        .expect("boundary seed must name its geometry")
+        .geometry;
+    assert_eq!((geometry.cluster, geometry.record), (cluster, record));
+    assert!(!operations.is_empty(), "empty boundary seed");
+    // Separate from the all-corpus replay so every boundary is a fixed CI
+    // case, with its own fresh image, independent reader and final remount.
+    let mut h = harness::Harness::on(&format!("boundary-{stem}"), &geometry);
+    for operation in operations {
+        assert!(h.step(operation), "boundary operation must execute");
+    }
+    h.finish();
+}
+
+#[test]
+fn corpus_c512_r1024_survives_fresh_remount() {
+    boundary_corpus_replay(512, 1024);
+}
+
+#[test]
+fn corpus_c512_r4096_survives_fresh_remount() {
+    boundary_corpus_replay(512, 4096);
+}
+
+#[test]
+fn corpus_c65536_r1024_survives_fresh_remount() {
+    boundary_corpus_replay(65536, 1024);
+}
+
+#[test]
+fn corpus_c65536_r4096_survives_fresh_remount() {
+    boundary_corpus_replay(65536, 4096);
+}
+
+#[test]
 fn committed_corpus_replays_every_seed() {
     let corpus = Path::new(CORPUS);
     for required in [
