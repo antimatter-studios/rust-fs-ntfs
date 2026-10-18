@@ -1,0 +1,3 @@
+## Interfaces
+
+| Slate shared-subset window (test support) | Experimental: `scripts/slate-oracle.sh window MIN OUT RUN=VERDICTS...` reads the verdict tables of a run window of the advisory Slate job, oldest first, and admits a case to the stable shared subset only when every run carries Windows chkdsk's clean verdict on its bytes and Slate's agreement; a disagreement, a ledger-recorded row, a missing Windows verdict or an absence from any run excludes it by name, and a window below MIN runs or an empty subset fails | Unreleased | #882, #694, #580 | `tests/scripts/slate-oracle.sh` (window contracts), `scripts/slate-oracle.sh window` |
