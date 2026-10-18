@@ -648,3 +648,154 @@ fn a_windows_capture_is_archived_metadata_and_allocated_before_free() {
         }
     }
 }
+
+/// The 512-byte sectors of every cluster `$Bitmap` marks free, as the
+/// independent `ntfs` crate reads `$Bitmap` (MFT record 6's unnamed `$DATA`)
+/// and the volume's geometry from the boot sector.
+fn free_sectors(img: &str) -> BTreeSet<u64> {
+    use ntfs::NtfsReadSeek;
+    let (ntfs, mut reader) = common::open(img);
+    let cluster = u64::from(ntfs.cluster_size());
+    let clusters = ntfs.size() / cluster;
+    let file = ntfs.file(&mut reader, 6).expect("MFT record 6");
+    let item = file
+        .data(&mut reader, "")
+        .expect("$Bitmap has a $DATA attribute")
+        .expect("$Bitmap's $DATA");
+    let attr = item.to_attribute().expect("to_attribute");
+    let mut value = attr.value(&mut reader).expect("$Bitmap's value");
+    let mut bitmap = vec![0u8; clusters.div_ceil(8) as usize];
+    let mut done = 0;
+    while done < bitmap.len() {
+        let n = value
+            .read(&mut reader, &mut bitmap[done..])
+            .expect("read $Bitmap");
+        assert!(n > 0, "{img}: $Bitmap ends before cluster {}", done * 8);
+        done += n;
+    }
+    let per_cluster = cluster / SECTOR;
+    let free: BTreeSet<u64> = (0..clusters)
+        .filter(|&c| bitmap[(c / 8) as usize] >> (c % 8) & 1 == 0)
+        .flat_map(|c| c * per_cluster..(c + 1) * per_cluster)
+        .collect();
+    assert!(!free.is_empty(), "{img}: no free cluster");
+    free
+}
+
+#[test]
+fn a_scan_with_every_free_cluster_unreadable_keeps_every_file() {
+    for (name, _) in CAPTURES {
+        let Some(k) = name
+            .strip_prefix("windows-interrupted-")
+            .and_then(|k| k.strip_suffix(".recovered"))
+        else {
+            continue;
+        };
+        let src = unpack(name);
+        let bad = free_sectors(&src);
+        let lost = bad.len() as u64 * SECTOR;
+        let mut source = Faulty {
+            inner: FileSource::open(Path::new(&src)).unwrap(),
+            bad,
+            reads: 0,
+        };
+        let archive = common::temp_image_path("rescue_archive");
+        let mut out = new_file(&archive);
+        let report = scan(&mut source, &mut out, ScanOptions::default())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        drop(out);
+
+        let (rebuilt, parsed) = rebuild(&archive);
+        parsed.assert_tiles();
+        for r in parsed.records.iter().filter(|r| r.kind == 2) {
+            assert_eq!(
+                r.class, 3,
+                "{name}: the unreadable record at {}+{} is not free space",
+                r.offset, r.len
+            );
+        }
+        assert_eq!(report.unreadable_bytes, lost, "{name}: {report:?}");
+        for class in [
+            RangeClass::Unclassified,
+            RangeClass::Metadata,
+            RangeClass::Allocated,
+            RangeClass::Tail,
+        ] {
+            assert_eq!(
+                report.class(class).unreadable,
+                0,
+                "{name}: {class:?} bytes reported unreadable: {report:?}"
+            );
+        }
+        let free = report.class(RangeClass::Free);
+        assert_eq!(
+            (free.archived, free.unreadable),
+            (0, lost),
+            "{name}: the free space Windows' $Bitmap names: {report:?}"
+        );
+        files_match_windows(k, &rebuilt);
+        for path in [&src, &archive, &rebuilt] {
+            std::fs::remove_file(path).expect("remove a scratch file");
+        }
+    }
+}
+
+/// A source that stops the scan, as an unplugged device does, at the first
+/// read that touches a free cluster: the scan ends after the allocated pass.
+struct StopsAtFree {
+    inner: FileSource,
+    free: BTreeSet<u64>,
+}
+
+const STOPPED: &str = "the source stopped at free space";
+
+impl RescueSource for StopsAtFree {
+    fn size(&self) -> u64 {
+        self.inner.size()
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), ReadFailure> {
+        let first = offset / SECTOR;
+        let last = (offset + buf.len() as u64 - 1) / SECTOR;
+        if self.free.range(first..=last).next().is_some() {
+            return Err(ReadFailure::Failed(STOPPED.into()));
+        }
+        self.inner.read_at(offset, buf)
+    }
+}
+
+#[test]
+fn a_scan_stopped_after_the_allocated_pass_keeps_every_file() {
+    for (name, _) in CAPTURES {
+        let Some(k) = name
+            .strip_prefix("windows-interrupted-")
+            .and_then(|k| k.strip_suffix(".recovered"))
+        else {
+            continue;
+        };
+        let src = unpack(name);
+        let mut source = StopsAtFree {
+            inner: FileSource::open(Path::new(&src)).unwrap(),
+            free: free_sectors(&src),
+        };
+        let archive = common::temp_image_path("rescue_archive");
+        let mut out = new_file(&archive);
+        let err = scan(&mut source, &mut out, ScanOptions::default())
+            .expect_err("a source that stops at free space stops the scan");
+        drop(out);
+        assert!(err.contains(STOPPED), "{name}: {err}");
+
+        let (rebuilt, parsed) = rebuild(&archive);
+        assert!(parsed.unreadable().is_empty(), "{name}");
+        let classes: BTreeSet<u32> = parsed.records.iter().map(|r| r.class).collect();
+        assert_eq!(
+            classes,
+            BTreeSet::from([1, 2]),
+            "{name}: the classes archived before the free pass"
+        );
+        files_match_windows(k, &rebuilt);
+        for path in [&src, &archive, &rebuilt] {
+            std::fs::remove_file(path).expect("remove a scratch file");
+        }
+    }
+}
