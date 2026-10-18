@@ -872,3 +872,41 @@ fn capi_mkfs_then_parse() {
     ntfs.read_upcase_table(&mut cursor).expect("upcase");
     assert_eq!(ntfs.cluster_size(), 4096);
 }
+
+/// `$Secure:$SDS` is allocated the way Windows `format` allocates it: one
+/// contiguous run covering the primary block, the 256 KiB mirror gap and the
+/// mirror, with attribute flags 0. Windows' own 256 MiB volumes (the
+/// slate-oracle cases of #696) carry flags 0 and a single 0x41-cluster run at
+/// 4 KiB clusters. Slate's checker refuses a `$SDS` that carries any
+/// attribute flag, so the sparse layout this crate used to write made it fail
+/// the whole security inventory with `InvalidSecurity` (#837), even though
+/// Windows `chkdsk` accepted it.
+#[test]
+fn secure_sds_is_one_contiguous_unflagged_run() {
+    use fs_ntfs::sds::SDS_MIRROR_GAP;
+
+    for cluster_size in [4096u32, 65536] {
+        let mut dev = MemDev::new(VOL_SIZE);
+        format_filesystem(&mut dev, VOL_SIZE, cluster_size, 4096, Some("SDS"), None)
+            .expect("format");
+        let attr = raw_attribute(&dev, rec::SECURE as u64, 0x80, stream::SDS);
+        assert_eq!(attr[8], 1, "{cluster_size}: $SDS must be non-resident");
+        let flags = u16::from_le_bytes([attr[12], attr[13]]);
+        assert_eq!(flags, 0, "{cluster_size}: $SDS attribute flags");
+        let allocated = u64::from_le_bytes(attr[0x28..0x30].try_into().unwrap());
+        let wanted_clusters = SDS_MIRROR_GAP / cluster_size as u64 + 1;
+        assert_eq!(
+            allocated,
+            wanted_clusters * cluster_size as u64,
+            "{cluster_size}: $SDS allocated length"
+        );
+        let runs_at = u16::from_le_bytes([attr[0x20], attr[0x21]]) as usize;
+        let runs = decode_runs(&attr[runs_at..]).expect("decode $SDS runs");
+        assert_eq!(runs.len(), 1, "{cluster_size}: $SDS runs {runs:?}");
+        assert!(runs[0].lcn.is_some(), "{cluster_size}: $SDS run is a hole");
+        assert_eq!(
+            runs[0].length, wanted_clusters,
+            "{cluster_size}: $SDS run length"
+        );
+    }
+}
