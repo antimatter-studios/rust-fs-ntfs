@@ -82,6 +82,21 @@ source, and refuses it, naming what differs, when:
 The first mismatch, in plan order, is the one named. Size and serial
 number are checked before any before-image.
 
+## Checking a unit on the device about to receive it
+
+`repair_plan::check_unit_on_device` (#913) checks one unit immediately
+before it is written. It only reads the device, as it stands at that
+unit's turn: the plan's earlier units are already written there, so only
+the unit's own earlier writes are laid over what the device holds. It
+refuses the unit when:
+
+- a write's range does not hold its before-image (`plan unit U write W:
+  the device does not hold its before-image in bytes START..END`), naming
+  the write's whole byte range;
+- the plan has no unit at that index (`the plan has N units, no unit U`).
+
+The first mismatch, in the unit's write order, is the one named.
+
 ## Tests
 
 `a_saved_plan_loads_back_to_what_windows_recovered_and_only_when_intact` in
@@ -98,3 +113,11 @@ copies with a byte changed under the first write and under the last write
 no earlier write covers, one sector shorter, and with another volume serial
 number, and checks that each is refused, naming what differs, and that no
 copy is written.
+
+`a_plan_unit_is_checked_on_the_device_about_to_receive_it_at_its_turn`
+applies a plan from each Windows capture to a copy unit by unit, checking
+each unit first, and checks that every unit checks clean at its turn
+without the copy changing. It then changes one byte, which no earlier
+write of the same unit covers, inside the first, a middle and the last
+unit's ranges after the earlier units are written, and checks that each is
+refused naming that write's byte range and that the copy is not written.
