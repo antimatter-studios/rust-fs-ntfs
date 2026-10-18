@@ -9,6 +9,7 @@ pub mod fsck;
 mod import;
 pub mod inventory;
 pub mod mkfs;
+pub mod rescue;
 
 // THE FORMATTER'S ONE IMPLEMENTATION, shared with `rust-ntfs format`, the
 // test matrix's driver. `mkfs.ntfs` parses its command line with clap and
