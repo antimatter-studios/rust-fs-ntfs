@@ -35,9 +35,19 @@
 //! SHA-256 of the bytes there before it and of the bytes it leaves. The
 //! target is opened read-only, as with `-n`, and the exit status is `-n`'s.
 //!
+//! WHAT `--apply PLAN --to TARGET` DOES: loads a plan file and
+//! copy-repairs the volume into a new TARGET through
+//! `fs_ntfs::repair_plan::copy_repair` (#910): the volume is opened
+//! read-only and checked against the plan, and only then is TARGET created,
+//! the volume copied into it and the plan applied there. The volume is the
+//! source and is never written. `--to` naming the source, or anything that
+//! exists, is refused before anything is created; so is `--apply` beside
+//! anything that writes or plans (`-y`, `-p`, `--dry-run`).
+//!
 //! Without `-y` nothing is written, as with `-n`.
 
 use std::ffi::OsString;
+use std::path::Path;
 
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command as Cmd};
 
@@ -46,7 +56,7 @@ use fs_ntfs::fsck::{
     check_io, repair_dirty_io, replay_logfile_io, CheckFinding, CheckReport, FsckOptions,
     LogfileState,
 };
-use fs_ntfs::repair_plan::{plan_fsck_io, RepairPlan};
+use fs_ntfs::repair_plan::{copy_repair, load_plan, plan_fsck_io, CopyRepairError, RepairPlan};
 use sha2::{Digest, Sha256};
 
 /// fsck(8): no errors.
@@ -102,6 +112,10 @@ fn command() -> Cmd {
              Nothing is written unless -y (or -p) is given. Then a $LogFile that holds \
              work is replayed; a log that cannot be replayed in full is left as it is, \
              with nothing written.\n\n\
+             --apply PLAN --to TARGET copy-repairs the volume into a new TARGET: the \
+             volume is opened read-only and checked against PLAN, and only then is \
+             TARGET created, the volume copied into it and PLAN applied there. TARGET \
+             must not exist and must not be the volume itself.\n\n\
              --dry-run works out every write -y would make (--clear-dirty's too, when \
              given) and makes none: TARGET is opened read-only. The report's plan lists \
              them in units, each the writes between two flushes, each by offset, length \
@@ -153,6 +167,26 @@ fn command() -> Cmd {
                 .conflicts_with_all(["no", "yes", "preen"]),
         )
         .arg(
+            Arg::new("apply")
+                .long("apply")
+                .value_name("PLAN")
+                .help(
+                    "Copy-repair the volume into --to's new TARGET by the plan file PLAN; \
+                     the volume is opened read-only and never written",
+                )
+                .value_parser(value_parser!(OsString))
+                .requires("to")
+                .conflicts_with_all(["no", "yes", "preen", "dry_run", "clear_dirty", "offset"]),
+        )
+        .arg(
+            Arg::new("to")
+                .long("to")
+                .value_name("TARGET")
+                .help("With --apply, the new file to copy-repair into; it must not exist")
+                .value_parser(value_parser!(OsString))
+                .requires("apply"),
+        )
+        .arg(
             Arg::new("clear_dirty")
                 .short('d')
                 .long("clear-dirty")
@@ -192,6 +226,7 @@ fn command() -> Cmd {
              fsck.ntfs -y disk.img              replay $LogFile; the dirty flag stays set\n  \
              fsck.ntfs --dry-run disk.img       every write -y would make; none is made\n  \
              fsck.ntfs -y --clear-dirty disk.img   and clear the dirty flag too\n  \
+             fsck.ntfs --apply plan --to new.img disk.img   copy-repair into new.img\n  \
              fsck.ntfs --text disk.img; echo $?",
         )
 }
@@ -200,6 +235,12 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
     let target = matches
         .get_one::<OsString>("device")
         .expect("clap requires the device");
+    if let Some(plan) = matches.get_one::<OsString>("apply") {
+        let to = matches
+            .get_one::<OsString>("to")
+            .expect("clap requires --to with --apply");
+        return apply(Path::new(target), Path::new(plan), Path::new(to));
+    }
     let offset = matches.get_one::<u64>("offset").copied().unwrap_or(0);
     let repair = matches.get_flag("yes") || matches.get_flag("preen");
     let dry_run = matches.get_flag("dry_run");
@@ -384,6 +425,80 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
     Ok(Outcome::report(report)
         .with_text(text.join("\n"))
         .with_code(code))
+}
+
+/// Copy-repair `source` into a new `target` by the plan file at `plan`
+/// (#910). A `target` that is the source, or that exists, is refused before
+/// the plan is read; the library then refuses a source the plan does not fit
+/// before `target` is created. The source is opened read-only throughout.
+fn apply(source: &Path, plan: &Path, target: &Path) -> Result<Outcome, CliError> {
+    let name = source.display().to_string();
+    let to = target.display().to_string();
+    let usage = |m: String| CliError::usage(m).with_code(USAGE);
+    let failed = |m: String| CliError::failed(m).with_code(OPERATIONAL);
+    if source == target || same_file(source, target) {
+        return Err(usage(format!(
+            "--to '{to}' is the source: copy-repair writes a new target and never its source"
+        )));
+    }
+    if target.symlink_metadata().is_ok() {
+        return Err(usage(format!(
+            "--to '{to}' already exists: copy-repair writes only a new target, so nothing is \
+             overwritten"
+        )));
+    }
+    let plan_name = plan.display().to_string();
+    let bytes = std::fs::read(plan).map_err(|e| failed(format!("read plan '{plan_name}': {e}")))?;
+    let saved =
+        load_plan(&bytes).map_err(|e| failed(format!("plan '{plan_name}' refused: {e}")))?;
+    copy_repair(&saved, source, target).map_err(|e| match e {
+        CopyRepairError::TargetExists(_) => usage(format!("{e}: nothing is overwritten")),
+        CopyRepairError::Source(_) => failed(format!(
+            "{name}: refused for plan '{plan_name}', no target created: {e}"
+        )),
+        CopyRepairError::Io(_) => failed(format!("{name}: copy-repair into '{to}': {e}")),
+    })?;
+    let units = saved.units.len() as u64;
+    let writes = saved
+        .units
+        .iter()
+        .map(|u| u.writes.len() as u64)
+        .sum::<u64>();
+    let report = Json::object([
+        ("fs", Json::from("ntfs")),
+        ("device", Json::from(name.as_str())),
+        ("mode", Json::from("apply")),
+        ("plan", Json::from(plan_name.as_str())),
+        ("target", Json::from(to.as_str())),
+        ("units", Json::from(units)),
+        ("writes", Json::from(writes)),
+        ("exit", Json::from(u64::from(CLEAN))),
+    ]);
+    let text = format!(
+        "fsck.ntfs: {name}: plan '{plan_name}' applied to new target '{to}' ({units} units, \
+         {writes} writes); {name} was opened read-only and is unchanged"
+    );
+    Ok(Outcome::report(report).with_text(text).with_code(CLEAN))
+}
+
+/// Whether `a` and `b` name the same existing file: on Unix the same device
+/// and inode, so a hard link or a symlink to the source is caught too.
+#[cfg(unix)]
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+/// Whether `a` and `b` name the same existing file, by canonical path.
+#[cfg(not(unix))]
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// A dry run's plan as JSON: each unit's writes, by offset, length and the
