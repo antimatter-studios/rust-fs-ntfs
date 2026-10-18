@@ -4527,3 +4527,261 @@ fn fsck_apply_copy_repairs_a_read_only_capture_into_a_new_target() {
         std::fs::remove_file(&src).unwrap();
     }
 }
+
+#[cfg(feature = "cli")]
+#[test]
+fn fsck_apply_in_place_repairs_a_copy_through_an_external_journal() {
+    // `fsck.ntfs --apply PLAN --in-place --journal FILE TARGET` (#922): the
+    // journal location is checked, TARGET opened exclusively and checked
+    // against the plan, and the plan applied in place through the journal.
+    // The copy must reach the files Windows' own restart left, and the
+    // journal must read back through the library with every unit applied.
+    // Each refusal must name its reason, exit non-zero, leave the copy's
+    // SHA-256 unchanged and create no journal. The plan is saved through the
+    // library (#905) until `--dry-run --plan FILE` (#906) writes it from the
+    // CLI.
+    use fs_ntfs::repair_journal::{progress, read_journal, JournalBinding};
+    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use std::path::Path;
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let pristine_sha = hex_sha256(&pristine);
+        let mut v = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        let plan_file = format!("{src}.plan");
+        std::fs::write(&plan_file, &saved).unwrap();
+        let journal_dir = format!("{src}.journal.d");
+        let _ = std::fs::remove_dir_all(&journal_dir);
+        std::fs::create_dir(&journal_dir).unwrap();
+        let journal = format!("{journal_dir}/repair.journal");
+
+        // A second copy that no longer holds the first write's before-image.
+        let first = &loaded.units[0].writes[0];
+        let mut changed = pristine.clone();
+        changed[first.offset as usize] ^= 0xff;
+        let other = format!("{src}.other");
+        std::fs::write(&other, &changed).unwrap();
+        let other_sha = hex_sha256(&changed);
+        drop(changed);
+        drop(pristine);
+
+        // Each refusal names its reason, exits non-zero, leaves its target
+        // unchanged and creates no journal.
+        let missing = format!("{journal_dir}/no-such-dir/repair.journal");
+        let elsewhere = format!("{src}.to");
+        let _ = std::fs::remove_file(&elsewhere);
+        let cases: [(&str, Vec<&str>, &str, &str, &str); 9] = [
+            (
+                "--in-place without --journal",
+                vec!["--apply", &plan_file, "--in-place", &src],
+                "--journal",
+                &src,
+                &journal,
+            ),
+            (
+                "--journal without --in-place",
+                vec!["--apply", &plan_file, "--journal", &journal, &src],
+                "--in-place",
+                &src,
+                &journal,
+            ),
+            (
+                "--in-place with --to",
+                vec![
+                    "--apply",
+                    &plan_file,
+                    "--in-place",
+                    "--journal",
+                    &journal,
+                    "--to",
+                    &elsewhere,
+                    &src,
+                ],
+                "--to",
+                &src,
+                &journal,
+            ),
+            (
+                "--in-place with --dry-run",
+                vec![
+                    "--apply",
+                    &plan_file,
+                    "--in-place",
+                    "--journal",
+                    &journal,
+                    "--dry-run",
+                    &src,
+                ],
+                "--dry-run",
+                &src,
+                &journal,
+            ),
+            (
+                "--in-place with -y",
+                vec![
+                    "--apply",
+                    &plan_file,
+                    "--in-place",
+                    "--journal",
+                    &journal,
+                    "-y",
+                    &src,
+                ],
+                "--yes",
+                &src,
+                &journal,
+            ),
+            (
+                "a journal whose directory is missing",
+                vec![
+                    "--apply",
+                    &plan_file,
+                    "--in-place",
+                    "--journal",
+                    &missing,
+                    &src,
+                ],
+                "does not exist",
+                &src,
+                &missing,
+            ),
+            (
+                "a journal that already exists",
+                vec![
+                    "--apply",
+                    &plan_file,
+                    "--in-place",
+                    "--journal",
+                    &plan_file,
+                    &src,
+                ],
+                "already exists",
+                &src,
+                &journal,
+            ),
+            (
+                "a journal that is the device",
+                vec!["--apply", &plan_file, "--in-place", "--journal", &src, &src],
+                "is the device being repaired",
+                &src,
+                &journal,
+            ),
+            (
+                "a device that does not hold the plan's before-images",
+                vec![
+                    "--apply",
+                    &plan_file,
+                    "--in-place",
+                    "--journal",
+                    &journal,
+                    &other,
+                ],
+                "before-image",
+                &other,
+                &journal,
+            ),
+        ];
+        let plan_sha = hex_sha256(&saved);
+        for (what, args, reason, target, not_created) in cases {
+            let (code, said) = fsck_cli(&args);
+            assert_ne!(code, 0, "{k}: {what} went ahead: {said}");
+            assert!(
+                said.contains(reason),
+                "{k}: {what} refused without naming '{reason}': {said}"
+            );
+            let want = if target == other {
+                &other_sha
+            } else {
+                &pristine_sha
+            };
+            assert_eq!(
+                &hex_sha256(&std::fs::read(target).unwrap()),
+                want,
+                "{k}: {what} changed {target}"
+            );
+            assert!(
+                !Path::new(not_created).exists(),
+                "{k}: {what} created {not_created}"
+            );
+            assert!(
+                !Path::new(&elsewhere).exists(),
+                "{k}: {what} created {elsewhere}"
+            );
+            assert_eq!(
+                hex_sha256(&std::fs::read(&plan_file).unwrap()),
+                plan_sha,
+                "{k}: {what} changed the plan file"
+            );
+        }
+
+        // A copy another process holds under an exclusive lock is refused.
+        {
+            let holder = std::fs::File::open(&src).unwrap();
+            holder.lock().unwrap();
+            let (code, said) = fsck_cli(&[
+                "--apply",
+                &plan_file,
+                "--in-place",
+                "--journal",
+                &journal,
+                &src,
+            ]);
+            assert_ne!(code, 0, "{k}: a locked copy went ahead: {said}");
+            assert!(
+                said.contains("held by another process"),
+                "{k}: a locked copy refused without naming the holder: {said}"
+            );
+            assert_eq!(
+                hex_sha256(&std::fs::read(&src).unwrap()),
+                pristine_sha,
+                "{k}: a locked copy was changed"
+            );
+            assert!(
+                !Path::new(&journal).exists(),
+                "{k}: a locked copy created the journal"
+            );
+        }
+
+        // The in-place apply itself.
+        let (code, said) = fsck_cli(&[
+            "--apply",
+            &plan_file,
+            "--in-place",
+            "--journal",
+            &journal,
+            &src,
+        ]);
+        assert_eq!(code, 0, "{k}: --apply --in-place exited {code}: {said}");
+        let want = manifest(k);
+        let got = walk(&src);
+        assert!(
+            got == want,
+            "{k}: {} files after --apply --in-place, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+        let binding = JournalBinding::of(&saved).unwrap();
+        let read = read_journal(&std::fs::read(&journal).unwrap(), &binding)
+            .unwrap_or_else(|e| panic!("{k}: the journal read back refused: {e:?}"));
+        assert_eq!(read.torn, None, "{k}: the journal ends in a torn record");
+        let done = progress(&read, &loaded).unwrap_or_else(|e| panic!("{k}: progress: {e:?}"));
+        assert_eq!(
+            (done.applied as usize, done.open),
+            (loaded.units.len(), None),
+            "{k}: the journal does not mark every unit applied"
+        );
+
+        std::fs::remove_dir_all(&journal_dir).unwrap();
+        std::fs::remove_file(&other).unwrap();
+        std::fs::remove_file(&plan_file).unwrap();
+        std::fs::remove_file(&src).unwrap();
+    }
+}
