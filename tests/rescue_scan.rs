@@ -1047,3 +1047,103 @@ fn a_resumed_scan_reads_again_only_ranges_with_no_data_record() {
         std::fs::remove_file(path).expect("remove a scratch file");
     }
 }
+
+/// Where each record of `parsed` starts in its archive, by the documented
+/// layout, with the archive's length last.
+fn record_starts(parsed: &Archive) -> Vec<u64> {
+    let mut starts = vec![32u64];
+    for r in &parsed.records {
+        let payload = if r.kind == 1 { r.len } else { 0 };
+        starts.push(starts.last().unwrap() + 28 + payload);
+    }
+    starts
+}
+
+/// The record boundaries an interrupted scan is resumed from: the header
+/// alone, the first record of each class after the first, the middle record
+/// and the whole archive. Sampled, not every boundary, so the test stays
+/// inside its tier's budget.
+fn sampled_boundaries(parsed: &Archive) -> BTreeSet<usize> {
+    let n = parsed.records.len();
+    let mut at = BTreeSet::from([0, n / 2, n]);
+    for k in 1..n {
+        if parsed.records[k].class != parsed.records[k - 1].class {
+            at.insert(k);
+        }
+    }
+    at
+}
+
+#[test]
+fn an_archive_interrupted_anywhere_and_resumed_rebuilds_each_windows_capture() {
+    for (name, sha) in CAPTURES {
+        let src = unpack(name);
+        let full = common::temp_image_path("rescue_resume_full");
+        scan_to_path(Path::new(&src), Path::new(&full), ScanOptions::default())
+            .unwrap_or_else(|e| panic!("{name}: the uninterrupted scan: {e}"));
+        let whole = parse(&full, |_, _| {});
+        let starts = record_starts(&whole);
+        let bytes = std::fs::read(&full).expect("read the uninterrupted archive");
+        assert_eq!(
+            *starts.last().unwrap(),
+            bytes.len() as u64,
+            "{name}: the archive's length"
+        );
+        let classes: BTreeSet<u32> = whole.records.iter().map(|r| r.class).collect();
+        assert!(
+            classes.is_superset(&BTreeSet::from([1, 2, 3])),
+            "{name}: the archive has no metadata, allocated and free records to cut between"
+        );
+        for k in sampled_boundaries(&whole) {
+            // At the boundary, and one byte past it into a torn record.
+            let mut cuts = vec![starts[k]];
+            if k < whole.records.len() {
+                cuts.push(starts[k] + 1);
+            }
+            for cut in cuts {
+                let archive = common::temp_image_path("rescue_resume_cut");
+                new_file(&archive)
+                    .write_all(&bytes[..cut as usize])
+                    .expect("write the interrupted archive");
+                let mut source = FileSource::open(Path::new(&src)).unwrap();
+                let mut out = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&archive)
+                    .expect("open the interrupted archive");
+                let report = resume(&mut source, &mut out, ScanOptions::default())
+                    .unwrap_or_else(|e| panic!("{name}: resume from byte {cut}: {e}"));
+                drop(out);
+                assert!(
+                    report.is_complete(),
+                    "{name}: resume from byte {cut}: {report:?}"
+                );
+
+                let (rebuilt, parsed) = rebuild(&archive);
+                parsed.assert_tiles();
+                assert!(
+                    parsed.unreadable().is_empty(),
+                    "{name}: resume from byte {cut}"
+                );
+                assert_eq!(
+                    file_sha256(&rebuilt),
+                    sha,
+                    "{name}: the image rebuilt from the archive resumed from byte {cut}, \
+                     against the capture's SHA-256"
+                );
+                if let Some(k) = name
+                    .strip_prefix("windows-interrupted-")
+                    .and_then(|k| k.strip_suffix(".recovered"))
+                {
+                    files_match_windows(k, &rebuilt);
+                }
+                for path in [&archive, &rebuilt] {
+                    std::fs::remove_file(path).expect("remove a scratch file");
+                }
+            }
+        }
+        for path in [&src, &full] {
+            std::fs::remove_file(path).expect("remove a scratch file");
+        }
+    }
+}
