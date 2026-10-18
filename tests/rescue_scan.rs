@@ -1366,3 +1366,90 @@ fn an_archive_interrupted_anywhere_and_resumed_rebuilds_each_windows_capture() {
         }
     }
 }
+
+/// The first sector, in archive order, at which one of the first `k` data
+/// records of the archive at `path` differs from `other`, the bytes of another
+/// source: the sector a resume of that archive against `other` must name.
+fn first_differing_sector(path: &str, k: usize, other: &[u8]) -> Option<u64> {
+    let mut seen = 0;
+    let mut first = None;
+    let parsed = parse(path, |offset, bytes| {
+        if seen < k && first.is_none() {
+            let there = &other[offset as usize..offset as usize + bytes.len()];
+            first = bytes
+                .iter()
+                .zip(there)
+                .position(|(a, b)| a != b)
+                .map(|i| offset + i as u64);
+        }
+        seen += 1;
+    });
+    let sector = u64::from(parsed.sector);
+    first.map(|byte| byte - byte % sector)
+}
+
+#[test]
+fn resuming_one_windows_captures_archive_against_another_is_refused() {
+    // The captures are 133,103,616-byte partitions of one volume, with one
+    // serial number: neither the size nor the boot sector's serial tells them
+    // apart. The bytes Windows wrote do, and Windows' restart changed the
+    // copy it recovered.
+    let name = "windows-interrupted-1";
+    let src = unpack(name);
+    let full = common::temp_image_path("rescue_foreign_full");
+    scan_to_path(Path::new(&src), Path::new(&full), ScanOptions::default())
+        .unwrap_or_else(|e| panic!("{name}: the scan: {e}"));
+    let whole = parse(&full, |_, _| {});
+    assert!(
+        whole.unreadable().is_empty(),
+        "{name}: the scan recorded unreadable sectors"
+    );
+    let starts = record_starts(&whole);
+    let bytes = std::fs::read(&full).expect("read the archive");
+    // Interrupted one byte into the middle record: the records before it are
+    // whole, the middle one is torn.
+    let k = whole.records.len() / 2;
+    let cut = starts[k] + 1;
+    for other in ["windows-interrupted-6", "windows-interrupted-1.recovered"] {
+        let foreign = unpack(other);
+        let there = std::fs::read(&foreign).expect("read the other capture");
+        assert_eq!(
+            there.len() as u64,
+            whole.size,
+            "{other} is not the size of {name}"
+        );
+        let at = first_differing_sector(&full, k, &there).unwrap_or_else(|| {
+            panic!("no whole record of the {name} archive holds a byte {other} differs in")
+        });
+        let archive = common::temp_image_path("rescue_foreign_cut");
+        new_file(&archive)
+            .write_all(&bytes[..cut as usize])
+            .expect("write the interrupted archive");
+        let before = file_sha256(&archive);
+        let mut source = FileSource::open(Path::new(&foreign)).unwrap();
+        let mut out = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&archive)
+            .expect("open the interrupted archive");
+        let got = resume(&mut source, &mut out, ScanOptions::default());
+        drop(out);
+        let err = got.expect_err(&format!("the {name} archive was resumed against {other}"));
+        assert!(
+            err.contains(&format!("byte {at} ")),
+            "the refusal of {other} does not name its first differing sector, \
+             at byte {at}: {err}"
+        );
+        assert_eq!(
+            file_sha256(&archive),
+            before,
+            "the refused resume against {other} changed the archive"
+        );
+        for path in [&archive, &foreign] {
+            std::fs::remove_file(path).expect("remove a scratch file");
+        }
+    }
+    for path in [&src, &full] {
+        std::fs::remove_file(path).expect("remove a scratch file");
+    }
+}
