@@ -185,11 +185,15 @@ public static class GeometryRetrievalPointers {
         byte[] output, int outputSize, out int returned, IntPtr overlapped);
     const uint FsctlGetRetrievalPointers = 0x00090073;
     const int ErrorMoreData = 234;
-    // FILE_READ_ATTRIBUTES, all share modes, OPEN_EXISTING, and
-    // FILE_FLAG_BACKUP_SEMANTICS so a directory's index stream opens.
+    // This FILE_ANY_ACCESS control needs a metadata-only handle. Request
+    // no file access, all share modes, OPEN_EXISTING, and backup semantics
+    // for directory index streams; protected metadata need not grant reads.
     public static long[][] Query(string target) {
-        using (SafeFileHandle handle = CreateFileW(target, 0x80, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero)) {
-            if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error(), "cannot open " + target);
+        using (SafeFileHandle handle = CreateFileW(target, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero)) {
+            if (handle.IsInvalid) {
+                int openError = Marshal.GetLastWin32Error();
+                throw new Win32Exception(openError, "cannot open " + target + " (Win32 " + openError + ")");
+            }
             List<long[]> extents = new List<long[]>();
             long start = 0;
             byte[] buffer = new byte[64 * 1024];

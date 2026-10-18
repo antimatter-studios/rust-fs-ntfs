@@ -106,6 +106,9 @@ pub struct RetirePlan {
     pub units: Vec<PlanUnit>,
     /// The clusters the plan retires, sorted: none `$BadClus` already maps.
     pub retired: Vec<u64>,
+    /// The clusters asked for that are in use, left alone, each with the
+    /// file that owns it.
+    pub in_use: Vec<crate::bad_clusters::InUseCluster>,
 }
 
 /// Plan what [`crate::bad_clusters::retire_clusters_io`] would write to
@@ -121,11 +124,12 @@ pub fn plan_retire_clusters_io<T: BlockIo + ?Sized>(
         units: Vec::new(),
         open: PlanUnit::default(),
     };
-    let retired = crate::bad_clusters::retire_clusters_io(&mut planning, clusters)?;
+    let retirement = crate::bad_clusters::retire_clusters_io(&mut planning, clusters)?;
     planning.close_unit();
     Ok(RetirePlan {
         units: planning.units,
-        retired,
+        retired: retirement.retired,
+        in_use: retirement.in_use,
     })
 }
 
