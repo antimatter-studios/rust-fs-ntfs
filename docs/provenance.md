@@ -150,6 +150,16 @@ sequence, lowest VCN and instance identify the actual list attribute. The
 same Windows job requires `chkdsk` to report this exact copy damaged and
 retains both verdicts; no Windows VM is run during local development.
 
+The type-order check (#1043, part of #1041) follows Microsoft's
+`ATTRIBUTE_LIST_ENTRY` devnote's ordering by attribute type. Its regression
+exchanges the complete `$STANDARD_INFORMATION` and `$FILE_NAME` entries in
+a disposable copy of Windows' `ntfs-attrlist.img`; all entry fields and the
+referenced attributes remain unchanged. Windows CI grades that exact copy
+with `chkdsk` and retains the findings alongside the untouched clean control.
+The Windows verdict has not been measured locally. Name collation (#1044)
+and same-name lowest-VCN order (#1045) are separate, pending checks; this
+change makes no assumption about Windows' attribute-name collation.
+
 The listed-directory cycle (#818) uses Windows' own enumeration, EA query,
 stream readback and `chkdsk` to grade the grown and folded indexes. Directory
 stream readback uses the documented [FindFirstStreamW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirststreamw),
