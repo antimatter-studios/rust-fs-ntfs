@@ -1,0 +1,3 @@
+## Interfaces
+
+| Operation-sequence geometry refusals (test support) | Experimental: a raw operation-sequence input can ask for a geometry the formatter refuses (a 128 KiB cluster); the model expects that refusal with `plan_format`'s own reason, the explorer records it in `refusals.tsv`, runs nothing and counts it in `refusal-histogram.json`, and a capture keeps such an input unchanged | Unreleased | #1025, #733 | `op_sequence_generator.rs::a_geometry_the_formatter_refuses_is_an_expected_refusal_with_its_reason`, `op_sequence_readback.rs::the_explorer_counts_a_refused_geometry_with_its_reason` |
