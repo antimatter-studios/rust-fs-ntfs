@@ -8,13 +8,15 @@
 //! independent implementation (`crc32fast`), rebuilds an image from the data
 //! records with its own file writes, and reads each rebuilt copy Windows
 //! recovered with the independent `ntfs` crate, against the size and SHA-256
-//! Windows' `Get-FileHash` recorded for every file on it.
+//! Windows' `Get-FileHash` recorded for every file on it. Each capture's
+//! archive is also exported (#994) and the image graded against the
+//! capture's recorded SHA-256.
 
 mod common;
 
 use fs_ntfs::rescue::{
-    read_archive, resume, scan, scan_to_path, FileSource, RangeClass, ReadFailure, RescueSource,
-    ScanOptions,
+    export_to_path, read_archive, resume, scan, scan_to_path, FileSource, RangeClass, ReadFailure,
+    RescueSource, ScanOptions,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -341,6 +343,47 @@ fn a_scan_of_each_windows_capture_rebuilds_it_byte_for_byte() {
             files_match_windows(k, &rebuilt);
         }
         for path in [&src, &archive, &rebuilt] {
+            std::fs::remove_file(path).expect("remove a scratch file");
+        }
+    }
+}
+
+#[test]
+fn each_windows_captures_archive_exports_to_an_image_with_the_captures_sha256() {
+    // Graded against the SHA-256 `tests/windows_interrupted_fixture.rs`
+    // records for each capture, and against the exported file's bytes as
+    // `sha2` hashes them, never against the report alone.
+    for (name, sha) in CAPTURES {
+        let src = unpack(name);
+        let archive = common::temp_image_path("rescue_export_archive");
+        let report = scan_to_path(Path::new(&src), Path::new(&archive), ScanOptions::default())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(report.is_complete(), "{name}: {report:?}");
+        let archived = file_sha256(&archive);
+
+        let image = common::temp_image_path("rescue_export_image");
+        let exported = export_to_path(Path::new(&archive), Path::new(&image))
+            .unwrap_or_else(|e| panic!("{name}: export the archive: {e}"));
+        assert_eq!(
+            file_sha256(&image),
+            sha,
+            "{name}: the image exported from the archive"
+        );
+        assert_eq!(
+            hex(&exported.sha256),
+            sha,
+            "{name}: the SHA-256 the export reports"
+        );
+        assert_eq!(
+            exported.bytes, report.source_size,
+            "{name}: the byte count the export reports"
+        );
+        assert_eq!(
+            file_sha256(&archive),
+            archived,
+            "{name}: the export changed its archive"
+        );
+        for path in [&src, &archive, &image] {
             std::fs::remove_file(path).expect("remove a scratch file");
         }
     }
