@@ -3593,3 +3593,109 @@ fn an_in_place_repair_stops_at_a_unit_the_device_reads_back_wrong_and_never_mark
         std::fs::remove_file(&src).unwrap();
     }
 }
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn a_repair_journal_reports_the_units_applied_and_the_unit_left_open_at_every_cut() {
+    // Wherever an in-place apply's journal is cut (#926), its progress
+    // names the units with an applied record wholly before the cut, and
+    // the unit whose intent is whole before the cut with no applied record
+    // after it. Every byte inside one record reads back alike, so the cuts
+    // are each record boundary, one byte either side of it and the middle
+    // of each record. The expected answer is built from the plan's own
+    // record lengths, not from the reader.
+    use fs_ntfs::repair_journal::{
+        applied_record, apply_in_place, header_record, intent_record, progress, read_journal,
+        JournalBinding, Progress, ProgressError,
+    };
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+        let (mut device, mut journal, _) = recording_pair(&pristine, None);
+        apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+            .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+        let bytes = journal.bytes;
+        let binding = JournalBinding {
+            plan_sha256,
+            source_size: loaded.source_size,
+            volume_serial: loaded.volume_serial,
+        };
+
+        // Each record's end, and the progress a journal cut there holds.
+        let mut at = header_record(&binding).len();
+        let mut ends = vec![(
+            at,
+            Progress {
+                applied: 0,
+                open: None,
+            },
+        )];
+        for (u, unit) in loaded.units.iter().enumerate() {
+            let u = u as u32;
+            at += intent_record(u, unit).len();
+            ends.push((
+                at,
+                Progress {
+                    applied: u,
+                    open: Some(u),
+                },
+            ));
+            at += applied_record(u).len();
+            ends.push((
+                at,
+                Progress {
+                    applied: u + 1,
+                    open: None,
+                },
+            ));
+        }
+        assert_eq!(at, bytes.len(), "{k}: the journal is not its records");
+
+        let mut cuts = vec![0, 1];
+        let mut start = 0;
+        for &(end, _) in &ends {
+            cuts.extend([(start + end) / 2, end - 1, end, end + 1]);
+            start = end;
+        }
+        cuts.retain(|&c| c <= bytes.len());
+        for cut in cuts {
+            let want = ends.iter().rev().find(|(end, _)| *end <= cut).map_or(
+                Progress {
+                    applied: 0,
+                    open: None,
+                },
+                |(_, p)| *p,
+            );
+            let read = read_journal(&bytes[..cut], &binding)
+                .unwrap_or_else(|e| panic!("{k}: cut at byte {cut}: the journal reads as {e}"));
+            let got = progress(&read, &loaded)
+                .unwrap_or_else(|e| panic!("{k}: cut at byte {cut}: progress refused: {e}"));
+            assert_eq!(got, want, "{k}: cut at byte {cut}");
+        }
+
+        // One byte of unit 0's first redo changed, its checksum whole.
+        let mut changed = loaded.units[0].clone();
+        changed.writes[0].after[0] ^= 0xff;
+        let head = header_record(&binding).len();
+        let first = intent_record(0, &loaded.units[0]).len();
+        let mut forged = bytes[..head].to_vec();
+        forged.extend(intent_record(0, &changed));
+        forged.extend(&bytes[head + first..]);
+        let read = read_journal(&forged, &binding)
+            .unwrap_or_else(|e| panic!("{k}: the forged journal reads as {e}"));
+        let refusal = progress(&read, &loaded);
+        assert_eq!(
+            refusal,
+            Err(ProgressError::WriteDiffers { unit: 0, write: 0 }),
+            "{k}: an intent whose redo is not the plan's"
+        );
+        assert!(
+            refusal
+                .unwrap_err()
+                .to_string()
+                .contains("plan unit 0 write 0"),
+            "{k}: the refusal does not name the unit and write"
+        );
+        std::fs::remove_file(&src).unwrap();
+    }
+}
