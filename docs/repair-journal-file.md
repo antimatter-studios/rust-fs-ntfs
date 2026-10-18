@@ -114,6 +114,27 @@ record (`journal record N: ...`) when:
 The checksum is checked before anything inside the record, so any change
 to a whole record is named as a checksum mismatch.
 
+## Writing a journal: an in-place repair
+
+`repair_journal::apply_in_place` applies a plan to the device it was made
+from through an empty journal outside that device. The header is written,
+flushed and read back first. Then, for each unit in order:
+
+1. The unit's ranges are checked on the device (`check_unit_on_device`);
+   a mismatch stops the apply with nothing of the unit written.
+2. The unit's intent record is appended, the journal flushed, and the
+   record read back and compared with what was written.
+3. The unit's writes go to the device, and the device is flushed.
+4. Every write's range is read back from the device and compared with
+   what the unit leaves there.
+5. Only then is the unit's applied record appended and the journal
+   flushed.
+
+A unit whose device read-back differs stops the apply, naming the unit,
+the write and its byte range; its intent is in the journal and its applied
+record is not. Nothing reaches the device outside the plan's ranges, and
+the plan is never written into the volume's `$LogFile` as a transaction.
+
 ## Tests
 
 `a_repair_journal_reads_back_to_its_last_whole_record_and_refuses_the_rest`
@@ -128,3 +149,14 @@ back and the torn tail is named. It flips a byte in each record except
 the last, writes an applied record with no intent and an intent that
 skips a unit, and reads the journal against another capture's plan, and
 checks that each is refused naming the record.
+
+`an_in_place_repair_reaches_what_windows_recovered_and_equals_the_copy_repair`
+applies each capture's plan in place, with the journal in another
+directory, and checks the device is byte for byte the target copy-repair
+makes from the same plan, and reaches Windows' manifest and recovered
+metadata. `an_in_place_repair_makes_each_unit_durable_in_the_journal_before_writing_it`
+records every write, flush and read on a device and journal pair and
+checks they arrive in exactly the order above, unit by unit.
+`an_in_place_repair_stops_at_a_unit_the_device_reads_back_wrong_and_never_marks_it_applied`
+drops one device write and checks the apply stops naming that unit and
+range, with no applied record for it in the journal.
