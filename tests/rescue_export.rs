@@ -7,6 +7,9 @@
 
 mod common;
 
+use fs_ntfs::block_io::{BlockIo, PathIo};
+use fs_ntfs::fsck;
+use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::rescue::{
     export_manifest_path, export_temp_path, export_to_path, export_with, scan, ExportOptions,
     ReadFailure, RescueSource, ScanOptions,
@@ -17,6 +20,8 @@ use std::path::{Path, PathBuf};
 
 const SECTOR: u64 = 512;
 const SIZE: u64 = 3 * 1024 * 1024 + 7 * SECTOR;
+/// The NTFS volumes' size: small, but past `mkfs`'s minimum.
+const NTFS_SIZE: u64 = 8 * 1024 * 1024;
 
 /// A source of `SIZE` patterned bytes; reads touching a `bad` sector fail.
 struct Memory {
@@ -35,11 +40,45 @@ impl Memory {
             .collect();
         Memory { bytes, bad }
     }
+
+    /// A clean NTFS volume of `NTFS_SIZE` bytes from `mkfs`, its `bad`
+    /// sectors unreadable.
+    fn ntfs(tag: &str, bad: Vec<u64>) -> Self {
+        let path = common::temp_image_path(format!("rescue_export_ntfs_{tag}"));
+        fs::File::create(&path)
+            .and_then(|f| f.set_len(NTFS_SIZE))
+            .expect("create the volume");
+        let mut io = PathIo::open_rw(Path::new(&path)).expect("open the volume");
+        format_filesystem(&mut io, NTFS_SIZE, 4096, 1024, Some("RESCUE"), Some(1001))
+            .expect("format the volume");
+        <PathIo as BlockIo>::sync(&mut io).expect("sync the volume");
+        drop(io);
+        assert!(
+            !fsck::is_dirty(&path).expect("read the source's dirty flag"),
+            "mkfs left the source volume dirty"
+        );
+        let bytes = fs::read(&path).expect("read the volume");
+        fs::remove_file(&path).ok();
+        Memory { bytes, bad }
+    }
+
+    /// The sector holding `$Volume`'s MFT record (record 3), from the boot
+    /// sector's `$MFT` cluster and the 1024-byte records `ntfs` formats.
+    fn volume_record_sector(&self) -> u64 {
+        let le = |at: usize, n: usize| {
+            self.bytes[at..at + n]
+                .iter()
+                .rev()
+                .fold(0u64, |v, &b| (v << 8) | u64::from(b))
+        };
+        let cluster = le(0x0B, 2) * le(0x0D, 1);
+        (le(0x30, 8) * cluster + 3 * 1024) / SECTOR
+    }
 }
 
 impl RescueSource for Memory {
     fn size(&self) -> u64 {
-        SIZE
+        self.bytes.len() as u64
     }
 
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), ReadFailure> {
@@ -231,5 +270,97 @@ fn a_complete_archive_exported_with_the_opt_in_reports_complete_and_writes_no_ma
     assert!(
         !export_manifest_path(&image).exists(),
         "a complete export wrote an error manifest"
+    );
+}
+
+#[test]
+fn an_incomplete_ntfs_export_sets_the_volume_dirty_flag() {
+    // A free sector well past the metadata `mkfs` lays down, and not the
+    // last one, which holds the backup boot sector.
+    let bad = NTFS_SIZE / SECTOR - 16;
+    let mut source = Memory::ntfs("incomplete", vec![bad]);
+    let archive = archive_of(&mut source, "rescue_export_ntfs_incomplete");
+    let image = PathBuf::from(common::temp_image_path(
+        "rescue_export_ntfs_incomplete_image",
+    ));
+
+    let report = export_with(
+        &archive,
+        &image,
+        ExportOptions {
+            allow_incomplete: true,
+        },
+    )
+    .expect("an incomplete archive exports when asked to");
+
+    assert_eq!(report.missing, vec![(bad * SECTOR, SECTOR)]);
+    assert!(
+        fsck::is_dirty(&image).expect("read the image's dirty flag"),
+        "an incomplete export left the volume clean for Windows to trust"
+    );
+    assert_eq!(
+        sha256_of(&image),
+        hex(&report.sha256),
+        "the reported SHA-256 is not the image's, dirty flag included"
+    );
+}
+
+#[test]
+fn a_complete_ntfs_export_leaves_the_dirty_flag_as_the_source_had_it() {
+    let mut source = Memory::ntfs("complete", Vec::new());
+    let expected = hex(&Sha256::digest(&source.bytes));
+    let archive = archive_of(&mut source, "rescue_export_ntfs_complete");
+    let image = PathBuf::from(common::temp_image_path("rescue_export_ntfs_complete_image"));
+
+    let report = export_with(
+        &archive,
+        &image,
+        ExportOptions {
+            allow_incomplete: true,
+        },
+    )
+    .expect("a complete archive exports");
+
+    assert!(report.is_complete());
+    assert_eq!(sha256_of(&image), expected, "the export changed the volume");
+    assert!(!fsck::is_dirty(&image).expect("read the image's dirty flag"));
+}
+
+#[test]
+fn an_incomplete_export_missing_the_volume_record_says_the_flag_is_unset() {
+    let mut source = Memory::ntfs("no_volume_record", Vec::new());
+    let bad = source.volume_record_sector();
+    source.bad = vec![bad];
+    let expected = {
+        let mut bytes = source.bytes.clone();
+        let at = (bad * SECTOR) as usize;
+        bytes[at..at + SECTOR as usize].fill(0);
+        hex(&Sha256::digest(&bytes))
+    };
+    let archive = archive_of(&mut source, "rescue_export_ntfs_no_volume_record");
+    let image = PathBuf::from(common::temp_image_path(
+        "rescue_export_ntfs_no_volume_record_image",
+    ));
+
+    export_with(
+        &archive,
+        &image,
+        ExportOptions {
+            allow_incomplete: true,
+        },
+    )
+    .expect("an incomplete archive exports when asked to");
+
+    assert_eq!(
+        sha256_of(&image),
+        expected,
+        "the export fabricated bytes in the missing $Volume record"
+    );
+    let manifest = fs::read_to_string(export_manifest_path(&image)).expect("read the manifest");
+    assert!(
+        manifest
+            .lines()
+            .any(|l| l.starts_with('#') && l.contains("dirty flag is not set")),
+        "the manifest does not say the dirty flag could not be set:\n{manifest}"
     );
 }
