@@ -74,7 +74,10 @@ licenses = ["LICENSE-APACHE", "LICENSE-MIT"]
 # dispatch, --version, doctor, the output contract, man pages and
 # completions -- is rust-fs-core's `cli` feature, turned on only here, so
 # the static library gains nothing. clap is MIT/Apache-2.0.
-cli = ["dep:clap", "dep:sha2", "rust-fs-core/cli"]
+cli = ["dep:clap", "plan-file", "rust-fs-core/cli"]
+# Saving and loading repair plans as files (#905): the SHA-256 that binds a
+# plan to its source and checks the file. The command-line tools turn it on.
+plan-file = ["dep:sha2"]
 # Test-only: builds `rust-ntfs`, the test matrix's driver (see its target
 # above). Nothing a consumer or a user installs turns it on.
 harness = []
