@@ -3142,3 +3142,161 @@ fn a_copy_repair_syncs_after_every_unit_and_never_inside_one() {
         "no capture planned more than one unit, so no boundary between units was tested"
     );
 }
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn a_repair_journal_reads_back_to_its_last_whole_record_and_refuses_the_rest() {
+    // A repair journal is an append-only external file of checksummed
+    // records (#918). Written for a plan from each Windows capture, it
+    // must read back record for record, each intent carrying its unit's
+    // before- and after-images; cut at a record boundary it must read back
+    // the records before the cut, and one byte past it name the torn tail.
+    // A changed record that is not the last, an applied record with no
+    // intent, a skipped unit and another capture's plan must be refused,
+    // naming the record.
+    use fs_ntfs::repair_journal::{
+        applied_record, header_record, intent_record, read_journal, JournalBinding, JournalRecord,
+        TornRecord,
+    };
+    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    let mut plans = Vec::new();
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let mut v = RecordedRepair {
+            bytes: std::fs::read(&src).unwrap(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        std::fs::remove_file(&src).unwrap();
+        plans.push((k, saved));
+    }
+    assert!(
+        plans.len() > 1,
+        "only one capture holds work, so no journal could be read against another plan"
+    );
+    for (i, (k, saved)) in plans.iter().enumerate() {
+        let loaded = load_plan(saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        let binding = JournalBinding::of(saved).unwrap_or_else(|e| panic!("{k}: bind: {e}"));
+        let mut journal = header_record(&binding);
+        let mut bounds = vec![0, journal.len()];
+        for (u, unit) in loaded.units.iter().enumerate() {
+            journal.extend(intent_record(u as u32, unit));
+            bounds.push(journal.len());
+            journal.extend(applied_record(u as u32));
+            bounds.push(journal.len());
+        }
+
+        let read = read_journal(&journal, &binding).unwrap_or_else(|e| panic!("{k}: read: {e}"));
+        assert_eq!(read.torn, None, "{k}: a whole journal read as torn");
+        assert_eq!(
+            read.records.len(),
+            1 + 2 * loaded.units.len(),
+            "{k}: records read back"
+        );
+        assert_eq!(
+            read.records[0],
+            JournalRecord::Header(binding.clone()),
+            "{k}: header"
+        );
+        for (u, unit) in loaded.units.iter().enumerate() {
+            match &read.records[1 + 2 * u] {
+                JournalRecord::Intent { unit: n, writes } => {
+                    assert_eq!(*n as usize, u, "{k}: intent {u}'s unit index");
+                    assert_eq!(writes.len(), unit.writes.len(), "{k}: intent {u}'s writes");
+                    for (w, (got, want)) in writes.iter().zip(&unit.writes).enumerate() {
+                        assert_eq!(got.offset, want.offset, "{k}: unit {u} write {w} offset");
+                        assert!(
+                            got.before == want.before,
+                            "{k}: unit {u} write {w}: preimage is not the plan's before-image"
+                        );
+                        assert!(
+                            got.after == want.after,
+                            "{k}: unit {u} write {w}: redo is not the plan's after-image"
+                        );
+                    }
+                }
+                other => panic!(
+                    "{k}: record {} is {other:?}, not unit {u}'s intent",
+                    1 + 2 * u
+                ),
+            }
+            assert_eq!(
+                read.records[2 + 2 * u],
+                JournalRecord::Applied { unit: u as u32 },
+                "{k}: unit {u}'s applied record"
+            );
+        }
+
+        for (r, &cut) in bounds.iter().enumerate() {
+            let back = read_journal(&journal[..cut], &binding)
+                .unwrap_or_else(|e| panic!("{k}: cut at {cut}: {e}"));
+            assert!(
+                back.records == read.records[..r] && back.torn.is_none(),
+                "{k}: cut at {cut}: read {} records, torn {:?}, not the {r} before it",
+                back.records.len(),
+                back.torn
+            );
+            if cut < journal.len() {
+                let back = read_journal(&journal[..cut + 1], &binding)
+                    .unwrap_or_else(|e| panic!("{k}: cut at {}: {e}", cut + 1));
+                assert!(
+                    back.records == read.records[..r],
+                    "{k}: cut at {}: read {} records, not the {r} before it",
+                    cut + 1,
+                    back.records.len()
+                );
+                assert_eq!(
+                    back.torn,
+                    Some(TornRecord {
+                        record: r,
+                        offset: cut as u64
+                    }),
+                    "{k}: cut at {}: the torn tail",
+                    cut + 1
+                );
+            }
+        }
+
+        let refused =
+            |what: &str, bytes: &[u8], against: &JournalBinding, record: usize| match read_journal(
+                bytes, against,
+            ) {
+                Ok(j) => panic!("{k}: {what}: read back {} records", j.records.len()),
+                Err(e) => assert!(
+                    e.to_string().contains(&format!("journal record {record}:")),
+                    "{k}: {what}: refused as {e}, not naming record {record}"
+                ),
+            };
+        for r in 0..bounds.len() - 2 {
+            let (start, end) = (bounds[r], bounds[r + 1]);
+            for at in [start, start + 8, end - 33, end - 1] {
+                let mut flipped = journal.clone();
+                flipped[at] ^= 0x01;
+                refused(
+                    &format!("record {r} byte {at} flipped"),
+                    &flipped,
+                    &binding,
+                    r,
+                );
+            }
+        }
+        let mut orphan = header_record(&binding);
+        orphan.extend(applied_record(0));
+        refused("an applied record with no intent", &orphan, &binding, 1);
+        let mut skipped = journal[..bounds[3]].to_vec();
+        skipped.extend(intent_record(2, &loaded.units[0]));
+        refused("unit 1 skipped", &skipped, &binding, 3);
+        let (other, other_saved) = &plans[(i + 1) % plans.len()];
+        let other_binding =
+            JournalBinding::of(other_saved).unwrap_or_else(|e| panic!("{other}: bind: {e}"));
+        refused(
+            &format!("read against {other}'s plan"),
+            &journal,
+            &other_binding,
+            0,
+        );
+    }
+}
