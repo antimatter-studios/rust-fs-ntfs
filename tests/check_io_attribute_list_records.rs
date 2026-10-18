@@ -11,7 +11,8 @@
 //! list Windows wrote when its 96 streams outgrew the base record. Each
 //! case breaks one fact of one extension record the list names, on a
 //! disposable copy, and requires a `BadAttributeList` for `/many.bin`'s
-//! base record; the untouched copy has none.
+//! base record; the untouched copy has none. `NTFS_LIST_RECORD_CHECK_IMAGES`
+//! retains these exact copies and both checkers' findings for Windows CI (#826).
 
 mod common;
 
@@ -19,7 +20,7 @@ use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::fsck::{self, CheckFinding};
 use fs_ntfs::{mft_io, read, write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const FIXTURE: &str = "test-disks/ntfs-attrlist.img";
 const SEQUENCE: usize = 0x10;
@@ -28,7 +29,7 @@ const BASE_REFERENCE: usize = 0x20;
 const ROOT: u64 = 5;
 
 /// One case: what it breaks, and the edit to the fixed-up extension record.
-type Case = (&'static str, fn(&mut [u8]));
+type Case = (&'static str, &'static str, fn(&mut [u8]));
 
 /// A disposable copy of the fixture, `/many.bin`'s base record, and one
 /// extension record its list names.
@@ -37,7 +38,17 @@ fn copy_with_an_extension(tag: &str) -> (String, u64, u64) {
         Path::new(FIXTURE).exists(),
         "missing {FIXTURE}; run test-disks/build-windows-native-read-fixtures.ps1 on Windows"
     );
-    let img = common::temp_image_path(format!("checklist_{tag}"));
+    let img = match std::env::var_os("NTFS_LIST_RECORD_CHECK_IMAGES") {
+        Some(dir) => {
+            std::fs::create_dir_all(&dir).expect("create retained-copy directory");
+            PathBuf::from(dir)
+                .join(format!("{tag}.img"))
+                .to_str()
+                .expect("UTF-8 image path")
+                .to_owned()
+        }
+        None => common::temp_image_path(format!("checklist_{tag}")),
+    };
     std::fs::copy(FIXTURE, &img).expect("copy the fixture");
     let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
     let base = write::resolve_path_to_record_number_io(&mut io, "/many.bin").expect("/many.bin");
@@ -49,14 +60,28 @@ fn copy_with_an_extension(tag: &str) -> (String, u64, u64) {
         .map(|e| e.record_number)
         .find(|&n| n != base)
         .expect("/many.bin has an extension record");
+    if std::env::var_os("NTFS_LIST_RECORD_CHECK_IMAGES").is_some() {
+        std::fs::write(
+            Path::new(&img).with_extension("records.txt"),
+            format!("case: {tag}\nbase: {base}\nextension: {extension}\n"),
+        )
+        .expect("retain record identities");
+    }
     (img, base, extension)
 }
 
 /// The records `check_io` reports a `BadAttributeList` for.
 fn bad_lists(img: &str) -> Vec<u64> {
-    let mut io = PathIo::open_rw(Path::new(img)).expect("open_rw");
-    fsck::check_io(&mut io)
-        .expect("check_io")
+    let mut io = PathIo::open_ro(Path::new(img)).expect("open_ro");
+    let report = fsck::check_io(&mut io).expect("check_io");
+    if std::env::var_os("NTFS_LIST_RECORD_CHECK_IMAGES").is_some() {
+        std::fs::write(
+            Path::new(img).with_extension("findings.txt"),
+            format!("{report:#?}"),
+        )
+        .expect("retain check_io findings");
+    }
+    report
         .findings
         .into_iter()
         .filter_map(|f| match f {
@@ -75,22 +100,35 @@ fn the_list_windows_wrote_is_clean() {
 #[test]
 fn an_entry_naming_a_record_that_is_not_the_files_extension_is_reported() {
     let cases: [Case; 3] = [
-        ("an extension record whose base is another file", |r| {
-            r[BASE_REFERENCE..BASE_REFERENCE + 8]
-                .copy_from_slice(&(ROOT | (u64::from(ROOT as u16) << 48)).to_le_bytes());
-        }),
-        ("an extension record with another sequence number", |r| {
-            let seq = u16::from_le_bytes([r[SEQUENCE], r[SEQUENCE + 1]]);
-            r[SEQUENCE..SEQUENCE + 2].copy_from_slice(&seq.wrapping_add(1).to_le_bytes());
-        }),
-        ("an extension record whose header is not in use", |r| {
-            let flags = u16::from_le_bytes([r[FLAGS], r[FLAGS + 1]]);
-            r[FLAGS..FLAGS + 2].copy_from_slice(&(flags & !mft_io::MFT_FLAG_IN_USE).to_le_bytes());
-        }),
+        (
+            "base-reference",
+            "an extension record whose base is another file",
+            |r| {
+                r[BASE_REFERENCE..BASE_REFERENCE + 8]
+                    .copy_from_slice(&(ROOT | (u64::from(ROOT as u16) << 48)).to_le_bytes());
+            },
+        ),
+        (
+            "sequence",
+            "an extension record with another sequence number",
+            |r| {
+                let seq = u16::from_le_bytes([r[SEQUENCE], r[SEQUENCE + 1]]);
+                r[SEQUENCE..SEQUENCE + 2].copy_from_slice(&seq.wrapping_add(1).to_le_bytes());
+            },
+        ),
+        (
+            "in-use",
+            "an extension record whose header is not in use",
+            |r| {
+                let flags = u16::from_le_bytes([r[FLAGS], r[FLAGS + 1]]);
+                r[FLAGS..FLAGS + 2]
+                    .copy_from_slice(&(flags & !mft_io::MFT_FLAG_IN_USE).to_le_bytes());
+            },
+        ),
     ];
     let mut missed = Vec::new();
-    for (i, (what, edit)) in cases.iter().enumerate() {
-        let (img, base, extension) = copy_with_an_extension(&format!("case{i}"));
+    for (tag, what, edit) in &cases {
+        let (img, base, extension) = copy_with_an_extension(tag);
         let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
         mft_io::update_mft_record_io(&mut io, extension, |r| {
             edit(r);
