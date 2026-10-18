@@ -10,10 +10,10 @@ permissions:
 jobs:
   geometry-capture:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Fixture-free decoding and coverage contracts (48 checks)
+      - name: Fixture-free decoding and coverage contracts (59 checks)
         shell: pwsh
         run: ./tests/scripts/windows-format-geometry.ps1
       - name: Capture all 26 Windows format requests and six large-cluster layouts
@@ -23,6 +23,10 @@ jobs:
         if: ${{ !cancelled() }}
         shell: pwsh
         run: ./test-disks/capture-sector-geometry.ps1
+      - name: Capture Windows' own NTFS format of a 512e disk beside a 512n disk
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: ./test-disks/capture-512e-geometry.ps1
       - name: No generated image survives capture
         if: always()
         shell: pwsh
