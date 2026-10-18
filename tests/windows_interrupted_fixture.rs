@@ -3870,6 +3870,264 @@ fn an_in_place_repair_stopped_after_any_write_resumes_to_the_uninterrupted_volum
     }
 }
 
+/// An observer of an in-place apply that keeps every progress report and
+/// asks for a stop once `stop` says so, given how many times it has been
+/// asked and how many device writes have landed.
+#[cfg(feature = "plan-file")]
+struct Watching<F: FnMut(usize, usize) -> bool> {
+    reports: Vec<fs_ntfs::repair_journal::ApplyProgress>,
+    asked: usize,
+    log: IoLog,
+    stop: F,
+}
+
+#[cfg(feature = "plan-file")]
+impl<F: FnMut(usize, usize) -> bool> fs_ntfs::repair_journal::ApplyObserver for Watching<F> {
+    fn progress(&mut self, at: fs_ntfs::repair_journal::ApplyProgress) {
+        self.reports.push(at);
+    }
+
+    fn cancel_requested(&mut self) -> bool {
+        let landed = self
+            .log
+            .borrow()
+            .iter()
+            .filter(|(journal, e)| !journal && *e == IoEvent::Write)
+            .count();
+        self.asked += 1;
+        (self.stop)(self.asked - 1, landed)
+    }
+}
+
+/// Whether `reports` start at `from` units and bytes done, rise without
+/// falling to `to`, and name `total` throughout; the first report that
+/// does not is named.
+#[cfg(feature = "plan-file")]
+fn rising(
+    reports: &[fs_ntfs::repair_journal::ApplyProgress],
+    from: (u32, u64),
+    to: (u32, u64),
+    total: (u32, u64),
+) -> Result<(), String> {
+    let first = reports.first().ok_or("no progress was reported")?;
+    if (first.units, first.bytes) != from {
+        return Err(format!("the first report is {first:?}, not {from:?} done"));
+    }
+    for pair in reports.windows(2) {
+        if pair[1].units <= pair[0].units || pair[1].bytes < pair[0].bytes {
+            return Err(format!("{:?} follows {:?}", pair[1], pair[0]));
+        }
+    }
+    if let Some(r) = reports
+        .iter()
+        .find(|r| (r.units_total, r.bytes_total) != total)
+    {
+        return Err(format!("{r:?} names another total than {total:?}"));
+    }
+    let last = reports.last().unwrap();
+    if (last.units, last.bytes) != to {
+        return Err(format!("the last report is {last:?}, not {to:?} done"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn an_in_place_repair_cancelled_anywhere_stops_after_a_whole_unit_and_resumes() {
+    // A cancellation is honoured only at a unit boundary (#956): asked at
+    // each boundary, or requested while any device write of a unit is
+    // landing, the apply stops with every unit it began written, read
+    // back and marked applied, and none open. Resumed, it must reach the
+    // bytes of an uninterrupted apply, and the files and metadata Windows'
+    // own restart reached. Progress, in the apply and in the resume, must
+    // rise without falling and end at the plan's units and bytes.
+    use fs_ntfs::repair_journal::{
+        apply_in_place, apply_in_place_observed, read_journal, resume_in_place_observed,
+        InPlaceError, JournalBinding, JournalRecord,
+    };
+    for (k, log_end) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+        let units = loaded.units.len();
+        let bytes_of = |n: usize| -> u64 {
+            loaded.units[..n]
+                .iter()
+                .flat_map(|u| &u.writes)
+                .map(|w| w.after.len() as u64)
+                .sum()
+        };
+        let total = (units as u32, bytes_of(units));
+        let binding = JournalBinding {
+            plan_sha256,
+            source_size: loaded.source_size,
+            volume_serial: loaded.volume_serial,
+        };
+
+        let (mut device, mut journal, log) = recording_pair(&pristine, None);
+        let mut watch = Watching {
+            reports: Vec::new(),
+            asked: 0,
+            log,
+            stop: |_, _| false,
+        };
+        apply_in_place_observed(&loaded, plan_sha256, &mut device, &mut journal, &mut watch)
+            .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+        rising(&watch.reports, (0, 0), total, total)
+            .unwrap_or_else(|e| panic!("{k}: uninterrupted apply: {e}"));
+        assert_eq!(watch.reports.len(), units + 1, "{k}: one report per unit");
+        let whole = device.bytes;
+
+        // Unit u's device writes are the ones numbered after every earlier
+        // unit's: a request after write n is honoured after its unit.
+        let mut ends = Vec::new();
+        let mut landed = 0;
+        for unit in &loaded.units {
+            landed += unit.writes.len();
+            ends.push(landed);
+        }
+        let mut stops: Vec<(String, usize)> = (0..units)
+            .map(|b| (format!("at boundary {b}"), b))
+            .collect();
+        for n in 1..=landed {
+            let after = ends.iter().position(|&end| end >= n).unwrap() + 1;
+            stops.push((format!("after device write {n}"), after));
+        }
+
+        let mut bad = Vec::new();
+        let mut resumed = None;
+        for (i, (when, want)) in stops.iter().enumerate() {
+            let boundary = i < units;
+            let (mut device, mut journal, log) = recording_pair(&pristine, None);
+            let mut watch = Watching {
+                reports: Vec::new(),
+                asked: 0,
+                log,
+                stop: |asked: usize, landed: usize| {
+                    if boundary {
+                        asked >= *want
+                    } else {
+                        landed >= i + 1 - units
+                    }
+                },
+            };
+            match apply_in_place_observed(
+                &loaded,
+                plan_sha256,
+                &mut device,
+                &mut journal,
+                &mut watch,
+            ) {
+                Err(InPlaceError::Cancelled { applied }) if applied as usize == *want => {}
+                other => {
+                    bad.push(format!(
+                        "{when}: the apply returned {other:?}, not cancelled after {want} units"
+                    ));
+                    continue;
+                }
+            }
+            let done = (*want as u32, bytes_of(*want));
+            if let Err(e) = rising(&watch.reports, (0, 0), done, total) {
+                bad.push(format!("{when}: the cancelled apply's progress: {e}"));
+                continue;
+            }
+            let read = match read_journal(&journal.bytes, &binding) {
+                Ok(read) => read,
+                Err(e) => {
+                    bad.push(format!("{when}: the journal reads back as {e}"));
+                    continue;
+                }
+            };
+            let intents: Vec<u32> = read
+                .records
+                .iter()
+                .filter_map(|r| match r {
+                    JournalRecord::Intent { unit, .. } => Some(*unit),
+                    _ => None,
+                })
+                .collect();
+            let applied: Vec<u32> = read
+                .records
+                .iter()
+                .filter_map(|r| match r {
+                    JournalRecord::Applied { unit } => Some(*unit),
+                    _ => None,
+                })
+                .collect();
+            let first: Vec<u32> = (0..*want as u32).collect();
+            if intents != first || applied != first || read.torn.is_some() {
+                bad.push(format!(
+                    "{when}: the journal holds intents {intents:?}, applied {applied:?} and \
+                     torn {:?}",
+                    read.torn
+                ));
+                continue;
+            }
+            let mut again = Watching {
+                reports: Vec::new(),
+                asked: 0,
+                log: watch.log.clone(),
+                stop: |_, _| false,
+            };
+            if let Err(e) = resume_in_place_observed(
+                &loaded,
+                plan_sha256,
+                &mut device,
+                &mut journal,
+                &mut again,
+            ) {
+                bad.push(format!("{when}: the resume refused: {e}"));
+                continue;
+            }
+            if let Err(e) = rising(&again.reports, done, total, total) {
+                bad.push(format!("{when}: the resume's progress: {e}"));
+                continue;
+            }
+            if device.bytes != whole {
+                bad.push(format!(
+                    "{when}: the resumed device holds other bytes than an uninterrupted apply"
+                ));
+                continue;
+            }
+            resumed = Some(device.bytes);
+        }
+        assert!(
+            bad.is_empty(),
+            "{k}: of {} cancellations, {} did not stop after a whole unit and resume:\n{}",
+            stops.len(),
+            bad.len(),
+            bad.iter().take(6).cloned().collect::<Vec<_>>().join("\n")
+        );
+
+        // The plain apply is the observed one with nobody watching.
+        let (mut device, mut journal, _) = recording_pair(&pristine, None);
+        apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+            .unwrap_or_else(|e| panic!("{k}: unobserved in-place repair: {e}"));
+        assert!(device.bytes == whole, "{k}: the unobserved apply differs");
+
+        let device = format!("{src}.cancelled");
+        std::fs::write(&device, resumed.expect("no cancellation resumed")).unwrap();
+        let want = manifest(k);
+        let got = walk(&device);
+        assert!(
+            got == want,
+            "{k}: {} files after the cancelled repair resumed, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+        let recovered = unpack(&format!("windows-interrupted-{k}.recovered"));
+        oracle::same_metadata_as_windows(
+            k,
+            &Image::read(&src),
+            &Image::read(&device),
+            &Image::read(&recovered),
+            log_end,
+        );
+        std::fs::remove_file(&recovered).unwrap();
+        std::fs::remove_file(&device).unwrap();
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
 #[cfg(feature = "plan-file")]
 #[test]
 fn a_device_write_torn_by_a_cut_resumes_to_the_uninterrupted_volume() {
