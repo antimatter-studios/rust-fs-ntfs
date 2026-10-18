@@ -1091,17 +1091,10 @@ pub fn truncate_io<T: BlockIo + ?Sized>(
     //
     // Its unnamed `$DATA` may be in an extension record, where the base
     // record's walk calls it missing, and its base record may have no room
-    // for the stream to grow (#790, part of #663). The stream is read
-    // through the list, cut short or extended with zeros, and rewritten
-    // where the list keeps it, as `write_at` does (#789); the clusters past
-    // the new end are freed once the records no longer name them.
+    // for the stream to grow (#790, part of #663). The record-number entry
+    // point resizes it through the list (#796).
     if listed_regular_file_io(io, rec)? {
-        let size = usize::try_from(new_size).map_err(|_| Error::io("size too large"))?;
-        let mut value = crate::read::read_attribute_value(io, rec, AttrType::Data, None)?;
-        value.resize(size, 0);
-        write_listed_unnamed_data_io(io, rec, &value)?;
-        finish_data_write_io(io, rec)?;
-        return Ok(new_size);
+        return truncate_by_record_number_io(io, rec, new_size);
     }
     // A resident value is resized and written back whole: cut short, or
     // extended with zeros, promoted if it outgrows the record (#500).
@@ -1115,6 +1108,21 @@ pub fn truncate_io<T: BlockIo + ?Sized>(
     let size = truncate_by_record_number_io(io, rec, new_size)?;
     finish_data_write_io(io, rec)?;
     Ok(size)
+}
+
+/// Resize the unnamed `$DATA` of a file with an `$ATTRIBUTE_LIST`: the
+/// stream is read through the list, cut short or extended with zeros, and
+/// rewritten where the list keeps it, as `write_at` does (#789); the
+/// clusters past the new end are freed once the records no longer name them.
+fn truncate_listed_unnamed_data_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    new_size: u64,
+) -> Result<(), Error> {
+    let size = usize::try_from(new_size).map_err(|_| Error::io("size too large"))?;
+    let mut value = crate::read::read_attribute_value(io, rec, AttrType::Data, None)?;
+    value.resize(size, 0);
+    write_listed_unnamed_data_io(io, rec, &value).map(|_| ())
 }
 
 /// Attribute-header offsets for non-resident lengths (Microsoft's ATTRIBUTE_RECORD_HEADER devnote).
@@ -1138,6 +1146,14 @@ pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
     new_size: u64,
 ) -> Result<u64, Error> {
     refuse_metafile_io(io, record_number, "truncate")?;
+    // A FILE WITH AN $ATTRIBUTE_LIST IS RESIZED THROUGH IT, whichever entry
+    // point reached it: the base record alone may not hold the unnamed
+    // `$DATA` at all (#796, the record-number half of #790).
+    if listed_regular_file_io(io, record_number)? {
+        truncate_listed_unnamed_data_io(io, record_number, new_size)?;
+        finish_data_write_io(io, record_number)?;
+        return Ok(new_size);
+    }
     let (params, record) = read_mft_record_io(io, record_number)?;
     let cluster_size = params.cluster_size;
 
