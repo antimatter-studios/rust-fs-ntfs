@@ -4286,6 +4286,22 @@ fn quota_refund_io<T: BlockIo + ?Sized>(
     let Some((owner, charge)) = quota_charge_of(record).filter(|&(o, c)| o != 0 && c != 0) else {
         return Ok(None);
     };
+    quota_move_io(io, owner, charge, 0)
+}
+
+/// The `$Q` entry that leaves `owner` charged `to` bytes for a file it was
+/// charged `from` bytes for, worked out with nothing written: its usage
+/// moves by the difference (#674, #675).
+///
+/// `None` when the volume does not track quotas. An owner with no entry,
+/// or one charged less than `from`, is accounting this cannot follow:
+/// refused.
+fn quota_move_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    owner: u32,
+    charge: u64,
+    to: u64,
+) -> Result<Option<QuotaRefund>, Error> {
     let path = view_index::QUOTA_PATH;
     let quota_rec = resolve_path_to_record_number_io(io, path).map_err(|e| {
         e.context(format!(
@@ -4321,6 +4337,11 @@ fn quota_refund_io<T: BlockIo + ?Sized>(
         Error::io(format!(
             "{path}: owner {owner} is charged {used} bytes in $Q, less than the {charge} bytes \
              the file is charged; chkdsk rebuilds the quota accounting"
+        ))
+    })?;
+    let left = left.checked_add(to).ok_or_else(|| {
+        Error::io(format!(
+            "{path}: owner {owner} is charged {used} bytes in $Q, too many to add {to} to"
         ))
     })?;
     data[QUOTA_DATA_BYTES_USED..QUOTA_DATA_BYTES_USED + 8].copy_from_slice(&left.to_le_bytes());
@@ -4763,7 +4784,66 @@ fn stamp_changed_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<(), Err
 /// its directory entries carry its new size.
 fn finish_data_write_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<(), Error> {
     stamp_written_io(io, rec)?;
-    refresh_directory_entry_sizes_io(io, rec)
+    refresh_directory_entry_sizes_io(io, rec)?;
+    recharge_quota_io(io, rec)
+}
+
+/// What Windows charges a file on a volume tracking quotas: its MFT record
+/// plus the allocated size of each of its non-resident `$DATA` streams,
+/// read from the stream's first extent. Resident attributes add nothing
+/// beyond the record (measured on
+/// `test-disks/windows-interrupted-quota.recovered`).
+fn quota_charge_due(record: &[u8], record_size: u64) -> u64 {
+    let field = |at: usize| {
+        record
+            .get(at..at + 8)
+            .map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()))
+    };
+    record_size
+        + attr_io::iter_attributes(record)
+            .filter(|a| a.type_code == AttrType::Data as u32 && !a.is_resident)
+            .filter(|a| field(a.attr_offset + NR_LOWEST_VCN) == 0)
+            .map(|a| field(a.attr_offset + NR_ALLOCATED_SIZE))
+            .sum::<u64>()
+}
+
+/// In a non-resident attribute's header: the first VCN its extent maps,
+/// and, in the first extent, the stream's allocated size.
+const NR_LOWEST_VCN: usize = 0x10;
+const NR_ALLOCATED_SIZE: usize = 0x28;
+
+/// Charge the file at `rec` what its allocation now costs, and move its
+/// owner's usage in `$Extend\$Quota:$Q` by the difference, as Windows does
+/// when a write changes a file's allocation (#675).
+///
+/// Nothing changes on a volume not tracking quotas, for a file charged to
+/// owner 0 or charged nothing, or for one whose charge already matches. A
+/// file with an `$ATTRIBUTE_LIST` keeps its charge: the first extent of a
+/// stream may sit in another record, which this does not read yet.
+fn recharge_quota_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<(), Error> {
+    let (params, record) = read_mft_record_io(io, rec)?;
+    let Some((owner, charged)) = quota_charge_of(&record).filter(|&(o, c)| o != 0 && c != 0) else {
+        return Ok(());
+    };
+    if attr_io::find_attribute(&record, AttrType::AttributeList, None).is_some() {
+        return Ok(());
+    }
+    let due = quota_charge_due(&record, params.file_record_size);
+    if due == charged {
+        return Ok(());
+    }
+    let Some(moved) = quota_move_io(io, owner, charged, due)? else {
+        return Ok(());
+    };
+    give_back_quota_io(io, Some(moved))?;
+    update_mft_record_io(io, rec, |record| {
+        let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)
+            .ok_or_else(|| Error::io("no $STANDARD_INFORMATION to charge"))?;
+        let start = attr_io::resident_value_start(&loc)
+            .ok_or_else(|| Error::io("a non-resident $STANDARD_INFORMATION"))?;
+        record[start + SI_QUOTA..start + SI_QUOTA + 8].copy_from_slice(&due.to_le_bytes());
+        Ok(())
+    })
 }
 
 /// The directory `path` names its last component in.
