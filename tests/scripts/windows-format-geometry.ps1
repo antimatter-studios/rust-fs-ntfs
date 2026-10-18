@@ -82,5 +82,51 @@ $layoutRows[3].sds = $null
 Assert-GeometryFailure { Assert-LargeClusterLayoutRows $layoutRows } 'missing layout field fails'
 $layoutRows[3].sds = $run; $layoutRows[0].accepted = $false
 Assert-GeometryFailure { Assert-LargeClusterLayoutRows $layoutRows } 'failed 64 KiB control fails'
-if ($checks -ne 33) { throw "only $checks geometry contracts executed, expected 33" }
-Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 33)"
+# 4Kn: a 4096-byte boot sector, the update sequence header of a raw record,
+# and the row that must come from a disk Windows reports as 4096-byte sectors.
+$boot4k = [byte[]]::new(4096)
+[Text.Encoding]::ASCII.GetBytes('NTFS    ').CopyTo($boot4k, 3)
+[BitConverter]::GetBytes([uint16]4096).CopyTo($boot4k, 11)
+$boot4k[13] = 1; $boot4k[64] = 1; $boot4k[68] = 1
+[BitConverter]::GetBytes([uint64]262143).CopyTo($boot4k, 40)
+[BitConverter]::GetBytes([uint64]4).CopyTo($boot4k, 48)
+[BitConverter]::GetBytes([uint64]2).CopyTo($boot4k, 56)
+$boot4k[510] = 85; $boot4k[511] = 170
+$decoded4k = ConvertFrom-FormatBoot $boot4k -SectorBytes 4096
+Assert-Geometry ($decoded4k.bytes_per_sector -eq 4096 -and $decoded4k.cluster_bytes -eq 4096 -and
+    $decoded4k.record_bytes -eq 4096 -and $decoded4k.index_block_bytes -eq 4096) '4096-byte boot sector fields'
+Assert-Geometry ($decoded4k.number_sectors -eq 262143) 'boot sector NumberSectors'
+Assert-GeometryFailure { ConvertFrom-FormatBoot $boot4k } '4096-byte sectors fail the 512-byte decoder'
+Assert-GeometryFailure { ConvertFrom-FormatBoot ([byte[]]::new(512)) -SectorBytes 4096 } 'short 4096-byte boot sector fails'
+$record = [byte[]]::new(4096)
+[Text.Encoding]::ASCII.GetBytes('FILE').CopyTo($record, 0)
+[BitConverter]::GetBytes([uint16]48).CopyTo($record, 4)
+[BitConverter]::GetBytes([uint16]9).CopyTo($record, 6)
+$usa = ConvertFrom-UpdateSequenceHeader $record 'FILE'
+Assert-Geometry ($usa.usa_offset -eq 48 -and $usa.usa_count -eq 9 -and $usa.stride_bytes -eq 512) 'USA stride from its count'
+[BitConverter]::GetBytes([uint16]2).CopyTo($record, 6)
+Assert-Geometry ((ConvertFrom-UpdateSequenceHeader $record 'FILE').stride_bytes -eq 4096) 'one 4096-byte stride'
+Assert-GeometryFailure { ConvertFrom-UpdateSequenceHeader $record 'INDX' } 'wrong record magic fails'
+[BitConverter]::GetBytes([uint16]7).CopyTo($record, 6)
+Assert-GeometryFailure { ConvertFrom-UpdateSequenceHeader $record 'FILE' } 'a count that does not divide the record fails'
+$lines4k = @('Bytes Per Sector : 4096', 'Bytes Per Physical Sector : 4096', 'Bytes Per Cluster : 4096',
+    'Bytes Per FileRecord Segment : 4096', 'Mft Start Lcn : 0x0000000000000004',
+    'Mft2 Start Lcn : 0x0000000000000002')
+$native4k = ConvertFrom-GeometryNtfsInfo $lines4k -Physical
+Assert-Geometry ($native4k.bytes_per_sector -eq 4096 -and $native4k.bytes_per_physical_sector -eq 4096) 'fsutil physical sector field'
+Assert-GeometryFailure { ConvertFrom-GeometryNtfsInfo ($lines4k | Where-Object { $_ -notmatch 'Physical' }) -Physical } 'missing physical sector field fails'
+$sectorRow = [pscustomobject][ordered]@{ disk_tool = 'New-VHD'; logical_sector_bytes = 4096;
+    physical_sector_bytes = 4096; fsutil = $native4k; boot = $decoded4k; backup_boot_offsets = @(1073737728);
+    mft_usa = $usa; root_index_usa = $usa }
+Assert-SectorGeometryRow $sectorRow
+$checks++
+$sectorRow.logical_sector_bytes = 512
+Assert-GeometryFailure { Assert-SectorGeometryRow $sectorRow } 'a 512-byte scratch disk cannot pass as 4Kn'
+$sectorRow.logical_sector_bytes = 4096; $sectorRow.root_index_usa = $null
+Assert-GeometryFailure { Assert-SectorGeometryRow $sectorRow } 'missing 4Kn field fails'
+$sectorRow.root_index_usa = $usa; $sectorRow.backup_boot_offsets = @()
+Assert-GeometryFailure { Assert-SectorGeometryRow $sectorRow } 'no backup boot sector found fails'
+$sectorRow.backup_boot_offsets = @(1073737728); $native4k.bytes_per_sector = 512
+Assert-GeometryFailure { Assert-SectorGeometryRow $sectorRow } 'fsutil disagreeing with the 4Kn boot sector fails'
+if ($checks -ne 48) { throw "only $checks geometry contracts executed, expected 48" }
+Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 48)"
