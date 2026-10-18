@@ -937,6 +937,24 @@ case "$step" in
         has '"kind": "logfile"' || die "fsck.ntfs did not report the log holding work after the stop: $out"
         windows_listing "$1"
         ;;
+    undo-index-compare)
+        [ $# -eq 1 ] || die "undo-index-compare IMAGE SNAPSHOT"
+        # IMAGE is what Windows' restart left over a stopped replay (#755);
+        # each index block the replay's undo writes is compared with the
+        # same block after an uninterrupted replay of the untouched capture
+        # (#756), which a listing and chkdsk /scan can both miss (#514).
+        restarted="$image"
+        image="$image.uninterrupted"
+        unpack_interrupted "$1"
+        set +e
+        out="$(cargo run --quiet --release --manifest-path "$REPO/Cargo.toml" \
+            --example undo_index_compare -- "$image" "$restarted" 2>&1)"
+        status=$?
+        set -e
+        rm -f "$image"
+        printf '%s\n' "$out"
+        [ "$status" -eq 0 ] || die "undo_index_compare exited $status"
+        ;;
     replay-lsn)
         [ $# -eq 1 ] || die "replay-lsn IMAGE SNAPSHOT"
         unpack_interrupted "$1"
