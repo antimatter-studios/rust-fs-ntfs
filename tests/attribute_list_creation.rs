@@ -14,7 +14,7 @@ mod common;
 use fs_ntfs::attr_io::{self, AttrType};
 use fs_ntfs::bitmap;
 use fs_ntfs::block_io::{BlockIo, PathIo};
-use fs_ntfs::error::{Error, Kind};
+use fs_ntfs::error::Kind;
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::{data_runs, fsck, mft_bitmap, mft_io, read, write};
 use ntfs::NtfsReadSeek;
@@ -337,20 +337,29 @@ fn a_write_through_the_list_that_is_refused_changes_nothing() {
     );
 }
 
-/// A directory's attributes are not moved between records: a stream its
-/// record cannot hold is refused, with nothing written.
+/// The legacy test name is retained: a directory now gets a list when
+/// its streams fill the base record (#815), and keeps its index there.
 #[test]
 fn a_directory_is_given_no_list() {
     let (img, _) = volume_with_a_file("dir");
     let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
-    write::mkdir_io(&mut io, "/", "d").expect("mkdir /d");
-    let mut refused: Option<Error> = None;
-    for i in 1..=16 {
-        if let Err(e) = write::write_named_stream_io(&mut io, "/d", &format!("s{i}"), &[7u8; 64]) {
-            refused = Some(e);
-            break;
-        }
+    let rec = write::mkdir_io(&mut io, "/", "d").expect("mkdir /d");
+    for name in ["a", "b"] {
+        write::create_file_io(&mut io, "/d", name).expect("create directory entry");
     }
-    let refused = refused.expect("sixteen streams fitted in a directory's record");
-    assert_eq!(refused.kind(), Kind::Refused, "{refused}");
+    for i in 1..=16 {
+        write::write_named_stream_io(&mut io, "/d", &format!("s{i}"), &contents(i, 64))
+            .unwrap_or_else(|e| panic!("write /d:s{i}: {e}"));
+    }
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
+    drop(io);
+    assert!(!list_is_true(&img, rec).is_empty());
+    for i in 1..=16 {
+        assert_eq!(ntfs_stream(&img, "/d", &format!("s{i}")), contents(i, 64));
+    }
+    let (ntfs, mut reader) = common::open(&img);
+    let mut names = common::list_names(&ntfs, &mut reader, "/d");
+    names.sort();
+    assert_eq!(names, ["a", "b"]);
+    clean(&img);
 }
