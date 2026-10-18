@@ -1,0 +1,108 @@
+name: Slate checker oracle (advisory)
+# Slate's offline checker beside Windows chkdsk, on the same bytes (#687,
+# part of #580). Slate is a third NTFS implementation: it can show where two
+# implementations read a volume differently, and only Windows says which one
+# is right. So Windows formats the controls, our mkfs.ntfs formats the rest,
+# chkdsk grades every image, and Slate's read-only check is then run on the
+# very images chkdsk graded. A disagreement fails this workflow and keeps its
+# image in the artifact.
+#
+# ADVISORY. It is not in .github-guard's required contexts and does not run
+# in the merge queue. #694 makes the stable part of it required, after a
+# measured run of reliability; until then it reports, it does not gate.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/slate-oracle.yml
+      - scripts/slate-oracle.sh
+      - tests/scripts/slate-oracle.sh
+      - test-disks/build-slate-oracle-cases.ps1
+      - chores.yml
+      - src/mkfs.rs
+      - src/cli/ntfs/mkfs.rs
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-cases:
+    name: Windows formats and chkdsk grades the cases
+    runs-on: windows-latest
+    # Four 256 MiB images, two Windows formats and four read-only chkdsk
+    # passes. A bound, so a hung mount fails by name (#388).
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - name: Install rust-img-vhd
+        shell: pwsh
+        run: |
+          $vhd = (Select-String -Path chores.yml -Pattern '^\s*IMG_VHD_REF:\s*(\S+)').Matches[0].Groups[1].Value
+          if (-not $vhd) { throw 'IMG_VHD_REF is missing from chores.yml' }
+          git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
+          cargo install --locked --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
+      - name: Build the release CLI
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: cargo build --locked --release --features cli --bin rust-fs-ntfs
+      - name: Format the cases and grade each with Windows chkdsk
+        shell: pwsh
+        run: >-
+          ./test-disks/build-slate-oracle-cases.ps1
+          -Cli target/release/rust-fs-ntfs.exe
+          -OutDir tmp/slate-oracle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slate-oracle-cases-${{ github.sha }}
+          path: |
+            tmp/slate-oracle/cases.tsv
+            tmp/slate-oracle/images/*.img
+            tmp/slate-oracle/*.mkfs.json
+            tmp/slate-oracle/chkdsk/
+          if-no-files-found: error
+          retention-days: 7
+  slate-check:
+    name: Slate checks the same bytes
+    needs: windows-cases
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: slate-oracle-cases-${{ github.sha }}
+          path: tmp/slate-oracle
+      - name: Fetch Slate at the pinned commit and check its licences
+        run: bash scripts/slate-oracle.sh fetch "$RUNNER_TEMP/slate-ntfs"
+      - name: Build Slate's MIT checker
+        run: |
+          set -euo pipefail
+          checker="$(bash scripts/slate-oracle.sh build "$RUNNER_TEMP/slate-ntfs")"
+          echo "SLATE_CHECKER=$checker" >>"$GITHUB_ENV"
+          mkdir -p tmp/slate-oracle/out
+          {
+            printf 'slate_commit\t%s\n' "$(git -C "$RUNNER_TEMP/slate-ntfs" rev-parse HEAD)"
+            printf 'rustc\t%s\n' "$(rustc --version)"
+            printf 'source_head\t%s\n' "${{ github.event.pull_request.head.sha || github.sha }}"
+          } >tmp/slate-oracle/out/provenance.tsv
+      # The floor is the four cases build-slate-oracle-cases.ps1 makes. A run
+      # that compared fewer did not do the work, whatever it printed.
+      - name: Compare Slate's verdicts with Windows chkdsk's
+        run: >-
+          bash scripts/slate-oracle.sh compare
+          tmp/slate-oracle/cases.tsv tmp/slate-oracle/images
+          "$SLATE_CHECKER" tmp/slate-oracle/out 4
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: slate-oracle-verdicts-${{ github.sha }}
+          path: tmp/slate-oracle/out/
+          if-no-files-found: error
+          retention-days: 14

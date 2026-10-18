@@ -23,6 +23,20 @@ or removed, this file changes in the same pull request.
 ntfs-3g's tools and the Linux kernel's ntfs3 driver are run as subprocess
 oracles. That is allowed, and their source is not opened.
 
+[Slate](https://github.com/NullMagic2/slate-ntfs), a third NTFS
+implementation, is a supplementary subprocess oracle
+(`.github/workflows/slate-oracle.yml`, #687). Its core and tools crates
+declare MIT and are built from the commit `chores.yml` pins; its
+`ntfs-chkdsk --check` grades images Windows `chkdsk` has already graded, and
+Windows' verdict is the reference. Its `ntfs_utils` crate (MIT AND
+GPL-2.0-or-later, holding a table ported from ntfs-3g), `kernel/` and
+`kernel/patches/` are never built, and nothing from Slate is in this crate.
+What was read to wire it in: its licence files, Cargo manifests, `build.sh`,
+README and `RECOVERY_TRANSACTIONS.md`, and for the checker's exit statuses
+the usage text and exit constants of the MIT-licensed
+`src/tools/bin/ntfs-chkdsk.rs`. None of it is a source of this crate's
+knowledge of NTFS.
+
 ## Citations in the source
 
 The first source files (April 2026) cited the Linux-NTFS documentation page by
@@ -153,3 +167,8 @@ ntfs-3g and the Linux kernel's NTFS driver (#488). The layout has since been ver
 Windows-authored `$EA_INFORMATION` values with zero, one and two `NEED_EA`
 entries (`ea_information_windows_oracle`, #611). The source policy in
 `AGENTS.md` now forbids opening copyleft implementation source at all.
+
+One permissively licensed implementation file has been opened since, for its
+command-line contract and not for the format: the usage text and exit
+constants of Slate's MIT-licensed `src/tools/bin/ntfs-chkdsk.rs`, to drive
+it as an oracle (#687; see Sources).
