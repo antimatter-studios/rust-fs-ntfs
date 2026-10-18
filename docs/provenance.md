@@ -23,6 +23,13 @@ or removed, this file changes in the same pull request.
 ntfs-3g's tools and the Linux kernel's ntfs3 driver are run as subprocess
 oracles. That is allowed, and their source is not opened.
 
+To locate the `InvalidSecurity` finding on a fresh volume (#837), the
+conditions of Slate's MIT-licensed `src/ondisk/security_store.rs` at
+`579dfeb` were read: it refuses a `$Secure` stream whose attribute carries any
+flag. The layout the fix writes comes from Windows, not from Slate: a
+Windows-formatted 256 MiB volume's `$SDS` is one contiguous run with flags 0,
+and its `$Secure` is not marked sparse.
+
 ## Citations in the source
 
 The first source files (April 2026) cited the Linux-NTFS documentation page by

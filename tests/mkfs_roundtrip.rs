@@ -227,8 +227,9 @@ fn format_and_parse_back() {
 }
 
 /// Sub-PR S2: `$Secure` (rec 9) ships
-///   * named `$DATA`        "$SDS" — non-resident (primary at file
-///     offset 0, mirror at +0x40000), holding one canonical SD entry.
+///   * named `$DATA`        "$SDS" — non-resident, one contiguous run
+///     (primary at file offset 0, mirror at +0x40000), holding one
+///     canonical SD entry.
 ///   * named `$INDEX_ROOT`  "$SDH" — populated with one entry mapping
 ///     `(hash, security_id=0x100)` to the SDS offset/size pair.
 ///   * named `$INDEX_ROOT`  "$SII" — populated with one entry keyed
@@ -509,21 +510,17 @@ fn sparse_system_streams_have_extended_headers_and_real_allocation_totals() {
     assert_eq!(bad_runs.len(), 1);
     assert_eq!(bad_runs[0].lcn, None);
 
+    // `$Secure:$SDS` is not sparse (#837): the plain 0x40 header, its
+    // name at 0x40 and mapping pairs at 0x48, the layout Windows writes.
     let sds = raw_attribute(&dev, rec::SECURE as u64, 0x80, stream::SDS);
-    assert_eq!(u16::from_le_bytes(sds[12..14].try_into().unwrap()), 0x8000);
-    assert_eq!(u16::from_le_bytes(sds[10..12].try_into().unwrap()), 0x48);
-    assert_eq!(u16::from_le_bytes(sds[32..34].try_into().unwrap()), 0x50);
-    assert_eq!(
-        u64::from_le_bytes(sds[64..72].try_into().unwrap()),
-        2 * CLUSTER_SIZE
-    );
+    assert_eq!(u16::from_le_bytes(sds[12..14].try_into().unwrap()), 0);
+    assert_eq!(u16::from_le_bytes(sds[10..12].try_into().unwrap()), 0x40);
+    assert_eq!(u16::from_le_bytes(sds[32..34].try_into().unwrap()), 0x48);
     let sds_mapping = u16::from_le_bytes(sds[32..34].try_into().unwrap()) as usize;
     let sds_runs = decode_runs(&sds[sds_mapping..]).expect("decode $SDS mapping pairs");
-    assert_eq!(sds_runs.len(), 3);
+    assert_eq!(sds_runs.len(), 1);
     assert!(sds_runs[0].lcn.is_some());
-    assert_eq!(sds_runs[1].lcn, None);
-    assert_eq!(sds_runs[1].length, SDS_MIRROR_GAP / CLUSTER_SIZE - 1);
-    assert!(sds_runs[2].lcn.is_some());
+    assert_eq!(sds_runs[0].length, SDS_MIRROR_GAP / CLUSTER_SIZE + 1);
 }
 
 #[test]
@@ -532,7 +529,9 @@ fn sparse_system_records_mark_file_metadata_sparse() {
     format_filesystem(&mut dev, VOL_SIZE, 4096, 4096, Some("TESTVOL"), None)
         .expect("format_filesystem");
 
-    for record_number in [rec::BADCLUS, rec::SECURE] {
+    // `$Secure` is not sparse (#837): Windows marks it 0x20000006 in
+    // both attributes, and its `$SDS` is one allocated run.
+    for (record_number, sparse) in [(rec::BADCLUS, true), (rec::SECURE, false)] {
         let standard_information = raw_attribute(&dev, record_number as u64, 0x10, "");
         let si_value =
             u16::from_le_bytes(standard_information[20..22].try_into().unwrap()) as usize;
@@ -541,20 +540,20 @@ fn sparse_system_records_mark_file_metadata_sparse() {
                 .try_into()
                 .unwrap(),
         );
-        assert_ne!(
-            si_flags & 0x200,
-            0,
-            "record {record_number} $STANDARD_INFORMATION must mark the file sparse"
+        assert_eq!(
+            si_flags & 0x200 != 0,
+            sparse,
+            "record {record_number} $STANDARD_INFORMATION sparse bit"
         );
 
         let file_name = raw_attribute(&dev, record_number as u64, 0x30, "");
         let fn_value = u16::from_le_bytes(file_name[20..22].try_into().unwrap()) as usize;
         let fn_flags =
             u32::from_le_bytes(file_name[fn_value + 56..fn_value + 60].try_into().unwrap());
-        assert_ne!(
-            fn_flags & 0x200,
-            0,
-            "record {record_number} $FILE_NAME must mark the file sparse"
+        assert_eq!(
+            fn_flags & 0x200 != 0,
+            sparse,
+            "record {record_number} $FILE_NAME sparse bit"
         );
     }
 }
@@ -871,4 +870,42 @@ fn capi_mkfs_then_parse() {
     let mut ntfs = Ntfs::new(&mut cursor).expect("Ntfs::new");
     ntfs.read_upcase_table(&mut cursor).expect("upcase");
     assert_eq!(ntfs.cluster_size(), 4096);
+}
+
+/// `$Secure:$SDS` is allocated the way Windows `format` allocates it: one
+/// contiguous run covering the primary block, the 256 KiB mirror gap and the
+/// mirror, with attribute flags 0. Windows' own 256 MiB volumes (the
+/// slate-oracle cases of #696) carry flags 0 and a single 0x41-cluster run at
+/// 4 KiB clusters. Slate's checker refuses a `$SDS` that carries any
+/// attribute flag, so the sparse layout this crate used to write made it fail
+/// the whole security inventory with `InvalidSecurity` (#837), even though
+/// Windows `chkdsk` accepted it.
+#[test]
+fn secure_sds_is_one_contiguous_unflagged_run() {
+    use fs_ntfs::sds::SDS_MIRROR_GAP;
+
+    for cluster_size in [4096u32, 65536] {
+        let mut dev = MemDev::new(VOL_SIZE);
+        format_filesystem(&mut dev, VOL_SIZE, cluster_size, 4096, Some("SDS"), None)
+            .expect("format");
+        let attr = raw_attribute(&dev, rec::SECURE as u64, 0x80, stream::SDS);
+        assert_eq!(attr[8], 1, "{cluster_size}: $SDS must be non-resident");
+        let flags = u16::from_le_bytes([attr[12], attr[13]]);
+        assert_eq!(flags, 0, "{cluster_size}: $SDS attribute flags");
+        let allocated = u64::from_le_bytes(attr[0x28..0x30].try_into().unwrap());
+        let wanted_clusters = SDS_MIRROR_GAP / cluster_size as u64 + 1;
+        assert_eq!(
+            allocated,
+            wanted_clusters * cluster_size as u64,
+            "{cluster_size}: $SDS allocated length"
+        );
+        let runs_at = u16::from_le_bytes([attr[0x20], attr[0x21]]) as usize;
+        let runs = decode_runs(&attr[runs_at..]).expect("decode $SDS runs");
+        assert_eq!(runs.len(), 1, "{cluster_size}: $SDS runs {runs:?}");
+        assert!(runs[0].lcn.is_some(), "{cluster_size}: $SDS run is a hole");
+        assert_eq!(
+            runs[0].length, wanted_clusters,
+            "{cluster_size}: $SDS run length"
+        );
+    }
 }

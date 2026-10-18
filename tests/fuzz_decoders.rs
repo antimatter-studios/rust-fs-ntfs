@@ -184,7 +184,7 @@ fn targets() -> Vec<Target> {
         // volumes: which seed volume (the committed `image` corpus, and
         // one this crate formats and fills), which fields of which records
         // and index blocks to change with their fixups kept valid, and
-        // which writes to make. A case copies an 8 MiB volume and reads
+        // which writes to make. A case copies a 16 MiB volume and reads
         // it twice around the writes, so it gets few cases.
         Target {
             corpus: "structured",
