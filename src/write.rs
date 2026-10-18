@@ -5050,6 +5050,38 @@ fn quota_charge_due(record: &[u8], record_size: u64) -> u64 {
             .sum::<u64>()
 }
 
+/// [`quota_charge_due`] for the file at `rec`, whose base record is
+/// `record`, reading each `$DATA` stream's first extent wherever its
+/// `$ATTRIBUTE_LIST` says it sits (#1092): the base record is charged, and
+/// every stream's allocation, whichever record holds it. Extension records
+/// are not charged themselves; what Windows charges for them is not
+/// measured yet (#1093).
+fn quota_charge_due_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    record: &[u8],
+    record_size: u64,
+) -> Result<u64, Error> {
+    let mut due = quota_charge_due(record, record_size);
+    if attr_io::find_attribute(record, AttrType::AttributeList, None).is_none() {
+        return Ok(due);
+    }
+    let list = crate::read::read_attribute_value(io, rec, AttrType::AttributeList, None)?;
+    let mut holders: Vec<u64> = crate::read::parse_attribute_list(&list)?
+        .into_iter()
+        .filter(|e| e.type_code == AttrType::Data as u32 && e.starting_vcn == 0)
+        .map(|e| e.record_number)
+        .filter(|&n| n != rec)
+        .collect();
+    holders.sort_unstable();
+    holders.dedup();
+    for n in holders {
+        let (_, extension) = read_mft_record_io(io, n)?;
+        due += quota_charge_due(&extension, record_size) - record_size;
+    }
+    Ok(due)
+}
+
 /// In a non-resident attribute's header: the first VCN its extent maps,
 /// and, in the first extent, the stream's allocated size.
 const NR_LOWEST_VCN: usize = 0x10;
@@ -5061,17 +5093,14 @@ const NR_ALLOCATED_SIZE: usize = 0x28;
 ///
 /// Nothing changes on a volume not tracking quotas, for a file charged to
 /// owner 0 or charged nothing, or for one whose charge already matches. A
-/// file with an `$ATTRIBUTE_LIST` keeps its charge: the first extent of a
-/// stream may sit in another record, which this does not read yet.
+/// file with an `$ATTRIBUTE_LIST` is charged through it, by
+/// [`quota_charge_due_io`].
 fn recharge_quota_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<(), Error> {
     let (params, record) = read_mft_record_io(io, rec)?;
     let Some((owner, charged)) = quota_charge_of(&record).filter(|&(o, c)| o != 0 && c != 0) else {
         return Ok(());
     };
-    if attr_io::find_attribute(&record, AttrType::AttributeList, None).is_some() {
-        return Ok(());
-    }
-    let due = quota_charge_due(&record, params.file_record_size);
+    let due = quota_charge_due_io(io, rec, &record, params.file_record_size)?;
     if due == charged {
         return Ok(());
     }
@@ -5096,16 +5125,12 @@ fn recharge_quota_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<(), Er
 /// data write, the error would come with the file already changed.
 ///
 /// Passes whatever [`recharge_quota_io`] leaves alone: a volume not
-/// tracking quotas, a file charged to owner 0 or charged nothing, and one
-/// with an `$ATTRIBUTE_LIST`.
+/// tracking quotas, and a file charged to owner 0 or charged nothing.
 fn check_quota_recharge_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<(), Error> {
     let (_, record) = read_mft_record_io(io, rec)?;
     let Some((owner, charged)) = quota_charge_of(&record).filter(|&(o, c)| o != 0 && c != 0) else {
         return Ok(());
     };
-    if attr_io::find_attribute(&record, AttrType::AttributeList, None).is_some() {
-        return Ok(());
-    }
     quota_move_io(io, owner, charged, 0)
         .map(|_| ())
         .map_err(|e| e.context("write refused before any data was written"))

@@ -658,3 +658,72 @@ fn a_write_whose_recharge_cannot_succeed_is_refused_before_its_data_lands() {
         );
     }
 }
+
+/// The allocated size of the non-resident `$DATA` streams of base record
+/// `n`, each read from its first extent wherever it sits: in the base
+/// record or in an extension record in use that names `n` as its base.
+fn listed_data_allocated(vol: &Vol, n: u64) -> u64 {
+    (0..vol.records())
+        .filter_map(|m| vol.record(m).map(|rec| (m, rec)))
+        .filter(|(m, rec)| *m == n || (le(rec, 0x20, 6) == n && le(rec, 0x16, 2) & 1 != 0))
+        .map(|(_, rec)| data_allocated(&rec))
+        .sum()
+}
+
+/// Whether an extension record of base record `n` holds the first extent
+/// of the non-resident stream named `name`.
+fn first_extent_listed(vol: &Vol, n: u64, name: &str) -> bool {
+    (0..vol.records())
+        .filter_map(|m| vol.record(m))
+        .filter(|rec| le(rec, 0x20, 6) == n && le(rec, 0x16, 2) & 1 != 0)
+        .any(|rec| {
+            attrs(&rec).iter().any(|a| {
+                a.ty == DATA && a.non_resident && a.name == name && le(&rec, a.at + 0x10, 8) == 0
+            })
+        })
+}
+
+#[test]
+fn a_listed_files_charge_follows_a_stream_in_its_extension_record() {
+    let img = unpack(TRACKED, "listed");
+    let path = charged_files(&img, TRACKED).swap_remove(0);
+    let n = record_of(&img, &path);
+    for i in 1..=6 {
+        fs_ntfs::write::write_named_stream(Path::new(&img), &path, &format!("r{i}"), &[i; 600])
+            .unwrap_or_else(|e| panic!("write {path}:r{i}: {e}"));
+    }
+    let vol = Vol::read(&img);
+    let base = vol.record(n).unwrap();
+    assert!(
+        attrs(&base).iter().any(|a| a.ty == ATTRIBUTE_LIST),
+        "{path} has no $ATTRIBUTE_LIST after six streams its record cannot hold"
+    );
+
+    for size in [200_000usize, 70_000, 300_000, 100] {
+        fs_ntfs::write::write_named_stream(Path::new(&img), &path, "big", &vec![0x5A; size])
+            .unwrap_or_else(|e| panic!("write {size} bytes to {path}:big: {e}"));
+        let vol = Vol::read(&img);
+        if size > 1_000 {
+            assert!(
+                first_extent_listed(&vol, n, "big"),
+                "{path}:big's first extent is not in an extension record"
+            );
+        }
+        let (owner, qc) = charge(&vol.record(n).unwrap());
+        assert_ne!(owner, 0, "{path} lost its owner");
+        assert_eq!(
+            qc,
+            vol.record + listed_data_allocated(&vol, n),
+            "{path}:big written to {size} bytes: {path} is charged {qc}, not its {}-byte \
+             record and the {} bytes its streams have allocated through its $ATTRIBUTE_LIST",
+            vol.record,
+            listed_data_allocated(&vol, n)
+        );
+        assert_eq!(
+            usage(&vol).0,
+            charged(&vol),
+            "{path}:big written to {size} bytes: an owner's usage in $Q is not what its \
+             files are charged"
+        );
+    }
+}
