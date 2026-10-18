@@ -998,6 +998,19 @@ pub enum CheckFinding {
     /// reference names another file (#820). A reader following the list
     /// reads another file's attributes, or none.
     BadAttributeList { record: u64, reason: String },
+    /// On a volume tracking quotas, this owner's usage in
+    /// `$Extend\$Quota:$Q` is not the sum of what its files'
+    /// `$STANDARD_INFORMATION` charge it (#678). `usage` is `None` when
+    /// `$Q` has no entry for an owner files are charged to. chkdsk recounts
+    /// `$Q` and reports the same.
+    QuotaUsageDrift {
+        owner: u32,
+        usage: Option<u64>,
+        charged: u64,
+    },
+    /// The volume's `$Extend\$Quota:$Q` could not be read, so no owner's
+    /// usage was compared.
+    QuotaUnreadable { reason: String },
 }
 
 /// What [`check_io`] read, and what it found.
@@ -1065,8 +1078,9 @@ pub fn logfile_state_io<T: FsckIo>(io: &mut T) -> Result<LogfileState, Error> {
 /// `$LogFile` is empty, `$MFTMirr` against `$MFT`, the header and attribute
 /// chain of every MFT record `$MFT`'s bitmap marks in use (#515), and
 /// `$Bitmap` against the clusters every run list in those records claims
-/// (#517), and the records every base record's `$ATTRIBUTE_LIST` names
-/// (#820).
+/// (#517), the records every base record's `$ATTRIBUTE_LIST` names
+/// (#820), and, on a volume tracking quotas, each owner's usage in
+/// `$Extend\$Quota:$Q` against what its files are charged (#678).
 ///
 /// NOT A STRUCTURAL CHECKER. It does not follow indexes; a volume this calls clean is one on
 /// which none of THESE is wrong, and Windows' chkdsk remains the authority.
@@ -1089,6 +1103,10 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
     let volume_clusters = params.total_sectors / params.sectors_per_cluster.max(1);
     let mut claims = Vec::new();
     let mut every_claim_known = true;
+    // What each owner's files are charged, from their
+    // `$STANDARD_INFORMATION`, and whether every in-use record was read.
+    let mut charged = std::collections::BTreeMap::<u32, u64>::new();
+    let mut every_charge_known = true;
 
     // Every in-use record reads as a record.
     let bitmap = crate::mft_bitmap::locate_io(io)?;
@@ -1107,8 +1125,14 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
             Err(reason) => {
                 findings.push(CheckFinding::BadRecord { record, reason });
                 every_claim_known = false;
+                every_charge_known = false;
             }
             Ok(rec) => {
+                if let Some((owner, charge)) =
+                    crate::write::quota_charge_of(&rec).filter(|&(o, _)| o != 0)
+                {
+                    *charged.entry(owner).or_default() += charge;
+                }
                 if account {
                     every_claim_known &=
                         claims_of(record, &rec, volume_clusters, &mut claims, &mut findings);
@@ -1150,6 +1174,16 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
         0
     };
 
+    // Quota usage is compared only when every record's charge is known and
+    // the log holds no work, for the same reason clusters are.
+    if account && every_charge_known {
+        if let Err(e) = check_quota_usage(io, &charged, &mut findings) {
+            findings.push(CheckFinding::QuotaUnreadable {
+                reason: e.to_string(),
+            });
+        }
+    }
+
     Ok(CheckReport {
         dirty,
         logfile_empty,
@@ -1158,6 +1192,75 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
         clusters_scanned,
         findings,
     })
+}
+
+/// On a volume tracking quotas, each owner's usage in `$Extend\$Quota:$Q`
+/// against `charged`, the sum of what its files' `$STANDARD_INFORMATION`
+/// charge it, as chkdsk recounts it (#678). A volume with no `$Quota`, or
+/// one whose quota control entry is missing or has tracking off, is not
+/// checked.
+fn check_quota_usage<T: FsckIo>(
+    io: &mut T,
+    charged: &std::collections::BTreeMap<u32, u64>,
+    findings: &mut Vec<CheckFinding>,
+) -> Result<(), Error> {
+    use crate::view_index::{data_io, keys_io, QUOTA_INDEX, QUOTA_PATH};
+    use crate::write::{
+        QUOTA_CONTROL_OWNER, QUOTA_DATA_BYTES_USED, QUOTA_DATA_FLAGS, QUOTA_FLAG_TRACKING_ENABLED,
+    };
+    let quota_rec = match crate::write::resolve_path_to_record_number_io(io, QUOTA_PATH) {
+        Err(e) if e.kind() == Kind::NotFound => return Ok(()),
+        found => found?,
+    };
+    let field = |data: &[u8], at: usize, n: usize| -> Result<u64, Error> {
+        let bytes = data.get(at..at + n).ok_or_else(|| {
+            Error::io(format!("{QUOTA_PATH}: a $Q entry of {} bytes", data.len()))
+        })?;
+        let mut value = [0u8; 8];
+        value[..n].copy_from_slice(bytes);
+        Ok(u64::from_le_bytes(value))
+    };
+    // No quota control entry, as this crate's mkfs writes `$Q`, is no flags
+    // saying tracking is on.
+    let control_key = QUOTA_CONTROL_OWNER.to_le_bytes();
+    let Some(control) = data_io(io, quota_rec, QUOTA_INDEX, &control_key)? else {
+        return Ok(());
+    };
+    if field(&control, QUOTA_DATA_FLAGS, 4)? & u64::from(QUOTA_FLAG_TRACKING_ENABLED) == 0 {
+        return Ok(());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for (key, _) in keys_io(io, quota_rec, QUOTA_INDEX)? {
+        let owner =
+            u32::from_le_bytes(key.as_slice().try_into().map_err(|_| {
+                Error::io(format!("{QUOTA_PATH}: a $Q key of {} bytes", key.len()))
+            })?);
+        if owner == QUOTA_CONTROL_OWNER {
+            continue;
+        }
+        seen.insert(owner);
+        let data = data_io(io, quota_rec, QUOTA_INDEX, &key)?
+            .ok_or_else(|| Error::io(format!("{QUOTA_PATH}: owner {owner}'s entry is gone")))?;
+        let usage = field(&data, QUOTA_DATA_BYTES_USED, 8)?;
+        let files = charged.get(&owner).copied().unwrap_or(0);
+        if usage != files {
+            findings.push(CheckFinding::QuotaUsageDrift {
+                owner,
+                usage: Some(usage),
+                charged: files,
+            });
+        }
+    }
+    for (&owner, &files) in charged {
+        if !seen.contains(&owner) {
+            findings.push(CheckFinding::QuotaUsageDrift {
+                owner,
+                usage: None,
+                charged: files,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The records `$MFTMirr` holds, as stored: as many as its data declares,

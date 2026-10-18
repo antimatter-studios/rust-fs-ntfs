@@ -4190,16 +4190,16 @@ fn drop_view_index_entries_io<T: BlockIo + ?Sized>(
 
 /// `$Q`'s quota control entry, under owner id 1, whose flags say whether
 /// the volume tracks quotas (Linux-NTFS documentation, `$Quota`).
-const QUOTA_CONTROL_OWNER: u32 = 1;
-const QUOTA_FLAG_TRACKING_ENABLED: u32 = 0x10;
+pub(crate) const QUOTA_CONTROL_OWNER: u32 = 1;
+pub(crate) const QUOTA_FLAG_TRACKING_ENABLED: u32 = 0x10;
 /// In a `$Q` entry's data: its flags, and the bytes its owner is charged.
-const QUOTA_DATA_FLAGS: usize = 0x04;
-const QUOTA_DATA_BYTES_USED: usize = 0x08;
+pub(crate) const QUOTA_DATA_FLAGS: usize = 0x04;
+pub(crate) const QUOTA_DATA_BYTES_USED: usize = 0x08;
 
 /// The owner a record is charged to and what it is charged, from its
 /// `$STANDARD_INFORMATION`; `None` for the 48-byte form, which has no quota
 /// fields.
-fn quota_charge_of(record: &[u8]) -> Option<(u32, u64)> {
+pub(crate) fn quota_charge_of(record: &[u8]) -> Option<(u32, u64)> {
     let loc = attr_io::find_attribute(record, AttrType::StandardInformation, None)?;
     let start = attr_io::resident_value_start(&loc)?;
     if (loc.resident_value_length? as usize) < SI_QUOTA + 8 {
