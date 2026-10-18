@@ -290,6 +290,7 @@ fn committed_corpus_replays_every_seed() {
         "basic-write-v1.json",
         "namespace-v1.json",
         "refusals-v1.json",
+        "geometry-c512-r4096-v1.json",
     ] {
         assert!(corpus.join(required).is_file(), "missing seed {required}");
     }
@@ -305,18 +306,28 @@ fn committed_corpus_replays_every_seed() {
         eprintln!("replaying {}", seed.display());
         let (operations, pinned) = generator::decode_regression(&fs::read(seed).unwrap()).unwrap();
         assert!(!operations.is_empty(), "empty seed {}", seed.display());
-        if let Some(pinned) = pinned {
-            eprintln!("pinned: {} after operation {}", pinned.kind, pinned.step);
-            assert_eq!(
-                pinned.geometry,
-                harness::geometry(),
-                "{} was captured on another image: recapture it",
-                seed.display()
-            );
-        }
+        // A pin replays on the image it was captured on; a plain seed on
+        // the default one.
+        let geometry = match pinned {
+            Some(pinned) => {
+                eprintln!("pinned: {} after operation {}", pinned.kind, pinned.step);
+                pinned.geometry
+            }
+            None => harness::geometry(),
+        };
         // Evidence lands in tmp/op-sequence-model/corpus-<file stem>/.
         let stem = seed.file_stem().unwrap().to_str().unwrap();
-        let mut h = harness::Harness::new(&format!("corpus-{stem}"));
+        let mut h = harness::Harness::on(&format!("corpus-{stem}"), &geometry);
+        assert_eq!(
+            fs::read_to_string(format!("tmp/op-sequence-model/corpus-{stem}/geometry.txt"))
+                .unwrap(),
+            format!(
+                "{}\t{}\t{}\t{}\n",
+                geometry.size, geometry.cluster, geometry.record, geometry.serial
+            ),
+            "{} must replay on the geometry it names",
+            seed.display()
+        );
         for operation in operations {
             h.step(operation);
         }
