@@ -83,26 +83,52 @@ pub fn fuzz_input(input: &[u8]) {
     };
     // Keep totals across completed inputs as well as the current prefix's
     // per-opcode accepted/refused counts when a later input crashes, and
-    // the geometries the formatter refused, as the model expects (#1025).
+    // the geometries the formatter refused, as the model expects (#1025),
+    // and every refusal by operation and reason (#1031).
     use generator::OPCODES;
-    static TOTALS: std::sync::Mutex<(harness::Counts, usize)> =
-        std::sync::Mutex::new((([0; OPCODES], [0; OPCODES]), 0));
-    let histogram = |totals: &(harness::Counts, usize)| {
+    type Totals = (harness::Counts, usize, BTreeMap<(String, String), usize>);
+    static TOTALS: std::sync::Mutex<Totals> =
+        std::sync::Mutex::new((([0; OPCODES], [0; OPCODES]), 0, BTreeMap::new()));
+    let histogram = |totals: &Totals| {
         fs::write(
             "tmp/op-sequence-model/explorer/refusal-histogram.json",
             serde_json::to_vec(&(&totals.0 .0, &totals.0 .1, totals.1)).unwrap(),
         )
         .unwrap();
+        let reasons: String = totals
+            .2
+            .iter()
+            .map(|((operation, reason), count)| format!("{operation}\t{reason}\t{count}\n"))
+            .collect();
+        fs::write(
+            "tmp/op-sequence-model/explorer/refusal-reasons.tsv",
+            reasons,
+        )
+        .unwrap();
     };
-    if harness::refused_geometry("explorer", &geometry).is_some() {
+    // The explorer passes the run's seed; geometry.txt is written beside it.
+    let seed = std::env::var("OPSEQ_FUZZ_SEED").unwrap_or_else(|_| "unset".into());
+    let finding = |input: &[u8]| {
         fs::write("tmp/op-sequence-model/explorer/input.bin", input).unwrap();
+        fs::write(
+            "tmp/op-sequence-model/explorer/seed.txt",
+            format!("{seed}\n"),
+        )
+        .unwrap();
+    };
+    if let Some(error) = harness::refused_geometry("explorer", &geometry) {
+        finding(input);
         let mut totals = TOTALS.lock().unwrap();
         totals.1 += 1;
+        *totals
+            .2
+            .entry(("format".into(), format!("{:?}", error.kind())))
+            .or_default() += 1;
         histogram(&totals);
         return;
     }
     let mut h = harness::Harness::on("explorer", &geometry);
-    fs::write("tmp/op-sequence-model/explorer/input.bin", input).unwrap();
+    finding(input);
     match replayed {
         Some(operations) => {
             for operation in operations {
@@ -118,6 +144,9 @@ pub fn fuzz_input(input: &[u8]) {
     for kind in 0..OPCODES {
         totals.0 .0[kind] += h.counts.0[kind];
         totals.0 .1[kind] += h.counts.1[kind];
+    }
+    for (key, count) in &h.reasons {
+        *totals.2.entry(key.clone()).or_default() += count;
     }
     histogram(&totals);
 }

@@ -23,6 +23,8 @@ with tempfile.TemporaryDirectory() as directory:
         assert "-seed=683" in command and "-max_total_time=2" in command
         assert "-timeout=90" in command and "-rss_limit_mb=1024" in command
         assert kwargs["timeout"] == 97
+        # Every finding names the seed of the run that found it (#1031).
+        assert kwargs["env"]["OPSEQ_FUZZ_SEED"] == "683"
         kwargs["stdout"].write(b"stat::number_of_executed_units: 4\n")
         kwargs["stdout"].flush()
         return subprocess.CompletedProcess(command, 0)
@@ -58,5 +60,5 @@ with tempfile.TemporaryDirectory() as directory:
         pass
     else:
         raise AssertionError("missing corpus passed")
-print("operation explorer: budgets, seed, exit status, timeout, execution count and missing corpus checked")
+print("operation explorer: budgets, seed handed to the target, exit status, timeout, execution count and missing corpus checked")
 PY

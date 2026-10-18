@@ -118,6 +118,10 @@ a third value counts inputs whose geometry the formatter refused (#1025). A
 cluster byte of 255 asks for a 128 KiB cluster: the model expects that
 refusal with the formatter's reason, which `refusals.tsv` records, and
 nothing runs.
+`refusal-reasons.tsv` breaks every refusal down by operation and reason (the
+error kind), one `operation<TAB>reason<TAB>count` row each across the run; a
+refused geometry is a `format` row. `seed.txt` names the explorer seed that
+found the input, beside its `geometry.txt` (#1031).
 Replay an uploaded raw input or `reproducer.json` from the repository root:
 
 ```sh
