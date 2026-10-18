@@ -6,6 +6,7 @@ pub mod acl;
 pub mod device;
 pub mod fs;
 pub mod fsck;
+mod import;
 pub mod inventory;
 pub mod mkfs;
 
