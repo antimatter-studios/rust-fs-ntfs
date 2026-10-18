@@ -1,0 +1,3 @@
+### Added
+
+- **`fsck.ntfs --apply PLAN --in-place --journal FILE` repairs a volume in place through an external journal (#922).** FILE is checked with `repair_journal::check_journal_location`, the volume opened with `PathIo::open_exclusive` and checked against the plan with `repair_plan::check_plan_source`, and only then is FILE created and the plan applied through `repair_journal::apply_in_place`. In-place is never the default: `--in-place` without `--journal`, `--journal` without `--in-place`, `--in-place` beside `--to`, `--dry-run` or `-y`, a refused journal location, a volume another process holds and a volume the plan does not fit are each refused with a message naming the reason, before anything is created or written.
