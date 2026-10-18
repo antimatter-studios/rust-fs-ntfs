@@ -58,9 +58,17 @@ cases() {
     done
 }
 
+# ledger ROW...: the disagreement ledger compare reads, one tab-separated
+# `case regenerate windows_chkdsk windows_reading assigned issue` per argument.
+ledger() {
+    printf 'case\tregenerate\twindows_chkdsk\twindows_reading\tassigned\tissue\n' >"$WORK/ledger.tsv"
+    for row in "$@"; do printf '%s\n' "$row" >>"$WORK/ledger.tsv"; done
+}
+ledger
+
 compare() {
     rm -rf "$WORK/out"
-    bash "$ROOT/scripts/slate-oracle.sh" compare "$WORK/cases.tsv" "$WORK/images" \
+    SLATE_LEDGER="$WORK/ledger.tsv" bash "$ROOT/scripts/slate-oracle.sh" compare "$WORK/cases.tsv" "$WORK/images" \
         "${CHECKER:-$WORK/checker}" "$WORK/out" "$1" >"$WORK/log" 2>&1
 }
 
@@ -125,6 +133,60 @@ compare 3
 rc=$?
 [ "$rc" -ne 0 ] && ok || bad "two cases against a floor of three: exit 0, want a failure"
 grep -q 'floor' "$WORK/log" && ok || bad "a run below its floor says so: $(cat "$WORK/log")"
+
+# The disagreement ledger (#693). A disagreement with a graded row is
+# reported with its row and does not fail; one with no row is new and fails;
+# a row Windows has not graded keeps the run red; a row whose disagreement no
+# longer reproduces is stale and fails until it is removed.
+gen='test-disks/build-slate-oracle-cases.ps1 -Case disagree -Minimize'
+graded="disagree"$'\t'"$gen"$'\t'"clean"$'\t'"Windows reads every path and stream"$'\t'"slate"$'\t'"NullMagic2/slate-ntfs#1"
+cases 'win-4k windows win-4k.img clean' 'disagree ours disagree.img clean'
+ledger "$graded"
+compare 2
+rc=$?
+[ "$rc" -eq 0 ] && ok || bad "a disagreement with a graded ledger row: exit $rc, want 0: $(cat "$WORK/log")"
+grep -q $'^disagree\t.*\trecorded$' "$WORK/out/verdicts.tsv" 2>/dev/null && ok ||
+    bad "a recorded disagreement is in the table as recorded: $(cat "$WORK/out/verdicts.tsv" 2>/dev/null)"
+grep 'disagree' "$WORK/log" | grep -q 'NullMagic2/slate-ntfs#1' && ok ||
+    bad "a recorded disagreement is reported with its ledger row: $(cat "$WORK/log")"
+
+ledger
+compare 2
+rc=$?
+[ "$rc" -ne 0 ] && ok || bad "a disagreement with no ledger row: exit 0, want a failure"
+grep -q 'not in the ledger' "$WORK/log" && ok || bad "a new disagreement says it is not in the ledger: $(cat "$WORK/log")"
+
+ledger "disagree"$'\t'"$gen"$'\t'"ungraded"$'\t-\t-\t-'
+compare 2
+rc=$?
+[ "$rc" -ne 0 ] && ok || bad "a ledger row Windows has not graded: exit 0, want a failure"
+grep -q 'not graded' "$WORK/log" && ok || bad "an ungraded row says Windows has not graded it: $(cat "$WORK/log")"
+
+ledger "disagree"$'\t'"$gen"$'\t'"ungraded"$'\t-\t'"slate"$'\t'"NullMagic2/slate-ntfs#1"
+compare 2
+[ "$?" -ne 0 ] && ok || bad "a row assigned without a Windows verdict: exit 0, want a failure"
+
+ledger "disagree"$'\t'"tests/fixtures/disagree.img"$'\t'"clean"$'\t'"reads"$'\t'"slate"$'\t'"NullMagic2/slate-ntfs#1"
+compare 2
+rc=$?
+[ "$rc" -ne 0 ] && ok || bad "a row regenerated from a committed image, not a generator: exit 0, want a failure"
+grep -q 'generator' "$WORK/log" && ok || bad "a row with no generator says so: $(cat "$WORK/log")"
+
+cases 'win-4k windows win-4k.img clean' 'ours-4k ours ours-4k.img clean'
+ledger "ours-4k"$'\t'"$gen"$'\t'"clean"$'\t'"reads"$'\t'"ours"$'\t'"#1"
+compare 2
+rc=$?
+[ "$rc" -ne 0 ] && ok || bad "a ledger row whose disagreement no longer reproduces: exit 0, want a failure"
+grep -q 'no longer' "$WORK/log" && ok || bad "a stale row says its disagreement no longer reproduces: $(cat "$WORK/log")"
+ledger "absent"$'\t'"$gen"$'\t'"clean"$'\t'"reads"$'\t'"ours"$'\t'"#1"
+compare 2
+[ "$?" -ne 0 ] && ok || bad "a ledger row for a case the run did not grade: exit 0, want a failure"
+ledger
+
+# The repository's own ledger is well formed: every row has a generator, and
+# every graded row a Windows verdict, a reading, an assignment and an issue.
+bash "$ROOT/scripts/slate-oracle.sh" ledger "$ROOT/tests/slate-disagreements.tsv" >"$WORK/log" 2>&1 && ok ||
+    bad "tests/slate-disagreements.tsv is a well-formed ledger: $(cat "$WORK/log")"
 
 # write: a stand-in for Slate's copy-only writer (#863), taking
 # `SOURCE NEW ROOT_FILENAME OFFSET EXPECTED_HEX REPLACEMENT_HEX` as
