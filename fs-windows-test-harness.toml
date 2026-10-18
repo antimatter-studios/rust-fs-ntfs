@@ -801,6 +801,22 @@ host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-quota-enforce.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -HeadroomBytes '{step.headroom_bytes}' -WriteBytes '{step.write_bytes}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
+[ops.win-link-attr-list]
+# Create the file at `path`, hard-link it `links` times into `link_dir`,
+# and read its base record after every link: which attributes Windows moves
+# out to extension records once the names outgrow the base record lands in
+# attr-list.txt. Fails when a link is refused or the base record holds no
+# $ATTRIBUTE_LIST at the end (#1069, part of #1067).
+#
+# Step fields:
+#   path         — file path inside the volume (e.g. "/many.txt")
+#   link_dir     — directory the links go in (e.g. "/e"), made if absent
+#   links        — how many links to make, named many-0.txt onwards
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-link-attr-list.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -LinkDir '{step.link_dir}' -Links '{step.links}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
 [ops.win-quota-verify]
 # Read each owner's quota usage as the volume holds it, then have Windows
 # count every file again (tracking off and on) and read it again: the two
