@@ -3300,3 +3300,296 @@ fn a_repair_journal_reads_back_to_its_last_whole_record_and_refuses_the_rest() {
         );
     }
 }
+
+/// Each capture's plan, loaded back from its file, with the SHA-256 of
+/// that file and the capture's bytes.
+#[cfg(feature = "plan-file")]
+fn saved_plan(k: &str, src: &str) -> (fs_ntfs::repair_plan::SavedPlan, [u8; 32], Vec<u8>) {
+    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    let pristine = std::fs::read(src).unwrap();
+    let mut v = RecordedRepair {
+        bytes: pristine.clone(),
+        units: Vec::new(),
+        open: Vec::new(),
+    };
+    let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+        .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+    let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+    let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+    assert!(
+        !loaded.units.is_empty(),
+        "{k}: a log holding work planned nothing"
+    );
+    (loaded, Sha256::digest(&saved).into(), pristine)
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn an_in_place_repair_reaches_what_windows_recovered_and_equals_the_copy_repair() {
+    // A plan applied in place through a journal (#919) must leave the
+    // device byte for byte where copy-repair leaves its target from the
+    // same plan, and so reach the files and metadata Windows' own restart
+    // reached. The journal lives in another directory than the device.
+    use fs_ntfs::block_io::PathIo;
+    use fs_ntfs::repair_journal::{apply_in_place, read_journal, JournalBinding, JournalRecord};
+    use fs_ntfs::repair_plan::copy_repair;
+    use std::path::Path;
+    for (k, log_end) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+
+        let target = format!("{src}.copy-repaired");
+        let _ = std::fs::remove_file(&target);
+        copy_repair(&loaded, Path::new(&src), Path::new(&target))
+            .unwrap_or_else(|e| panic!("{k}: copy-repair: {e}"));
+
+        let device = format!("{src}.in-place");
+        std::fs::write(&device, &pristine).unwrap();
+        let journal_dir =
+            std::env::temp_dir().join(format!("rust-fs-ntfs-in-place-{}-{k}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&journal_dir);
+        std::fs::create_dir_all(&journal_dir).unwrap();
+        let journal = journal_dir.join("repair.journal");
+        std::fs::write(&journal, b"").unwrap();
+        {
+            let mut dev = PathIo::open_rw(Path::new(&device)).unwrap();
+            let mut jrn = PathIo::open_rw(&journal).unwrap();
+            apply_in_place(&loaded, plan_sha256, &mut dev, &mut jrn)
+                .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+        }
+        assert!(
+            std::fs::read(&device).unwrap() == std::fs::read(&target).unwrap(),
+            "{k}: the in-place repair left other bytes than copy-repair's target"
+        );
+        let binding = JournalBinding {
+            plan_sha256,
+            source_size: loaded.source_size,
+            volume_serial: loaded.volume_serial,
+        };
+        let read = read_journal(&std::fs::read(&journal).unwrap(), &binding)
+            .unwrap_or_else(|e| panic!("{k}: the journal reads back as {e}"));
+        let applied = read
+            .records
+            .iter()
+            .filter(|r| matches!(r, JournalRecord::Applied { .. }))
+            .count();
+        assert_eq!(
+            applied,
+            loaded.units.len(),
+            "{k}: the journal marks {applied} of {} units applied",
+            loaded.units.len()
+        );
+        assert_eq!(read.torn, None, "{k}: the journal ends in a torn record");
+
+        let want = manifest(k);
+        let got = walk(&device);
+        assert!(
+            got == want,
+            "{k}: {} files after the in-place repair, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+        let recovered = unpack(&format!("windows-interrupted-{k}.recovered"));
+        oracle::same_metadata_as_windows(
+            k,
+            &Image::read(&src),
+            &Image::read(&device),
+            &Image::read(&recovered),
+            log_end,
+        );
+        std::fs::remove_file(&recovered).unwrap();
+        std::fs::remove_dir_all(&journal_dir).unwrap();
+        std::fs::remove_file(&device).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
+/// What reached a device or a journal, in the order it reached either.
+#[cfg(feature = "plan-file")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IoEvent {
+    Write,
+    Sync,
+    Read,
+}
+
+/// Every write, sync and read that reached a recording pair, tagged
+/// `true` for the journal.
+#[cfg(feature = "plan-file")]
+type IoLog = std::rc::Rc<std::cell::RefCell<Vec<(bool, IoEvent)>>>;
+
+/// One side of a recording pair: in-memory bytes, and every write, sync
+/// and read pushed to a log shared with the other side, tagged
+/// `journal` or not. `drop_write` names one write, by its order among
+/// this side's writes, that is recorded but never lands.
+#[cfg(feature = "plan-file")]
+struct RecordingIo {
+    bytes: Vec<u8>,
+    journal: bool,
+    log: IoLog,
+    writes: usize,
+    drop_write: Option<usize>,
+}
+
+#[cfg(feature = "plan-file")]
+impl fs_ntfs::block_io::BlockIo for RecordingIo {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        let at = offset as usize;
+        let there = self
+            .bytes
+            .get(at..at + buf.len())
+            .ok_or("read past the end")?;
+        buf.copy_from_slice(there);
+        self.log.borrow_mut().push((self.journal, IoEvent::Read));
+        Ok(())
+    }
+
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        let at = offset as usize;
+        if self.journal && self.bytes.len() < at + buf.len() {
+            self.bytes.resize(at + buf.len(), 0);
+        }
+        if self.drop_write != Some(self.writes) {
+            self.bytes
+                .get_mut(at..at + buf.len())
+                .ok_or("write past the end")?
+                .copy_from_slice(buf);
+        }
+        self.writes += 1;
+        self.log.borrow_mut().push((self.journal, IoEvent::Write));
+        Ok(())
+    }
+
+    fn size(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn sync(&mut self) -> Result<(), String> {
+        self.log.borrow_mut().push((self.journal, IoEvent::Sync));
+        Ok(())
+    }
+}
+
+#[cfg(feature = "plan-file")]
+fn recording_pair(pristine: &[u8], drop_write: Option<usize>) -> (RecordingIo, RecordingIo, IoLog) {
+    let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let device = RecordingIo {
+        bytes: pristine.to_vec(),
+        journal: false,
+        log: log.clone(),
+        writes: 0,
+        drop_write,
+    };
+    let journal = RecordingIo {
+        bytes: Vec::new(),
+        journal: true,
+        log: log.clone(),
+        writes: 0,
+        drop_write: None,
+    };
+    (device, journal, log)
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn an_in_place_repair_makes_each_unit_durable_in_the_journal_before_writing_it() {
+    // For every unit (#919): the device is checked, the intent record is
+    // written, flushed and read back from the journal, and only then does
+    // the unit reach the device; the device is flushed and every write read
+    // back before the applied record is written and flushed; and no device
+    // write falls between units. The expected order is built here from the
+    // plan, one unit at a time, and must be exactly what reached the pair.
+    use fs_ntfs::repair_journal::apply_in_place;
+    use IoEvent::{Read, Sync, Write};
+    const J: bool = true;
+    const D: bool = false;
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+        let (mut device, mut journal, log) = recording_pair(&pristine, None);
+        apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+            .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+
+        let mut want = vec![(J, Write), (J, Sync), (J, Read)];
+        for unit in &loaded.units {
+            let n = unit.writes.len();
+            want.extend(std::iter::repeat_n((D, Read), n));
+            want.extend([(J, Write), (J, Sync), (J, Read)]);
+            want.extend(std::iter::repeat_n((D, Write), n));
+            want.push((D, Sync));
+            want.extend(std::iter::repeat_n((D, Read), n));
+            want.extend([(J, Write), (J, Sync)]);
+        }
+        let got = log.borrow().clone();
+        let first = got.iter().zip(&want).position(|(a, b)| a != b);
+        assert!(
+            got == want,
+            "{k}: {} events reached the device and journal, {} expected; first difference at \
+             event {first:?}",
+            got.len(),
+            want.len()
+        );
+        let mut expected = pristine.clone();
+        apply_plan(k, &mut expected, &loaded.units);
+        assert!(
+            device.bytes == expected,
+            "{k}: the device holds other bytes than the plan leaves"
+        );
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn an_in_place_repair_stops_at_a_unit_the_device_reads_back_wrong_and_never_marks_it_applied() {
+    // A device that drops one write (#919) reads that unit back different
+    // from its redo: the apply stops there, naming the unit and the range,
+    // and the journal holds the unit's intent but no applied record for it.
+    use fs_ntfs::repair_journal::{apply_in_place, read_journal, JournalBinding, JournalRecord};
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+        let last = loaded.units.len() - 1;
+        let first_of_last: usize = loaded.units[..last].iter().map(|u| u.writes.len()).sum();
+        let dropped = &loaded.units[last].writes[0];
+        let (start, end) = (dropped.offset, dropped.offset + dropped.after.len() as u64);
+        assert!(
+            dropped.before != dropped.after,
+            "{k}: unit {last}'s first write changes nothing, so dropping it proves nothing"
+        );
+        let (mut device, mut journal, _) = recording_pair(&pristine, Some(first_of_last));
+        match apply_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
+            Ok(()) => panic!("{k}: unit {last}'s first write was dropped, the apply went ahead"),
+            Err(e) => {
+                let e = e.to_string();
+                assert!(
+                    e.contains(&format!("unit {last} ")) && e.contains(&format!("{start}..{end}")),
+                    "{k}: a dropped write refused as {e}, not naming unit {last} and bytes \
+                     {start}..{end}"
+                );
+            }
+        }
+        let binding = JournalBinding {
+            plan_sha256,
+            source_size: loaded.source_size,
+            volume_serial: loaded.volume_serial,
+        };
+        let read = read_journal(&journal.bytes, &binding)
+            .unwrap_or_else(|e| panic!("{k}: the journal reads back as {e}"));
+        let last_u32 = last as u32;
+        assert!(
+            matches!(read.records.last(), Some(JournalRecord::Intent { unit, .. }) if *unit == last_u32),
+            "{k}: the journal does not end at unit {last}'s intent: {:?}",
+            read.records.last().map(std::mem::discriminant)
+        );
+        assert!(
+            !read
+                .records
+                .iter()
+                .any(|r| matches!(r, JournalRecord::Applied { unit } if *unit == last_u32)),
+            "{k}: unit {last} is marked applied though the device read it back wrong"
+        );
+        std::fs::remove_file(&src).unwrap();
+    }
+}
