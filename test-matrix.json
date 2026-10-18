@@ -2740,6 +2740,91 @@
       "image": "nfs-win-format-win-quota-mac-write-win-chkdsk.img",
       "_notes": "Windows turns quota tracking on and writes four files, each charged to its owner in $Extend\\$Quota:$Q. This crate grows one, shrinks one, cuts one to a single byte and moves a resident one out of its record, each a change of allocation its owner has to be charged. chkdsk grades the volume, and Windows then counts every file again from scratch: each owner's usage as the volume held it must be what that count gives (#675, part of #510)."
     },
+    "win-format-win-quota-mac-create-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "QUOTA",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-mkdir",
+          "path": "/owned",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-content",
+          "path": "/owned/existing.txt",
+          "content": "existing",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-quota-track",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/owned",
+          "basename": "created.txt"
+        },
+        {
+          "op": "mac-mkdir",
+          "parent": "/owned",
+          "basename": "created-dir"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/owned/created-dir",
+          "basename": "nested.txt"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "created-in-root.txt"
+        },
+        {
+          "op": "mac-write-bytes",
+          "path": "/owned/created.txt",
+          "bytes": "70000"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-quota-verify",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-win-format-win-quota-mac-create-win-chkdsk.img",
+      "_notes": "Windows makes a directory and a file in it, then turns quota tracking on, charging each to its owner in $Extend\\$Quota:$Q. This crate creates a file, a directory and a file inside that directory in the charged directory, a file in the root, and then grows the created file out of its record. Each new record has to be charged to its owner, as Windows charges the files it creates. chkdsk grades the volume, and Windows then counts every file again from scratch: each owner's usage as the volume held it must be what that count gives (#848, part of #676)."
+    },
     "win-format-win-usn-journal-mac-write-win-usn-retired-chkdsk": {
       "status": "pending",
       "volume_params": {
