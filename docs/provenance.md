@@ -144,6 +144,10 @@ lowest VCN or instance. The Windows-native fixture job runs `check_io`
 on each copy, then Windows `chkdsk` on the same bytes, requiring damage
 for each changed copy and a clean verdict for the untouched copy. Both
 checkers' findings are retained in `attribute-list-entry-checks`.
+The reverse check (#822) also removes one entry or every entry naming one
+extension record, retaining the attributes themselves unchanged. The same
+Windows job requires damage on these exact copies and retains both verdicts;
+the untouched Windows volume remains the clean control.
 
 The listed-directory cycle (#818) uses Windows' own enumeration, EA query,
 stream readback and `chkdsk` to grade the grown and folded indexes. Directory
