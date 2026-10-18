@@ -322,6 +322,18 @@ host = "host"
 command = "{binary} ls -t {image_dir}/{run_id}/{scenario.image}"
 expect_exit = 0
 
+[ops.mac-assert-directory-layout]
+# Refuse a vacuous directory cycle: a real list, extensions and index shape.
+host = "host"
+command = "{binary} directory-layout {image_dir}/{run_id}/{scenario.image} {step.path} {step.layout}"
+expect_exit = 0
+
+[ops.win-verify-listed-directories]
+# Enumerate every surviving name and reject any missing, extra or stale name.
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-verify-listed-directories.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
 [ops.mac-set-dirty]
 # Sets the volume-dirty flag in the image's $Volume attribute.
 # Used by dirty-volume scenarios that exercise chkdsk's repair
