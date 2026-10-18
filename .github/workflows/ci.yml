@@ -1012,10 +1012,11 @@ jobs:
           # contracts, plus two native EA CLI JSON contracts in #658, plus
           # the #910 `fsck.ntfs --apply --to` CLI contract, plus the #922
           # `fsck.ntfs --apply --in-place --journal` CLI contract, plus four
-          # #948 journal device-relationship contracts.
-          echo "tests executed: $n (floor 1385)"
-          if [ "$n" -lt 1385 ]; then
-              echo "::error::only $n tests executed, floor is 1385 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680, eight generator contracts in #681, four image-harness contracts in #682, one recursive-walk fault contract in #644, three named-stream contracts in #731, three EA contracts in #732 two CLI EA JSON contracts in #658 one fsck --apply CLI contract in #910 one fsck --apply --in-place CLI contract in #922 and four journal device-relationship contracts in #948. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
+          # #948 journal device-relationship contracts, plus the #906
+          # `fsck.ntfs --dry-run --plan` CLI contract.
+          echo "tests executed: $n (floor 1386)"
+          if [ "$n" -lt 1386 ]; then
+              echo "::error::only $n tests executed, floor is 1386 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680, eight generator contracts in #681, four image-harness contracts in #682, one recursive-walk fault contract in #644, three named-stream contracts in #731, three EA contracts in #732 two CLI EA JSON contracts in #658 one fsck --apply CLI contract in #910 one fsck --apply --in-place CLI contract in #922 four journal device-relationship contracts in #948 and one fsck --dry-run --plan CLI contract in #906. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
               exit 1
           fi
       - run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness -- -D warnings

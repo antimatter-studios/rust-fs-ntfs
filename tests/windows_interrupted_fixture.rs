@@ -4530,6 +4530,158 @@ fn fsck_apply_copy_repairs_a_read_only_capture_into_a_new_target() {
 
 #[cfg(feature = "cli")]
 #[test]
+fn fsck_dry_run_plan_writes_the_plan_to_an_external_file_never_its_target() {
+    // `fsck.ntfs --dry-run --plan FILE SOURCE` (#906): the dry run's plan is
+    // saved to FILE, never onto SOURCE. The capture is made read-only, so a
+    // write to it would fail, and its SHA-256 is checked after every run.
+    // The run exits as `-n` does, FILE loads back through the library, and
+    // its units are the report's plan. `--plan` naming the capture, by path
+    // or hard link, naming a file that exists, or without `--dry-run`, is
+    // refused naming its reason, and nothing is written.
+    use fs_ntfs::repair_plan::load_plan;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    type Writes = Vec<Vec<(u64, u64, String, String)>>;
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine_sha = hex_sha256(&std::fs::read(&src).unwrap());
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let unchanged = |what: &str| {
+            assert_eq!(
+                hex_sha256(&std::fs::read(&src).unwrap()),
+                pristine_sha,
+                "{k}: {what} changed the capture"
+            );
+        };
+
+        let (check_code, said) = fsck_cli(&["-n", &src]);
+        unchanged("-n");
+        let plan_file = format!("{src}.plan");
+        let _ = std::fs::remove_file(&plan_file);
+        let out = Command::new(env!("CARGO_BIN_EXE_rust-fs-ntfs"))
+            .args(["fsck", "--dry-run", "--plan", &plan_file, &src])
+            .output()
+            .expect("spawn fsck.ntfs");
+        let code = out.status.code().expect("exit status");
+        assert_eq!(
+            code,
+            check_code,
+            "{k}: --dry-run --plan exited {code}, -n {check_code} ({said}): {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        unchanged("--dry-run --plan");
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{k}: the report is not JSON: {e}"));
+        let reported: Writes = report["plan"]["units"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{k}: no plan in the report: {report}"))
+            .iter()
+            .map(|unit| {
+                unit["writes"]
+                    .as_array()
+                    .expect("a unit's writes")
+                    .iter()
+                    .map(|w| {
+                        (
+                            w["offset"].as_u64().expect("offset"),
+                            w["length"].as_u64().expect("length"),
+                            w["before_sha256"].as_str().expect("before").to_string(),
+                            w["after_sha256"].as_str().expect("after").to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        let saved = load_plan(&std::fs::read(&plan_file).unwrap())
+            .unwrap_or_else(|e| panic!("{k}: the plan file does not load: {e}"));
+        let loaded: Writes = saved
+            .units
+            .iter()
+            .map(|unit| {
+                unit.writes
+                    .iter()
+                    .map(|w| {
+                        (
+                            w.offset,
+                            w.after.len() as u64,
+                            hex_sha256(&w.before),
+                            hex_sha256(&w.after),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        assert!(
+            !loaded.is_empty(),
+            "{k}: a capture holding work saved no units"
+        );
+        assert_eq!(
+            loaded, reported,
+            "{k}: the plan file is not the report's plan"
+        );
+        assert_eq!(
+            saved.source_size,
+            std::fs::metadata(&src).unwrap().len(),
+            "{k}: the plan file is bound to another size"
+        );
+
+        // Each refusal names its reason, exits non-zero and writes nothing.
+        let refused = format!("{src}.refused");
+        let link = format!("{src}.link");
+        let _ = std::fs::remove_file(&refused);
+        let _ = std::fs::remove_file(&link);
+        std::fs::hard_link(&src, &link).unwrap();
+        let cases: [(&str, Vec<&str>, &str); 4] = [
+            (
+                "--plan naming the capture's path",
+                vec!["--dry-run", "--plan", &src, &src],
+                "is the volume",
+            ),
+            (
+                "--plan naming the capture through a hard link",
+                vec!["--dry-run", "--plan", &link, &src],
+                "is the volume",
+            ),
+            (
+                "--plan naming a file that exists",
+                vec!["--dry-run", "--plan", &plan_file, &src],
+                "already exists",
+            ),
+            (
+                "--plan without --dry-run",
+                vec!["--plan", &refused, &src],
+                "--dry-run",
+            ),
+        ];
+        let kept = hex_sha256(&std::fs::read(&plan_file).unwrap());
+        for (what, args, reason) in cases {
+            let (code, said) = fsck_cli(&args);
+            assert_ne!(code, 0, "{k}: {what} went ahead: {said}");
+            assert!(
+                said.contains(reason),
+                "{k}: {what} refused without naming '{reason}': {said}"
+            );
+            unchanged(what);
+            assert!(
+                !Path::new(&refused).exists(),
+                "{k}: {what} created {refused}"
+            );
+        }
+        assert_eq!(
+            hex_sha256(&std::fs::read(&plan_file).unwrap()),
+            kept,
+            "{k}: a refused --plan changed the existing plan file"
+        );
+
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_file(&plan_file).unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
+#[cfg(feature = "cli")]
+#[test]
 fn fsck_apply_in_place_repairs_a_copy_through_an_external_journal() {
     // `fsck.ntfs --apply PLAN --in-place --journal FILE TARGET` (#922): the
     // journal location is checked, TARGET opened exclusively and checked
