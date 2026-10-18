@@ -37,7 +37,7 @@ The file is a 32-byte header followed by records, back to back.
 | Offset | Size | Field |
 |---|---|---|
 | 0 | 8 | Magic: the ASCII bytes `NTRESCUE` |
-| 8 | 4 | Version: `1` |
+| 8 | 4 | Version: `2` |
 | 12 | 4 | Sector size of the scan: a power of two from 512 to 4096 |
 | 16 | 8 | Source length in bytes |
 | 24 | 4 | Reserved: zero |
@@ -50,17 +50,36 @@ The file is a 32-byte header followed by records, back to back.
 | 0 | 8 | Source offset of the span |
 | 8 | 8 | Span length in bytes, not zero |
 | 16 | 4 | Kind: `1` data, `2` unreadable |
-| 20 | 4 | CRC-32 of bytes 0 to 19 of this header, then the payload |
-| 24 | length (data only) | The source's bytes over the span |
+| 20 | 4 | Class of the span's space (below) |
+| 24 | 4 | CRC-32 of bytes 0 to 23 of this header, then the payload |
+| 28 | length (data only) | The source's bytes over the span |
 
 An unreadable record has no payload. Every span is a whole number of sectors,
 except one that ends at the end of a source whose length is not.
 
+A record's class says which space of the source its span was in, and a span
+never crosses two classes. The scan's report counts archived and unreadable
+bytes per class (`ScanReport::class`).
+
+| Class | Space |
+|---|---|
+| `0` | Unclassified: the scan knew no layout for the span |
+| `1` | NTFS metadata: the boot sector and its backup, `$MFT`, `$MFTMirr` |
+| `2` | Clusters `$Bitmap` marks allocated |
+| `3` | Clusters `$Bitmap` marks free |
+| `4` | The tail past the volume's last whole cluster |
+
+A linear scan writes every record as class `0`. Reading the volume's layout
+to order the scan by class is #969.
+
+Version `1`, the layout before classes, had a 24-byte record header with no
+class field. A version-2 reader refuses it rather than misreading its records.
+
 ## What a reader must refuse
 
-- A magic other than `NTRESCUE`, a version other than `1`, nonzero reserved
+- A magic other than `NTRESCUE`, a version other than `2`, nonzero reserved
   bytes, or a header whose CRC-32 does not match.
-- A record of any other kind, or with a zero length.
+- A record of any other kind or class, or with a zero length.
 - A record whose CRC-32 does not match. A complete record with a bad checksum
   is damage, not an interruption.
 - Records that do not tile the source in order: each starts where the one
