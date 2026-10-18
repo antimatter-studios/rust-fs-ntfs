@@ -132,6 +132,14 @@ rather than discarding it.
 
 ## What verifies each layout
 
+The listed-directory cycle (#818) uses Windows' own enumeration, EA query,
+stream readback and `chkdsk` to grade the grown and folded indexes. Directory
+stream readback uses the documented [FindFirstStreamW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirststreamw),
+[WIN32_FIND_STREAM_DATA](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/ns-fileapi-win32_find_stream_data)
+and [CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
+APIs because Windows PowerShell 5.1 does not expose directory streams through
+`Get-Item -Stream`. No filesystem implementation source was consulted.
+
 The oracle is Windows. The tests named `*_windows_oracle` or
 `*_windows_capture`, `windows_interrupted_fixture`, and the `chkdsk` matrix
 compare this crate's reading or writing with Windows' own bytes or verdict.
