@@ -465,3 +465,38 @@ fn truncating_the_unnamed_stream_in_an_extension_record_resizes_it_there() {
     list_is_true(&img, rec);
     truncates(&img, rec);
 }
+
+/// Truncate the unnamed stream of a listed file, in three clusters, to
+/// zero: every cluster goes back to the volume bitmap, as Windows frees
+/// them all, and the stream grows again afterwards (#795).
+fn truncate_to_zero_frees_every_cluster(img: &str, rec: u64) {
+    let mut model = b"contents".to_vec();
+    truncate_and_check(img, rec, &mut model, 9000);
+    write_at_and_check(img, rec, &mut model, 0, &pattern(9000));
+    let before = free_clusters(img);
+    truncate_and_check(img, rec, &mut model, 0);
+    assert_eq!(
+        free_clusters(img),
+        before + 3,
+        "truncating /f from three clusters to zero did not give all three back"
+    );
+    truncate_and_check(img, rec, &mut model, 700);
+}
+
+/// A truncate to zero of the unnamed `$DATA` of a listed file whose stream
+/// is in its base record frees every cluster the stream held (#795).
+#[test]
+fn truncating_the_unnamed_stream_of_a_listed_file_to_zero_frees_every_cluster() {
+    let (img, rec) = volume_with_a_listed_file("trunc0_base");
+    truncate_to_zero_frees_every_cluster(&img, rec);
+}
+
+/// A truncate to zero of a Windows-made file whose unnamed `$DATA` lives in
+/// an extension record frees every cluster the stream held (#795).
+#[test]
+fn truncating_the_unnamed_stream_in_an_extension_record_to_zero_frees_every_cluster() {
+    let (img, rec) = volume_with_a_listed_file("trunc0_ext");
+    move_unnamed_data_to_extension(&img, rec);
+    list_is_true(&img, rec);
+    truncate_to_zero_frees_every_cluster(&img, rec);
+}
