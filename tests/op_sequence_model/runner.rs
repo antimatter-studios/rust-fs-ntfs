@@ -81,6 +81,26 @@ pub fn fuzz_input(input: &[u8]) {
             (None, geometry, rest)
         }
     };
+    // Keep totals across completed inputs as well as the current prefix's
+    // per-opcode accepted/refused counts when a later input crashes, and
+    // the geometries the formatter refused, as the model expects (#1025).
+    use generator::OPCODES;
+    static TOTALS: std::sync::Mutex<(harness::Counts, usize)> =
+        std::sync::Mutex::new((([0; OPCODES], [0; OPCODES]), 0));
+    let histogram = |totals: &(harness::Counts, usize)| {
+        fs::write(
+            "tmp/op-sequence-model/explorer/refusal-histogram.json",
+            serde_json::to_vec(&(&totals.0 .0, &totals.0 .1, totals.1)).unwrap(),
+        )
+        .unwrap();
+    };
+    if harness::refused_geometry("explorer", &geometry).is_some() {
+        fs::write("tmp/op-sequence-model/explorer/input.bin", input).unwrap();
+        let mut totals = TOTALS.lock().unwrap();
+        totals.1 += 1;
+        histogram(&totals);
+        return;
+    }
     let mut h = harness::Harness::on("explorer", &geometry);
     fs::write("tmp/op-sequence-model/explorer/input.bin", input).unwrap();
     match replayed {
@@ -94,19 +114,10 @@ pub fn fuzz_input(input: &[u8]) {
         }
     }
     h.finish();
-    // Keep totals across completed inputs as well as the current prefix's
-    // per-opcode accepted/refused counts when a later input crashes.
-    use generator::OPCODES;
-    static TOTALS: std::sync::Mutex<harness::Counts> =
-        std::sync::Mutex::new(([0; OPCODES], [0; OPCODES]));
     let mut totals = TOTALS.lock().unwrap();
     for kind in 0..OPCODES {
-        totals.0[kind] += h.counts.0[kind];
-        totals.1[kind] += h.counts.1[kind];
+        totals.0 .0[kind] += h.counts.0[kind];
+        totals.0 .1[kind] += h.counts.1[kind];
     }
-    fs::write(
-        "tmp/op-sequence-model/explorer/refusal-histogram.json",
-        serde_json::to_vec(&*totals).unwrap(),
-    )
-    .unwrap();
+    histogram(&totals);
 }
