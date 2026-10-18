@@ -35,6 +35,15 @@
 //! SHA-256 of the bytes there before it and of the bytes it leaves. The
 //! target is opened read-only, as with `-n`, and the exit status is `-n`'s.
 //!
+//! WHAT `--dry-run --plan FILE` SAVES: the dry run's plan as a plan file
+//! (`fs_ntfs::repair_plan::save_plan`, #906), bound to the volume's size
+//! and serial number, for `--apply` to load. FILE is a new file outside the
+//! volume: FILE naming the volume itself (by path, or the same device and
+//! inode), FILE naming anything that exists, and `--plan` without
+//! `--dry-run` are refused before the volume is opened, and nothing is
+//! written. A plan the repair refuses saves no file and is an operational
+//! error.
+//!
 //! WHAT `--apply PLAN --to TARGET` DOES: loads a plan file and
 //! copy-repairs the volume into a new TARGET through
 //! `fs_ntfs::repair_plan::copy_repair` (#910): the volume is opened
@@ -68,7 +77,7 @@ use fs_ntfs::fsck::{
     LogfileState,
 };
 use fs_ntfs::repair_plan::{
-    check_plan_source, copy_repair, load_plan, plan_fsck_io, CopyRepairError, RepairPlan,
+    check_plan_source, copy_repair, load_plan, plan_fsck_io, save_plan, CopyRepairError, RepairPlan,
 };
 use sha2::{Digest, Sha256};
 
@@ -136,7 +145,8 @@ fn command() -> Cmd {
              --dry-run works out every write -y would make (--clear-dirty's too, when \
              given) and makes none: TARGET is opened read-only. The report's plan lists \
              them in units, each the writes between two flushes, each by offset, length \
-             and the SHA-256 of the bytes before and after it.\n\n\
+             and the SHA-256 of the bytes before and after it. --plan FILE also saves \
+             the plan to FILE, a new file outside the volume, for --apply to load.\n\n\
              The dirty flag is left set for Windows' chkdsk, which runs at the next mount \
              of a volume that carries it: it asks for a check of the whole volume, which \
              this is not. --clear-dirty with -y clears it once the log holds nothing to \
@@ -182,6 +192,17 @@ fn command() -> Cmd {
                 .help("Report every write -y would make, and make none: open read-only, as -n")
                 .action(ArgAction::SetTrue)
                 .conflicts_with_all(["no", "yes", "preen"]),
+        )
+        .arg(
+            Arg::new("plan_file")
+                .long("plan")
+                .value_name("FILE")
+                .help(
+                    "With --dry-run, save the plan to FILE for --apply; it must not exist \
+                     and must not be the volume",
+                )
+                .value_parser(value_parser!(OsString))
+                .conflicts_with("apply"),
         )
         .arg(
             Arg::new("apply")
@@ -269,6 +290,7 @@ fn command() -> Cmd {
              fsck.ntfs -fn disk.img             the same, as fsck(8) front-ends spell it\n  \
              fsck.ntfs -y disk.img              replay $LogFile; the dirty flag stays set\n  \
              fsck.ntfs --dry-run disk.img       every write -y would make; none is made\n  \
+             fsck.ntfs --dry-run --plan plan disk.img   and save them to the file plan\n  \
              fsck.ntfs -y --clear-dirty disk.img   and clear the dirty flag too\n  \
              fsck.ntfs --apply plan --to new.img disk.img   copy-repair into new.img\n  \
              fsck.ntfs --apply plan --in-place --journal /other/j disk.img   in place\n  \
@@ -303,6 +325,10 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         )
         .with_code(USAGE));
     }
+    let plan_file = matches.get_one::<OsString>("plan_file").map(Path::new);
+    if let Some(file) = plan_file {
+        check_plan_file(Path::new(target), file, dry_run)?;
+    }
     let name = target.to_string_lossy().into_owned();
     let operational = |e: CliError| e.with_code(OPERATIONAL);
 
@@ -314,6 +340,10 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
     // writes nothing (#709): the device is read-only.
     let plan =
         dry_run.then(|| plan_fsck_io(&mut dev, FsckOptions { clear_dirty }).map_err(String::from));
+    // Then saved to its own new file, never onto the volume (#906).
+    if let (Some(file), Some(plan)) = (plan_file, &plan) {
+        save_plan_file(&name, file, plan, &mut dev)?;
+    }
 
     // The log first: replayed in full, or not touched (#137).
     let mut replay_refused = None;
@@ -451,6 +481,9 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
     if let Some(plan) = &plan {
         fields.push(("plan", plan_json(plan)));
     }
+    if let Some(file) = plan_file {
+        fields.push(("plan_file", Json::from(file.display().to_string().as_str())));
+    }
     let report = Json::object(fields);
 
     let mut text = vec![match code {
@@ -473,9 +506,68 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         Some(Err(why)) => text.push(format!("  plan refused, nothing would be written: {why}")),
         None => {}
     }
+    if let Some(file) = plan_file {
+        text.push(format!("  plan saved to '{}'", file.display()));
+    }
     Ok(Outcome::report(report)
         .with_text(text.join("\n"))
         .with_code(code))
+}
+
+/// Refuse `--plan FILE` before the volume is opened (#906): without
+/// `--dry-run`, naming `target` itself, or naming anything that exists.
+fn check_plan_file(target: &Path, file: &Path, dry_run: bool) -> Result<(), CliError> {
+    let shown = file.display();
+    if !dry_run {
+        return Err(CliError::usage(format!(
+            "--plan '{shown}' saves a dry run's plan, so it needs --dry-run: nothing is written \
+             without it"
+        ))
+        .with_code(USAGE));
+    }
+    if file == target || same_file(file, target) {
+        return Err(CliError::failed(format!(
+            "--plan '{shown}' is the volume itself: the plan file goes outside the volume it \
+             plans for, so nothing is written"
+        ))
+        .with_code(OPERATIONAL));
+    }
+    if file.symlink_metadata().is_ok() {
+        return Err(CliError::failed(format!(
+            "--plan '{shown}' already exists: the plan is saved only to a new file, so nothing \
+             is written"
+        ))
+        .with_code(OPERATIONAL));
+    }
+    Ok(())
+}
+
+/// Save a dry run's `plan`, made from `dev`, to the new file `file`: a plan
+/// the repair refuses saves nothing and is an operational error.
+fn save_plan_file<T: fs_ntfs::block_io::BlockIo + ?Sized>(
+    name: &str,
+    file: &Path,
+    plan: &Result<RepairPlan, String>,
+    dev: &mut T,
+) -> Result<(), CliError> {
+    use std::io::Write;
+    let shown = file.display();
+    let failed = |why: String| CliError::failed(why).with_code(OPERATIONAL);
+    let plan = plan.as_ref().map_err(|why| {
+        failed(format!(
+            "{name}: plan refused, no plan file written to '{shown}': {why}"
+        ))
+    })?;
+    let bytes = save_plan(plan, dev)
+        .map_err(|e| failed(format!("{name}: save the plan to '{shown}': {e}")))?;
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(file)
+        .map_err(|e| failed(format!("--plan '{shown}': {e}")))?;
+    out.write_all(&bytes)
+        .and_then(|()| out.sync_all())
+        .map_err(|e| failed(format!("--plan '{shown}': write: {e}")))
 }
 
 /// Copy-repair `source` into a new `target` by the plan file at `plan`
