@@ -96,6 +96,10 @@ class field. A version-2 reader refuses it rather than misreading its records.
 
 A file that ends partway through a record header or payload was interrupted
 while that record was being written. Everything before that record stands.
+`rescue::read_archive` reads an archive back this way: it returns the whole
+records, where each starts in the archive, and the bytes of the torn record
+it left out, and refuses everything listed above except the tiling rule,
+which a resumed archive's history records will relax.
 Resuming such an archive is #722; refusing a foreign or changed source on
 resume is #723.
 
