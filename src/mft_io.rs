@@ -161,7 +161,7 @@ pub fn read_boot_params_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BootParams
     Ok(params)
 }
 
-fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, Error> {
+pub(crate) fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, Error> {
     let bytes_per_sector = read_u16_le(boot, BOOT_OFF_BYTES_PER_SECTOR)
         .ok_or_else(|| Error::io("boot sector too short to read bytes_per_sector"))?;
     if !is_power_of_two(bytes_per_sector) {
