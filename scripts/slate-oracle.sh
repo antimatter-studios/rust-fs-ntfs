@@ -14,12 +14,25 @@
 #       SLATE_URL, SLATE_REF and SLATE_LICENSE_SHA256 in chores.yml, or in the
 #       file $SLATE_PINS names.
 #
-#   slate-oracle.sh build SRC
-#       Build `ntfs-chkdsk` from SRC's tools crate (src/tools, MIT), --locked
-#       and --release, at this repository's pinned toolchain, and print the
-#       binary's path. Only the MIT crates are built: ntfs_utils (MIT AND
-#       GPL-2.0-or-later), kernel/ and kernel/patches/ are never compiled, and
-#       nothing here links Slate into this crate.
+#   slate-oracle.sh build SRC [BIN]
+#       Build BIN (`ntfs-chkdsk` unless named; `ntfs-write-lab` is the other)
+#       from SRC's tools crate (src/tools, MIT), --locked and --release, at
+#       this repository's pinned toolchain, and print the binary's path. Only
+#       the MIT crates are built: ntfs_utils (MIT AND GPL-2.0-or-later),
+#       kernel/ and kernel/patches/ are never compiled, and nothing here
+#       links Slate into this crate.
+#
+#   slate-oracle.sh write WRITES IMAGES WRITER OUT FLOOR
+#       Slate's copy-only writer on copies (#863). WRITES is a header and then
+#       one `case source root_file offset expected_hex replacement_hex` row
+#       per write (tab-separated). WRITER runs as ntfs-write-lab does,
+#       `WRITER SOURCE NEW ROOT_FILE OFFSET EXPECTED REPLACEMENT`, but SOURCE
+#       is a read-only copy of IMAGES/<source>, so the image itself is never
+#       handed to it. The copy must keep the source's SHA-256, the writer must
+#       exit 0, and NEW must differ from the source. OUT/images/<case>.img
+#       keeps each written image, OUT/<case>.write.txt the writer's output and
+#       OUT/slate-writes.tsv one row per case. At least FLOOR cases must be
+#       written.
 #
 #   slate-oracle.sh compare CASES IMAGES CHECKER OUT FLOOR
 #       CASES is the Windows job's table, a header and then one
@@ -41,7 +54,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
-    echo "usage: slate-oracle.sh fetch DEST | build SRC | compare CASES IMAGES CHECKER OUT FLOOR" >&2
+    echo "usage: slate-oracle.sh fetch DEST | build SRC [BIN] | compare CASES IMAGES CHECKER OUT FLOOR | write WRITES IMAGES WRITER OUT FLOOR" >&2
     exit 2
 }
 die() { echo "slate-oracle: $*" >&2; exit 1; }
@@ -88,16 +101,89 @@ fetch() {
 }
 
 build() {
-    [ "$#" -eq 1 ] || usage
-    local src=$1
+    [ "$#" -eq 1 ] || [ "$#" -eq 2 ] || usage
+    local src=$1 bin=${2:-ntfs-chkdsk}
+    case "$bin" in
+        ntfs-chkdsk | ntfs-write-lab) ;;
+        *) die "build makes ntfs-chkdsk or ntfs-write-lab, not '$bin'" ;;
+    esac
     [ -f "$src/src/tools/Cargo.toml" ] || die "$src has no src/tools/Cargo.toml"
     # Run from this repository, so rustup picks the toolchain its
     # rust-toolchain.toml pins rather than whatever the runner has.
     (cd "$ROOT" && CARGO_TARGET_DIR="$src/target" cargo build --quiet --locked --release \
-        --manifest-path "$src/src/tools/Cargo.toml" --bin ntfs-chkdsk) >&2 ||
-        die "cannot build ntfs-chkdsk from $src"
-    [ -x "$src/target/release/ntfs-chkdsk" ] || die "the build left no $src/target/release/ntfs-chkdsk"
-    printf '%s\n' "$src/target/release/ntfs-chkdsk"
+        --manifest-path "$src/src/tools/Cargo.toml" --bin "$bin") >&2 ||
+        die "cannot build $bin from $src"
+    [ -x "$src/target/release/$bin" ] || die "the build left no $src/target/release/$bin"
+    printf '%s\n' "$src/target/release/$bin"
+}
+
+write() {
+    [ "$#" -eq 5 ] || usage
+    local writes=$1 images=$2 writer=$3 out=$4 floor=$5
+    [[ $floor =~ ^[0-9]+$ ]] || usage
+    [ -f "$writes" ] || die "no write table at $writes"
+    [ -x "$writer" ] || die "no writer at $writer"
+    mkdir -p "$out/work" "$out/images" || die "cannot create $out"
+    printf 'case\tsource\tsource_sha256\twritten_sha256\twriter_exit\tresult\n' >"$out/slate-writes.tsv"
+
+    local rows=0 written=0 problems=0
+    local name source root_file offset expected replacement
+    while IFS=$'\t' read -r name source root_file offset expected replacement; do
+        replacement="${replacement%$'\r'}"
+        [ "$name" = case ] && continue
+        [ -n "$name" ] || continue
+        rows=$((rows + 1))
+        local original="$images/$source" staged="$out/work/$name.source.img"
+        local new="$out/images/$name.img" report="$out/$name.write.txt"
+        local digest=- after=- status=- result
+        rm -f "$new"
+
+        if [ ! -f "$original" ]; then
+            result=missing
+            echo "FAIL $name: no source image at $original"
+        else
+            digest="$(sha "$original")"
+            if ! cp "$original" "$staged" || ! chmod 0444 "$staged"; then
+                die "cannot make a read-only copy of $original"
+            fi
+            "$writer" "$staged" "$new" "$root_file" "$offset" "$expected" "$replacement" >"$report" 2>&1
+            status=$?
+            [ -f "$new" ] && after="$(sha "$new")"
+            if [ "$(sha "$original")" != "$digest" ] || [ "$(sha "$staged")" != "$digest" ]; then
+                result='source-changed'
+                echo "FAIL $name: the writer changed the source it was given, not only its copy"
+            elif [ "$status" -ne 0 ]; then
+                result='writer-error'
+                echo "FAIL $name: the writer ended with exit $status; see $report"
+            elif [ "$after" = - ]; then
+                result='no-copy'
+                echo "FAIL $name: the writer exited 0 and left no image at $new"
+            elif [ "$after" = "$digest" ]; then
+                result=unchanged
+                echo "FAIL $name: the written copy is byte-identical to its source"
+            else
+                result=written
+                written=$((written + 1))
+            fi
+        fi
+        # The source is in IMAGES and the written copy in OUT/images; the
+        # staged copy is not kept.
+        chmod u+w "$staged" 2>/dev/null
+        rm -f "$staged"
+        [ "$result" = written ] || problems=$((problems + 1))
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$source" "$digest" "$after" "$status" "$result" \
+            >>"$out/slate-writes.tsv"
+    done <"$writes"
+
+    if [ "$written" -lt "$floor" ]; then
+        echo "FAIL $written of $rows cases were written, below the floor of $floor"
+        problems=$((problems + 1))
+    fi
+    if [ "$problems" -gt 0 ]; then
+        echo "slate-oracle: $problems problem(s) in $rows writes; table in $out/slate-writes.tsv"
+        return 1
+    fi
+    echo "slate-oracle: $written of $rows cases written on copies (floor $floor); table in $out/slate-writes.tsv"
 }
 
 compare() {
@@ -184,5 +270,6 @@ case "$command" in
     fetch) fetch "$@" ;;
     build) build "$@" ;;
     compare) compare "$@" ;;
+    write) write "$@" ;;
     *) usage ;;
 esac
