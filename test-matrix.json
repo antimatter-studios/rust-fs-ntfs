@@ -3101,6 +3101,83 @@
       "image": "nfs-win-format-win-quota-mac-streams-win-chkdsk.img",
       "_notes": "Windows writes a file, turns quota tracking on, then writes a file with two non-resident named streams, charging both to their owner in $Extend\\$Quota:$Q as Windows itself charges named streams. This crate shrinks one of Windows' streams, deletes the other, and gives the first file two non-resident named streams of its own, each a change of allocation its owner has to be charged. chkdsk grades the volume, and Windows then counts every file again from scratch: each owner's usage as the volume held it must be what that count gives, so a named stream charged other than as Windows charges it shows as a difference (#851, part of #677)."
     },
+    "win-format-win-quota-mac-sparse-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "QUOTA",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-quota-track",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-write-sparse",
+          "files": "/win-scattered.bin@4000000@0+4096,2000000+4096,3995904+4096 /win-empty.bin@1048576@none",
+          "mode": "write",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "ours-empty.bin"
+        },
+        {
+          "op": "mac-write-sparse",
+          "path": "/ours-empty.bin",
+          "bytes": "4194304",
+          "pattern": "zeros"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "ours-half.bin"
+        },
+        {
+          "op": "mac-write-sparse",
+          "path": "/ours-half.bin",
+          "bytes": "1048576",
+          "pattern": "sparse"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-quota-verify",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-win-format-win-quota-mac-sparse-win-chkdsk.img",
+      "_notes": "Windows turns quota tracking on and writes two sparse files whose holes span many clusters, one with three 4 KiB islands of data across 4 MB and one with none, charging both to their owner in $Extend\\$Quota:$Q as Windows itself charges sparse files. This crate then writes a fully sparse 4 MiB file and a 1 MiB file of alternating 4 KiB data and holes. A sparse stream's header carries the logical size rounded to clusters at 0x28 and the clusters actually backed at 0x40, and write_sparse_file charges the first, holes and all. chkdsk grades the volume, and Windows then counts every file again from scratch: each owner's usage as the volume held it must be what that count gives, so a sparse file charged other than as Windows charges it shows as a difference (#1088, part of #852). Not yet run: its first outcome is recorded here."
+    },
     "win-format-win-usn-journal-mac-write-win-usn-retired-chkdsk": {
       "status": "pending",
       "volume_params": {
