@@ -4691,10 +4691,32 @@ pub fn read_reparse_point_io<T: BlockIo + ?Sized>(
     file_path: &str,
 ) -> Result<Option<ReparsePoint>, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    let (_, record) = read_mft_record_io(io, rec)?;
-    let Some(loc) = attr_io::find_attribute(&record, AttrType::ReparsePoint, None) else {
+    let (_, base) = read_mft_record_io(io, rec)?;
+    // A file with an $ATTRIBUTE_LIST may keep its $REPARSE_POINT in an
+    // extension record, so it is found through the list (#812).
+    if attr_io::find_attribute(&base, AttrType::AttributeList, None).is_some() {
+        let file = crate::attr_list::ListedFile::open(io, rec)?;
+        return match file.find(AttrType::ReparsePoint, "")? {
+            Some(found) => {
+                let attr = file.attribute_bytes(&found);
+                // `attribute_bytes` starts at the attribute, so `found.loc`
+                // is rebased onto it.
+                let mut loc = found.loc;
+                loc.attr_offset = 0;
+                decode_reparse_point(attr, &loc).map(Some)
+            }
+            None => Ok(None),
+        };
+    }
+    let Some(loc) = attr_io::find_attribute(&base, AttrType::ReparsePoint, None) else {
         return Ok(None);
     };
+    decode_reparse_point(&base, &loc).map(Some)
+}
+
+/// The tag and tag-specific data of the resident `$REPARSE_POINT` that
+/// `loc` locates in `record`.
+fn decode_reparse_point(record: &[u8], loc: &attr_io::AttrLocation) -> Result<ReparsePoint, Error> {
     if !loc.is_resident {
         return Err(Error::io(
             "$REPARSE_POINT is non-resident (not yet supported)",
@@ -4731,7 +4753,7 @@ pub fn read_reparse_point_io<T: BlockIo + ?Sized>(
         )));
     }
     let data = buf[data_start..data_start + data_len].to_vec();
-    Ok(Some(ReparsePoint { reparse_tag, data }))
+    Ok(ReparsePoint { reparse_tag, data })
 }
 
 /// The substitute name, print name and relative flag a symlink to
