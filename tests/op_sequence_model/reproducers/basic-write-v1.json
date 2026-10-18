@@ -1,0 +1,1 @@
+{"version":1,"operations":[{"op":"create","parent":"/","name":"a"},{"op":"write","path":"/a","data":[0,255,65]}]}
