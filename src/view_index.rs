@@ -597,7 +597,34 @@ pub(crate) fn data_io<T: BlockIo + ?Sized>(
     key: &[u8],
 ) -> Result<Option<Vec<u8>>, Error> {
     let (_, record) = crate::mft_io::read_mft_record_io(io, rec)?;
-    let root = crate::index_io::parse_index_root_node_of(&record, index, NodeKeys::View)?;
+    data_in_io(io, rec, &record, index, key)
+}
+
+/// [`data_io`] for a caller that only reads, with the index's attributes
+/// found wherever `$ATTRIBUTE_LIST` put them (#678).
+///
+/// A writer keeps [`data_io`]. What it finds it writes back with [`put_io`],
+/// which reads the base record: an entry found through the list would turn
+/// a refusal before anything is written into a failure after.
+pub(crate) fn listed_data_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    index: &str,
+    key: &[u8],
+) -> Result<Option<Vec<u8>>, Error> {
+    let (_, record) = crate::read::read_index_record_io(io, rec, index)?;
+    data_in_io(io, rec, &record, index, key)
+}
+
+/// The data of the entry for `key` in the index whose root is in `record`.
+fn data_in_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    record: &[u8],
+    index: &str,
+    key: &[u8],
+) -> Result<Option<Vec<u8>>, Error> {
+    let root = crate::index_io::parse_index_root_node_of(record, index, NodeKeys::View)?;
     if let Some(e) = root.entries.iter().find(|e| node_key(e) == key) {
         return entry_data(&e.key).map(Some);
     }
@@ -714,7 +741,28 @@ pub fn keys_io<T: BlockIo + ?Sized>(
     index: &str,
 ) -> Result<Vec<(Vec<u8>, bool)>, Error> {
     let (_, record) = crate::mft_io::read_mft_record_io(io, rec)?;
-    let root = crate::index_io::parse_index_root_node_of(&record, index, NodeKeys::View)?;
+    keys_in_io(io, rec, &record, index)
+}
+
+/// [`keys_io`] for a caller that only reads, with the index's attributes
+/// found wherever `$ATTRIBUTE_LIST` put them (#678).
+pub(crate) fn listed_keys_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    index: &str,
+) -> Result<Vec<(Vec<u8>, bool)>, Error> {
+    let (_, record) = crate::read::read_index_record_io(io, rec, index)?;
+    keys_in_io(io, rec, &record, index)
+}
+
+/// Every key of the index whose root is in `record`.
+fn keys_in_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    record: &[u8],
+    index: &str,
+) -> Result<Vec<(Vec<u8>, bool)>, Error> {
+    let root = crate::index_io::parse_index_root_node_of(record, index, NodeKeys::View)?;
     if !root.is_interior() {
         return Ok(root
             .entries

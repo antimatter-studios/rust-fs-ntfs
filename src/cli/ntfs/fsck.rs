@@ -547,5 +547,21 @@ fn finding(f: &CheckFinding) -> Json {
             ("why", Json::from(reason.as_str())),
             ("repairable", Json::from(false)),
         ]),
+        CheckFinding::QuotaUsageDrift {
+            owner,
+            usage,
+            charged,
+        } => Json::object([
+            ("kind", Json::from("quota_usage_drift")),
+            ("owner", Json::from(u64::from(*owner))),
+            ("usage", usage.map_or(Json::Null, Json::from)),
+            ("charged", Json::from(*charged)),
+            ("repairable", Json::from(false)),
+        ]),
+        CheckFinding::QuotaUnreadable { reason } => Json::object([
+            ("kind", Json::from("quota_unreadable")),
+            ("why", Json::from(reason.as_str())),
+            ("repairable", Json::from(false)),
+        ]),
     }
 }
