@@ -44,19 +44,32 @@
 //! exists, is refused before anything is created; so is `--apply` beside
 //! anything that writes or plans (`-y`, `-p`, `--dry-run`).
 //!
+//! WHAT `--apply PLAN --in-place --journal FILE` DOES: repairs the volume
+//! in place (#922). FILE is checked as a journal location with
+//! `check_journal_location`, the volume opened with
+//! `PathIo::open_exclusive` and checked against PLAN with
+//! `check_plan_source`, and only then is FILE created and PLAN applied
+//! through `apply_in_place`, journalling into FILE. In-place is never the
+//! default: `--in-place` needs `--journal`, `--journal` needs `--in-place`,
+//! and `--in-place` refuses `--to`, `--dry-run` and `-y`. Every refusal comes
+//! before anything is created or written.
+//!
 //! Without `-y` nothing is written, as with `-n`.
 
 use std::ffi::OsString;
 use std::path::Path;
 
-use clap::{value_parser, Arg, ArgAction, ArgMatches, Command as Cmd};
+use clap::{value_parser, Arg, ArgAction, ArgGroup, ArgMatches, Command as Cmd};
 
 use fs_core::cli::{CliError, Json, Outcome, Tool};
+use fs_ntfs::block_io::PathIo;
 use fs_ntfs::fsck::{
     check_io, repair_dirty_io, replay_logfile_io, CheckFinding, CheckReport, FsckOptions,
     LogfileState,
 };
-use fs_ntfs::repair_plan::{copy_repair, load_plan, plan_fsck_io, CopyRepairError, RepairPlan};
+use fs_ntfs::repair_plan::{
+    check_plan_source, copy_repair, load_plan, plan_fsck_io, CopyRepairError, RepairPlan,
+};
 use sha2::{Digest, Sha256};
 
 /// fsck(8): no errors.
@@ -116,6 +129,10 @@ fn command() -> Cmd {
              volume is opened read-only and checked against PLAN, and only then is \
              TARGET created, the volume copied into it and PLAN applied there. TARGET \
              must not exist and must not be the volume itself.\n\n\
+             --apply PLAN --in-place --journal FILE repairs the volume in place: FILE \
+             must be a new file outside the volume, the volume is opened exclusively \
+             and checked against PLAN, and only then is FILE created and PLAN applied, \
+             each unit journalled into FILE before it is written.\n\n\
              --dry-run works out every write -y would make (--clear-dirty's too, when \
              given) and makes none: TARGET is opened read-only. The report's plan lists \
              them in units, each the writes between two flushes, each by offset, length \
@@ -171,11 +188,11 @@ fn command() -> Cmd {
                 .long("apply")
                 .value_name("PLAN")
                 .help(
-                    "Copy-repair the volume into --to's new TARGET by the plan file PLAN; \
-                     the volume is opened read-only and never written",
+                    "Repair by the plan file PLAN: copy-repair into --to's new TARGET, \
+                     or with --in-place repair the volume itself",
                 )
                 .value_parser(value_parser!(OsString))
-                .requires("to")
+                .requires("apply_target")
                 .conflicts_with_all(["no", "yes", "preen", "dry_run", "clear_dirty", "offset"]),
         )
         .arg(
@@ -185,6 +202,33 @@ fn command() -> Cmd {
                 .help("With --apply, the new file to copy-repair into; it must not exist")
                 .value_parser(value_parser!(OsString))
                 .requires("apply"),
+        )
+        .arg(
+            Arg::new("in_place")
+                .long("in-place")
+                .help(
+                    "With --apply, repair the volume itself, opened exclusively, journalling \
+                     every unit into --journal's FILE first",
+                )
+                .action(ArgAction::SetTrue)
+                .requires_all(["apply", "journal"])
+                .conflicts_with_all(["to", "dry_run", "yes", "preen"]),
+        )
+        .arg(
+            Arg::new("journal")
+                .long("journal")
+                .value_name("FILE")
+                .help(
+                    "With --in-place, the new journal file; it must not exist and must not \
+                     be on the volume",
+                )
+                .value_parser(value_parser!(OsString))
+                .requires("in_place"),
+        )
+        .group(
+            ArgGroup::new("apply_target")
+                .args(["to", "in_place"])
+                .multiple(false),
         )
         .arg(
             Arg::new("clear_dirty")
@@ -227,6 +271,7 @@ fn command() -> Cmd {
              fsck.ntfs --dry-run disk.img       every write -y would make; none is made\n  \
              fsck.ntfs -y --clear-dirty disk.img   and clear the dirty flag too\n  \
              fsck.ntfs --apply plan --to new.img disk.img   copy-repair into new.img\n  \
+             fsck.ntfs --apply plan --in-place --journal /other/j disk.img   in place\n  \
              fsck.ntfs --text disk.img; echo $?",
         )
 }
@@ -236,6 +281,12 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         .get_one::<OsString>("device")
         .expect("clap requires the device");
     if let Some(plan) = matches.get_one::<OsString>("apply") {
+        if matches.get_flag("in_place") {
+            let journal = matches
+                .get_one::<OsString>("journal")
+                .expect("clap requires --journal with --in-place");
+            return apply_in_place(Path::new(target), Path::new(plan), Path::new(journal));
+        }
         let to = matches
             .get_one::<OsString>("to")
             .expect("clap requires --to with --apply");
@@ -479,6 +530,76 @@ fn apply(source: &Path, plan: &Path, target: &Path) -> Result<Outcome, CliError>
          {writes} writes); {name} was opened read-only and is unchanged"
     );
     Ok(Outcome::report(report).with_text(text).with_code(CLEAN))
+}
+
+/// Repair `device` in place by the plan file at `plan`, journalling into a
+/// new file at `journal` (#922). The journal location is checked, the plan
+/// loaded, the device opened exclusively and checked against the plan, all
+/// before the journal is created; then the plan is applied through
+/// `repair_journal::apply_in_place`.
+#[cfg(unix)]
+fn apply_in_place(device: &Path, plan: &Path, journal: &Path) -> Result<Outcome, CliError> {
+    use fs_ntfs::repair_journal::{apply_in_place, check_journal_location};
+    let name = device.display().to_string();
+    let journal_name = journal.display().to_string();
+    let plan_name = plan.display().to_string();
+    let usage = |m: String| CliError::usage(m).with_code(USAGE);
+    let failed = |m: String| CliError::failed(m).with_code(OPERATIONAL);
+    check_journal_location(journal, device).map_err(|e| {
+        usage(format!(
+            "--journal '{journal_name}' refused, nothing written: {e}"
+        ))
+    })?;
+    let bytes = std::fs::read(plan).map_err(|e| failed(format!("read plan '{plan_name}': {e}")))?;
+    let saved =
+        load_plan(&bytes).map_err(|e| failed(format!("plan '{plan_name}' refused: {e}")))?;
+    let mut io = PathIo::open_exclusive(device)
+        .map_err(|e| failed(format!("{name}: refused, nothing written: {e}")))?;
+    check_plan_source(&saved, &mut io).map_err(|e| {
+        failed(format!(
+            "{name}: refused for plan '{plan_name}', nothing written: {e}"
+        ))
+    })?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(journal)
+        .map_err(|e| failed(format!("create journal '{journal_name}': {e}")))?;
+    let mut journal_io = PathIo::open_rw(journal).map_err(failed)?;
+    let sha: [u8; 32] = Sha256::digest(&bytes).into();
+    apply_in_place(&saved, sha, &mut io, &mut journal_io).map_err(|e| {
+        failed(format!(
+            "{name}: in-place repair stopped: {e}; the journal '{journal_name}' holds how far \
+             it got"
+        ))
+    })?;
+    let units = saved.units.len() as u64;
+    let writes = saved
+        .units
+        .iter()
+        .map(|u| u.writes.len() as u64)
+        .sum::<u64>();
+    let report = Json::object([
+        ("fs", Json::from("ntfs")),
+        ("device", Json::from(name.as_str())),
+        ("mode", Json::from("apply-in-place")),
+        ("plan", Json::from(plan_name.as_str())),
+        ("journal", Json::from(journal_name.as_str())),
+        ("units", Json::from(units)),
+        ("writes", Json::from(writes)),
+        ("exit", Json::from(u64::from(CLEAN))),
+    ]);
+    let text = format!(
+        "fsck.ntfs: {name}: plan '{plan_name}' applied in place ({units} units, {writes} \
+         writes), journalled into '{journal_name}'"
+    );
+    Ok(Outcome::report(report).with_text(text).with_code(CLEAN))
+}
+
+/// An in-place repair needs the journal location check, which is Unix-only.
+#[cfg(not(unix))]
+fn apply_in_place(_device: &Path, _plan: &Path, _journal: &Path) -> Result<Outcome, CliError> {
+    Err(CliError::usage(String::from("--in-place is supported on Unix only")).with_code(USAGE))
 }
 
 /// Whether `a` and `b` name the same existing file: on Unix the same device
