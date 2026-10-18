@@ -57,6 +57,16 @@ REPLACEMENT_HEX`, exit 0 on success and 1 on failure. The writer only ever
 receives a read-only copy of a source image, and nothing it writes is a
 source of this crate's knowledge of NTFS.
 
+The allocation manifests for the Slate tier (#875, part of #692) call
+Windows' own
+[`FSCTL_GET_NTFS_VOLUME_DATA`](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_get_ntfs_volume_data)
+and
+[`FSCTL_GET_RETRIEVAL_POINTERS`](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_get_retrieval_pointers)
+controls, with the buffer layouts Microsoft documents for
+`NTFS_VOLUME_DATA_BUFFER` and `RETRIEVAL_POINTERS_BUFFER`. Each count and
+extent is observed through Windows on a disposable mount; no Slate
+implementation source was read for this capture.
+
 To locate the `InvalidSecurity` finding on a fresh volume (#837), the
 conditions of Slate's MIT-licensed `src/ondisk/security_store.rs` at
 `579dfeb` were read: it refuses a `$Secure` stream whose attribute carries any
