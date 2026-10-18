@@ -81,7 +81,8 @@ returned and never applied. The whole records before it are returned.
 
 A cut is recognised only by the length field, so a final record whose
 length field is itself damaged to run past the end of the file also reads
-as torn. Whatever is behind it is ignored, not applied.
+as torn. Whatever is behind it is ignored, not applied. A resume, which
+has the plan, then refuses such a tail: see below.
 
 ### What a reader must refuse
 
@@ -162,7 +163,16 @@ stopped, on the same device and the same journal. It reads the journal
 back with `read_journal` and `progress`, drops a torn final record and
 appends the next record where the torn one starts. That next record is
 always the one that was torn, the same bytes, so nothing of the torn tail
-is left after it. Then:
+is left after it.
+
+Because the plan fixes that next record -- the header when no record is
+whole, the open unit's applied record, or else the next unit's intent --
+a torn tail must be the start of it, byte for byte (#934). Any other tail
+was not left by a torn append: a whole record whose length field was
+raised, a torn record with a byte changed, or any tail after the last
+unit's applied record. The resume refuses it (`journal record N: cut
+short, and not the start of the record the plan expects next`) before
+anything is written to the device or the journal. Then:
 
 1. Every unit the journal marks applied is read back from the device:
    each write's range must hold its unit's redo with the later applied

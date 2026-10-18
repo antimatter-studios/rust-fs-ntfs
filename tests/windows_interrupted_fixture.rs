@@ -4142,3 +4142,139 @@ fn a_resume_refuses_a_unit_whose_range_changed_while_stopped_and_names_the_byte(
         std::fs::remove_file(&src).unwrap();
     }
 }
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn a_torn_journal_tail_resumes_only_as_a_prefix_of_the_record_the_plan_expects_next() {
+    // A cut append leaves the journal's last record short: a prefix of
+    // the record being appended (#934). The plan fixes which record that
+    // is, so a short tail holding anything else -- a whole record whose
+    // length field was raised, a torn tail with a byte changed, or a tail
+    // after the last unit's applied record -- is corruption. The resume
+    // must refuse it, naming the record, with the device and the journal
+    // as it found them; a true prefix must still resume to the
+    // uninterrupted apply.
+    use fs_ntfs::repair_journal::{
+        applied_record, apply_in_place, header_record, intent_record, resume_in_place,
+        InPlaceError, JournalBinding,
+    };
+    let raised = |record: &[u8]| {
+        let mut r = record.to_vec();
+        let length = u32::from_le_bytes(r[4..8].try_into().unwrap()) + 1;
+        r[4..8].copy_from_slice(&length.to_le_bytes());
+        r
+    };
+    let changed = |record: &[u8], keep: usize| {
+        let mut r = record[..keep].to_vec();
+        r[8] ^= 0x01;
+        r
+    };
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+        let (mut device, mut journal, _) = recording_pair(&pristine, None);
+        apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+            .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+        let whole = device.bytes;
+        let full = journal.bytes;
+        let binding = JournalBinding {
+            plan_sha256,
+            source_size: loaded.source_size,
+            volume_serial: loaded.volume_serial,
+        };
+        let header = header_record(&binding);
+        let intent = intent_record(0, &loaded.units[0]);
+        let applied = applied_record(0);
+        let mut unit0 = pristine.clone();
+        for w in &loaded.units[0].writes {
+            let at = w.offset as usize;
+            unit0[at..at + w.after.len()].copy_from_slice(&w.after);
+        }
+        let joined = |parts: &[&[u8]]| parts.concat();
+        let after_all = 1 + 2 * loaded.units.len();
+
+        let mut bad = Vec::new();
+        let corrupt: Vec<(&str, &[u8], Vec<u8>, usize)> = vec![
+            ("the header's length raised", &pristine, raised(&header), 0),
+            (
+                "unit 0's intent length raised",
+                &pristine,
+                joined(&[&header, &raised(&intent)]),
+                1,
+            ),
+            (
+                "unit 0's applied record length raised",
+                &unit0,
+                joined(&[&header, &intent, &raised(&applied)]),
+                2,
+            ),
+            (
+                "a byte changed in a torn intent",
+                &pristine,
+                joined(&[&header, &changed(&intent, intent.len() / 2)]),
+                1,
+            ),
+            (
+                "a byte changed in a torn applied record",
+                &unit0,
+                joined(&[&header, &intent, &changed(&applied, applied.len() - 1)]),
+                2,
+            ),
+            (
+                "a tail after the last unit's applied record",
+                &whole,
+                joined(&[&full, &intent[..intent.len() / 2]]),
+                after_all,
+            ),
+        ];
+        for (what, held, bytes, record) in corrupt {
+            let (mut device, mut journal, _) = recording_pair(held, None);
+            journal.bytes = bytes.clone();
+            match resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
+                Ok(()) => bad.push(format!("{what}: the resume reported success")),
+                Err(InPlaceError::Journal(e)) if e.record == record => {
+                    if device.bytes != held {
+                        bad.push(format!("{what}: refused as {e}, but the device changed"));
+                    }
+                    if journal.bytes != bytes {
+                        bad.push(format!("{what}: refused as {e}, but the journal changed"));
+                    }
+                }
+                Err(e) => bad.push(format!(
+                    "{what}: refused as {e}, not as journal record {record}"
+                )),
+            }
+        }
+
+        let prefixes: Vec<(&str, &[u8], Vec<u8>)> = vec![
+            (
+                "half the header",
+                &pristine,
+                header[..header.len() / 2].to_vec(),
+            ),
+            (
+                "half unit 0's intent",
+                &pristine,
+                joined(&[&header, &intent[..intent.len() / 2]]),
+            ),
+            (
+                "all but the last byte of unit 0's applied record",
+                &unit0,
+                joined(&[&header, &intent, &applied[..applied.len() - 1]]),
+            ),
+        ];
+        for (what, held, bytes) in prefixes {
+            let (mut device, mut journal, _) = recording_pair(held, None);
+            journal.bytes = bytes;
+            match resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
+                Ok(()) if device.bytes == whole => {}
+                Ok(()) => bad.push(format!(
+                    "{what}: the device holds other bytes than an uninterrupted apply"
+                )),
+                Err(e) => bad.push(format!("{what}: the resume refused: {e}")),
+            }
+        }
+        assert!(bad.is_empty(), "{k}:\n{}", bad.join("\n"));
+        std::fs::remove_file(&src).unwrap();
+    }
+}
