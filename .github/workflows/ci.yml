@@ -609,6 +609,75 @@ jobs:
           path: tmp/logs/
           if-no-files-found: ignore
 
+  op-sequence-chkdsk:
+    name: Windows chkdsk grades retained operation samples
+    # #1035: the samples the ntfs-3g oracle run kept (#1034) graded by
+    # Windows chkdsk, the same bytes ntfs-3g reported on.
+    needs: [changes, test]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the retained operation samples
+        uses: actions/download-artifact@v4
+        with:
+          name: op-sequence-model
+          path: tmp
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - name: Install rust-img-vhd
+        shell: pwsh
+        run: |
+          $vhd = (Select-String -Path chores.yml -Pattern '^\s*IMG_VHD_REF:\s*(\S+)').Matches[0].Groups[1].Value
+          git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
+          cargo install --locked --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
+      # The set comes from the script the oracle run kept the samples by, read
+      # through Git's bash: a bare `bash` in pwsh can resolve to WSL's.
+      - name: Name the retained samples
+        shell: bash
+        run: echo "OPSEQ_SAMPLES=$(bash scripts/check-op-sequence-samples.sh --list)" >> "$GITHUB_ENV"
+      # Read-only chkdsk over each sample's image; its report and chkdsk's own
+      # exit code land beside the sample's geometry.txt and ntfsfix.txt.
+      - name: Windows chkdsk grades each retained sample
+        shell: pwsh
+        run: |
+          $failed = @()
+          foreach ($sample in $env:OPSEQ_SAMPLES.Split(',')) {
+            $dir = Join-Path 'tmp/op-sequence-model' $sample
+            $image = Join-Path $PWD (Join-Path $dir 'sample.img')
+            if (-not (Test-Path -LiteralPath $image)) {
+              Write-Output "::error::retained sample $sample has no sample.img"
+              $failed += $sample
+              continue
+            }
+            $diag = Join-Path $dir 'chkdsk'
+            pwsh -File scripts/fs-windows-test-harness/win-chkdsk.ps1 `
+              -ImagePath $image -Diag $diag -Modes readonly -VerdictShape Clean
+            if ($LASTEXITCODE -ne 0) { $failed += $sample }
+            foreach ($pair in @(@('chkdsk-readonly.txt', 'chkdsk.txt'), @('chkdsk-readonly-exit.txt', 'chkdsk-exit.txt'))) {
+              $from = Join-Path $diag $pair[0]
+              if (Test-Path -LiteralPath $from) { Copy-Item -LiteralPath $from -Destination (Join-Path $dir $pair[1]) }
+            }
+          }
+          if ($failed) { throw "chkdsk did not find these retained samples clean: $($failed -join ', ')" }
+      - name: Every retained sample is graded and chkdsk finds it clean
+        if: always()
+        shell: bash
+        run: bash scripts/check-op-sequence-chkdsk.sh
+      - name: Keep chkdsk's reports beside each sample's ntfs-3g report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: op-sequence-chkdsk
+          path: |
+            tmp/op-sequence-model/*/chkdsk*
+            tmp/op-sequence-model/*/ntfsfix.txt
+            tmp/op-sequence-model/*/geometry.txt
+          if-no-files-found: error
+
   windows-native-read-fixtures:
     name: Windows-authored native read fixtures
     # Skipped, with integration and cli after it, for documentation alone.
@@ -2101,7 +2170,7 @@ jobs:
     name: ci-ok
     runs-on: ubuntu-latest
     if: always()
-    needs: [readonly-file-name, test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows]
+    needs: [readonly-file-name, test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows, op-sequence-chkdsk]
     steps:
       - uses: actions/checkout@v4
       - name: Check every gating job
