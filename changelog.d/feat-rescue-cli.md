@@ -7,6 +7,6 @@
   `--sector-size` sets the retry unit. The JSON report gives the bytes
   archived, the unreadable bytes and spans, the split by metadata, allocated
   and free space, and whether the archive is complete. The exit status is 0
-  for a complete archive, 4 when some spans are still unreadable, and 1 when
+  for a complete archive, 5 when some spans are still unreadable, and 1 when
   the rescue failed or was refused; an existing archive is refused without
   `--resume`, with the source and the archive unchanged.
