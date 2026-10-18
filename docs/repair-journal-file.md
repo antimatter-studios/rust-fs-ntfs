@@ -135,6 +135,26 @@ the write and its byte range; its intent is in the journal and its applied
 record is not. Nothing reaches the device outside the plan's ranges, and
 the plan is never written into the volume's `$LogFile` as a transaction.
 
+## Where an apply stopped
+
+`repair_journal::progress` reads a journal `read_journal` has accepted
+against its plan and says where the apply stopped. It reads no device. A
+journal that stops
+
+- **inside its header** holds no whole record: nothing is applied and
+  nothing is open, and a resume starts the journal again from its header;
+- **after its header, or after an applied record**, has every unit up to
+  and including the last applied record marked applied, and nothing open;
+- **after an intent record** has the units before that intent marked
+  applied, and the intent's unit open: its writes may have reached the
+  device whole, in part, or not at all.
+
+A torn final record changes none of this: it is ignored. Every intent must
+carry exactly its plan unit's writes, the same count and each with the
+same offset, preimage and redo; an intent that does not, or names a unit
+the plan does not hold, is refused naming the unit and write, even though
+its checksum is whole.
+
 ## Tests
 
 `a_repair_journal_reads_back_to_its_last_whole_record_and_refuses_the_rest`
@@ -160,3 +180,9 @@ checks they arrive in exactly the order above, unit by unit.
 `an_in_place_repair_stops_at_a_unit_the_device_reads_back_wrong_and_never_marks_it_applied`
 drops one device write and checks the apply stops naming that unit and
 range, with no applied record for it in the journal.
+`a_repair_journal_reports_the_units_applied_and_the_unit_left_open_at_every_cut`
+cuts each capture's journal at every record boundary, one byte either
+side of it and the middle of each record, and checks `progress` against
+the answer the plan's own record lengths give; and replaces unit 0's
+intent with one whose redo differs by a byte, its checksum recomputed,
+and checks it is refused naming unit 0 write 0.
