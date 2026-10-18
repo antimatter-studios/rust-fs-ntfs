@@ -2637,6 +2637,19 @@ fn insert_entry_in_parent_io<T: BlockIo + ?Sized>(
             Err(e) => return Err(e),
         }
 
+        if attr_io::find_attribute(&parent, AttrType::AttributeList, None).is_some() {
+            let mut file = crate::attr_list::ListedFile::open(io, parent_rec)?;
+            let grew = match file
+                .grow_index_root(io, |record| order.insert_into_root(record, entry_bytes))
+            {
+                Ok(grew) => grew,
+                Err(e) => return Err(file.abandon(io, e)),
+            };
+            file.commit(io)?;
+            if grew {
+                return Ok(());
+            }
+        }
         return promote_parent_index_io(io, parent_rec, &params, entry_bytes, &order, false);
     }
 
@@ -2952,21 +2965,25 @@ impl IndexBlockAllocator {
         let index = self.index.as_str();
         let runs_end = self.ia.runs.last().map_or(0, |r| r.starting_vcn + r.length);
         let mapping = crate::data_runs::encode_runs(&self.ia.runs)?;
-        let allocation = attr_io::find_attribute(record, AttrType::IndexAllocation, Some(index))
-            .ok_or_else(|| Error::io(format!("$INDEX_ALLOCATION:{index} disappeared")))?;
-        let replacement = crate::record_build::build_nonresident_attribute(
-            AttrType::IndexAllocation as u32,
-            Some(index),
-            allocation.attribute_id,
-            self.ia.data_length,
-            runs_end * self.ia.params.cluster_size,
-            self.ia.data_length,
-            i64::try_from(runs_end.saturating_sub(1)).map_err(|_| "INDX VCN does not fit i64")?,
-            &mapping,
-        )?;
-        crate::attr_resize::replace_attribute(record, allocation.attr_offset, &replacement)?;
-        let bitmap = attr_io::find_attribute(record, AttrType::Bitmap, Some(index))
-            .ok_or_else(|| Error::io(format!("$Bitmap:{index} disappeared")))?;
+        if let Some(allocation) =
+            attr_io::find_attribute(record, AttrType::IndexAllocation, Some(index))
+        {
+            let replacement = crate::record_build::build_nonresident_attribute(
+                AttrType::IndexAllocation as u32,
+                Some(index),
+                allocation.attribute_id,
+                self.ia.data_length,
+                runs_end * self.ia.params.cluster_size,
+                self.ia.data_length,
+                i64::try_from(runs_end.saturating_sub(1))
+                    .map_err(|_| "INDX VCN does not fit i64")?,
+                &mapping,
+            )?;
+            crate::attr_resize::replace_attribute(record, allocation.attr_offset, &replacement)?;
+        }
+        let Some(bitmap) = attr_io::find_attribute(record, AttrType::Bitmap, Some(index)) else {
+            return Ok(());
+        };
         let length = bitmap.resident_value_length.unwrap_or(0) as usize;
         if !bitmap.is_resident || length != self.ia.bitmap.len() {
             return Err(Error::io(format!(
@@ -2997,6 +3014,8 @@ impl IndexBlockAllocator {
 type CreatedBlocks = Vec<(u64, Vec<u8>)>;
 /// Blocks an insert rewrites in place: VCN, new clean bytes, old clean bytes.
 type RewrittenBlocks = Vec<(u64, Vec<u8>, Vec<u8>)>;
+/// Extension records holding index attributes: record number, new bytes, old bytes.
+type IndexExtensions = Vec<(u64, Vec<u8>, Vec<u8>)>;
 
 /// An insert that splits nodes, worked out in memory before any of it is
 /// written.
@@ -3005,6 +3024,7 @@ struct IndexSplitPlan {
     record: Vec<u8>,
     created: CreatedBlocks,
     rewritten: RewrittenBlocks,
+    extensions: IndexExtensions,
     allocator: IndexBlockAllocator,
 }
 
@@ -3034,7 +3054,29 @@ fn plan_index_split_io<T: BlockIo + ?Sized>(
         .map_err(|_| "index block size does not fit usize".to_string())?;
     let bytes_per_sector = ia.params.bytes_per_sector;
     let (index, keys) = (order.index(), order.keys());
-    let mut allocator = IndexBlockAllocator::new(io, &record, ia, index, dry_run)?;
+    // Readers assemble index attributes from extension records. Planning
+    // uses that view too, but writes each attribute back to its own record.
+    let (_, attributes) = crate::read::read_directory_record_io(io, parent_rec)?;
+    let mut extensions: IndexExtensions = Vec::new();
+    if attr_io::find_attribute(&record, AttrType::AttributeList, None).is_some() {
+        let list =
+            crate::read::read_attribute_value(io, parent_rec, AttrType::AttributeList, None)?;
+        for entry in crate::read::parse_attribute_list(&list)? {
+            if entry.record_number == parent_rec
+                || entry.name.as_deref() != Some(index)
+                || (entry.type_code != AttrType::IndexAllocation as u32
+                    && entry.type_code != AttrType::Bitmap as u32)
+                || extensions
+                    .iter()
+                    .any(|(number, _, _)| *number == entry.record_number)
+            {
+                continue;
+            }
+            let (_, bytes) = read_mft_record_io(io, entry.record_number)?;
+            extensions.push((entry.record_number, bytes.clone(), bytes));
+        }
+    }
+    let mut allocator = IndexBlockAllocator::new(io, &attributes, ia, index, dry_run)?;
 
     let planned = (|| -> Result<(Vec<u8>, CreatedBlocks, RewrittenBlocks), Error> {
         let mut created = Vec::new();
@@ -3125,12 +3167,21 @@ fn plan_index_split_io<T: BlockIo + ?Sized>(
     })();
 
     match planned {
-        Ok((record, created, rewritten)) => Ok(IndexSplitPlan {
-            record,
-            created,
-            rewritten,
-            allocator,
-        }),
+        Ok((record, created, rewritten)) => {
+            for (_, bytes, _) in &mut extensions {
+                if let Err(e) = allocator.finish_record(bytes) {
+                    allocator.release(io)?;
+                    return Err(e);
+                }
+            }
+            Ok(IndexSplitPlan {
+                record,
+                created,
+                rewritten,
+                extensions,
+                allocator,
+            })
+        }
         Err(e) => {
             allocator.release(io)?;
             Err(e)
@@ -3151,6 +3202,7 @@ fn commit_index_split_io<T: BlockIo + ?Sized>(
         record,
         created,
         rewritten,
+        extensions,
         allocator,
     } = plan;
     let ia = &allocator.ia;
@@ -3167,6 +3219,11 @@ fn commit_index_split_io<T: BlockIo + ?Sized>(
         .iter()
         .try_for_each(|(vcn, block, _)| idx_block::write_indx_block_io(io, ia, *vcn, block))
         .and_then(|()| Ok(io.sync()?))
+        .and_then(|()| {
+            extensions.iter().try_for_each(|(number, bytes, _)| {
+                crate::mft_io::restore_mft_record_io(io, *number, bytes)
+            })
+        })
         .and_then(|()| crate::mft_io::restore_mft_record_io(io, parent_rec, &record));
     let Err(e) = committed else {
         return Ok(());
@@ -3174,6 +3231,11 @@ fn commit_index_split_io<T: BlockIo + ?Sized>(
     let rollback = rewritten
         .iter()
         .try_for_each(|(vcn, _, old)| idx_block::write_indx_block_io(io, ia, *vcn, old))
+        .and_then(|()| {
+            extensions.iter().try_for_each(|(number, _, old)| {
+                crate::mft_io::restore_mft_record_io(io, *number, old)
+            })
+        })
         .and_then(|()| Ok(io.sync()?));
     if rollback.is_ok() {
         allocator.release(io)?;
@@ -3220,8 +3282,12 @@ pub(crate) fn promote_parent_index_io<T: BlockIo + ?Sized>(
         crate::bitmap::allocate_io(io, &volume_bitmap, lcn, clusters)?;
     }
 
+    let mut listed = None;
     let prepared = (|| -> Result<(Vec<u8>, Vec<u8>), Error> {
         let (_, mut parent) = read_mft_record_io(io, parent_rec)?;
+        if !dry_run && attr_io::find_attribute(&parent, AttrType::AttributeList, None).is_some() {
+            listed = Some(crate::attr_list::ListedFile::open(io, parent_rec)?);
+        }
         let mut block = index_io::promote_index_root_to_first_indx(
             &mut parent,
             index,
@@ -3246,7 +3312,6 @@ pub(crate) fn promote_parent_index_io<T: BlockIo + ?Sized>(
             i64::try_from(clusters - 1).map_err(|_| "INDX VCN does not fit i64")?,
             &mapping,
         )?;
-        crate::attr_resize::insert_attribute_sorted(&mut parent, &allocation)?;
         let bitmap_id = crate::attr_resize::allocate_attribute_id(&mut parent);
         let bitmap = build_named_resident_attribute(
             AttrType::Bitmap as u32,
@@ -3254,13 +3319,29 @@ pub(crate) fn promote_parent_index_io<T: BlockIo + ?Sized>(
             bitmap_id,
             &[1, 0, 0, 0, 0, 0, 0, 0],
         );
-        crate::attr_resize::insert_attribute_sorted(&mut parent, &bitmap)?;
+        if let Some(file) = listed.as_mut() {
+            // The root keeps its id, so its list entry is unchanged.
+            // New attributes get ids and entries wherever they fit.
+            file.change_base(|record| {
+                record.copy_from_slice(&parent);
+                Ok(())
+            })?;
+            file.add(io, allocation)?;
+            file.add(io, bitmap)?;
+        } else {
+            crate::attr_resize::insert_attribute_sorted(&mut parent, &allocation)?;
+            crate::attr_resize::insert_attribute_sorted(&mut parent, &bitmap)?;
+        }
         Ok((parent, block))
     })();
 
     let (parent, mut block) = match prepared {
         Ok(v) => v,
         Err(e) => {
+            let e = match listed.take() {
+                Some(file) => file.abandon(io, e),
+                None => e,
+            };
             if !dry_run {
                 crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
             }
@@ -3271,7 +3352,16 @@ pub(crate) fn promote_parent_index_io<T: BlockIo + ?Sized>(
         return Ok(());
     }
 
-    crate::mft_io::apply_fixup_on_write_magic(&mut block, params.bytes_per_sector, b"INDX")?;
+    if let Err(e) =
+        crate::mft_io::apply_fixup_on_write_magic(&mut block, params.bytes_per_sector, b"INDX")
+    {
+        let e = match listed.take() {
+            Some(file) => file.abandon(io, e),
+            None => e,
+        };
+        crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
+        return Err(e);
+    }
     let block_offset = lcn
         .checked_mul(params.cluster_size)
         .ok_or(Error::io("INDX block offset overflow"))?;
@@ -3279,10 +3369,19 @@ pub(crate) fn promote_parent_index_io<T: BlockIo + ?Sized>(
         .write_all_at(block_offset, &block)
         .and_then(|_| io.sync())
     {
+        let e = Error::io(format!("write first INDX block: {e}"));
+        let e = match listed.take() {
+            Some(file) => file.abandon(io, e),
+            None => e,
+        };
         crate::bitmap::free_io(io, &volume_bitmap, lcn, clusters)?;
-        return Err(Error::io(format!("write first INDX block: {e}")));
+        return Err(e);
     }
-    crate::mft_io::restore_mft_record_io(io, parent_rec, &parent).map_err(|e| {
+    match listed {
+        Some(file) => file.commit(io),
+        None => crate::mft_io::restore_mft_record_io(io, parent_rec, &parent),
+    }
+    .map_err(|e| {
         e.map_message(|m| {
             format!(
                 "the first INDX block is allocated and written but parent record {parent_rec} \
@@ -11049,6 +11148,151 @@ mod tests {
         assert_eq!(names, ["a", "b"]);
         let report = crate::fsck::check_io(&mut dev).unwrap();
         assert!(report.findings.is_empty(), "{:?}", report.findings);
+    }
+
+    #[test]
+    fn listed_directory_index_promotion_keeps_every_attribute_listed() {
+        for (directory, stream_count) in [
+            ("d".to_string(), 0),
+            ("d".to_string(), 24),
+            ("d".repeat(180), 0),
+        ] {
+            let directory_path = format!("/{directory}");
+            let size = 16 * 1024 * 1024;
+            let mut dev = MemDev { buf: vec![0; size] };
+            format_filesystem(&mut dev, size as u64, 4096, 1024, None, Some(1)).unwrap();
+            let rec = mkdir_io(&mut dev, "/", &directory).unwrap();
+            write_ea_io(&mut dev, &directory_path, b"USER.BIG", &[7; 800], 0).unwrap();
+            for i in 0..stream_count {
+                write_named_stream_io(
+                    &mut dev,
+                    &directory_path,
+                    &format!("s{i:02}"),
+                    &[i as u8; 120],
+                )
+                .unwrap();
+            }
+            let (_, before) = read_mft_record_io(&mut dev, rec).unwrap();
+            assert!(attr_io::find_attribute(&before, AttrType::AttributeList, None).is_some());
+            assert!(
+                attr_io::find_attribute(&before, AttrType::IndexAllocation, Some("$I30")).is_none()
+            );
+            let mut expected = Vec::new();
+            for i in 0..48 {
+                let name = format!("entry-{i:03}");
+                create_file_io(&mut dev, &directory_path, &name)
+                    .unwrap_or_else(|e| panic!("{stream_count} streams, create {name}: {e}"));
+                expected.push(name);
+            }
+            let list =
+                crate::read::read_attribute_value(&mut dev, rec, AttrType::AttributeList, None)
+                    .unwrap();
+            let entries = crate::read::parse_attribute_list(&list).unwrap();
+            if directory.len() > 1 {
+                assert!(
+                    entries.iter().any(|entry| {
+                        entry.record_number != rec
+                            && (entry.type_code == AttrType::IndexAllocation as u32
+                                || entry.type_code == AttrType::Bitmap as u32)
+                    }),
+                    "the full base record must put an index attribute in an extension"
+                );
+            }
+            for ty in [
+                AttrType::IndexRoot,
+                AttrType::IndexAllocation,
+                AttrType::Bitmap,
+            ] {
+                assert_eq!(
+                    entries.iter().filter(|e| e.type_code == ty as u32).count(),
+                    1
+                );
+            }
+            for entry in &entries {
+                let (_, record) = read_mft_record_io(&mut dev, entry.record_number).unwrap();
+                assert!(
+                    attr_io::iter_attributes(&record).any(|loc| {
+                        loc.type_code == entry.type_code
+                            && loc.attribute_id == entry.attribute_id
+                            && attr_io::decode_attr_name(&record, &loc)
+                                == entry.name.as_deref().unwrap_or("")
+                    }),
+                    "list entry names a missing attribute: {entry:?}"
+                );
+            }
+            let mut reader = std::io::Cursor::new(&dev.buf);
+            let mut ntfs = ntfs::Ntfs::new(&mut reader).unwrap();
+            ntfs.read_upcase_table(&mut reader).unwrap();
+            let dir = ntfs.file(&mut reader, rec).unwrap();
+            let index = dir.directory_index(&mut reader).unwrap();
+            let mut iter = index.entries();
+            let mut actual = Vec::new();
+            while let Some(entry) = iter.next(&mut reader) {
+                if let Some(key) = entry.unwrap().key() {
+                    actual.push(key.unwrap().name().to_string_lossy());
+                }
+            }
+            actual.sort();
+            assert_eq!(actual, expected, "independent ntfs directory listing");
+            assert_eq!(
+                list_eas_io(&mut dev, &directory_path).unwrap()[0].value,
+                [7; 800]
+            );
+            for i in 0..stream_count {
+                assert_eq!(
+                    crate::read::read_attribute_value(
+                        &mut dev,
+                        rec,
+                        AttrType::Data,
+                        Some(&format!("s{i:02}"))
+                    )
+                    .unwrap(),
+                    [i as u8; 120]
+                );
+            }
+            let report = crate::fsck::check_io(&mut dev).unwrap();
+            assert!(report.findings.is_empty(), "{:?}", report.findings);
+        }
+    }
+
+    #[test]
+    fn listed_directory_root_growth_moves_streams_before_spilling() {
+        for stream in [true, false] {
+            let size = 16 * 1024 * 1024;
+            let mut dev = MemDev { buf: vec![0; size] };
+            format_filesystem(&mut dev, size as u64, 4096, 1024, None, Some(1)).unwrap();
+            let rec = mkdir_io(&mut dev, "/", "d").unwrap();
+            write_ea_io(&mut dev, "/d", b"USER.BIG", &[7; 800], 0).unwrap();
+            let (ty, attribute_name) = if stream {
+                write_named_stream_io(&mut dev, "/d", "note", &[9; 300]).unwrap();
+                (AttrType::Data, Some("note"))
+            } else {
+                remove_ea_io(&mut dev, "/d", b"USER.BIG").unwrap();
+                write_ea_io(&mut dev, "/d", b"USER.SMALL", &[9; 300], 0).unwrap();
+                (AttrType::ExtendedAttribute, None)
+            };
+            let (_, before) = read_mft_record_io(&mut dev, rec).unwrap();
+            assert!(attr_io::find_attribute(&before, ty, attribute_name).is_some());
+            let name = "x".repeat(160);
+            create_file_io(&mut dev, "/d", &name).unwrap();
+            let (_, after) = read_mft_record_io(&mut dev, rec).unwrap();
+            assert!(attr_io::find_attribute(&after, ty, attribute_name).is_none());
+            assert!(
+                attr_io::find_attribute(&after, AttrType::IndexAllocation, Some("$I30")).is_none(),
+                "moving the stream or EA makes room for the resident root"
+            );
+            if stream {
+                assert_eq!(
+                    crate::read::read_attribute_value(&mut dev, rec, AttrType::Data, Some("note"))
+                        .unwrap(),
+                    [9; 300]
+                );
+            } else {
+                assert_eq!(list_eas_io(&mut dev, "/d").unwrap()[0].value, [9; 300]);
+            }
+            let report = crate::fsck::check_io(&mut dev).unwrap();
+            assert!(report.findings.is_empty(), "{:?}", report.findings);
+        }
     }
 
     #[test]
