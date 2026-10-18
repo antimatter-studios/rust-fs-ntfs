@@ -4663,6 +4663,78 @@
       "image": "nfs-cli-windows-interrupted-open-at-checkpoint-replay.img",
       "_notes": "A volume Windows was writing to when it was captured (test-disks/windows-interrupted-open-at-checkpoint), whose last checkpoint lists a transaction still open, which must be rolled back from before the checkpoint. fsck.ntfs -y replays and undoes it; then Windows grades the result: fsutil dirty query says Clean, every file Windows itself listed after its own recovery of the same image reads back at Windows' size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean."
     },
+    "cli-windows-interrupted-undo-stopped-replay-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 127,
+        "label": "ORACLE366",
+        "alloc_unit_size": 1024
+      },
+      "recipe": [
+        {
+          "op": "cli-replay-stopped",
+          "snapshot": "undo"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        {
+          "op": "win-cli-verify",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-windows-interrupted-undo-stopped-replay.img",
+      "_notes": "A volume Windows was writing to when it was captured (test-disks/windows-interrupted-undo), on 1 KiB clusters, whose $LogFile ends inside a transaction that must be rolled back. fsck.ntfs -y replays it and a power cut stops the replay right after its first undo write (#754), so the log still holds work. Windows attaches the image and its own restart runs over the log our replay left (#648); then Windows grades what its restart left: every file Windows itself listed after recovering the untouched capture reads back at Windows' size and SHA-256 (Get-FileHash) with no extra entries, and chkdsk finds the volume clean. Not yet run: it runs in CI's Windows `cli` group, and its first outcome is recorded here (#755)."
+    },
+    "cli-windows-interrupted-open-at-checkpoint-stopped-replay-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 127,
+        "label": "ORACLE366",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-replay-stopped",
+          "snapshot": "open-at-checkpoint"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        {
+          "op": "win-cli-verify",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-windows-interrupted-open-at-checkpoint-stopped-replay.img",
+      "_notes": "A volume Windows was writing to when it was captured (test-disks/windows-interrupted-open-at-checkpoint), whose last checkpoint lists a transaction still open, which must be rolled back from before the checkpoint. fsck.ntfs -y replays it and a power cut stops the replay right after its first undo write (#754), so the log still holds work. Windows attaches the image and its own restart runs over the log our replay left (#648); then Windows grades what its restart left: every file Windows itself listed after recovering the untouched capture reads back at Windows' size and SHA-256 (Get-FileHash) with no extra entries, and chkdsk finds the volume clean. Not yet run: it runs in CI's Windows `cli` group, and its first outcome is recorded here (#755)."
+    },
     "cli-windows-interrupted-quota-fsck-replay-win-verify-chkdsk": {
       "status": "pending",
       "volume_params": {
