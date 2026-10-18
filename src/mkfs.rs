@@ -573,7 +573,6 @@ pub fn plan_format(
     let sds_primary_lcn = mft_bitmap_lcn + MFT_BITMAP_CLUSTERS;
     let sds_mirror_lcn = sds_primary_lcn + sds_clusters(cluster_size) - 1;
 
-    let mftmirr_lcn = cluster_count / 2;
     // The mirror holds MFT records 0..3 -- $MFT, $MFTMirr, $LogFile and
     // $Volume, the four a repair needs to reach everything else -- and
     // the rest of their cluster when it holds more, as Windows' does.
@@ -595,6 +594,7 @@ pub fn plan_format(
     let root_index_clusters: u64 = u64::from(INDEX_BLOCK_SIZE).div_ceil(cluster_size as u64);
 
     let last_used_lcn = root_index_lcn + root_index_clusters;
+    let mftmirr_lcn = (cluster_count / 2).max(last_used_lcn + 1);
     if last_used_lcn >= mftmirr_lcn || mftmirr_lcn + mftmirr_clusters >= backup_boot_lcn {
         return Err(Error::io("volume too small for chosen layout"));
     }
