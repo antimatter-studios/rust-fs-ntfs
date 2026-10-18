@@ -753,6 +753,14 @@ impl ListedFile {
         Ok(())
     }
 
+    /// The namespace of the file's `$FILE_NAME` called `name`, in whichever
+    /// record holds it, base or extension (#785).
+    pub(crate) fn file_name_namespace(&self, name: &str) -> Option<u8> {
+        self.segments.iter().find_map(|segment| {
+            crate::write::find_file_name_by_name(&segment.bytes, name).map(|(_, ns)| ns)
+        })
+    }
+
     /// Rename the `$FILE_NAME`s that name the file `old` with `rename`, in
     /// whichever record holds each (#780). Windows keeps names in extension
     /// records too, so every record the list names is searched. A name its
