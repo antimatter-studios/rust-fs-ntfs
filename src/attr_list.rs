@@ -37,10 +37,10 @@
 //! or resized by `truncate` (#790): it is written where the list keeps it
 //! and moves only when its record cannot hold it.
 //!
-//! A directory takes the list too (#814): as only named streams and EAs
-//! move, its `$INDEX_ROOT`, `$INDEX_ALLOCATION` and `$BITMAP` stay in the
-//! base record, where the index edits find them, and an index edit that
-//! resizes `$INDEX_ROOT` in place changes no entry of the list.
+//! A directory takes the list too (#814). Its `$INDEX_ROOT` stays in the
+//! base record; growth moves named streams and EAs out first (#816).
+//! Promotion adds `$INDEX_ALLOCATION` and `$BITMAP` through the list,
+//! in the base record while they fit, else in an extension record.
 //!
 //! - A file with no list whose base record has no room for a stream or
 //!   an EA gets one: an entry for every attribute, and the named streams
@@ -294,9 +294,8 @@ impl ListedFile {
     /// A list this does not understand is refused before anything is
     /// written: one naming a record that is not in use, belongs to another
     /// file, or does not hold the attribute the entry says it does. A
-    /// directory is opened like a file: its index attributes are never
-    /// moved, so they stay in the base record, where the index edits find
-    /// them (#814).
+    /// directory is opened like a file; its root stays in the base record,
+    /// and its allocation and bitmap may live in extensions (#814, #816).
     pub(crate) fn open<T: BlockIo + ?Sized>(io: &mut T, base: u64) -> Result<Self, Error> {
         let (params, record) = mft_io::read_mft_record_io(io, base)?;
         if u64_at(&record, REC_BASE_REFERENCE) != 0 {
@@ -671,8 +670,8 @@ impl ListedFile {
         Ok(())
     }
 
-    /// Change the base record in place with `change`, which neither moves
-    /// nor resizes an attribute: a flag in its `$STANDARD_INFORMATION`.
+    /// Change the base record in place without changing its list entries:
+    /// a flag in `$STANDARD_INFORMATION`, or the value of `$INDEX_ROOT`.
     pub(crate) fn change_base<F>(&mut self, change: F) -> Result<(), Error>
     where
         F: FnOnce(&mut [u8]) -> Result<(), Error>,
@@ -681,6 +680,31 @@ impl ListedFile {
         change(&mut base.bytes)?;
         base.dirty = true;
         Ok(())
+    }
+
+    /// Grow the resident directory root in its base record, moving named
+    /// streams and EAs out first if necessary. `false` means the root
+    /// still needs promotion after those attributes have moved (#816).
+    pub(crate) fn grow_index_root<T, F>(&mut self, io: &mut T, change: F) -> Result<bool, Error>
+    where
+        T: BlockIo + ?Sized,
+        F: Fn(&mut [u8]) -> Result<(), Error>,
+    {
+        loop {
+            let mut bytes = self.segments[0].bytes.clone();
+            match change(&mut bytes) {
+                Ok(()) => {
+                    self.segments[0].bytes = bytes;
+                    self.segments[0].dirty = true;
+                    return Ok(true);
+                }
+                Err(e) if e.contains("exceeds record capacity") => {}
+                Err(e) => return Err(e),
+            }
+            if self.evict_base_attributes(io, true)? == 0 {
+                return Ok(false);
+            }
+        }
     }
 
     /// Whether `len` more bytes fit in the record `record`.
@@ -900,9 +924,24 @@ impl ListedFile {
     /// records, as Windows moves a batch of streams out when the base
     /// record fills. Returns how many moved.
     fn evict_named_data<T: BlockIo + ?Sized>(&mut self, io: &mut T) -> Result<usize, Error> {
+        self.evict_base_attributes(io, false)
+    }
+
+    /// Move named streams, and optionally EAs, without moving the root
+    /// or changing the number or names of the list's entries.
+    fn evict_base_attributes<T: BlockIo + ?Sized>(
+        &mut self,
+        io: &mut T,
+        include_eas: bool,
+    ) -> Result<usize, Error> {
         let record = &self.segments[0].bytes;
         let victims: Vec<(Vec<u8>, u16)> = attr_io::iter_attributes(record)
-            .filter(|l| l.type_code == AttrType::Data as u32 && l.name_length > 0)
+            .filter(|l| {
+                (l.type_code == AttrType::Data as u32 && l.name_length > 0)
+                    || (include_eas
+                        && (l.type_code == AttrType::ExtendedAttribute as u32
+                            || l.type_code == AttrType::ExtendedAttributeInformation as u32))
+            })
             .filter(|l| {
                 self.entries
                     .iter()
@@ -917,7 +956,7 @@ impl ListedFile {
                 )
             })
             .collect();
-        self.evict(io, AttrType::Data, victims)
+        self.evict(io, victims)
     }
 
     /// Move every `$FILE_NAME` in the base record to extension records,
@@ -946,21 +985,21 @@ impl ListedFile {
                 )
             })
             .collect();
-        self.evict(io, AttrType::FileName, victims)
+        self.evict(io, victims)
     }
 
-    /// Move `victims`, attributes of `kind` in the base record given with
-    /// their ids there, each to an extension record with room, and point
-    /// their list entries at where they now are.
+    /// Move `victims`, attributes in the base record given with their ids
+    /// there, each to an extension record with room, and point their list
+    /// entries at where they now are.
     fn evict<T: BlockIo + ?Sized>(
         &mut self,
         io: &mut T,
-        kind: AttrType,
         victims: Vec<(Vec<u8>, u16)>,
     ) -> Result<usize, Error> {
         let base = self.segments[0].number;
         for (mut attr, old_id) in victims.iter().cloned() {
-            let loc = find_by_id(&self.segments[0].bytes, kind as u32, old_id)
+            let ty = u32_at(&attr, 0);
+            let loc = find_by_id(&self.segments[0].bytes, ty, old_id)
                 .ok_or(Error::io("an attribute to move is not in the base record"))?;
             crate::write::remove_listed_attribute_at(
                 &mut self.segments[0].bytes,
@@ -984,9 +1023,7 @@ impl ListedFile {
                 .entries
                 .iter_mut()
                 .find(|e| {
-                    e.record_number() == base
-                        && e.type_code == kind as u32
-                        && e.attribute_id == old_id
+                    e.record_number() == base && e.type_code == ty && e.attribute_id == old_id
                 })
                 .ok_or(Error::io("an attribute to move has no entry in the list"))?;
             entry.reference = reference;
