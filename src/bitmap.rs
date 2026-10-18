@@ -1727,22 +1727,23 @@ mod tests {
     /// Its unnamed `$DATA` is a resident stub on a volume this crate
     /// formats, so the unnamed spelling contributes nothing at all --
     /// which is why `$Secure` was protected on no volume before this
-    /// fix, `main` included. These two ranges are what the `$SDS`
-    /// route adds, and reverting the spelling removes them.
+    /// fix, `main` included. This range -- `$SDS`'s one contiguous run
+    /// of 65 clusters at 4 KiB, primary block through mirror (#837) --
+    /// is what the `$SDS` route adds, and reverting the spelling
+    /// removes it.
     #[test]
     fn secures_sds_clusters_are_protected() {
         let mut dev = formatted_dev();
         let bm = locate_bitmap_io(&mut dev).unwrap();
-        for expected in [(1111u64, 1112u64), (1112, 1113)] {
-            assert!(
-                bm.other_protected.contains(&expected),
-                "$Secure's $SDS range {expected:?} must be in the protected set; got {:?}. \
-                 Its absence is the unnamed-$DATA spelling, which contributes nothing here.",
-                bm.other_protected
-            );
-        }
+        let expected = (1111u64, 1176u64);
         assert!(
-            bm.covers_the_volumes_own(1111, 2),
+            bm.other_protected.contains(&expected),
+            "$Secure's $SDS range {expected:?} must be in the protected set; got {:?}. \
+             Its absence is the unnamed-$DATA spelling, which contributes nothing here.",
+            bm.other_protected
+        );
+        assert!(
+            bm.covers_the_volumes_own(1111, 65),
             "and those clusters must be refused by the guard itself"
         );
     }
