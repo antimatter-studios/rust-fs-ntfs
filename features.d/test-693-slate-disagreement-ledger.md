@@ -1,0 +1,3 @@
+## Interfaces
+
+| Slate disagreement ledger (test support) | Experimental: every Slate checker disagreement with Windows chkdsk is looked up in `tests/slate-disagreements.tsv`; a row carries the generator that rebuilds the minimized image, Windows' chkdsk verdict and reading on it, and the implementation and issue it is assigned to; a recorded row is reported, a new disagreement, an ungraded row or a row that no longer reproduces keeps the advisory job red | Unreleased | #693, #580 | `tests/scripts/slate-oracle.sh` (ledger contracts), `scripts/slate-oracle.sh ledger`, `tests/slate-disagreements.tsv` |
