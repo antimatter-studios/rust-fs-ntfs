@@ -6332,11 +6332,24 @@ fn write_listed_named_stream_io<T: BlockIo + ?Sized>(
     data: &[u8],
 ) -> Result<(), Error> {
     let mut file = crate::attr_list::ListedFile::open(io, rec)?;
-    let found = file.find(AttrType::Data, stream_name)?;
-    let (old_runs, was_nonresident) = match &found {
-        Some(found) => (file.runs(found)?, !found.loc.is_resident),
-        None => (Vec::new(), false),
-    };
+    // A SPLIT NAMED STREAM IS REWRITTEN WHOLE.
+    //
+    // #800 moved the extents of a split unnamed `$DATA` on a rewrite;
+    // a named stream split the same way (#799) went through `find`,
+    // which refuses an attribute split across records, so its rewrite
+    // was refused (#805). The old extents' clusters are all freed once
+    // the records no longer name them; every extent but the first goes
+    // with its entry, and the first takes the new stream, split again if
+    // its run list needs it.
+    let extents = file.extents(AttrType::Data, stream_name)?;
+    let found = extents.first();
+    let mut old_runs = Vec::new();
+    for extent in &extents {
+        old_runs.extend(file.runs(extent)?);
+    }
+    let was_nonresident = found.is_some_and(|f| !f.loc.is_resident);
+    let exists = found.is_some();
+    file.remove_continuations(AttrType::Data, stream_name)?;
     let resident = crate::record_build::build_named_resident_data_attribute(0, stream_name, data)?;
     let extents = if !was_nonresident && resident.len() <= file.max_attribute_len() {
         vec![resident]
@@ -6352,14 +6365,7 @@ fn write_listed_named_stream_io<T: BlockIo + ?Sized>(
             Err(e) => return Err(file.abandon(io, e)),
         }
     };
-    let placed = place_listed_extents(
-        io,
-        &mut file,
-        AttrType::Data,
-        stream_name,
-        found.is_some(),
-        extents,
-    );
+    let placed = place_listed_extents(io, &mut file, AttrType::Data, stream_name, exists, extents);
     if let Err(e) = placed {
         return Err(file.abandon(io, e));
     }
