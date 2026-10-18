@@ -99,9 +99,24 @@ while that record was being written. Everything before that record stands.
 `rescue::read_archive` reads an archive back this way: it returns the whole
 records, where each starts in the archive, and the bytes of the torn record
 it left out, and refuses everything listed above except the tiling rule,
-which a resumed archive's history records will relax.
-Resuming such an archive is #722; refusing a foreign or changed source on
-resume is #723.
+which a resumed archive's history records relax.
+
+## Resuming an interrupted archive
+
+`rescue::resume` continues an interrupted scan in the same archive. It reads
+the archive back to its last whole record and cuts the torn record after it
+away; nothing before the cut is rewritten. It then runs the scan in the same
+order but reads only the ranges of the source no data record holds: the
+ranges the interrupted pass never reached, and the spans it recorded as
+unreadable. A span that reads now gains a data record after the earlier
+unreadable record, which stays as history. The layout reads an NTFS scan
+starts with are served from the archive's data records where those hold the
+bytes, so no range already archived is read from the source again.
+
+A resumed archive's data records still never overlap one another, and
+together with the unreadable records of the last pass still tile the
+source; an earlier pass's unreadable record may overlap a later data record.
+Refusing a foreign or changed source on resume is #723.
 
 ## Tests
 

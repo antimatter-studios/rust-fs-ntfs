@@ -13,7 +13,7 @@
 mod common;
 
 use fs_ntfs::rescue::{
-    read_archive, scan, scan_to_path, FileSource, RangeClass, ReadFailure, RescueSource,
+    read_archive, resume, scan, scan_to_path, FileSource, RangeClass, ReadFailure, RescueSource,
     ScanOptions,
 };
 use sha2::{Digest, Sha256};
@@ -906,4 +906,155 @@ fn a_whole_record_with_a_bad_checksum_is_refused_as_damage() {
     // Cut inside that record, the damage is a torn tail like any other.
     let got = read_archive(&mut &bytes[..at as usize]).expect("the cut archive");
     assert_eq!(got.records.len(), i);
+}
+
+/// A source that logs every read it is asked for, as (offset, length).
+struct Logged {
+    inner: Faulty,
+    log: Vec<(u64, u64)>,
+}
+
+impl RescueSource for Logged {
+    fn size(&self) -> u64 {
+        self.inner.size()
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), ReadFailure> {
+        self.log.push((offset, buf.len() as u64));
+        self.inner.read_at(offset, buf)
+    }
+}
+
+#[test]
+fn a_resumed_scan_reads_again_only_ranges_with_no_data_record() {
+    // The first 8 MiB of a Windows capture. Sectors 100 and 101 fail on the
+    // first pass only; sector 9000 fails on both.
+    let src = unpack("windows-interrupted-1");
+    let prefix = common::temp_image_path("rescue_resume_prefix");
+    let mut head = vec![0u8; 8 << 20];
+    File::open(&src)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .expect("read the capture's first 8 MiB");
+    new_file(&prefix)
+        .write_all(&head)
+        .expect("write the prefix");
+    let options = ScanOptions {
+        sector_size: 512,
+        chunk_size: 256 << 10,
+    };
+    let healed: BTreeSet<u64> = BTreeSet::from([100, 101]);
+    let dead: BTreeSet<u64> = BTreeSet::from([9000]);
+    let archive = common::temp_image_path("rescue_resume_archive");
+    let mut first = Faulty {
+        inner: FileSource::open(Path::new(&prefix)).unwrap(),
+        bad: healed.union(&dead).copied().collect(),
+        reads: 0,
+    };
+    scan(&mut first, &mut new_file(&archive), options).expect("the first pass");
+
+    // Interrupt it: cut the archive halfway through the payload of the first
+    // data record after its last unreadable record.
+    let whole = parse(&archive, |_, _| {});
+    let mut starts = vec![32u64];
+    for r in &whole.records {
+        let payload = if r.kind == 1 { r.len } else { 0 };
+        starts.push(starts.last().unwrap() + 28 + payload);
+    }
+    let last_lost = whole
+        .records
+        .iter()
+        .rposition(|r| r.kind == 2)
+        .expect("the first pass recorded unreadable sectors");
+    let k = (last_lost + 1..whole.records.len())
+        .find(|&i| whole.records[i].kind == 1)
+        .expect("a data record after the last unreadable one");
+    let cut = starts[k] + 28 + whole.records[k].len / 2;
+    let before = std::fs::read(&archive).expect("read the first pass's archive");
+    OpenOptions::new()
+        .write(true)
+        .open(&archive)
+        .and_then(|f| f.set_len(cut))
+        .expect("cut the archive");
+    let kept: Vec<(u64, u64)> = whole.records[..k]
+        .iter()
+        .filter(|r| r.kind == 1)
+        .map(|r| (r.offset, r.offset + r.len))
+        .collect();
+
+    let mut second = Logged {
+        inner: Faulty {
+            inner: FileSource::open(Path::new(&prefix)).unwrap(),
+            bad: dead.clone(),
+            reads: 0,
+        },
+        log: Vec::new(),
+    };
+    let mut out = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&archive)
+        .expect("open the cut archive");
+    resume(&mut second, &mut out, options).expect("the resumed pass");
+    drop(out);
+
+    for &(offset, len) in &second.log {
+        for &(a, b) in &kept {
+            assert!(
+                offset + len <= a || offset >= b,
+                "the resumed pass read {offset}+{len}, which the data record \
+                 {a}..{b} already holds"
+            );
+        }
+    }
+    let after = std::fs::read(&archive).expect("read the resumed archive");
+    assert!(
+        after.len() as u64 > starts[k]
+            && after[..starts[k] as usize] == before[..starts[k] as usize],
+        "the resume changed the archive's whole records"
+    );
+
+    // Every byte but sector 9000 is in exactly one data record, holding the
+    // capture's bytes; sector 9000 is in none.
+    let mut held: Vec<(u64, u64)> = Vec::new();
+    let parsed = parse(&archive, |offset, bytes| {
+        assert!(
+            bytes == &head[offset as usize..offset as usize + bytes.len()],
+            "the data record at {offset}+{} differs from the capture",
+            bytes.len()
+        );
+        held.push((offset, offset + bytes.len() as u64));
+    });
+    held.sort();
+    let mut next = 0;
+    for &(a, b) in &held {
+        if next == 9000 * SECTOR {
+            next += SECTOR;
+        }
+        assert_eq!(
+            a, next,
+            "a data record starts at {a} where {next} was expected"
+        );
+        next = b;
+    }
+    assert_eq!(
+        next, parsed.size,
+        "the data records end short of the source"
+    );
+
+    // The first pass's unreadable records stay as history; the dead sector
+    // is unreadable again, with no payload.
+    let lost = parsed.unreadable();
+    assert_eq!(
+        lost[..lost.len() - 1],
+        whole.unreadable()[..],
+        "the first pass's unreadable records"
+    );
+    assert_eq!(
+        lost[lost.len() - 1],
+        (9000 * SECTOR, SECTOR),
+        "the resumed pass's unreadable record"
+    );
+    for path in [&src, &prefix, &archive] {
+        std::fs::remove_file(path).expect("remove a scratch file");
+    }
 }
