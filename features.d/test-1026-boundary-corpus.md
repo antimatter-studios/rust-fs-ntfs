@@ -1,0 +1,3 @@
+## Interfaces
+
+| Operation-sequence geometry boundary corpus (test support) | Experimental: every committed seed names its geometry, and four fixed CI cases replay 512-byte and 65536-byte clusters with 1024-byte and 4096-byte MFT records, compare through an independent reader, and compare again after a fresh whole-image remount | Unreleased | #1026, #733 | `op_sequence_readback.rs::every_committed_corpus_seed_names_its_geometry`, `op_sequence_readback.rs::corpus_c512_r1024_survives_fresh_remount`, `op_sequence_readback.rs::corpus_c512_r4096_survives_fresh_remount`, `op_sequence_readback.rs::corpus_c65536_r1024_survives_fresh_remount`, `op_sequence_readback.rs::corpus_c65536_r4096_survives_fresh_remount` |

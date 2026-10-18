@@ -91,6 +91,16 @@ manifest to `tmp/op-sequence-model/corpus-executed.json`. The ordinary
 Existing test floors and measured output budgets remain unchanged; raise a
 floor only after a CI measurement. Missing seeds or tools fail.
 
+Every committed seed explicitly names its geometry in its version-1 pin
+metadata (#1026), including the default 64 MiB, 4096-byte-cluster,
+1024-byte-record seeds. Four fixed CI cases replay the boundary seeds for
+512-byte and 65536-byte clusters crossed with 1024-byte and 4096-byte MFT
+records. Each case creates its own image, requires every operation to
+execute, compares through fresh descriptors and the independent `ntfs`
+parser, then compares again after a fresh whole-image remount. The Ubuntu
+ntfs-3g hook repeats these cases with its reference tools. Existing seed
+names and operations are retained; the readback floor is 20 cases.
+
 The existing `fuzz.yml` workflow also runs libFuzzer's `operation_sequence`
 target, preserving all byte-decoder targets. `seconds` (1..3600, default 120)
 sets exploration time; `seed` (1..4294967295, default 683) is logged before
