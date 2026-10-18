@@ -74,6 +74,8 @@ cli = [
   "cli-windows-interrupted-tail-continuation-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-undo-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-open-at-checkpoint-fsck-replay-win-verify-chkdsk",
+  "cli-windows-interrupted-undo-stopped-replay-win-verify-chkdsk",
+  "cli-windows-interrupted-open-at-checkpoint-stopped-replay-win-verify-chkdsk",
   "cli-windows-interrupted-quota-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-fresh-log-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-quota-spilled-fsck-replay-win-verify-chkdsk",
