@@ -430,6 +430,15 @@ host = "host"
 command = "bash scripts/cli-oracle.sh replay {image_dir}/{run_id}/{scenario.image} {step.snapshot}"
 expect_exit = 0
 
+[ops.cli-replay-stopped]
+# The same volume, whose replay a power cut stops right after its first
+# undo write (#754): the log still holds work, for Windows' own restart to
+# find when the image is attached (#648). Writes <image>.manifest from what
+# Windows listed after recovering the untouched capture itself.
+host = "host"
+command = "bash scripts/cli-oracle.sh replay-stopped {image_dir}/{run_id}/{scenario.image} {step.snapshot}"
+expect_exit = 0
+
 [ops.cli-write-after-replay]
 # The same volume: fs.ntfs mkdir must be refused with nothing written while
 # its $LogFile holds work (#137), then fsck.ntfs -y replays it, and fs.ntfs
