@@ -507,7 +507,10 @@ pub enum InPlaceError {
     /// unit it is for was not written. `unit` is `None` for the header.
     JournalReadBack { unit: Option<u32>, offset: u64 },
     /// The device read write `write` of unit `unit` back different from
-    /// its redo, in bytes `start..end`.
+    /// its redo, in bytes `start..end`. For a unit a resume finds marked
+    /// applied, it differs from what the applied units leave there, and
+    /// `start..end` runs from the first byte that differs to the last; the
+    /// device and the journal are left as the resume found them.
     DeviceReadBack {
         unit: u32,
         write: usize,
@@ -515,7 +518,9 @@ pub enum InPlaceError {
         end: u64,
     },
     /// A resumed unit's write `write` holds neither its preimage nor its
-    /// redo in bytes `start..end`; nothing of the unit was written again.
+    /// redo in bytes `start..end`, the first such byte to the last (#929);
+    /// nothing of the unit was written again, and nothing was appended to
+    /// the journal.
     OpenUnitRange {
         unit: u32,
         write: usize,
@@ -629,6 +634,12 @@ pub fn apply_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
 ///    [`apply_in_place`] does. Its intent is not appended a second time.
 /// 3. Every later unit is applied exactly as [`apply_in_place`] applies it.
 ///
+/// A range that fails step 1 or 2, because something changed the device
+/// while the apply was stopped, refuses the resume before anything is
+/// written to the device or appended to the journal (#929). The refusal
+/// names the unit, the write and the bytes, from the first that fails to
+/// the last.
+///
 /// A journal holding no whole record is started again from its header.
 /// The record appended over a torn one is always the record that was torn,
 /// as long or longer, so no torn bytes are left after it.
@@ -664,19 +675,19 @@ pub fn resume_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
         for (w, write) in plan.units[u].writes.iter().enumerate() {
             let held = read_range(device, u, w, write)?;
             let left = left_by_units(&plan.units[u..applied], w);
-            let differs = (0..held.len()).any(|i| {
+            let changed = changed_span(write.offset, held.len(), |i| {
                 let byte = write.offset + i as u64;
-                held[i] != left[i]
-                    && !open_writes
+                held[i] == left[i]
+                    || open_writes
                         .iter()
                         .any(|o| (o.offset..o.offset + o.after.len() as u64).contains(&byte))
             });
-            if differs {
+            if let Some((start, end)) = changed {
                 return Err(InPlaceError::DeviceReadBack {
                     unit: u as u32,
                     write: w,
-                    start: write.offset,
-                    end: write.offset + write.after.len() as u64,
+                    start,
+                    end,
                 });
             }
         }
@@ -688,15 +699,15 @@ pub fn resume_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
         for (w, write) in unit.writes.iter().enumerate() {
             let held = read_range(device, o, w, write)?;
             let left = left_by_unit(unit, w);
-            let torn = (0..held.len()).all(|i| {
+            let changed = changed_span(write.offset, held.len(), |i| {
                 held[i] == write.before[i] || held[i] == write.after[i] || held[i] == left[i]
             });
-            if !torn {
+            if let Some((start, end)) = changed {
                 return Err(InPlaceError::OpenUnitRange {
                     unit: o as u32,
                     write: w,
-                    start: write.offset,
-                    end: write.offset + write.after.len() as u64,
+                    start,
+                    end,
                 });
             }
         }
@@ -707,6 +718,14 @@ pub fn resume_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
         apply_unit(plan, u, device, journal, &mut at)?;
     }
     Ok(())
+}
+
+/// The device bytes, first to last, of the `len` bytes from `offset` for
+/// which `held(i)` is false; `None` when it holds for every byte.
+fn changed_span(offset: u64, len: usize, held: impl Fn(usize) -> bool) -> Option<(u64, u64)> {
+    let first = (0..len).find(|&i| !held(i))?;
+    let last = (first..len).rev().find(|&i| !held(i))?;
+    Some((offset + first as u64, offset + last as u64 + 1))
 }
 
 /// Read write `w` of unit `u`'s range back from `device`.
