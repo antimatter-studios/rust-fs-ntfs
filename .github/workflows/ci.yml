@@ -430,12 +430,12 @@ jobs:
       - name: unit tests (release) with an executed-test floor
         run: |
           bash ../rust-fs-core/scripts/tier.sh --refuse-skips unit -- cargo test --release --locked --lib
-          # Previous floor 600 plus the #815 directory-stream contract.
-          # The regression ran with 768 unit cases on 2026-10-18.
+          # Previous floor 601 plus two listed-directory index contracts in #816.
+          # The two contracts ran with 777 unit cases on 2026-10-18.
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/unit.log | awk '{s+=$4} END{print s+0}')
-          echo "tests executed: $n (floor 601)"
-          if [ "$n" -lt 601 ]; then
-              echo "::error::only $n unit tests executed, floor is 601 -- 637 ran on 2026-09-17 in run 34985102618, plus the directory-stream contract in #815, and a run that executes less than that stopped early rather than passed"
+          echo "tests executed: $n (floor 603)"
+          if [ "$n" -lt 603 ]; then
+              echo "::error::only $n unit tests executed, floor is 603 -- 637 ran on 2026-09-17 in run 34985102618, plus the directory-stream contract in #815 and two directory-index contracts in #816, and a run that executes less than that stopped early rather than passed"
               exit 1
           fi
       # The floor here is 15 out of a measured 16, which looks like no margin at
@@ -576,12 +576,12 @@ jobs:
       - name: unit tests (debug, overflow checks armed) with an executed-test floor
         run: |
           bash ../rust-fs-core/scripts/tier.sh --refuse-skips unit-debug -- cargo test --locked --lib
-          # Previous floor 600 plus the #815 directory-stream contract.
-          # The regression ran with 768 unit cases on 2026-10-18.
+          # Previous floor 601 plus two listed-directory index contracts in #816.
+          # The two contracts ran with 777 unit cases on 2026-10-18.
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/unit-debug.log | awk '{s+=$4} END{print s+0}')
-          echo "tests executed: $n (floor 601)"
-          if [ "$n" -lt 601 ]; then
-              echo "::error::only $n unit tests executed under overflow checks, floor is 601 -- 637 ran on 2026-09-17 in run 34985102618, plus the directory-stream contract in #815, and a run that executes less than that stopped early rather than passed"
+          echo "tests executed: $n (floor 603)"
+          if [ "$n" -lt 603 ]; then
+              echo "::error::only $n unit tests executed under overflow checks, floor is 603 -- 637 ran on 2026-09-17 in run 34985102618, plus the directory-stream contract in #815 and two directory-index contracts in #816, and a run that executes less than that stopped early rather than passed"
               exit 1
           fi
         env:
@@ -998,10 +998,10 @@ jobs:
           # `fsck.ntfs --apply --in-place --journal` CLI contract, plus four
           # #948 journal device-relationship contracts, plus the #906
           # `fsck.ntfs --dry-run --plan` CLI contract and one #815
-          # directory-stream contract.
-          echo "tests executed: $n (floor 1387)"
-          if [ "$n" -lt 1387 ]; then
-              echo "::error::only $n tests executed, floor is 1387 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680, eight generator contracts in #681, four image-harness contracts in #682, one recursive-walk fault contract in #644, three named-stream contracts in #731, three EA contracts in #732 two CLI EA JSON contracts in #658 one fsck --apply CLI contract in #910 one fsck --apply --in-place CLI contract in #922 four journal device-relationship contracts in #948 one fsck --dry-run --plan CLI contract in #906 and one directory-stream contract in #815. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
+          # directory-stream contract and two #816 directory-index contracts.
+          echo "tests executed: $n (floor 1389)"
+          if [ "$n" -lt 1389 ]; then
+              echo "::error::only $n tests executed, floor is 1389 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680, eight generator contracts in #681, four image-harness contracts in #682, one recursive-walk fault contract in #644, three named-stream contracts in #731, three EA contracts in #732 two CLI EA JSON contracts in #658 one fsck --apply CLI contract in #910 one fsck --apply --in-place CLI contract in #922 four journal device-relationship contracts in #948 one fsck --dry-run --plan CLI contract in #906 and one directory-stream contract in #815 and two directory-index contracts in #816. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
               exit 1
           fi
       - run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness -- -D warnings
@@ -1165,11 +1165,11 @@ jobs:
           #
           # Measured 2026-09-17 from run 34985102618 (job 104435065061): 637
           # executed, the same `--lib` set the stable legs run. Previous
-          # floor 600 plus the #815 directory-stream contract is 601.
+          # floor 601 plus two #816 directory-index contracts is 603.
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/asan.log | awk '{s+=$4} END{print s+0}')
-          echo "tests executed under ASan: $n (floor 601)"
-          if [ "$n" -lt 601 ]; then
-              echo "::error::only $n tests executed under ASan, floor is 601 -- 637 ran on 2026-09-17 in run 34985102618, plus the directory-stream contract in #815, and a run that executes less than that sanitized nothing rather than passed"
+          echo "tests executed under ASan: $n (floor 603)"
+          if [ "$n" -lt 603 ]; then
+              echo "::error::only $n tests executed under ASan, floor is 603 -- 637 ran on 2026-09-17 in run 34985102618, plus the directory-stream contract in #815 and two directory-index contracts in #816, and a run that executes less than that sanitized nothing rather than passed"
               exit 1
           fi
       - name: upload test logs
