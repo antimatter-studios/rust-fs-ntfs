@@ -102,6 +102,60 @@ impl PathIo {
         Ok(Self { file, size })
     }
 
+    /// Read-write handle for an in-place repair, holding an exclusive,
+    /// non-blocking lock on the device for as long as it lives (#920).
+    ///
+    /// The lock is [`File::try_lock`] (`flock(LOCK_EX | LOCK_NB)` on Unix),
+    /// which belongs to this open file description. A device another holder
+    /// has locked is refused at once with an error saying it is held by
+    /// another process, before anything is written. On Linux a block device
+    /// is also opened with `O_EXCL`, which the kernel refuses with `EBUSY`
+    /// for a device that is mounted or otherwise held.
+    ///
+    /// Only the in-place repair path of the standalone fsck CLI opens a
+    /// device this way. Every other caller, the FSKit extension included,
+    /// keeps the cooperative in-process lock and opens through
+    /// [`PathIo::open_rw`], [`PathIo::open_ro`] or a callback transport.
+    pub fn open_exclusive(path: &Path) -> Result<Self, String> {
+        let held = || {
+            format!(
+                "open exclusive '{}': the device is held by another process",
+                path.display()
+            )
+        };
+        let mut options = OpenOptions::new();
+        options.read(true).write(true);
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+            let is_block_device = std::fs::metadata(path)
+                .map(|m| m.file_type().is_block_device())
+                .unwrap_or(false);
+            if is_block_device {
+                options.custom_flags(libc::O_EXCL);
+            }
+        }
+        let file = options.open(path).map_err(|e| {
+            if cfg!(target_os = "linux") && e.raw_os_error() == Some(libc::EBUSY) {
+                held()
+            } else {
+                format!("open rw '{}': {e}", path.display())
+            }
+        })?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Err(held()),
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(format!("lock '{}': {e}", path.display()))
+            }
+        }
+        let size = file
+            .metadata()
+            .map_err(|e| format!("stat '{}': {e}", path.display()))?
+            .len();
+        Ok(Self { file, size })
+    }
+
     /// Path-backed read-only handle. Used by routines that conceptually
     /// only read but go through the same trait surface (e.g. resolve
     /// path → MFT record number).
