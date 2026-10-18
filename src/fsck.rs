@@ -1378,6 +1378,7 @@ const LIST_ENTRY_MIN: usize = 0x1A;
 /// reference names another file; or an entry identifies no attribute in
 /// that record by type, exact UTF-16 name, lowest VCN and instance (#821).
 /// An entry for the list itself is invalid even when it matches (#1040).
+/// Descending attribute type codes identify the out-of-order entry (#1043).
 /// `rec` is the fixed-up base record. A record with no list, or an
 /// extension record, is left alone.
 fn check_list_records<T: FsckIo>(
@@ -1404,6 +1405,7 @@ fn check_list_records<T: FsckIo>(
     };
     let mut references: Vec<u64> = Vec::new();
     let mut entries = Vec::new();
+    let mut previous_type = None;
     let mut at = 0;
     while at + LIST_ENTRY_MIN <= value.len() {
         let length = u16::from_le_bytes([
@@ -1417,9 +1419,17 @@ fn check_list_records<T: FsckIo>(
                 value.len()
             ));
         }
-        if u32::from_le_bytes(value[at..at + 4].try_into().expect("type"))
-            == AttrType::AttributeList as u32
-        {
+        let ty = u32::from_le_bytes(value[at..at + 4].try_into().expect("type"));
+        if let Some((previous_at, previous)) = previous_type {
+            if ty < previous {
+                report(format!(
+                    "its $ATTRIBUTE_LIST entry at {at} has type {ty:#x}, out of type order \
+                     after entry at {previous_at} with type {previous:#x}"
+                ));
+            }
+        }
+        previous_type = Some((at, ty));
+        if ty == AttrType::AttributeList as u32 {
             report(format!(
                 "its $ATTRIBUTE_LIST entry at {at} has type 0x20 and lists itself"
             ));
@@ -2917,6 +2927,62 @@ mod check_tests {
             report.logfile,
             LogfileState::Clean(crate::logfile::CleanBecause::MarkedClean)
         );
+    }
+
+    #[test]
+    fn an_attribute_list_type_inversion_is_reported() {
+        let mut dev = fresh();
+        let base = crate::write::create_file_io(&mut dev, "/", "listed").unwrap();
+        for i in 0..16 {
+            crate::write::write_named_stream_io(
+                &mut dev,
+                "/listed",
+                &format!("stream{i:02}"),
+                &[42; 400],
+            )
+            .unwrap();
+        }
+        let before = dev.0.clone();
+        assert!(check_io(&mut dev).unwrap().findings.is_empty());
+        assert_eq!(dev.0, before, "checking the sorted control must not write");
+        let mut list =
+            crate::read::read_attribute_value(&mut dev, base, AttrType::AttributeList, None)
+                .unwrap();
+        let first = u16::from_le_bytes([list[4], list[5]]) as usize;
+        let second = u16::from_le_bytes([list[first + 4], list[first + 5]]) as usize;
+        assert_eq!(
+            u32::from_le_bytes(list[..4].try_into().unwrap()),
+            AttrType::StandardInformation as u32
+        );
+        assert_eq!(
+            u32::from_le_bytes(list[first..first + 4].try_into().unwrap()),
+            AttrType::FileName as u32
+        );
+        // Exchange complete entries: both still identify their original
+        // attributes, and no length, name, VCN, reference or instance changes.
+        list[..first + second].rotate_left(first);
+        crate::mft_io::update_mft_record_io(&mut dev, base, |record| {
+            let loc =
+                crate::attr_io::find_attribute(record, AttrType::AttributeList, None).unwrap();
+            assert!(loc.is_resident);
+            let at = loc.attr_offset + loc.resident_value_offset.unwrap() as usize;
+            record[at..at + list.len()].copy_from_slice(&list);
+            Ok(())
+        })
+        .unwrap();
+        let before = dev.0.clone();
+        let report = check_io(&mut dev).unwrap();
+        assert_eq!(report.findings.len(), 1, "{report:#?}");
+        assert!(
+            report.findings.iter().any(|f| matches!(f,
+                CheckFinding::BadAttributeList { record, reason }
+                    if *record == base && reason.contains(&format!("entry at {second}"))
+                        && reason.contains("out of type order")
+                        && reason.contains("0x10") && reason.contains("0x30")
+            )),
+            "{report:#?}"
+        );
+        assert_eq!(dev.0, before, "checking must not write");
     }
 
     #[test]
