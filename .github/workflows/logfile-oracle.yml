@@ -16,6 +16,7 @@ name: logfile oracle
 #   view indexes, quota updates, truncation: mix views
 #   file record tails (WriteEndOfFileRecordSegment): mix tails
 #   clusters freed under dirty pages (DeleteDirtyClusters): mix freed
+#   object id data rewritten in place (UpdateRelativeDataInIndex*): mix objids
 #
 # On demand only. It builds no code and gates nothing: a fixture is chosen
 # from its artifact by a person and committed, and from then on the tests
@@ -44,7 +45,7 @@ on:
         required: false
         default: "0"
       mix:
-        description: "Workload: files (create, write, rename, delete), views (adds quota tracking, security descriptors, object ids, junctions, truncation), tails (small resident files whose data is cut and regrown, and a named stream added and removed) or freed (compressed files rewritten compressible and sparse files zeroed, so clusters are freed while their pages are dirty)"
+        description: "Workload: files (create, write, rename, delete), views (adds quota tracking, security descriptors, object ids, junctions, truncation), tails (small resident files whose data is cut and regrown, and a named stream added and removed), freed (compressed files rewritten compressible and sparse files zeroed, so clusters are freed while their pages are dirty) or objids (every file gets an object id whose extended information is then rewritten in place)"
         required: false
         default: "files"
 
