@@ -49,6 +49,14 @@ later. Each path, stream size and SHA-256 is observed through Windows on a
 disposable mount; the manifest binds to the original raw image's SHA-256.
 No additional Slate implementation source was read for this capture.
 
+The Slate tier's `write` step (#863, part of #690) runs Slate's copy-only
+writer, `ntfs-write-lab`, from the MIT tools crate at the pinned commit. Only
+the argument list and exit status of `src/tools/bin/ntfs-write-lab.rs` (MIT)
+were read, to call it: `SOURCE NEW ROOT_FILENAME OFFSET EXPECTED_HEX
+REPLACEMENT_HEX`, exit 0 on success and 1 on failure. The writer only ever
+receives a read-only copy of a source image, and nothing it writes is a
+source of this crate's knowledge of NTFS.
+
 To locate the `InvalidSecurity` finding on a fresh volume (#837), the
 conditions of Slate's MIT-licensed `src/ondisk/security_store.rs` at
 `579dfeb` were read: it refuses a `$Secure` stream whose attribute carries any
