@@ -558,6 +558,50 @@ impl ListedFile {
         Ok(bytes)
     }
 
+    /// Take out the `$FILE_NAME` that names the file `basename` in the
+    /// directory `parent_reference`, from whichever record holds it, with
+    /// its entry, and count one hard link fewer in the base record (#778).
+    /// Windows keeps names in extension records too, so every record the
+    /// list names is searched, not the base record alone.
+    pub(crate) fn remove_file_name(
+        &mut self,
+        parent_reference: u64,
+        basename: &str,
+    ) -> Result<(), Error> {
+        let found = self
+            .segments
+            .iter()
+            .enumerate()
+            .find_map(|(i, s)| {
+                crate::write::find_file_name_attr(&s.bytes, parent_reference, basename)
+                    .map(|loc| (i, loc))
+            })
+            .ok_or_else(|| {
+                Error::not_found(format!(
+                    "unlink: no $FILE_NAME for '{basename}' under parent {parent_reference:#x}"
+                ))
+            })?;
+        let (index, loc) = found;
+        let number = self.segments[index].number;
+        let segment = &mut self.segments[index];
+        crate::write::remove_listed_attribute_at(
+            &mut segment.bytes,
+            loc.attr_offset,
+            loc.attr_length,
+        )?;
+        segment.dirty = true;
+        self.entries.retain(|e| {
+            !(e.record_number() == number
+                && e.type_code == loc.type_code
+                && e.attribute_id == loc.attribute_id)
+        });
+        let base = &mut self.segments[0];
+        let links = u16_at(&base.bytes, 0x12).saturating_sub(1);
+        base.bytes[0x12..0x14].copy_from_slice(&links.to_le_bytes());
+        base.dirty = true;
+        Ok(())
+    }
+
     /// Give a file with no list one: an entry for every attribute in its
     /// base record, and its named streams moved out, as Windows moved
     /// everything but `$STANDARD_INFORMATION` the first time.
