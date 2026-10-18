@@ -16,6 +16,7 @@ on:
       - .github/workflows/slate-oracle.yml
       - scripts/slate-oracle.sh
       - tests/scripts/slate-oracle.sh
+      - tests/slate-disagreements.tsv
       - tests/scripts/slate-writer-capture.sh
       - scripts/fs-windows-test-harness/run-host-steps
       - scripts/cli-oracle.sh
