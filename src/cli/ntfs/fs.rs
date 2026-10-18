@@ -233,9 +233,9 @@ fn command() -> Cmd {
                      fs.ntfs disk.img export /notes.txt - > notes.txt\n\n\
                      Copies the unnamed data stream in fixed-size chunks. A local file is \
                      published only when complete; an existing name needs --replace. \
-                     Directories and reparse points are refused. Compressed and encrypted \
-                     streams are unsupported by export. Use read for compressed files. \
-                     Only single files are supported.",
+                     Directories and reparse points are refused. A compressed stream is \
+                     decompressed one compression unit at a time; encrypted streams are \
+                     refused. Only single files are supported.",
                 ),
         )
         .subcommand(
@@ -1377,8 +1377,9 @@ fn xattr(
     Ok(Outcome::done())
 }
 
-/// A positioned reader for the unnamed stream. Native uncompressed ranged
-/// reads allocate at most the requested chunk, even across attribute extents.
+/// A positioned reader for the unnamed stream. Native ranged reads allocate
+/// at most the requested chunk, even across attribute extents, plus one
+/// compression unit when the stream is compressed.
 struct ExportFile<'a> {
     dev: &'a mut Device,
     record: u64,
@@ -1424,7 +1425,7 @@ fn export(dev: &mut Device, request: &ExportRequest) -> Result<Outcome, CliError
             "{path}: is a reparse point; export does not follow links or transformed data"
         )));
     }
-    // The native compressed range reader materialises the whole stream.
+    // The native encrypted range reader would materialise the whole stream.
     // Check the actual attribute flags in every extent, not just SI's flags,
     // so this adapter never silently falls back to a whole-file buffer.
     for holder in records_holding(dev, record, AttrType::Data).map_err(|e| ntfs_error(path, e))? {
@@ -1436,10 +1437,9 @@ fn export(dev: &mut Device, request: &ExportRequest) -> Result<Outcome, CliError
             }
             let flags = attr_io::attribute_flags(&bytes, &loc)
                 .ok_or_else(|| CliError::failed(format!("{path}: truncated $DATA flags")))?;
-            if flags & (attr_io::attr_flags::COMPRESSION_MASK | attr_io::attr_flags::ENCRYPTED) != 0
-            {
+            if flags & attr_io::attr_flags::ENCRYPTED != 0 {
                 return Err(CliError::not_implemented(format!(
-                    "{path}: bounded export of compressed or encrypted data is not supported"
+                    "{path}: export of encrypted (EFS) data is not supported"
                 )));
             }
         }

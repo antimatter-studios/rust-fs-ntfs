@@ -827,9 +827,11 @@ fn read_value_from_record<T: BlockIo + ?Sized>(
 /// **without materialising the whole value**. An uncompressed non-resident
 /// attribute reads only the clusters overlapping the window — so a small read
 /// of a huge file doesn't allocate gigabytes. Resident values (tiny) and
-/// compressed values (decompress as a unit) fall back to a full read + slice.
+/// encrypted values fall back to a full read + slice.
 /// Follows `$ATTRIBUTE_LIST`. Returns fewer than `len` bytes only at end of
 /// value. `offset` stays `u64` throughout (no 32-bit truncation).
+/// Compressed values decompress only the compression units the window
+/// overlaps, one unit at a time.
 pub fn read_attribute_range<T: BlockIo + ?Sized>(
     io: &mut T,
     record_number: u64,
@@ -857,7 +859,19 @@ pub fn read_attribute_range<T: BlockIo + ?Sized>(
         }
     }
 
-    // Resident or compressed: read the whole value, then slice the window.
+    // Compressed: decompress only the units the window overlaps, one at a
+    // time, so memory is bounded by one unit plus the window.
+    if !loc.is_resident {
+        let flags = u16::from_le_bytes([
+            record[loc.attr_offset + attr_off::FLAGS],
+            record[loc.attr_offset + attr_off::FLAGS + 1],
+        ]);
+        if flags & ATTR_FLAG_ENCRYPTED == 0 && flags & ATTR_FLAG_COMPRESSED != 0 {
+            return read_compressed_window(io, &params, &record, &loc, offset, len);
+        }
+    }
+
+    // Resident or encrypted: read the whole value, then slice the window.
     let full = read_value_from_record(io, &params, &record, &loc, Holes::AreZeros)?;
     let full_len = full.len() as u64;
     let start = offset.min(full_len) as usize;
@@ -995,6 +1009,21 @@ fn read_compressed_nonresident<T: BlockIo + ?Sized>(
     record: &[u8],
     loc: &attr_io::AttrLocation,
 ) -> Result<Vec<u8>, Error> {
+    read_compressed_window(io, params, record, loc, 0, usize::MAX)
+}
+
+/// The bytes `[offset, offset+len)` of a compressed non-resident attribute,
+/// clipped to its data size. Only the units the window overlaps are read
+/// and decompressed, one at a time, so a ranged read holds at most one
+/// unit's stored and decompressed bytes beside the returned window.
+fn read_compressed_window<T: BlockIo + ?Sized>(
+    io: &mut T,
+    params: &crate::mft_io::BootParams,
+    record: &[u8],
+    loc: &attr_io::AttrLocation,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<u8>, Error> {
     let data_size = bounded_value_length(
         params,
         &loc.non_resident_value_length,
@@ -1026,10 +1055,12 @@ fn read_compressed_nonresident<T: BlockIo + ?Sized>(
 
     let cluster_size = params.cluster_size as usize;
     let unit_size = unit_clusters * cluster_size;
-    let mut out = vec![0u8; data_size];
+    let start = offset.min(data_size as u64) as usize;
+    let end = start.saturating_add(len).min(data_size);
+    let mut out = vec![0u8; end - start];
 
-    let mut unit_first_vcn = 0usize;
-    while unit_first_vcn * cluster_size < data_size {
+    let mut unit_first_vcn = (start / unit_size) * unit_clusters;
+    while unit_first_vcn * cluster_size < end {
         let unit_off = unit_first_vcn * cluster_size;
         let unit_out_len = unit_size.min(data_size - unit_off);
 
@@ -1063,9 +1094,9 @@ fn read_compressed_nonresident<T: BlockIo + ?Sized>(
                     params.cluster_size,
                     io.size(),
                 )?;
-                let mut cluster = vec![0u8; cluster_size];
-                io.read_exact_at(at, &mut cluster)?;
-                raw.extend_from_slice(&cluster);
+                let filled = raw.len();
+                raw.resize(filled + cluster_size, 0);
+                io.read_exact_at(at, &mut raw[filled..])?;
             }
             let plain = if allocated_lcns.len() == unit_clusters {
                 // All clusters allocated ⇒ stored uncompressed; raw is content.
@@ -1074,8 +1105,13 @@ fn read_compressed_nonresident<T: BlockIo + ?Sized>(
                 // Fewer than a full unit ⇒ LZNT1-compressed; decompress.
                 compression::decompress_unit(&raw, unit_out_len)?
             };
-            let copy = unit_out_len.min(plain.len());
-            out[unit_off..unit_off + copy].copy_from_slice(&plain[..copy]);
+            // The part of this unit inside the window, in unit coordinates.
+            let from = start.saturating_sub(unit_off);
+            let to = (end - unit_off).min(unit_out_len).min(plain.len());
+            if from < to {
+                let at = unit_off + from - start;
+                out[at..at + (to - from)].copy_from_slice(&plain[from..to]);
+            }
         }
 
         unit_first_vcn += unit_clusters;
