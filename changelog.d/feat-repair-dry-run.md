@@ -1,0 +1,3 @@
+### Added
+
+- **`fsck.ntfs --dry-run` reports every write a repair would make, and makes none (#709).** It opens the target read-only and runs the library's own repair over an overlay that records each write instead of making it, so the plan is the repair rather than a copy of it. The plan is a list of units, each the writes made between two flushes, each write by offset, length and the SHA-256 of the bytes before and after it; `--clear-dirty` plans that too. A repair the library refuses is refused by the dry run in the same words. The library entry point is `repair_plan::plan_fsck_io`, whose plan carries the before- and after-images themselves.
