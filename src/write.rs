@@ -3826,11 +3826,21 @@ where
     F: Fn(&mut Vec<crate::ea_io::Ea>) -> Result<(), Error>,
 {
     let mut file = crate::attr_list::ListedFile::open(io, rec)?;
-    let found = file.find(AttrType::ExtendedAttribute, "")?;
-    let (old_runs, was_nonresident) = match &found {
-        Some(found) => (file.runs(found)?, !found.loc.is_resident),
-        None => (Vec::new(), false),
-    };
+    // A SPLIT `$EA` IS REWRITTEN WHOLE.
+    //
+    // #803 can split a non-resident `$EA`'s run list into extents; the
+    // write went through `find`, which refuses an attribute split across
+    // records, so changing the EAs of such a file was refused (#1058).
+    // The old extents' clusters are all freed once the records no longer
+    // name them; every extent but the first goes with its entry, and the
+    // first takes the new `$EA`, split again if its run list needs it.
+    let extents = file.extents(AttrType::ExtendedAttribute, "")?;
+    let mut old_runs = Vec::new();
+    for extent in &extents {
+        old_runs.extend(file.runs(extent)?);
+    }
+    let found = extents.into_iter().next();
+    let was_nonresident = found.as_ref().is_some_and(|f| !f.loc.is_resident);
     let mut eas = match found {
         None => Vec::new(),
         // The reader refuses a compressed or encrypted value, so a
@@ -3854,6 +3864,7 @@ where
         }
     };
     change(&mut eas)?;
+    file.remove_continuations(AttrType::ExtendedAttribute, "")?;
     if let Err(e) = place_listed_eas_io(io, &mut file, &eas, was_nonresident) {
         return Err(file.abandon(io, e));
     }
