@@ -211,6 +211,7 @@ which shows only that the crate agrees with itself:
 | View indexes | `extend_view_indexes`, `view_index_spilled` |
 | `$Secure` | `security_descriptor_windows_oracle`, `security_id_must_exist` |
 | `$ATTRIBUTE_LIST`, unnamed `$DATA` through it | the `cli-attrlist-data-win-verify-chkdsk` matrix scenario (the unnamed stream of a listed file rewritten, patched and truncated by `fs.ntfs`, read back by Windows with `Get-FileHash` and graded by `chkdsk`) |
+| `$ATTRIBUTE_LIST`, unnamed `$DATA` split into extents | the `cli-attrlist-split-extents-win-verify-chkdsk` matrix scenario (a listed file's unnamed stream written by `fs.ntfs` over one-cluster holes, so its run list is split into extents the list names, then patched, rewritten and truncated, read back by Windows with `Get-FileHash` and graded by `chkdsk`) |
 | `$EA`, `$EA_INFORMATION` | `ea_information_windows_oracle`, `ea_names_windows_oracle` |
 | Reparse points | `readlink_windows_oracle`, `write_reparse`, the `cli-link-win-verify-chkdsk` matrix scenario (symbolic links `fs.ntfs ln -s` made, their targets read and followed by Windows) |
 | `$OBJECT_ID` | `object_id`, `field_exhaustion_objid` |
