@@ -995,8 +995,8 @@ pub enum CheckFinding {
     /// The `$ATTRIBUTE_LIST` of this base record names a record that is not
     /// one of the file's: one `$MFT`'s bitmap marks free, whose header is
     /// not in use, whose sequence number is not the entry's, or whose base
-    /// reference names another file (#820). A reader following the list
-    /// reads another file's attributes, or none.
+    /// reference names another file (#820); or an entry's type, name,
+    /// lowest VCN and instance identify no attribute there (#821).
     BadAttributeList { record: u64, reason: String },
     /// On a volume tracking quotas, this owner's usage in
     /// `$Extend\$Quota:$Q` is not the sum of what its files'
@@ -1079,8 +1079,9 @@ pub fn logfile_state_io<T: FsckIo>(io: &mut T) -> Result<LogfileState, Error> {
 /// chain of every MFT record `$MFT`'s bitmap marks in use (#515), and
 /// `$Bitmap` against the clusters every run list in those records claims
 /// (#517), the records every base record's `$ATTRIBUTE_LIST` names
-/// (#820), and, on a volume tracking quotas, each owner's usage in
-/// `$Extend\$Quota:$Q` against what its files are charged (#678).
+/// (#820), each entry's attribute identity (#821), and, on a volume
+/// tracking quotas, each owner's usage in `$Extend\$Quota:$Q` against what
+/// its files are charged (#678).
 ///
 /// NOT A STRUCTURAL CHECKER. It does not follow indexes; a volume this calls clean is one on
 /// which none of THESE is wrong, and Windows' chkdsk remains the authority.
@@ -1325,8 +1326,10 @@ const LIST_ENTRY_MIN: usize = 0x1A;
 /// `$ATTRIBUTE_LIST` names a record that is not one of the file's (#820):
 /// one `$MFT`'s bitmap marks free, that does not read, whose header is not
 /// in use, whose sequence number is not the entry's, or whose base
-/// reference names another file. `rec` is the fixed-up base record. A
-/// record with no list, or an extension record, is left alone.
+/// reference names another file; or an entry identifies no attribute in
+/// that record by type, exact UTF-16 name, lowest VCN and instance (#821).
+/// `rec` is the fixed-up base record. A record with no list, or an
+/// extension record, is left alone.
 fn check_list_records<T: FsckIo>(
     io: &mut T,
     bitmap: &crate::mft_bitmap::MftBitmap,
@@ -1350,6 +1353,7 @@ fn check_list_records<T: FsckIo>(
         Err(e) => return report(format!("its $ATTRIBUTE_LIST does not read: {e}")),
     };
     let mut references: Vec<u64> = Vec::new();
+    let mut entries = Vec::new();
     let mut at = 0;
     while at + LIST_ENTRY_MIN <= value.len() {
         let length = u16::from_le_bytes([
@@ -1367,6 +1371,7 @@ fn check_list_records<T: FsckIo>(
         if !references.contains(&reference) {
             references.push(reference);
         }
+        entries.push((at, &value[at..at + length]));
         at += length;
     }
     for reference in references {
@@ -1413,6 +1418,57 @@ fn check_list_records<T: FsckIo>(
             report(format!(
                 "its $ATTRIBUTE_LIST names record {n}, whose base record is {owner}"
             ));
+        }
+        for &(at, entry) in &entries {
+            if u64_le(entry, LIST_ENTRY_REFERENCE) != reference {
+                continue;
+            }
+            let ty = u32::from_le_bytes(entry[..4].try_into().expect("type"));
+            let vcn = u64_le(entry, 8);
+            let id = u16::from_le_bytes([entry[24], entry[25]]);
+            let name_len = usize::from(entry[6]) * 2;
+            let name_at = if name_len == 0 {
+                0
+            } else {
+                usize::from(entry[7])
+            };
+            let Some(name) = entry
+                .get(name_at..name_at + name_len)
+                .filter(|_| name_len == 0 || name_at >= LIST_ENTRY_MIN)
+            else {
+                report(format!(
+                    "its $ATTRIBUTE_LIST entry at {at} has a name outside the entry"
+                ));
+                continue;
+            };
+            let found = crate::attr_io::iter_attributes(&named).any(|a| {
+                if a.type_code != ty
+                    || a.attribute_id != id
+                    || usize::from(a.name_length) * 2 != name_len
+                {
+                    return false;
+                }
+                let attr = &named[a.attr_offset..a.attr_offset + a.attr_length];
+                let first_vcn = if a.is_resident { 0 } else { u64_le(attr, 16) };
+                let start = if name_len == 0 {
+                    0
+                } else {
+                    usize::from(a.name_offset)
+                };
+                first_vcn == vcn && attr.get(start..start + name_len) == Some(name)
+            });
+            if !found {
+                let name = String::from_utf16_lossy(
+                    &name
+                        .chunks_exact(2)
+                        .map(|p| u16::from_le_bytes([p[0], p[1]]))
+                        .collect::<Vec<_>>(),
+                );
+                report(format!(
+                    "its $ATTRIBUTE_LIST entry at {at} names record {n}, which holds no attribute \
+                     with type {ty:#x}, name {name:?}, lowest VCN {vcn}, instance {id}"
+                ));
+            }
         }
     }
 }
@@ -2723,6 +2779,49 @@ mod check_tests {
             report.logfile,
             LogfileState::Clean(crate::logfile::CleanBecause::MarkedClean)
         );
+    }
+
+    #[test]
+    fn a_list_entry_whose_named_attribute_is_absent_is_reported() {
+        let mut dev = fresh();
+        let base = crate::write::create_file_io(&mut dev, "/", "listed").unwrap();
+        for i in 0..16 {
+            crate::write::write_named_stream_io(
+                &mut dev,
+                "/listed",
+                &format!("stream{i:02}"),
+                &[42; 400],
+            )
+            .unwrap();
+        }
+        assert!(check_io(&mut dev).unwrap().findings.is_empty());
+        let list = crate::read::read_attribute_value(&mut dev, base, AttrType::AttributeList, None)
+            .unwrap();
+        let entry = crate::read::parse_attribute_list(&list)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.record_number != base && e.name.is_some())
+            .unwrap();
+        crate::mft_io::update_mft_record_io(&mut dev, entry.record_number, |record| {
+            let loc = crate::attr_io::iter_attributes(record)
+                .find(|a| a.attribute_id == entry.attribute_id)
+                .unwrap();
+            let at = loc.attr_offset + loc.name_offset as usize;
+            record[at] ^= 1;
+            Ok(())
+        })
+        .unwrap();
+        let before = dev.0.clone();
+        let report = check_io(&mut dev).unwrap();
+        assert!(
+            report.findings.iter().any(|f| matches!(f,
+                CheckFinding::BadAttributeList { record, reason }
+                    if *record == base && reason.contains("entry") && reason.contains("instance")
+            )),
+            "{:?}",
+            report.findings
+        );
+        assert_eq!(dev.0, before, "checking must not write");
     }
 
     /// Make the log say records were written after its last checkpoint:

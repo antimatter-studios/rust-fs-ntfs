@@ -132,6 +132,13 @@ rather than discarding it.
 
 ## What verifies each layout
 
+The attribute-list checker (#821) changes one entry field at a time in
+disposable copies of Windows' `ntfs-attrlist.img`: type, UTF-16 name,
+lowest VCN or instance. The Windows-native fixture job runs `check_io`
+on each copy, then Windows `chkdsk` on the same bytes, requiring damage
+for each changed copy and a clean verdict for the untouched copy. Both
+checkers' findings are retained in `attribute-list-entry-checks`.
+
 The listed-directory cycle (#818) uses Windows' own enumeration, EA query,
 stream readback and `chkdsk` to grade the grown and folded indexes. Directory
 stream readback uses the documented [FindFirstStreamW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirststreamw),
