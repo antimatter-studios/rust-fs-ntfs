@@ -1,0 +1,37 @@
+name: Windows format geometry capture
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  geometry-capture:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fixture-free decoding and coverage contracts (24 checks)
+        shell: pwsh
+        run: ./tests/scripts/windows-format-geometry.ps1
+      - name: Capture all 26 Windows format requests
+        shell: pwsh
+        run: ./test-disks/capture-format-geometry.ps1
+      - name: No generated image survives capture
+        if: always()
+        shell: pwsh
+        run: |
+          if (Get-ChildItem tmp/format-geometry -Filter '*.vhd' -ErrorAction SilentlyContinue) {
+            throw 'a scratch geometry VHD survived cleanup'
+          }
+      - name: Retain native measurements and provenance, including partial failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: format-geometry-${{ github.sha }}
+          path: |
+            tmp/format-geometry/*.json
+            tmp/format-geometry/*.txt
+          if-no-files-found: error
