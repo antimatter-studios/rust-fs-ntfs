@@ -4375,3 +4375,142 @@ fn a_plan_for_an_in_place_apply_opens_by_setting_the_dirty_flag() {
         );
     }
 }
+
+/// Run the binary's `fsck` verb; the exit status, and stdout with stderr.
+#[cfg(feature = "cli")]
+fn fsck_cli(args: &[&str]) -> (i32, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_rust-fs-ntfs"))
+        .arg("fsck")
+        .args(args)
+        .output()
+        .expect("spawn fsck.ntfs");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.code().expect("exit status"), said)
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn fsck_apply_copy_repairs_a_read_only_capture_into_a_new_target() {
+    // `fsck.ntfs --apply PLAN --to TARGET SOURCE` (#910): the plan file is
+    // loaded and SOURCE copy-repaired into TARGET through the library. The
+    // capture is made read-only, so a write to it would fail, and its
+    // SHA-256 is checked after every run. TARGET must reach the files
+    // Windows' own restart left. Each refusal must name its reason, exit
+    // non-zero, and create nothing. The plan is saved through the library
+    // (#905) until `--dry-run --plan FILE` (#906) writes it from the CLI.
+    use fs_ntfs::repair_plan::{plan_fsck_io, save_plan};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let pristine_sha = hex_sha256(&pristine);
+        let mut v = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        drop(pristine);
+        let plan_file = format!("{src}.plan");
+        std::fs::write(&plan_file, &saved).unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let unchanged = |what: &str| {
+            assert_eq!(
+                hex_sha256(&std::fs::read(&src).unwrap()),
+                pristine_sha,
+                "{k}: {what} changed the capture"
+            );
+        };
+
+        let target = format!("{src}.applied");
+        let _ = std::fs::remove_file(&target);
+        let (code, said) = fsck_cli(&["--apply", &plan_file, "--to", &target, &src]);
+        assert_eq!(code, 0, "{k}: --apply --to exited {code}: {said}");
+        unchanged("--apply --to");
+        let want = manifest(k);
+        let got = walk(&target);
+        assert!(
+            got == want,
+            "{k}: {} files after --apply --to, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+
+        // Each refusal names its reason, exits non-zero and creates nothing.
+        let refused = format!("{src}.refused");
+        let link = format!("{src}.link");
+        let _ = std::fs::remove_file(&refused);
+        let _ = std::fs::remove_file(&link);
+        std::fs::hard_link(&src, &link).unwrap();
+        let cases: [(&str, Vec<&str>, &str, &str); 6] = [
+            (
+                "--apply without --to",
+                vec!["--apply", &plan_file, &src],
+                "--to",
+                &refused,
+            ),
+            (
+                "--to naming the source's path",
+                vec!["--apply", &plan_file, "--to", &src, &src],
+                "is the source",
+                &refused,
+            ),
+            (
+                "--to naming the source through a hard link",
+                vec!["--apply", &plan_file, "--to", &link, &src],
+                "is the source",
+                &refused,
+            ),
+            (
+                "--to naming a file that exists",
+                vec!["--apply", &plan_file, "--to", &target, &src],
+                "already exists",
+                &refused,
+            ),
+            (
+                "--apply with --dry-run",
+                vec!["--apply", &plan_file, "--to", &refused, "--dry-run", &src],
+                "--dry-run",
+                &refused,
+            ),
+            (
+                "--apply with -y",
+                vec!["--apply", &plan_file, "--to", &refused, "-y", &src],
+                "--yes",
+                &refused,
+            ),
+        ];
+        let kept = hex_sha256(&std::fs::read(&target).unwrap());
+        for (what, args, reason, not_created) in cases {
+            let (code, said) = fsck_cli(&args);
+            assert_ne!(code, 0, "{k}: {what} went ahead: {said}");
+            assert!(
+                said.contains(reason),
+                "{k}: {what} refused without naming '{reason}': {said}"
+            );
+            unchanged(what);
+            assert!(
+                !Path::new(not_created).exists(),
+                "{k}: {what} created {not_created}"
+            );
+        }
+        assert_eq!(
+            hex_sha256(&std::fs::read(&target).unwrap()),
+            kept,
+            "{k}: a refused --apply changed the existing target"
+        );
+
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        std::fs::remove_file(&plan_file).unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_file(&src).unwrap();
+    }
+}
