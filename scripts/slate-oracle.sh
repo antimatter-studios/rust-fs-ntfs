@@ -56,7 +56,27 @@
 #       the image nor answer about different bytes. Slate's statuses are 0
 #       for clean and 4 for findings; anything else is a failure of the run.
 #       OUT/verdicts.tsv gets one row per case, OUT/<case>.slate.txt the
-#       checker's report. At least FLOOR cases must agree with Windows.
+#       checker's report. At least FLOOR cases must agree with Windows or
+#       match a graded ledger row.
+#
+#       Every disagreement is looked up in the ledger, $SLATE_LEDGER or
+#       tests/slate-disagreements.tsv (#693). A disagreement with a graded
+#       row is `recorded`: reported with its row and not a failure. One with
+#       no row is new and fails. A row Windows has not graded fails, and so
+#       does a row whose case did not disagree in this run: it no longer
+#       reproduces and must be removed, so the ledger cannot go stale.
+#
+#   slate-oracle.sh ledger [LEDGER]
+#       Check the ledger alone (default tests/slate-disagreements.tsv): a
+#       header and then one `case regenerate windows_chkdsk windows_reading
+#       assigned issue` row per disagreement (tab-separated). regenerate is
+#       the command that rebuilds the minimized image, and its first word is
+#       a generator in this repository, never a committed disk image.
+#       windows_chkdsk is Windows' verdict on that image, `clean` or
+#       `not-clean`, or `ungraded`. A graded row names Windows' reading of
+#       the image, the implementation it is assigned to (`ours` or `slate`)
+#       and the issue; an ungraded row is assigned to nobody (`-`), because
+#       no row is assigned before Windows has graded it.
 #
 # Exit 0 when every case ran and agreed with Windows and the floor was met;
 # 1 when any case disagreed, could not be graded, or the floor was missed;
@@ -67,7 +87,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
-    echo "usage: slate-oracle.sh fetch DEST | build SRC [BIN] | compare CASES IMAGES CHECKER OUT FLOOR | write WRITES IMAGES WRITER OUT FLOOR | replay CAPTURES REPLAYER OUT FLOOR" >&2
+    echo "usage: slate-oracle.sh fetch DEST | build SRC [BIN] | compare CASES IMAGES CHECKER OUT FLOOR | ledger [LEDGER] | write WRITES IMAGES WRITER OUT FLOOR | replay CAPTURES REPLAYER OUT FLOOR" >&2
     exit 2
 }
 die() { echo "slate-oracle: $*" >&2; exit 1; }
@@ -272,6 +292,61 @@ replay() {
     echo "slate-oracle: $replayed of $rows captures replayed into new images (floor $floor); table in $out/slate-replays.tsv"
 }
 
+# ledger_problems LEDGER: one `FAIL` line per malformed or ungraded row.
+ledger_problems() {
+    local ledger=$1 name regenerate windows reading assigned issue generator
+    [ -f "$ledger" ] || { echo "FAIL no disagreement ledger at $ledger"; return; }
+    while IFS=$'\t' read -r name regenerate windows reading assigned issue; do
+        issue="${issue%$'\r'}"
+        [ "$name" = case ] && continue
+        [ -n "$name" ] || continue
+        generator="${regenerate%% *}"
+        if [ -z "$generator" ] || [ ! -f "$ROOT/$generator" ]; then
+            echo "FAIL ledger $name: regenerate '$regenerate' does not start with a generator in this repository"
+        fi
+        case "$generator" in
+            *.img | *.img.gz | *.vhd | *.vhdx | *.raw | *.gz | *.zst | *.xz)
+                echo "FAIL ledger $name: regenerate names a disk image, not a generator: '$regenerate'" ;;
+        esac
+        case "$windows" in
+            clean | not-clean)
+                [ -n "$reading" ] && [ "$reading" != - ] ||
+                    echo "FAIL ledger $name: no Windows reading of the minimized image"
+                case "$assigned" in
+                    ours | slate) ;;
+                    *) echo "FAIL ledger $name: assigned '$assigned' is neither ours nor slate" ;;
+                esac
+                [ -n "$issue" ] && [ "$issue" != - ] || echo "FAIL ledger $name: no issue for the assigned defect"
+                ;;
+            ungraded)
+                echo "FAIL ledger $name: Windows has not graded the minimized image; the row is not graded"
+                if [ "$assigned" != - ] || [ "$issue" != - ]; then
+                    echo "FAIL ledger $name: assigned to '$assigned' ($issue) without a Windows verdict"
+                fi
+                ;;
+            *) echo "FAIL ledger $name: windows_chkdsk '$windows' is neither clean, not-clean nor ungraded" ;;
+        esac
+    done <"$ledger"
+}
+
+# ledger_row LEDGER CASE: the case's row, without its case field, or nothing.
+ledger_row() {
+    [ -f "$1" ] || return 0
+    awk -F'\t' -v c="$2" 'NR > 1 && $1 == c { sub(/\r$/, ""); sub(/^[^\t]*\t/, ""); print; exit }' "$1"
+}
+
+ledger() {
+    [ "$#" -le 1 ] || usage
+    local file="${1:-${SLATE_LEDGER:-$ROOT/tests/slate-disagreements.tsv}}" found
+    found="$(ledger_problems "$file")"
+    if [ -n "$found" ]; then
+        printf '%s\n' "$found"
+        echo "slate-oracle: $(printf '%s\n' "$found" | wc -l | tr -d ' ') problem(s) in $file"
+        return 1
+    fi
+    echo "slate-oracle: $file is a well-formed ledger"
+}
+
 compare() {
     [ "$#" -eq 5 ] || usage
     local cases=$1 images=$2 checker=$3 out=$4 floor=$5
@@ -282,7 +357,13 @@ compare() {
     printf 'case\torigin\tsha256\twindows_verdict\twindows_exit\tslate_verdict\tslate_exit\tresult\n' \
         >"$out/verdicts.tsv"
 
-    local rows=0 agreed=0 problems=0
+    local ledger="${SLATE_LEDGER:-$ROOT/tests/slate-disagreements.tsv}" found row
+    local rows=0 agreed=0 recorded=0 problems=0 reproduced=' '
+    found="$(ledger_problems "$ledger")"
+    if [ -n "$found" ]; then
+        printf '%s\n' "$found"
+        problems=$((problems + $(printf '%s\n' "$found" | wc -l)))
+    fi
     local name origin image digest windows windows_exit
     while IFS=$'\t' read -r name origin image digest windows windows_exit; do
         windows_exit="${windows_exit%$'\r'}"
@@ -327,26 +408,45 @@ compare() {
                 result=agree
                 agreed=$((agreed + 1))
             else
-                result=disagree
-                echo "FAIL $name: Windows chkdsk accepts this $origin image and Slate reports findings; see $report"
+                row="$(ledger_row "$ledger" "$name")"
+                if [ -n "$row" ]; then
+                    result=recorded
+                    recorded=$((recorded + 1))
+                    reproduced="$reproduced$name "
+                    echo "RECORDED $name: Windows chkdsk accepts this $origin image and Slate reports findings; ledger row: ${row//$'\t'/ | }"
+                else
+                    result=disagree
+                    echo "FAIL $name: Windows chkdsk accepts this $origin image and Slate reports findings, and the case is not in the ledger $ledger; see $report"
+                fi
             fi
         fi
         # The image Windows graded is already in the artifact; its copy is not kept.
         rm -f "$copy"
-        [ "$result" = agree ] || problems=$((problems + 1))
+        case "$result" in agree | recorded) ;; *) problems=$((problems + 1)) ;; esac
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$origin" "$digest" "$windows" \
             "$windows_exit" "$slate" "$status" "$result" >>"$out/verdicts.tsv"
     done <"$cases"
 
-    if [ "$agreed" -lt "$floor" ]; then
-        echo "FAIL $agreed of $rows cases agreed with Windows chkdsk, below the floor of $floor"
+    # A row whose case did not disagree here no longer reproduces.
+    if [ -f "$ledger" ]; then
+        local listed
+        while IFS=$'\t' read -r listed _; do
+            [ "$listed" = case ] && continue
+            [ -n "$listed" ] || continue
+            case "$reproduced" in *" $listed "*) continue ;; esac
+            echo "FAIL ledger $listed: the disagreement no longer reproduces in this run; remove its row"
+            problems=$((problems + 1))
+        done <"$ledger"
+    fi
+    if [ $((agreed + recorded)) -lt "$floor" ]; then
+        echo "FAIL $agreed of $rows cases agreed with Windows chkdsk and $recorded matched the ledger, below the floor of $floor"
         problems=$((problems + 1))
     fi
     if [ "$problems" -gt 0 ]; then
         echo "slate-oracle: $problems problem(s) in $rows cases; table in $out/verdicts.tsv"
         return 1
     fi
-    echo "slate-oracle: $agreed of $rows cases agree with Windows chkdsk (floor $floor); table in $out/verdicts.tsv"
+    echo "slate-oracle: $agreed of $rows cases agree with Windows chkdsk and $recorded are recorded disagreements (floor $floor); table in $out/verdicts.tsv"
 }
 
 [ "$#" -ge 1 ] || usage
@@ -356,6 +456,7 @@ case "$command" in
     fetch) fetch "$@" ;;
     build) build "$@" ;;
     compare) compare "$@" ;;
+    ledger) ledger "$@" ;;
     write) write "$@" ;;
     replay) replay "$@" ;;
     *) usage ;;
