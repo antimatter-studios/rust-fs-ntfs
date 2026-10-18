@@ -365,6 +365,16 @@ pub enum PlanSourceError {
         write: usize,
         offset: u64,
     },
+    /// The device about to receive a unit does not hold a write's
+    /// before-image in the write's byte range at that unit's turn.
+    DeviceBeforeImage {
+        unit: usize,
+        write: usize,
+        start: u64,
+        end: u64,
+    },
+    /// The plan has no unit at this index.
+    NoSuchUnit { unit: usize, units: usize },
     /// The source could not be read.
     Read(String),
 }
@@ -389,6 +399,18 @@ impl std::fmt::Display for PlanSourceError {
                 f,
                 "plan unit {unit} write {write}: the source does not hold its before-image at byte {offset}"
             ),
+            Self::DeviceBeforeImage {
+                unit,
+                write,
+                start,
+                end,
+            } => write!(
+                f,
+                "plan unit {unit} write {write}: the device does not hold its before-image in bytes {start}..{end}"
+            ),
+            Self::NoSuchUnit { unit, units } => {
+                write!(f, "the plan has {units} units, no unit {unit}")
+            }
             Self::Read(e) => write!(f, "reading the source: {e}"),
         }
     }
@@ -428,32 +450,81 @@ pub fn check_plan_source<T: BlockIo + ?Sized>(
     let mut earlier: Vec<&PlannedWrite> = Vec::new();
     for (u, unit) in plan.units.iter().enumerate() {
         for (w, write) in unit.writes.iter().enumerate() {
-            let mut held = vec![0u8; write.before.len()];
-            source
-                .read_exact_at(write.offset, &mut held)
-                .map_err(PlanSourceError::Read)?;
-            let end = write.offset + held.len() as u64;
-            for e in &earlier {
-                let from = e.offset.max(write.offset);
-                let to = (e.offset + e.after.len() as u64).min(end);
-                if from < to {
-                    held[(from - write.offset) as usize..(to - write.offset) as usize]
-                        .copy_from_slice(
-                            &e.after[(from - e.offset) as usize..(to - e.offset) as usize],
-                        );
-                }
-            }
-            if let Some(i) = held.iter().zip(&write.before).position(|(a, b)| a != b) {
+            if let Some(offset) = first_difference(source, write, &earlier)? {
                 return Err(PlanSourceError::BeforeImage {
                     unit: u,
                     write: w,
-                    offset: write.offset + i as u64,
+                    offset,
                 });
             }
             earlier.push(write);
         }
     }
     Ok(())
+}
+
+/// Check unit `unit` of `plan` against the `device` about to receive it,
+/// reading only. The device is read as it stands at that unit's turn, the
+/// plan's earlier units already written to it, so only the unit's own
+/// earlier writes are laid over what it holds: every write's range must
+/// then hold its before-image. The first mismatch is refused, naming the
+/// write's byte range.
+#[cfg(feature = "plan-file")]
+pub fn check_unit_on_device<T: BlockIo + ?Sized>(
+    plan: &SavedPlan,
+    unit: usize,
+    device: &mut T,
+) -> Result<(), PlanSourceError> {
+    let writes = &plan
+        .units
+        .get(unit)
+        .ok_or(PlanSourceError::NoSuchUnit {
+            unit,
+            units: plan.units.len(),
+        })?
+        .writes;
+    let mut earlier: Vec<&PlannedWrite> = Vec::new();
+    for (w, write) in writes.iter().enumerate() {
+        if first_difference(device, write, &earlier)?.is_some() {
+            return Err(PlanSourceError::DeviceBeforeImage {
+                unit,
+                write: w,
+                start: write.offset,
+                end: write.offset + write.before.len() as u64,
+            });
+        }
+        earlier.push(write);
+    }
+    Ok(())
+}
+
+/// The first byte of `write`'s range where `device`, with the after-images
+/// of `earlier` writes laid over it, does not hold the write's
+/// before-image; `None` when it holds it all.
+#[cfg(feature = "plan-file")]
+fn first_difference<T: BlockIo + ?Sized>(
+    device: &mut T,
+    write: &PlannedWrite,
+    earlier: &[&PlannedWrite],
+) -> Result<Option<u64>, PlanSourceError> {
+    let mut held = vec![0u8; write.before.len()];
+    device
+        .read_exact_at(write.offset, &mut held)
+        .map_err(PlanSourceError::Read)?;
+    let end = write.offset + held.len() as u64;
+    for e in earlier {
+        let from = e.offset.max(write.offset);
+        let to = (e.offset + e.after.len() as u64).min(end);
+        if from < to {
+            held[(from - write.offset) as usize..(to - write.offset) as usize]
+                .copy_from_slice(&e.after[(from - e.offset) as usize..(to - e.offset) as usize]);
+        }
+    }
+    Ok(held
+        .iter()
+        .zip(&write.before)
+        .position(|(a, b)| a != b)
+        .map(|i| write.offset + i as u64))
 }
 
 /// Reads little-endian fields in order; `None` past the end.
