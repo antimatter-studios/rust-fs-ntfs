@@ -2730,6 +2730,49 @@
       "image": "nfs-win-format-win-quota-enforce-win-chkdsk.img",
       "_notes": "Windows turns quota tracking and enforcement on, gives a file's owner a hard limit 64 KiB above what it is charged, and writes 1 MiB to the file. The diagnostics record what Windows does with a write past the limit: the error it returns, the file's length afterwards, and the owner's $Q usage and flags before and after. The step fails when the write is not refused. The image Windows leaves is kept as the fixture an enforcing write here is checked against (#867, part of #679)."
     },
+    "win-format-win-link-attr-list-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 127,
+        "label": "LINKS",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-link-attr-list",
+          "path": "/many.txt",
+          "link_dir": "/e",
+          "links": "40",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-win-format-win-link-attr-list-win-chkdsk.img",
+      "_notes": "Windows creates /many.txt (64 bytes) and hard-links it forty times as /e/many-0.txt onwards, the names the cli-link recipe gives it, where fs.ntfs ln refuses the 33rd because the base record has no room left for its $ATTRIBUTE_LIST (#1067). After every link the op reads the base record through FSCTL_GET_NTFS_FILE_RECORD; at the end it reads the $ATTRIBUTE_LIST, resident or not, and every extension record it names. attr-list.txt in the diagnostics records which attributes Windows moved out of the base record and when. The step fails when Windows leaves the file without an $ATTRIBUTE_LIST. The image Windows leaves is kept as the fixture the driver's 33rd link is checked against (#1069, part of #1067). Not yet run: its first outcome is recorded here."
+    },
     "win-format-win-quota-mac-delete-win-chkdsk": {
       "status": "pending",
       "volume_params": {
