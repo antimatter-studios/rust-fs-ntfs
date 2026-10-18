@@ -1023,6 +1023,7 @@ jobs:
             test-disks/ntfs-attrlist-names.img
             test-disks/ntfs-attrlist-names.names.tsv
             test-disks/ntfs-compressed.img
+            test-disks/ntfs-compressed.sha256.tsv
             test-disks/ntfs-symlink.img
             test-disks/ntfs-symlink.targets.tsv
             test-disks/ntfs-cli-read.img
