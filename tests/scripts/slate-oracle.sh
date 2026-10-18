@@ -345,6 +345,72 @@ captures
 replay 0
 [ "$?" -ne 0 ] && ok || bad "a directory holding no captures: exit 0, want a failure"
 
+# window (#882): the stable shared subset of a measured run window. A case is
+# admitted only when every run of the window has Windows' clean verdict on its
+# bytes and Slate's agreement with it.
+# verdicts RUN ROW...: run RUN's verdicts table, one space-separated
+# `case windows_verdict slate_verdict result` per argument.
+verdicts() {
+    local run=$1 row
+    shift
+    mkdir -p "$WORK/window"
+    printf 'case\torigin\tsha256\twindows_verdict\twindows_exit\tslate_verdict\tslate_exit\tresult\n' \
+        >"$WORK/window/$run.tsv"
+    for row in "$@"; do
+        # shellcheck disable=SC2086 # a row is split into its fields on purpose
+        set -- $row
+        printf '%s\tmkfs\t%064d\t%s\t0\t%s\t0\t%s\n' "$1" "$run" "$2" "$3" "$4" >>"$WORK/window/$run.tsv"
+    done
+}
+window() {
+    local min=$1
+    shift
+    rm -f "$WORK/subset.tsv"
+    bash "$ROOT/scripts/slate-oracle.sh" window "$min" "$WORK/subset.tsv" "$@" >"$WORK/log" 2>&1
+}
+
+verdicts 101 'steady clean clean agree' 'flaky clean clean agree' 'ledgered clean clean agree' \
+    'ungraded - clean agree' 'dropped clean clean agree'
+verdicts 102 'steady clean clean agree' 'flaky clean findings disagree' 'ledgered clean clean agree' \
+    'ungraded clean clean agree'
+verdicts 103 'steady clean clean agree' 'flaky clean clean agree' 'ledgered clean findings recorded' \
+    'ungraded clean clean agree' 'dropped clean clean agree'
+three=("101=$WORK/window/101.tsv" "102=$WORK/window/102.tsv" "103=$WORK/window/103.tsv")
+
+window 3 "${three[@]}"
+rc=$?
+[ "$rc" -eq 0 ] && ok || bad "a three-run window with one stable case: exit $rc, want 0: $(cat "$WORK/log")"
+grep -qx $'steady\tmkfs\t101,102,103' "$WORK/subset.tsv" 2>/dev/null && ok ||
+    bad "the stable case is admitted with the run IDs of its window: $(cat "$WORK/subset.tsv" 2>/dev/null)"
+[ "$(wc -l <"$WORK/subset.tsv" 2>/dev/null | tr -d ' ')" = 2 ] && ok ||
+    bad "the subset holds the header and the stable case only: $(cat "$WORK/subset.tsv" 2>/dev/null)"
+grep -q 'EXCLUDED flaky:' "$WORK/log" && ok || bad "a case that disagreed in one run is excluded by name: $(cat "$WORK/log")"
+grep -q 'EXCLUDED ledgered:' "$WORK/log" && ok ||
+    bad "a case only recorded in the ledger in one run is excluded by name: $(cat "$WORK/log")"
+grep -q 'EXCLUDED ungraded:' "$WORK/log" && ok ||
+    bad "a case without a Windows verdict in one run is excluded, even where Slate agreed: $(cat "$WORK/log")"
+grep -q 'EXCLUDED dropped:' "$WORK/log" && ok || bad "a case absent from one run is excluded by name: $(cat "$WORK/log")"
+
+window 4 "${three[@]}"
+[ "$?" -ne 0 ] && ok || bad "three runs against a minimum of 4: exit 0, want a failure"
+grep -q 'below the minimum of 4' "$WORK/log" && ok || bad "a short window is named as short: $(cat "$WORK/log")"
+
+window 2 "102=$WORK/window/102.tsv" "101=$WORK/window/101.tsv"
+[ "$?" -ne 0 ] && ok || bad "runs given out of order: exit 0, want a failure"
+
+window 2 "101=$WORK/window/101.tsv" "101=$WORK/window/101.tsv"
+[ "$?" -ne 0 ] && ok || bad "one run given twice to fill the window: exit 0, want a failure"
+
+window 2 "101=$WORK/window/101.tsv" "104=$WORK/window/104.tsv"
+[ "$?" -ne 0 ] && ok || bad "a run with no verdicts table: exit 0, want a failure"
+
+window 1 "$WORK/window/101.tsv"
+[ "$?" -ne 0 ] && ok || bad "a verdicts table without its run ID: exit 0, want a failure"
+
+verdicts 105 'steady clean findings disagree'
+window 2 "103=$WORK/window/103.tsv" "105=$WORK/window/105.tsv"
+[ "$?" -ne 0 ] && ok || bad "a window in which no case agreed in every run: exit 0, want a failure"
+
 # fetch: a local repository stands in for Slate's.
 src="$WORK/slate-src"
 mkdir -p "$src/src/tools"
