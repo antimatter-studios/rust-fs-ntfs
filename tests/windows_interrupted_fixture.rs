@@ -5495,3 +5495,174 @@ fn fsck_apply_in_place_resume_finishes_a_stopped_repair_from_its_journal() {
         std::fs::remove_file(&src).unwrap();
     }
 }
+
+/// The `(units, units_total)` of each progress line `fsck.ntfs --apply
+/// --in-place` printed to stderr, in order: `... progress: U of N units, B
+/// of T bytes` (#964).
+#[cfg(all(unix, feature = "cli", feature = "harness"))]
+fn apply_progress_lines(said: &str) -> Vec<(u64, u64)> {
+    said.lines()
+        .filter_map(|line| line.split_once(" progress: "))
+        .map(|(_, rest)| {
+            let words: Vec<&str> = rest.split_whitespace().collect();
+            match words[..] {
+                [u, "of", n, "units,", _, "of", _, "bytes"] => {
+                    (u.parse().unwrap(), n.parse().unwrap())
+                }
+                _ => panic!("an unreadable progress line: {rest}"),
+            }
+        })
+        .collect()
+}
+
+#[cfg(all(unix, feature = "cli", feature = "harness"))]
+#[test]
+fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
+    // `fsck.ntfs --apply PLAN --in-place --journal FILE` (#964) reports
+    // its progress on stderr and stops on SIGINT at the next unit
+    // boundary. The harness build's FSCK_NTFS_HOLD_AFTER_UNITS holds the
+    // apply after that many units until a signal arrives, so this test
+    // sends a real SIGINT at a known point. The apply must exit with
+    // fsck(8)'s operational status (8), name the units applied, and leave
+    // a journal that `--resume` finishes into what Windows' own restart
+    // produced. Progress lines must rise, and a finished apply's last one
+    // must name the plan's total.
+    use fs_ntfs::repair_journal::{progress, read_journal, JournalBinding};
+    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use std::io::BufRead;
+
+    for (k, log_end) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let mut v = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        let units = loaded.units.len() as u64;
+        assert!(units > 0, "{k}: a log holding work planned nothing");
+        let plan_file = format!("{src}.sigint.plan");
+        std::fs::write(&plan_file, &saved).unwrap();
+        let journal_dir = format!("{src}.sigint.d");
+        let _ = std::fs::remove_dir_all(&journal_dir);
+        std::fs::create_dir(&journal_dir).unwrap();
+        let journal = format!("{journal_dir}/repair.journal");
+        let device = format!("{src}.sigint.img");
+        std::fs::write(&device, &pristine).unwrap();
+        drop(pristine);
+
+        let hold = units / 2;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rust-fs-ntfs"))
+            .args([
+                "fsck",
+                "--apply",
+                &plan_file,
+                "--in-place",
+                "--journal",
+                &journal,
+                &device,
+            ])
+            .env("FSCK_NTFS_HOLD_AFTER_UNITS", hold.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn fsck.ntfs");
+        let mut stderr = std::io::BufReader::new(child.stderr.take().unwrap());
+        let mut said = String::new();
+        loop {
+            let mut line = String::new();
+            let read = stderr.read_line(&mut line).unwrap();
+            assert!(
+                read > 0,
+                "{k}: fsck.ntfs ended before reporting {hold} units applied: {said}"
+            );
+            said.push_str(&line);
+            if apply_progress_lines(&line).first().map(|p| p.0) == Some(hold) {
+                break;
+            }
+        }
+        // SAFETY: kill(2) on the child this test spawned and has not reaped.
+        let sent = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
+        assert_eq!(sent, 0, "{k}: SIGINT: {}", std::io::Error::last_os_error());
+        stderr.read_to_string(&mut said).unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(
+            status.code(),
+            Some(8),
+            "{k}: the interrupted apply exited {status}: {said}"
+        );
+        assert!(
+            said.contains(&format!("stopped after {hold} of {units} units")),
+            "{k}: the interrupted apply did not name the {hold} units applied: {said}"
+        );
+        let stopped = apply_progress_lines(&said);
+        assert!(
+            stopped.windows(2).all(|p| p[0].0 < p[1].0) && stopped.last() == Some(&(hold, units)),
+            "{k}: progress before the stop does not rise to {hold} of {units}: {stopped:?}"
+        );
+        let binding = JournalBinding::of(&saved).unwrap();
+        let read = read_journal(&std::fs::read(&journal).unwrap(), &binding)
+            .unwrap_or_else(|e| panic!("{k}: the journal read back refused: {e:?}"));
+        let done = progress(&read, &loaded).unwrap_or_else(|e| panic!("{k}: progress: {e:?}"));
+        assert_eq!(
+            (done.applied as u64, done.open),
+            (hold, None),
+            "{k}: the interrupted journal does not stop at a unit boundary"
+        );
+
+        let (code, said) = fsck_cli(&[
+            "--apply",
+            &plan_file,
+            "--in-place",
+            "--resume",
+            "--journal",
+            &journal,
+            &device,
+        ]);
+        assert_eq!(
+            code, 0,
+            "{k}: --apply --in-place --resume exited {code}: {said}"
+        );
+        let resumed = apply_progress_lines(&said);
+        assert!(
+            resumed.windows(2).all(|p| p[0].0 < p[1].0)
+                && resumed.first().is_some_and(|p| p.0 == hold)
+                && resumed.last() == Some(&(units, units)),
+            "{k}: progress of the resume does not rise from {hold} to {units}: {resumed:?}"
+        );
+        let read = read_journal(&std::fs::read(&journal).unwrap(), &binding)
+            .unwrap_or_else(|e| panic!("{k}: the journal read back refused: {e:?}"));
+        let done = progress(&read, &loaded).unwrap_or_else(|e| panic!("{k}: progress: {e:?}"));
+        assert_eq!(
+            (done.applied as u64, done.open),
+            (units, None),
+            "{k}: the resumed journal does not mark every unit applied"
+        );
+        let want = manifest(k);
+        let got = walk(&device);
+        assert!(
+            got == want,
+            "{k}: {} files after the interrupted apply resumed, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+        let recovered = unpack(&format!("windows-interrupted-{k}.recovered"));
+        oracle::same_metadata_as_windows(
+            k,
+            &Image::read(&src),
+            &Image::read(&device),
+            &Image::read(&recovered),
+            log_end,
+        );
+
+        std::fs::remove_file(&recovered).unwrap();
+        std::fs::remove_dir_all(&journal_dir).unwrap();
+        std::fs::remove_file(&plan_file).unwrap();
+        std::fs::remove_file(&device).unwrap();
+        std::fs::remove_file(&src).unwrap();
+    }
+}

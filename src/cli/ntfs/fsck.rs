@@ -648,6 +648,69 @@ fn apply(source: &Path, plan: &Path, target: &Path) -> Result<Outcome, CliError>
     Ok(Outcome::report(report).with_text(text).with_code(CLEAN))
 }
 
+/// Set by SIGINT; an in-place apply stops before its next unit (#964).
+#[cfg(unix)]
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn on_interrupt(_: libc::c_int) {
+    INTERRUPTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Watches an in-place apply from the CLI (#964): each progress report is
+/// a line on stderr, and a SIGINT stops the apply before its next unit, so
+/// the unit in hand is finished first.
+#[cfg(unix)]
+struct CliObserver {
+    name: String,
+    /// The harness build holds the apply once this many units are applied,
+    /// until a signal arrives, so a test can send SIGINT at a known point.
+    #[cfg(feature = "harness")]
+    hold_after: Option<u32>,
+}
+
+#[cfg(unix)]
+impl CliObserver {
+    fn new(name: &str) -> Self {
+        // SAFETY: the handler only stores to an atomic, which is
+        // async-signal-safe.
+        unsafe {
+            let handler = on_interrupt as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            libc::signal(libc::SIGINT, handler);
+        }
+        Self {
+            name: name.to_string(),
+            #[cfg(feature = "harness")]
+            hold_after: std::env::var("FSCK_NTFS_HOLD_AFTER_UNITS")
+                .ok()
+                .and_then(|units| units.parse().ok()),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl fs_ntfs::repair_journal::ApplyObserver for CliObserver {
+    fn progress(&mut self, at: fs_ntfs::repair_journal::ApplyProgress) {
+        eprintln!(
+            "fsck.ntfs: {}: progress: {} of {} units, {} of {} bytes",
+            self.name, at.units, at.units_total, at.bytes, at.bytes_total
+        );
+        #[cfg(feature = "harness")]
+        if self.hold_after == Some(at.units) {
+            let held = std::time::Instant::now();
+            while !INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)
+                && held.elapsed() < std::time::Duration::from_secs(60)
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+
+    fn cancel_requested(&mut self) -> bool {
+        INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// Repair `device` in place by the plan file at `plan`, journalling into a
 /// new file at `journal` (#922). The journal location is checked, the plan
 /// loaded, the device opened exclusively and checked against the plan, all
@@ -663,7 +726,9 @@ fn apply_in_place(
     journal: &Path,
     resume: bool,
 ) -> Result<Outcome, CliError> {
-    use fs_ntfs::repair_journal::{apply_in_place, check_journal_location, resume_in_place};
+    use fs_ntfs::repair_journal::{
+        apply_in_place_observed, check_journal_location, resume_in_place_observed, InPlaceError,
+    };
     let name = device.display().to_string();
     let journal_name = journal.display().to_string();
     let plan_name = plan.display().to_string();
@@ -704,18 +769,23 @@ fn apply_in_place(
     }
     let mut journal_io = PathIo::open_rw(journal).map_err(failed)?;
     let sha: [u8; 32] = Sha256::digest(&bytes).into();
+    let mut observer = CliObserver::new(&name);
     let done = if resume {
-        resume_in_place(&saved, sha, &mut io, &mut journal_io)
+        resume_in_place_observed(&saved, sha, &mut io, &mut journal_io, &mut observer)
     } else {
-        apply_in_place(&saved, sha, &mut io, &mut journal_io)
+        apply_in_place_observed(&saved, sha, &mut io, &mut journal_io, &mut observer)
     };
-    done.map_err(|e| {
-        failed(format!(
+    let units = saved.units.len() as u64;
+    done.map_err(|e| match e {
+        InPlaceError::Cancelled { applied } => failed(format!(
+            "{name}: interrupted: stopped after {applied} of {units} units, each finished; \
+             --apply '{plan_name}' --in-place --resume --journal '{journal_name}' finishes it"
+        )),
+        e => failed(format!(
             "{name}: in-place repair stopped: {e}; the journal '{journal_name}' holds how far \
              it got"
-        ))
+        )),
     })?;
-    let units = saved.units.len() as u64;
     let writes = saved
         .units
         .iter()
