@@ -21,6 +21,8 @@
 //! records) follows the rescue scanner of Slate's MIT-licensed tools;
 //! neither its code nor its archive format is used (docs/provenance.md).
 
+use crate::attr_io::{find_attribute, AttrType};
+use crate::data_runs::{decode_runs, DataRun};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -268,24 +270,204 @@ pub fn scan<S: RescueSource + ?Sized>(
         return Err(EMPTY_SOURCE.into());
     }
     write_header(archive, options.sector_size, size)?;
+    let order =
+        ntfs_order(source, size).unwrap_or_else(|| vec![(0, size, RangeClass::Unclassified)]);
     let mut out = Records::new(archive, size);
-    let sector = options.sector_size as usize;
     let mut buf = vec![0u8; options.chunk_size];
-    let mut offset = 0u64;
-    while offset < size {
-        let n = (size - offset).min(options.chunk_size as u64) as usize;
+    for (start, end, class) in order {
+        out.class = class;
+        scan_span(source, &mut out, &mut buf, start, end, options.sector_size)?;
+    }
+    out.finish()
+}
+
+/// Archive `start..end` of the source in bulk reads of `buf`'s length.
+fn scan_span<S: RescueSource + ?Sized>(
+    source: &mut S,
+    out: &mut Records<'_>,
+    buf: &mut [u8],
+    start: u64,
+    end: u64,
+    sector_size: u32,
+) -> Result<(), String> {
+    let mut offset = start;
+    while offset < end {
+        let n = (end - offset).min(buf.len() as u64) as usize;
         let chunk = &mut buf[..n];
         match source.read_at(offset, chunk) {
             Ok(()) => out.data(offset, chunk)?,
             Err(ReadFailure::Unreadable(_)) => {
                 out.report.failed_bulk_reads += 1;
-                retry_by_sector(source, &mut out, offset, chunk, sector)?;
+                retry_by_sector(source, out, offset, chunk, sector_size as usize)?;
             }
             Err(ReadFailure::Failed(e)) => return Err(format!("the scan stopped: {e}")),
         }
         offset += n as u64;
     }
-    out.finish()
+    Ok(())
+}
+
+/// A half-open span of the source and the class of space it is in.
+type Span = (u64, u64, RangeClass);
+
+/// The order to archive an NTFS source in: the boot sector and its backup,
+/// `$MFT` and `$MFTMirr`, then the clusters `$Bitmap` marks allocated, then
+/// the free ones, then the tail past the last whole cluster. The spans tile
+/// the source exactly once.
+///
+/// `None` when the boot sector does not parse as NTFS, or `$MFT`'s record
+/// 0, 1 or 6 or `$Bitmap` cannot be read in full: the scan is then linear,
+/// because it never guesses a layout. These reads touch no record and no
+/// report, so a source with no readable layout is scanned exactly as it
+/// would have been without them.
+fn ntfs_order<S: RescueSource + ?Sized>(source: &mut S, size: u64) -> Option<Vec<Span>> {
+    let mut boot = [0u8; 512];
+    if size < boot.len() as u64 {
+        return None;
+    }
+    source.read_at(0, &mut boot).ok()?;
+    if &boot[3..11] != b"NTFS    " {
+        return None;
+    }
+    let params = crate::mft_io::parse_boot_params_from_bytes(&boot).ok()?;
+    let cluster = params.cluster_size;
+    let bps = params.bytes_per_sector;
+    let record = usize::try_from(params.file_record_size).ok()?;
+    let clusters = params.volume_bytes().min(size) / cluster;
+    if clusters == 0 {
+        return None;
+    }
+
+    // $MFT's own record maps $MFT; records 1 and 6 are found through it.
+    let mut mft = vec![0u8; record];
+    source
+        .read_at(params.mft_lcn.checked_mul(cluster)?, &mut mft)
+        .ok()?;
+    let mft_runs = unnamed_data_runs(&mut mft, bps, clusters)?;
+    let nth_record =
+        |source: &mut S, n: u64| read_runs(source, &mft_runs, cluster, n * record as u64, record);
+    let mirr_runs = unnamed_data_runs(&mut nth_record(source, 1)?, bps, clusters)?;
+    let bitmap_runs = unnamed_data_runs(&mut nth_record(source, 6)?, bps, clusters)?;
+    let bitmap = read_runs(
+        source,
+        &bitmap_runs,
+        cluster,
+        0,
+        usize::try_from(clusters.div_ceil(8)).ok()?,
+    )?;
+
+    let mut metadata = vec![(0, cluster)];
+    // The backup boot sector is the sector after the volume's last.
+    let backup = params.volume_bytes();
+    if backup < size {
+        metadata.push((backup, (backup + u64::from(bps)).min(size)));
+    }
+    for run in mft_runs.iter().chain(&mirr_runs) {
+        let lcn = run.lcn?;
+        metadata.push((lcn * cluster, (lcn + run.length) * cluster));
+    }
+    metadata.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (a, b) in metadata {
+        match merged.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+
+    let mut order: Vec<Span> = merged
+        .iter()
+        .map(|&(a, b)| (a, b, RangeClass::Metadata))
+        .collect();
+    let allocated = |c: u64| bitmap[(c / 8) as usize] >> (c % 8) & 1 == 1;
+    for (class, want) in [(RangeClass::Allocated, true), (RangeClass::Free, false)] {
+        let mut c = 0;
+        while c < clusters {
+            if allocated(c) != want {
+                c += 1;
+                continue;
+            }
+            let first = c;
+            while c < clusters && allocated(c) == want {
+                c += 1;
+            }
+            outside(&merged, first * cluster, c * cluster, class, &mut order);
+        }
+    }
+    outside(
+        &merged,
+        clusters * cluster,
+        size,
+        RangeClass::Tail,
+        &mut order,
+    );
+    Some(order)
+}
+
+/// Push the parts of `start..end` that no span of `taken` covers.
+fn outside(taken: &[(u64, u64)], start: u64, end: u64, class: RangeClass, order: &mut Vec<Span>) {
+    let mut at = start;
+    for &(a, b) in taken {
+        if b <= at || a >= end {
+            continue;
+        }
+        if a > at {
+            order.push((at, a, class));
+        }
+        at = at.max(b);
+    }
+    if at < end {
+        order.push((at, end, class));
+    }
+}
+
+/// The runs of an MFT record's unnamed, non-resident `$DATA`, each inside
+/// the volume's `clusters`.
+fn unnamed_data_runs(record: &mut [u8], bps: u16, clusters: u64) -> Option<Vec<DataRun>> {
+    crate::mft_io::apply_fixup_on_read(record, bps).ok()?;
+    let at = find_attribute(record, AttrType::Data, None)?;
+    if at.is_resident {
+        return None;
+    }
+    let pairs = at.attr_offset + usize::from(at.non_resident_mapping_pairs_offset?);
+    let runs = decode_runs(record.get(pairs..at.attr_offset + at.attr_length)?).ok()?;
+    let inside = |r: &DataRun| {
+        r.lcn
+            .and_then(|lcn| lcn.checked_add(r.length))
+            .is_some_and(|end| end <= clusters)
+    };
+    (!runs.is_empty() && runs.iter().all(inside)).then_some(runs)
+}
+
+/// Read `len` bytes of a non-resident value from byte `start`, through its
+/// runs. `None` when a byte is in no run or in a sparse one, or a read fails.
+fn read_runs<S: RescueSource + ?Sized>(
+    source: &mut S,
+    runs: &[DataRun],
+    cluster: u64,
+    start: u64,
+    len: usize,
+) -> Option<Vec<u8>> {
+    let mut out = vec![0u8; len];
+    let mut done = 0;
+    while done < len {
+        let at = start + done as u64;
+        let vcn = at / cluster;
+        let run = runs
+            .iter()
+            .find(|r| vcn >= r.starting_vcn && vcn - r.starting_vcn < r.length)?;
+        let lcn = run.lcn? + (vcn - run.starting_vcn);
+        let run_end = run
+            .starting_vcn
+            .checked_add(run.length)?
+            .checked_mul(cluster)?;
+        let n = ((run_end - at) as usize).min(len - done);
+        source
+            .read_at(lcn * cluster + at % cluster, &mut out[done..done + n])
+            .ok()?;
+        done += n;
+    }
+    Some(out)
 }
 
 /// Read a chunk whose bulk read failed one sector at a time, archiving each

@@ -131,10 +131,13 @@ impl Archive {
             .collect()
     }
 
-    /// The records tile the source: in order, with no gap and no overlap.
+    /// The records tile the source, taken in offset order: no gap and no
+    /// overlap. The scan may archive them in another order.
     fn assert_tiles(&self) {
+        let mut sorted: Vec<&Record> = self.records.iter().collect();
+        sorted.sort_by_key(|r| r.offset);
         let mut next = 0;
-        for r in &self.records {
+        for r in sorted {
             assert!(r.len > 0, "an empty record at {}", r.offset);
             assert_eq!(
                 r.offset, next,
@@ -428,8 +431,9 @@ fn unreadable_sectors_are_recorded_exactly_and_every_other_byte_is_kept() {
     assert_eq!(report.failed_bulk_reads, 6, "{report:?}");
     assert_eq!(
         source.reads,
-        chunks + 5 * per_chunk + last_chunk,
-        "bulk reads plus one read per sector of each failed chunk"
+        1 + chunks + 5 * per_chunk + last_chunk,
+        "the boot-sector read that found no layout, then bulk reads plus \
+         one read per sector of each failed chunk"
     );
     assert_eq!(
         file_sha256(&src),
@@ -521,4 +525,115 @@ fn an_existing_file_is_never_taken_as_the_archive() {
         capture_sha256(name),
         "the refused scan changed its source"
     );
+}
+
+/// The 512-byte sectors `$Bitmap`'s data is in, found by the independent
+/// `ntfs` crate reading MFT record 6's unnamed `$DATA`.
+fn bitmap_sectors(img: &str) -> BTreeSet<u64> {
+    use ntfs::NtfsReadSeek;
+    let (ntfs, mut reader) = common::open(img);
+    let file = ntfs.file(&mut reader, 6).expect("MFT record 6");
+    let item = file
+        .data(&mut reader, "")
+        .expect("$Bitmap has a $DATA attribute")
+        .expect("$Bitmap's $DATA");
+    let attr = item.to_attribute().expect("to_attribute");
+    let mut value = attr.value(&mut reader).expect("$Bitmap's value");
+    let mut sectors = BTreeSet::new();
+    let mut buf = [0u8; SECTOR as usize];
+    loop {
+        let at = value.data_position().value();
+        let n = value.read(&mut reader, &mut buf).expect("read $Bitmap");
+        if n == 0 {
+            break;
+        }
+        let at = at.expect("$Bitmap has no sparse run").get();
+        sectors.extend(at / SECTOR..(at + n as u64).div_ceil(SECTOR));
+    }
+    assert!(!sectors.is_empty(), "{img}: $Bitmap has no data");
+    sectors
+}
+
+#[test]
+fn a_source_whose_bitmap_is_unreadable_is_scanned_linearly() {
+    let name = "windows-interrupted-1.recovered";
+    let src = unpack(name);
+    let bad = bitmap_sectors(&src);
+    let lost = bad.len() as u64 * SECTOR;
+    let mut source = Faulty {
+        inner: FileSource::open(Path::new(&src)).unwrap(),
+        bad,
+        reads: 0,
+    };
+    let archive = common::temp_image_path("rescue_archive");
+    let mut out = new_file(&archive);
+    let report = scan(&mut source, &mut out, ScanOptions::default()).expect("scan");
+    drop(out);
+    let parsed = parse(&archive, |_, _| {});
+    parsed.assert_tiles();
+    let mut next = 0;
+    for r in &parsed.records {
+        assert_eq!(
+            r.offset, next,
+            "without a readable $Bitmap the scan is linear: the record at {} is out of order",
+            r.offset
+        );
+        next += r.len;
+        assert_eq!(
+            r.class, 0,
+            "without a readable $Bitmap the record at {}+{} has a class",
+            r.offset, r.len
+        );
+    }
+    assert_eq!(report.unreadable_bytes, lost, "{report:?}");
+    let none = report.class(RangeClass::Unclassified);
+    assert_eq!(none.archived, report.readable_bytes, "{report:?}");
+    assert_eq!(none.unreadable, lost, "{report:?}");
+    std::fs::remove_file(&archive).expect("remove the archive");
+    std::fs::remove_file(&src).expect("remove the capture copy");
+}
+
+#[test]
+fn a_windows_capture_is_archived_metadata_and_allocated_before_free() {
+    for (name, sha) in CAPTURES {
+        let src = unpack(name);
+        let archive = common::temp_image_path("rescue_archive");
+        let report = scan_to_path(Path::new(&src), Path::new(&archive), ScanOptions::default())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(report.is_complete(), "{name}: {report:?}");
+        let (rebuilt, parsed) = rebuild(&archive);
+        parsed.assert_tiles();
+        let classes: Vec<u32> = parsed.records.iter().map(|r| r.class).collect();
+        assert!(
+            !classes.contains(&0),
+            "{name}: a source with a readable layout left a record unclassified"
+        );
+        for class in [1, 2, 3] {
+            assert!(
+                classes.contains(&class),
+                "{name}: no record of class {class}"
+            );
+        }
+        let first_free = classes.iter().position(|&c| c == 3).unwrap();
+        if let Some(late) = classes[first_free..].iter().position(|&c| c == 1 || c == 2) {
+            let r = &parsed.records[first_free + late];
+            panic!(
+                "{name}: the class {} record at {}+{} follows the first free record",
+                r.class, r.offset, r.len
+            );
+        }
+        let mut seen = 0;
+        for &c in &classes {
+            assert!(c >= seen, "{name}: class {c} after class {seen}");
+            seen = c;
+        }
+        assert_eq!(
+            file_sha256(&rebuilt),
+            sha,
+            "{name}: the image rebuilt from the archive"
+        );
+        for path in [&src, &archive, &rebuilt] {
+            std::fs::remove_file(path).expect("remove a scratch file");
+        }
+    }
 }
