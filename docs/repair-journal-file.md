@@ -169,9 +169,18 @@ is left after it. Then:
    units' writes laid over it. Those units are skipped, never written
    again. Bytes the open unit also writes are left to its own check.
 2. The open unit is redone when every write's range holds its whole
-   preimage or its whole redo: its writes reach the device, the device is
-   flushed and read back, and its applied record is appended and flushed,
-   as the apply's steps 3 to 5 do. Its intent is not appended again.
+   preimage, its whole redo, or a write torn between the two: its writes
+   reach the device, the device is flushed and read back, and its applied
+   record is appended and flushed, as the apply's steps 3 to 5 do. Its
+   intent is not appended again.
+
+   A write is torn when a power cut stops it part way, and a device may
+   land its sectors in any order, so a torn range can hold new bytes at
+   its start, its end, or anywhere between. The rule is per byte: a range
+   counts as torn when every byte in it equals the same byte of the
+   write's preimage or of what the unit leaves there. The redo is then
+   written over the whole range and read back, exactly as for a range
+   holding the whole preimage.
 3. Every later unit is applied exactly as the apply applies it.
 
 A journal holding no whole record is started again from its header. A
@@ -220,3 +229,8 @@ metadata. `a_resumed_in_place_repair_writes_nothing_to_the_device_for_a_unit_mar
 cuts the apply right after each unit's applied record and checks the
 resume writes exactly the later units' writes to the device, and that
 resuming a finished apply writes nothing to the device or the journal.
+`a_device_write_torn_by_a_cut_resumes_to_the_uninterrupted_volume` cuts
+each capture's apply during every device write, landing the first half of
+that write's new bytes with the rest unchanged, then only the second
+half, and checks the resumed device is byte for byte where an
+uninterrupted apply leaves it.
