@@ -383,6 +383,13 @@ fn mftmirr_records(cluster_size: u32, mft_record_size: u32) -> u64 {
 /// Size of the root directory's index blocks, as the boot sector declares.
 const INDEX_BLOCK_SIZE: u32 = 4096;
 
+/// Clusters in `$Secure:$SDS`'s single run: the 256 KiB primary block
+/// plus the cluster holding the mirror entry that starts at
+/// [`crate::sds::SDS_MIRROR_GAP`].
+fn sds_clusters(cluster_size: u32) -> u64 {
+    crate::sds::SDS_MIRROR_GAP / cluster_size as u64 + 1
+}
+
 /// Format an NTFS volume in place over a [`BlockIo`].
 pub fn format_filesystem(
     dev: &mut dyn BlockIo,
@@ -490,15 +497,15 @@ pub fn format_filesystem(
     let mft_bitmap_lcn = attrdef_lcn + attrdef_clusters;
     let mft_bitmap_clusters: u64 = 1;
 
-    // $Secure:$SDS data — two real clusters (primary entries + mirror at
-    // file offset 0x40000). Placed immediately after $MFT's $BITMAP
-    // cluster. The 256 KiB gap between primary and mirror lives in a
-    // sparse data run, so only 2 clusters are actually consumed on
-    // disk regardless of cluster size — matches the Microsoft
-    // reference's $SDS layout (primary + mirror, sparse middle).
+    // $Secure:$SDS data — one contiguous run from the primary block
+    // through the mirror at file offset 0x40000, placed immediately
+    // after $MFT's $BITMAP cluster. Windows `format` allocates it this
+    // way: its 256 MiB volumes carry a single 0x41-cluster run at 4 KiB
+    // clusters with attribute flags 0. A sparse middle, which this crate
+    // once wrote, is refused by Slate's checker (#837).
     let sds_primary_lcn = mft_bitmap_lcn + mft_bitmap_clusters;
-    let sds_mirror_lcn = sds_primary_lcn + 1;
-    let sds_real_clusters: u64 = 2;
+    let sds_mirror_lcn = sds_primary_lcn + sds_clusters(cluster_size) - 1;
+    let sds_total_clusters = sds_clusters(cluster_size);
 
     let mftmirr_lcn = cluster_count / 2;
     // The mirror holds MFT records 0..3 -- $MFT, $MFTMirr, $LogFile and
@@ -633,7 +640,7 @@ pub fn format_filesystem(
     allocate(upcase_lcn, upcase_clusters)?;
     allocate(attrdef_lcn, attrdef_clusters)?;
     allocate(mft_bitmap_lcn, mft_bitmap_clusters)?;
-    allocate(sds_primary_lcn, sds_real_clusters)?;
+    allocate(sds_primary_lcn, sds_total_clusters)?;
     allocate(mftmirr_lcn, mftmirr_clusters)?;
     allocate(backup_boot_lcn, 1)?;
     // Trailing bits past `cluster_count` (within the final byte) must be
@@ -651,31 +658,17 @@ pub fn format_filesystem(
     // Sub-PR S2: one canonical SD entry (`security_id = 0x100`, hash
     // computed via `sds::sdh_hash`) at file offset 0, mirrored
     // byte-identical at file offset 0x40000 (256 KiB) per the public
-    // NTFS layout. Two real clusters back the stream — primary at
-    // `sds_primary_lcn`, mirror at `sds_mirror_lcn` — with a sparse
-    // run in the middle representing the 256 KiB gap.
+    // NTFS layout. The whole run is written, zeros included, because
+    // it is not sparse: its initialized length covers the gap, so stale
+    // device bytes there would be read back as stream content.
     let canonical_sd_entry = crate::sds::SdEntry {
         security_id: 0x100,
         sd: SD_SYSFILE_RW,
     };
     let sds_stream = crate::sds::build_sds(&[canonical_sd_entry]);
-    let sds_primary_off = sds_primary_lcn * cluster_size as u64;
-    let primary_bytes_in_cluster = (cluster_size as usize).min(sds_stream.len());
-    let mut primary_cluster = vec![0u8; cluster_size as usize];
-    primary_cluster[..primary_bytes_in_cluster]
-        .copy_from_slice(&sds_stream[..primary_bytes_in_cluster]);
-    dev.write_all_at(sds_primary_off, &primary_cluster)?;
-
-    let mirror_off_in_stream = crate::sds::SDS_MIRROR_GAP as usize;
-    let mut mirror_cluster = vec![0u8; cluster_size as usize];
-    let mirror_payload_len = sds_stream
-        .len()
-        .saturating_sub(mirror_off_in_stream)
-        .min(cluster_size as usize);
-    mirror_cluster[..mirror_payload_len].copy_from_slice(
-        &sds_stream[mirror_off_in_stream..mirror_off_in_stream + mirror_payload_len],
-    );
-    dev.write_all_at(sds_mirror_lcn * cluster_size as u64, &mirror_cluster)?;
+    let mut sds_run = vec![0u8; (sds_total_clusters * cluster_size as u64) as usize];
+    sds_run[..sds_stream.len()].copy_from_slice(&sds_stream);
+    dev.write_all_at(sds_primary_lcn * cluster_size as u64, &sds_run)?;
 
     // 5. MFT records ------------------------------------------------------
     let rs = mft_record_size as usize;
@@ -1137,37 +1130,17 @@ pub fn format_filesystem(
         let sii_name = stream::utf16(stream::SII);
 
         // Sub-PR S2: $SDS becomes non-resident with one canonical SD
-        // entry at offset 0 and its mirror at file offset 0x40000.
-        // Two real clusters back the stream — primary at
-        // sds_primary_lcn, mirror at sds_mirror_lcn — separated by a
-        // sparse run that covers the 256 KiB gap exactly. The
-        // file-logical layout is:
-        //   VCN 0           — primary cluster (LCN = sds_primary_lcn)
-        //   VCN 1..gap_vcn  — sparse hole
-        //   VCN gap_vcn     — mirror cluster (LCN = sds_mirror_lcn)
-        //
-        // gap_vcn = 0x40000 / cluster_size, so the mirror cluster
-        // starts exactly at file offset 0x40000 regardless of
-        // cluster size.
-        let gap_vcn: u64 = crate::sds::SDS_MIRROR_GAP / cluster_size as u64;
-        debug_assert!(gap_vcn >= 1, "256 KiB mirror gap must span >= 1 cluster");
-        let sds_runs = vec![
-            DataRun {
-                starting_vcn: 0,
-                length: 1,
-                lcn: Some(sds_primary_lcn),
-            },
-            DataRun {
-                starting_vcn: 1,
-                length: gap_vcn - 1,
-                lcn: None,
-            },
-            DataRun {
-                starting_vcn: gap_vcn,
-                length: 1,
-                lcn: Some(sds_mirror_lcn),
-            },
-        ];
+        // entry at offset 0 and its mirror at file offset 0x40000, in
+        // one contiguous, unflagged run of `sds_total_clusters`
+        // clusters starting at sds_primary_lcn: VCN 0 holds the primary
+        // entry and VCN 0x40000 / cluster_size the mirror. Windows
+        // `format` writes this shape; the sparse middle this crate once
+        // used made Slate's checker refuse the whole `$Secure` (#837).
+        let sds_runs = vec![DataRun {
+            starting_vcn: 0,
+            length: sds_total_clusters,
+            lcn: Some(sds_primary_lcn),
+        }];
         let sds_mp = encode_runs(&sds_runs)?;
         // data_length: bytes from offset 0 through the end of the
         // mirror entry's DATA, and it is not rounded. `SD_SYSFILE_RW`
@@ -1179,19 +1152,18 @@ pub fn format_filesystem(
         // 128 so a following entry starts aligned, and there is no
         // following entry here. Writing the rounded 0x40080 would claim
         // four bytes of padding that were never written.
-        // allocated_length is the on-stream allocated size
-        // ((gap_vcn + 1) clusters * cluster_size).
+        // allocated_length is the whole run.
         let sds_data_len = crate::sds::SDS_MIRROR_GAP
             + (crate::sds::SDS_HEADER_LEN as u64)
             + SD_SYSFILE_RW.len() as u64;
-        let sds_alloc_len = (gap_vcn + 1) * cluster_size as u64;
-        let sds_last_vcn = gap_vcn as i64;
-        let sds_data = build_sparse_nonresident_data_attribute(
+        let sds_alloc_len = sds_total_clusters * cluster_size as u64;
+        let sds_last_vcn = sds_total_clusters as i64 - 1;
+        let sds_data = build_nonresident_attribute(
+            ATTR_DATA,
             Some(stream::SDS),
             4,
             sds_data_len,
             sds_alloc_len,
-            sds_real_clusters * cluster_size as u64,
             sds_data_len,
             sds_last_vcn,
             &sds_mp,
@@ -1854,7 +1826,10 @@ fn build_system_record_with_parent(
         record_number,
         rec::SECURE | rec::REPARSE | rec::OBJID | rec::QUOTA
     );
-    let is_sparse = matches!(record_number, rec::BADCLUS | rec::SECURE);
+    // Only `$BadClus` carries a sparse stream. `$Secure:$SDS` is one
+    // contiguous run, and Windows marks `$Secure` 0x20000006 in both
+    // `$STANDARD_INFORMATION` and `$FILE_NAME`, without the sparse bit.
+    let is_sparse = record_number == rec::BADCLUS;
     // VIEW_INDEX records need both 0x0004 (MFT_RECORD_HAS_VIEW_INDEX, indicating
     // a named non-$I30 index root is present) and 0x0008 (MFT_RECORD_IS_VIEW_INDEX).
     // Post-/f byte-diff (2026-05-24): slots 16/17 show 0x000D after /f fixes them.

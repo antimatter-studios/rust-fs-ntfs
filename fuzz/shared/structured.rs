@@ -481,8 +481,13 @@ fn write_one(io: &mut Disk, paths: &[String], r: &mut Recipe) {
 /// A volume this crate formatted and filled with one of each thing the
 /// reads and writes reach: a directory, a file with contents, a named
 /// stream and an extended attribute.
+///
+/// 16 MiB: mkfs keeps its metadata below `$MFTMirr` at the volume's
+/// midpoint, and since `$Secure:$SDS` became one contiguous 65-cluster
+/// run (#837) that region ends at LCN 1081 with 4 KiB clusters and
+/// 1 KiB records -- past the 8 MiB midpoint of 1024.
 pub fn own_volume() -> Vec<u8> {
-    let size = 8 << 20;
+    let size = 16 << 20;
     let mut io = Disk(vec![0; size]);
     fs_ntfs::mkfs::format_filesystem(&mut io, size as u64, 4096, 1024, Some("FUZZ"), Some(1))
         .expect("format the explorer's own volume");
