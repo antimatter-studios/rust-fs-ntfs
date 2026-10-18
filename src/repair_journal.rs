@@ -905,3 +905,127 @@ fn lay_over<'a>(
     }
     left
 }
+
+/// Why a journal location was refused (#921). A refused location has had
+/// nothing created at it and nothing written to the target.
+#[derive(Debug, PartialEq, Eq)]
+pub enum JournalLocationError {
+    /// The directory the journal would be created in does not exist, or
+    /// is not a directory: the external storage meant for it is missing.
+    MissingDirectory(std::path::PathBuf),
+    /// The journal is the target: the same path, or another name for the
+    /// same file (a hard link, or a symlink to it).
+    IsTarget,
+    /// The target is a device, and the journal's directory is on a
+    /// filesystem that device holds.
+    OnTargetDevice,
+    /// Something already exists at the journal path. A new journal is
+    /// never written over an existing file.
+    Exists,
+    /// The target or the journal's directory could not be looked at.
+    Io(String),
+}
+
+impl std::fmt::Display for JournalLocationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingDirectory(dir) => write!(
+                f,
+                "the journal's directory '{}' does not exist",
+                dir.display()
+            ),
+            Self::IsTarget => write!(f, "the journal is the device being repaired"),
+            Self::OnTargetDevice => write!(
+                f,
+                "the journal's directory is on a filesystem the device being repaired holds"
+            ),
+            Self::Exists => write!(f, "a file already exists at the journal path"),
+            Self::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for JournalLocationError {}
+
+/// The parts of a file's `stat` a journal location is checked by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocationStat {
+    /// `st_dev`: the device of the filesystem the file is on.
+    pub dev: u64,
+    /// `st_ino`: the file on that filesystem.
+    pub ino: u64,
+    /// `st_rdev`: the device the file is, read only when `is_device`.
+    pub rdev: u64,
+    /// The file is a block or character device.
+    pub is_device: bool,
+}
+
+#[cfg(unix)]
+impl LocationStat {
+    /// The location fields of `meta`.
+    pub fn of(meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let kind = meta.file_type();
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            rdev: meta.rdev(),
+            is_device: kind.is_block_device() || kind.is_char_device(),
+        }
+    }
+
+    /// The same file as `other`: the same inode on the same filesystem.
+    pub fn same_file(&self, other: &Self) -> bool {
+        self.dev == other.dev && self.ino == other.ino
+    }
+}
+
+/// Whether `directory` is on a filesystem `target` holds: `target` is a
+/// device, and it is the device `directory`'s filesystem is on.
+pub fn directory_on_target(directory: &LocationStat, target: &LocationStat) -> bool {
+    target.is_device && directory.dev == target.rdev
+}
+
+/// Check `journal` as the place an in-place repair of `target` keeps its
+/// journal, before anything is created or written (#921). It is refused,
+/// naming the reason, when:
+///
+/// - the directory it would be created in does not exist;
+/// - it is the target, by path or as another name for the same file (a
+///   hard link, or a symlink to it);
+/// - the target is a device and the journal's directory is on a
+///   filesystem that device holds;
+/// - something already exists at it, a dangling symlink included.
+///
+/// Nothing is created at `journal` and nothing is written to `target`,
+/// whether the location is refused or not.
+#[cfg(unix)]
+pub fn check_journal_location(
+    journal: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<(), JournalLocationError> {
+    let directory = match journal.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => std::path::Path::new("."),
+    };
+    let directory_meta = match std::fs::metadata(directory) {
+        Ok(meta) if meta.is_dir() => meta,
+        _ => return Err(JournalLocationError::MissingDirectory(directory.into())),
+    };
+    let target_meta = std::fs::metadata(target)
+        .map_err(|e| JournalLocationError::Io(format!("the target '{}': {e}", target.display())))?;
+    let target_stat = LocationStat::of(&target_meta);
+
+    if std::fs::symlink_metadata(journal).is_ok() {
+        return match std::fs::metadata(journal) {
+            Ok(meta) if LocationStat::of(&meta).same_file(&target_stat) => {
+                Err(JournalLocationError::IsTarget)
+            }
+            _ => Err(JournalLocationError::Exists),
+        };
+    }
+    if directory_on_target(&LocationStat::of(&directory_meta), &target_stat) {
+        return Err(JournalLocationError::OnTargetDevice);
+    }
+    Ok(())
+}
