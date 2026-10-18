@@ -63,6 +63,13 @@
 //! and `--in-place` refuses `--to`, `--dry-run` and `-y`. Every refusal comes
 //! before anything is created or written.
 //!
+//! WHAT `--apply PLAN --in-place --resume --journal FILE` DOES: resumes an
+//! in-place repair that stopped (#963). FILE is the journal the stopped
+//! apply left, and must exist and not be the volume; the volume is opened
+//! exclusively and the apply continued through `resume_in_place`, which
+//! checks FILE against PLAN and the volume, skips the units it marks
+//! applied, redoes the open one and applies the rest.
+//!
 //! Without `-y` nothing is written, as with `-n`.
 
 use std::ffi::OsString;
@@ -141,7 +148,9 @@ fn command() -> Cmd {
              --apply PLAN --in-place --journal FILE repairs the volume in place: FILE \
              must be a new file outside the volume, the volume is opened exclusively \
              and checked against PLAN, and only then is FILE created and PLAN applied, \
-             each unit journalled into FILE before it is written.\n\n\
+             each unit journalled into FILE before it is written. With --resume, FILE \
+             is the journal a stopped in-place repair left, and the repair continues \
+             from where it stopped.\n\n\
              --dry-run works out every write -y would make (--clear-dirty's too, when \
              given) and makes none: TARGET is opened read-only. The report's plan lists \
              them in units, each the writes between two flushes, each by offset, length \
@@ -246,6 +255,16 @@ fn command() -> Cmd {
                 .value_parser(value_parser!(OsString))
                 .requires("in_place"),
         )
+        .arg(
+            Arg::new("resume")
+                .long("resume")
+                .help(
+                    "With --in-place, resume a stopped repair from --journal's FILE, the \
+                     journal it left, instead of starting a new one",
+                )
+                .action(ArgAction::SetTrue)
+                .requires("in_place"),
+        )
         .group(
             ArgGroup::new("apply_target")
                 .args(["to", "in_place"])
@@ -307,7 +326,12 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
             let journal = matches
                 .get_one::<OsString>("journal")
                 .expect("clap requires --journal with --in-place");
-            return apply_in_place(Path::new(target), Path::new(plan), Path::new(journal));
+            return apply_in_place(
+                Path::new(target),
+                Path::new(plan),
+                Path::new(journal),
+                matches.get_flag("resume"),
+            );
         }
         let to = matches
             .get_one::<OsString>("to")
@@ -628,38 +652,64 @@ fn apply(source: &Path, plan: &Path, target: &Path) -> Result<Outcome, CliError>
 /// new file at `journal` (#922). The journal location is checked, the plan
 /// loaded, the device opened exclusively and checked against the plan, all
 /// before the journal is created; then the plan is applied through
-/// `repair_journal::apply_in_place`.
+/// `repair_journal::apply_in_place`. With `resume`, `journal` is the one a
+/// stopped apply left (#963): it must exist and not be the device, and the
+/// apply continues through `repair_journal::resume_in_place`, which checks
+/// the journal against the plan and the device before writing.
 #[cfg(unix)]
-fn apply_in_place(device: &Path, plan: &Path, journal: &Path) -> Result<Outcome, CliError> {
-    use fs_ntfs::repair_journal::{apply_in_place, check_journal_location};
+fn apply_in_place(
+    device: &Path,
+    plan: &Path,
+    journal: &Path,
+    resume: bool,
+) -> Result<Outcome, CliError> {
+    use fs_ntfs::repair_journal::{apply_in_place, check_journal_location, resume_in_place};
     let name = device.display().to_string();
     let journal_name = journal.display().to_string();
     let plan_name = plan.display().to_string();
     let usage = |m: String| CliError::usage(m).with_code(USAGE);
     let failed = |m: String| CliError::failed(m).with_code(OPERATIONAL);
-    check_journal_location(journal, device).map_err(|e| {
-        usage(format!(
-            "--journal '{journal_name}' refused, nothing written: {e}"
-        ))
-    })?;
+    if !resume {
+        check_journal_location(journal, device).map_err(|e| {
+            usage(format!(
+                "--journal '{journal_name}' refused, nothing written: {e}"
+            ))
+        })?;
+    } else if journal.symlink_metadata().is_err() {
+        return Err(usage(format!(
+            "--resume: --journal '{journal_name}' does not exist, so there is no stopped \
+             repair to resume; nothing written"
+        )));
+    } else if journal == device || same_file(journal, device) {
+        return Err(usage(format!(
+            "--resume: --journal '{journal_name}' is the volume itself; nothing written"
+        )));
+    }
     let bytes = std::fs::read(plan).map_err(|e| failed(format!("read plan '{plan_name}': {e}")))?;
     let saved =
         load_plan(&bytes).map_err(|e| failed(format!("plan '{plan_name}' refused: {e}")))?;
     let mut io = PathIo::open_exclusive(device)
         .map_err(|e| failed(format!("{name}: refused, nothing written: {e}")))?;
-    check_plan_source(&saved, &mut io).map_err(|e| {
-        failed(format!(
-            "{name}: refused for plan '{plan_name}', nothing written: {e}"
-        ))
-    })?;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(journal)
-        .map_err(|e| failed(format!("create journal '{journal_name}': {e}")))?;
+    if !resume {
+        check_plan_source(&saved, &mut io).map_err(|e| {
+            failed(format!(
+                "{name}: refused for plan '{plan_name}', nothing written: {e}"
+            ))
+        })?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(journal)
+            .map_err(|e| failed(format!("create journal '{journal_name}': {e}")))?;
+    }
     let mut journal_io = PathIo::open_rw(journal).map_err(failed)?;
     let sha: [u8; 32] = Sha256::digest(&bytes).into();
-    apply_in_place(&saved, sha, &mut io, &mut journal_io).map_err(|e| {
+    let done = if resume {
+        resume_in_place(&saved, sha, &mut io, &mut journal_io)
+    } else {
+        apply_in_place(&saved, sha, &mut io, &mut journal_io)
+    };
+    done.map_err(|e| {
         failed(format!(
             "{name}: in-place repair stopped: {e}; the journal '{journal_name}' holds how far \
              it got"
@@ -677,12 +727,18 @@ fn apply_in_place(device: &Path, plan: &Path, journal: &Path) -> Result<Outcome,
         ("mode", Json::from("apply-in-place")),
         ("plan", Json::from(plan_name.as_str())),
         ("journal", Json::from(journal_name.as_str())),
+        ("resumed", Json::from(resume)),
         ("units", Json::from(units)),
         ("writes", Json::from(writes)),
         ("exit", Json::from(u64::from(CLEAN))),
     ]);
+    let how = if resume {
+        "resumed and applied"
+    } else {
+        "applied"
+    };
     let text = format!(
-        "fsck.ntfs: {name}: plan '{plan_name}' applied in place ({units} units, {writes} \
+        "fsck.ntfs: {name}: plan '{plan_name}' {how} in place ({units} units, {writes} \
          writes), journalled into '{journal_name}'"
     );
     Ok(Outcome::report(report).with_text(text).with_code(CLEAN))
@@ -690,7 +746,12 @@ fn apply_in_place(device: &Path, plan: &Path, journal: &Path) -> Result<Outcome,
 
 /// An in-place repair needs the journal location check, which is Unix-only.
 #[cfg(not(unix))]
-fn apply_in_place(_device: &Path, _plan: &Path, _journal: &Path) -> Result<Outcome, CliError> {
+fn apply_in_place(
+    _device: &Path,
+    _plan: &Path,
+    _journal: &Path,
+    _resume: bool,
+) -> Result<Outcome, CliError> {
     Err(CliError::usage(String::from("--in-place is supported on Unix only")).with_code(USAGE))
 }
 
