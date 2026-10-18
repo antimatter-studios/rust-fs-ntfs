@@ -30,6 +30,11 @@ flag. The layout the fix writes comes from Windows, not from Slate: a
 Windows-formatted 256 MiB volume's `$SDS` is one contiguous run with flags 0,
 and its `$Secure` is not marked sparse.
 
+`$Extend`'s `$I30` keys for `$ObjId`, `$Reparse` and `$Quota` (#838) are
+written from a Windows-formatted 256 MiB volume's bytes: each key carries the
+child's `$FILE_NAME` times, zero sizes and attributes `0x20000006`. No Slate
+source was read for this; Slate only reported the disagreement.
+
 ## Citations in the source
 
 The first source files (April 2026) cited the Linux-NTFS documentation page by
