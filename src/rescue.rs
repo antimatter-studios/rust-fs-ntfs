@@ -946,6 +946,12 @@ pub struct ExportReport {
     /// offset: written as zeros and listed in the error manifest at
     /// [`export_manifest_path`]. Empty for a complete image.
     pub missing: Vec<(u64, u64)>,
+    /// For an incomplete image, whether its `$Volume` dirty flag was set,
+    /// so Windows checks the volume before trusting it: `Err` names why it
+    /// could not be (the `$Volume` record missing or not NTFS), and the
+    /// error manifest says so too. `None` for a complete image, whose flag
+    /// is left exactly as the source had it.
+    pub dirty_flag: Option<Result<(), String>>,
 }
 
 impl ExportReport {
@@ -1089,6 +1095,16 @@ fn write_manifest(path: &Path, report: &ExportReport) -> Result<(), String> {
         report.missing.len(),
         report.bytes
     );
+    match &report.dirty_flag {
+        Some(Ok(())) => text.push_str(
+            "# the volume's dirty flag is set, so Windows checks it before trusting it\n",
+        ),
+        Some(Err(e)) => text.push_str(&format!(
+            "# the volume's dirty flag is not set: {}\n",
+            e.replace('\n', " ")
+        )),
+        None => {}
+    }
     for &(offset, len) in &report.missing {
         text.push_str(&format!("{offset} {len}\n"));
     }
@@ -1177,6 +1193,15 @@ fn write_image(
             at += n as u64;
         }
     }
+    // An incomplete NTFS image is marked dirty the way Windows marks one:
+    // `$Volume`'s VOLUME_INFORMATION flag, mirrored into `$MFTMirr`. A
+    // `$Volume` record lost to a gap is not fabricated; the report says
+    // why the flag is not set.
+    let dirty_flag = (!gaps.is_empty()).then(|| {
+        crate::fsck::set_dirty_io(&mut ImageIo { file: out, size })
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    });
     let mut hash = Sha256::new();
     out.seek(SeekFrom::Start(0)).map_err(write_err)?;
     let mut buf = vec![0u8; DEFAULT_CHUNK];
@@ -1192,7 +1217,41 @@ fn write_image(
         bytes: size,
         sha256: hash.finalize().into(),
         missing: gaps.to_vec(),
+        dirty_flag,
     })
+}
+
+/// [`BlockIo`](crate::block_io::BlockIo) over the image an export is
+/// writing, for setting its dirty flag in place.
+struct ImageIo<'a> {
+    file: &'a mut File,
+    size: u64,
+}
+
+impl crate::block_io::BlockIo for ImageIo<'_> {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .and_then(|_| self.file.read_exact(buf))
+            .map_err(|e| format!("read the image @{offset} len {}: {e}", buf.len()))
+    }
+
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .and_then(|_| self.file.write_all(buf))
+            .map_err(|e| format!("write the image @{offset} len {}: {e}", buf.len()))
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn sync(&mut self) -> Result<(), String> {
+        self.file
+            .sync_all()
+            .map_err(|e| format!("sync the image: {e}"))
+    }
 }
 
 /// Read as many bytes as `r` has, up to `buf.len()`.
