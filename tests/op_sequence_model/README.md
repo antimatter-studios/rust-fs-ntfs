@@ -1,5 +1,20 @@
 # Seeded operation readback: first slice of #484
 
+`model.rs` is the separate logical tree model from #680, with no dependency
+on the driver's readers, writers or record IDs. Its eight fixture-free
+contracts live in `tests/op_sequence_reference_model.rs` and run in CI with
+their own executed-case floor, as well as in `chore test:suite`. Files share
+bytes through model identities when hard-linked; directories retain child
+identities across same-directory rename. Refused transitions change nothing.
+Names use a supplied 65,536-entry UTF-16 `$UpCase` mapping, not Rust Unicode
+case conversion. The 1 MiB file bound is a workload limit, not an NTFS limit.
+Directory sizes are modeled as zero, and directory link counts count names,
+not POSIX dot entries. Timestamps, open handles, ADS and EAs are outside this
+slice. The model is not yet wired into disk execution: #681–#685 cover the
+generator, fresh-reopen harness, explorer, regression capture and extensions.
+These contracts prove expected-state semantics, not on-disk NTFS correctness;
+the existing independent readers below remain necessary for disk validation.
+
 `tests/op_sequence_readback.rs` runs exactly four seeds (0, 1, 484 and
 u64::MAX), each with three creates, 120 offset writes/truncates, and one
 refused duplicate create. Every accepted operation must complete in full.
