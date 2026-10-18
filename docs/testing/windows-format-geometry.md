@@ -62,17 +62,34 @@ not assumed. `sector-4096-provenance.json` and `sector-4096-ntfsinfo.txt`
 are kept beside the row; the scratch VHDX is detached and removed in
 `finally`.
 
+Issue #901 adds Windows' own NTFS format of a 512e disk (512-byte logical,
+4096-byte physical sectors) beside a 512n disk of the same 1 GiB size, the
+reference #702's planner work (#902) grades against. NTFS records only the
+logical sector size, so whether the physical size changes Windows' layout is
+measured, not assumed. The same collector makes each disk with the logical
+and physical sizes set separately, and `Get-Disk` must report 512 and 4096
+(512e) or 512 and 512 (512n) before anything is formatted, so a mislabelled
+disk cannot pass. Each row (`sector-512.json`, `sector-512-4096.json`) carries
+the 4Kn row's fields plus the partition offset and `$LogFile`'s first LCN and
+allocated clusters from `FSCTL_GET_RETRIEVAL_POINTERS`. `sector-512e-diff.json`
+then names every compared field where the two formats differ; the physical
+sector size itself is the variable under test and is not compared. An empty
+list is a valid, recorded result: it means Windows' layout does not depend on
+the physical sector size.
+
 This slice deliberately does not supply invented measurements. #888 adds
 native `$LogFile` size, #889 measures maximum cluster-count boundaries,
 and #890 retains the measured table under this directory, checks for
 regeneration drift and grades `plan_format`. No planner parity or largest
 supported volume claim is made by the capture workflow.
 
-The 48 fixture-free PowerShell contracts cover request coverage, signed
+The 59 fixture-free PowerShell contracts cover request coverage, signed
 encoding boundaries, malformed BPBs, native field parsing, disagreement,
 duplicates, missing rows, the control formats, extent decoding, complete
-large-cluster layout rows, 4096-byte boot sectors, update sequence headers
-and complete 4Kn rows from a disk that reports 4096-byte sectors. These synthetic bytes
+large-cluster layout rows, 4096-byte boot sectors, update sequence headers,
+complete 4Kn rows from a disk that reports 4096-byte sectors, complete 512e
+and 512n rows from disks that report their physical size, and the 512e diff
+naming each changed field. These synthetic bytes
 test collector mechanics; Microsoft's formatter supplies the actual oracle.
 
 Sources: Microsoft's [Format-Volume documentation](https://learn.microsoft.com/en-us/powershell/module/storage/format-volume)
