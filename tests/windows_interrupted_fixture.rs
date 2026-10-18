@@ -3993,3 +3993,152 @@ fn a_resumed_in_place_repair_writes_nothing_to_the_device_for_a_unit_marked_appl
         std::fs::remove_file(&src).unwrap();
     }
 }
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn a_resume_refuses_a_unit_whose_range_changed_while_stopped_and_names_the_byte() {
+    // While an in-place apply is stopped, something else can write the
+    // device (#929). For every device write of each capture's apply, the
+    // cut stops that write; then one byte is changed to a value that is
+    // neither what the journal says belongs there nor, for the open unit,
+    // its preimage: first in the open unit's range, then in a unit the
+    // journal marks applied. The resume must refuse, naming that unit,
+    // write and byte, and leave the device and the journal exactly as the
+    // cut and the change left them.
+    use fs_ntfs::repair_journal::{
+        apply_in_place, progress, read_journal, resume_in_place, InPlaceError, JournalBinding,
+    };
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+        let (mut device, mut journal, log) = recording_pair(&pristine, None);
+        apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+            .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+        let device_writes: Vec<usize> = log
+            .borrow()
+            .iter()
+            .filter(|(_, e)| *e == IoEvent::Write)
+            .enumerate()
+            .filter(|(_, (journal, _))| !journal)
+            .map(|(n, _)| n)
+            .collect();
+        let binding = JournalBinding {
+            plan_sha256,
+            source_size: loaded.source_size,
+            volume_serial: loaded.volume_serial,
+        };
+
+        let mut bad = Vec::new();
+        let mut applied_cases = 0;
+        for &stop in &device_writes {
+            for in_applied in [false, true] {
+                let (mut device, mut journal, _) = recording_pair(&pristine, None);
+                cut_pair(&mut device, &mut journal, Some(stop));
+                if apply_in_place(&loaded, plan_sha256, &mut device, &mut journal).is_ok() {
+                    bad.push(format!("write {stop}: the cut apply reported success"));
+                    continue;
+                }
+                cut_pair(&mut device, &mut journal, None);
+                let read = read_journal(&journal.bytes, &binding)
+                    .unwrap_or_else(|e| panic!("{k}: write {stop}: the journal: {e}"));
+                let stopped = progress(&read, &loaded)
+                    .unwrap_or_else(|e| panic!("{k}: write {stop}: the journal: {e}"));
+                let Some(open) = stopped.open else {
+                    bad.push(format!("write {stop}: the cut left no unit open"));
+                    continue;
+                };
+                let open_writes = &loaded.units[open as usize].writes;
+                let in_open = |byte: u64| {
+                    open_writes
+                        .iter()
+                        .any(|o| (o.offset..o.offset + o.after.len() as u64).contains(&byte))
+                };
+                // The unit, write and byte to change, and the values the
+                // change must avoid.
+                let target = if in_applied {
+                    (0..stopped.applied as usize).find_map(|u| {
+                        loaded.units[u]
+                            .writes
+                            .iter()
+                            .enumerate()
+                            .find_map(|(w, write)| {
+                                (0..write.after.len() as u64)
+                                    .map(|i| write.offset + i)
+                                    .find(|&byte| !in_open(byte))
+                                    .map(|byte| (u as u32, w, byte, Vec::new()))
+                            })
+                    })
+                } else {
+                    let write = &open_writes[0];
+                    let later: Vec<u8> = open_writes[1..]
+                        .iter()
+                        .filter(|o| {
+                            (o.offset..o.offset + o.after.len() as u64).contains(&write.offset)
+                        })
+                        .map(|o| o.after[(write.offset - o.offset) as usize])
+                        .collect();
+                    let mut avoid = vec![write.before[0], write.after[0]];
+                    avoid.extend(later);
+                    Some((open, 0, write.offset, avoid))
+                };
+                let Some((unit, w, byte, mut avoid)) = target else {
+                    continue;
+                };
+                if in_applied {
+                    applied_cases += 1;
+                }
+                avoid.push(device.bytes[byte as usize]);
+                let value = (0..=255u8).find(|v| !avoid.contains(v)).unwrap();
+                device.bytes[byte as usize] = value;
+                let device_sha256 = hex_sha256(&device.bytes);
+                let journal_len = journal.bytes.len();
+
+                let what = if in_applied {
+                    "an applied unit"
+                } else {
+                    "the open unit"
+                };
+                match resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
+                    Err(InPlaceError::OpenUnitRange {
+                        unit: u,
+                        write,
+                        start,
+                        end,
+                    }) if !in_applied && (u, write, start, end) == (unit, w, byte, byte + 1) => {}
+                    Err(InPlaceError::DeviceReadBack {
+                        unit: u,
+                        write,
+                        start,
+                        end,
+                    }) if in_applied && (u, write, start, end) == (unit, w, byte, byte + 1) => {}
+                    other => {
+                        bad.push(format!(
+                            "write {stop}: byte {byte} of unit {unit} write {w} ({what}) changed: \
+                             the resume gave {other:?}"
+                        ));
+                        continue;
+                    }
+                }
+                if hex_sha256(&device.bytes) != device_sha256 {
+                    bad.push(format!(
+                        "write {stop}: {what}: the refused resume wrote the device"
+                    ));
+                }
+                if journal.bytes.len() != journal_len {
+                    bad.push(format!(
+                        "write {stop}: {what}: the refused resume appended to the journal"
+                    ));
+                }
+            }
+        }
+        assert!(applied_cases > 0, "{k}: no cut left a unit applied");
+        assert!(
+            bad.is_empty(),
+            "{k}: of {} changed bytes, {} were not refused as they must be:\n{}",
+            device_writes.len() + applied_cases,
+            bad.len(),
+            bad.iter().take(6).cloned().collect::<Vec<_>>().join("\n")
+        );
+        std::fs::remove_file(&src).unwrap();
+    }
+}
