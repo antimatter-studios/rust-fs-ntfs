@@ -18,7 +18,8 @@ use std::process::Command;
 
 use fs_ntfs::repair_journal::{
     bsd_device_record, check_journal_location, device_relation, directory_on_target,
-    sysfs_device_record, DeviceRecord, DeviceRelation, JournalLocationError, LocationStat,
+    layered_refusal, sysfs_device_record, sysfs_lower_devices, DeviceRecord, DeviceRelation,
+    JournalLocationError, LocationStat,
 };
 use sha2::{Digest, Sha256};
 
@@ -348,6 +349,187 @@ fn a_sysfs_block_tree_resolves_a_partition_to_its_disk() {
         sysfs_device_record(&root, 0, 42),
         None,
         "a device sysfs does not list (tmpfs, NFS) has no record"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// The devices directly under each layered device in `stack`, as an
+/// APFS container's physical stores or a device-mapper or md device's
+/// slaves would be read (#952).
+fn under<'a>(stack: &'a [(&'a str, Vec<DeviceRecord>)]) -> impl Fn(&str) -> Vec<DeviceRecord> + 'a {
+    move |name| {
+        stack
+            .iter()
+            .find(|(layered, _)| *layered == name)
+            .map(|(_, lower)| lower.clone())
+            .unwrap_or_default()
+    }
+}
+
+#[test]
+fn a_journal_on_a_layered_device_is_traced_to_the_disks_under_it() {
+    let stack = [
+        // An APFS volume disk3s1 on the synthesized disk3, whose physical
+        // store is the partition disk2s2.
+        ("disk3", vec![device("disk2s2", "disk2")]),
+        // A device-mapper device on the whole disk sda.
+        ("dm-0", vec![device("sda", "sda")]),
+        // An md array across a partition of sdb and one of sdc.
+        ("md0", vec![device("sdb1", "sdb"), device("sdc1", "sdc")]),
+        // A device-mapper device on that array: two layers down.
+        ("dm-1", vec![device("md0", "md0")]),
+        // A device-mapper device on an unrelated disk.
+        ("dm-2", vec![device("sdd1", "sdd")]),
+    ];
+    let lower = under(&stack);
+
+    let refused = |journal: DeviceRecord, target: DeviceRecord, why: &str| {
+        let refusal =
+            layered_refusal(&journal, &target, &lower).unwrap_or_else(|| panic!("{why}: accepted"));
+        assert!(
+            matches!(refusal, JournalLocationError::OnTargetStack { .. }),
+            "{why}: {refusal:?}"
+        );
+        refusal
+    };
+
+    let apfs = refused(
+        device("disk3s1", "disk3"),
+        device("disk2", "disk2"),
+        "an APFS volume whose container is on a partition of the target disk",
+    );
+    assert_eq!(
+        apfs,
+        JournalLocationError::OnTargetStack {
+            journal_device: "disk2s2".into(),
+            target_device: "disk2".into(),
+        },
+        "the refusal names the device under the journal and the target it shares a disk with"
+    );
+    let message = apfs.to_string();
+    assert!(
+        message.contains("'disk2s2'") && message.contains("'disk2'"),
+        "the refusal names both devices: {message}"
+    );
+    refused(
+        device("disk3s1", "disk3"),
+        device("disk2s2", "disk2"),
+        "an APFS volume whose container is the partition being repaired",
+    );
+    refused(
+        device("dm-0", "dm-0"),
+        device("sda", "sda"),
+        "a device-mapper device on the target disk",
+    );
+    refused(
+        device("dm-0", "dm-0"),
+        device("sda1", "sda"),
+        "a device-mapper device on the disk holding the target partition",
+    );
+    refused(
+        device("md0", "md0"),
+        device("sdc", "sdc"),
+        "an md array across the target disk and another",
+    );
+    refused(
+        device("md0p1", "md0"),
+        device("sdb", "sdb"),
+        "a partition of an md array across the target disk",
+    );
+    refused(
+        device("dm-1", "dm-1"),
+        device("sdb1", "sdb"),
+        "a device-mapper device on an md array across the target partition",
+    );
+    refused(
+        device("sda2", "sda"),
+        device("dm-0", "dm-0"),
+        "a journal on the disk under the device-mapper device being repaired",
+    );
+
+    for (journal, target, why) in [
+        (
+            device("dm-2", "dm-2"),
+            device("sda", "sda"),
+            "a stack on an unrelated disk",
+        ),
+        (
+            device("disk3s1", "disk3"),
+            device("disk2s1", "disk2"),
+            "an APFS container on another partition of the disk holding the target",
+        ),
+        (
+            device("sdd2", "sdd"),
+            device("dm-2", "dm-2"),
+            "another partition of the disk under the device being repaired",
+        ),
+        (
+            device("sde1", "sde"),
+            device("sda", "sda"),
+            "no layers and an unrelated disk",
+        ),
+    ] {
+        assert_eq!(layered_refusal(&journal, &target, &lower), None, "{why}");
+    }
+
+    assert_eq!(
+        layered_refusal(
+            &device("disk2s1", "disk2"),
+            &device("disk2", "disk2"),
+            &lower
+        ),
+        Some(JournalLocationError::OnTargetPartition),
+        "a direct relationship keeps its own refusal"
+    );
+
+    // A topology that loops (a damaged or racing registry) still ends.
+    let looped = [
+        ("dm-5", vec![device("dm-6", "dm-6")]),
+        ("dm-6", vec![device("dm-5", "dm-5")]),
+    ];
+    assert_eq!(
+        layered_refusal(
+            &device("dm-5", "dm-5"),
+            &device("sda", "sda"),
+            &under(&looped)
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_sysfs_block_tree_lists_the_slaves_under_a_layered_device() {
+    let root = PathBuf::from(common::temp_image_path("journal_location_sysfs_slaves"));
+    let _ = std::fs::remove_dir_all(&root);
+    let sda = root.join("devices/pci0000:00/block/sda");
+    std::fs::create_dir_all(sda.join("sda1")).unwrap();
+    std::fs::write(sda.join("sda1/partition"), "1\n").unwrap();
+    let sdb = root.join("devices/pci0000:00/block/sdb");
+    std::fs::create_dir_all(&sdb).unwrap();
+    let dm0 = root.join("devices/virtual/block/dm-0");
+    std::fs::create_dir_all(dm0.join("slaves")).unwrap();
+    std::os::unix::fs::symlink(sda.join("sda1"), dm0.join("slaves/sda1")).unwrap();
+    std::os::unix::fs::symlink(&sdb, dm0.join("slaves/sdb")).unwrap();
+    std::fs::create_dir_all(root.join("class/block")).unwrap();
+    std::os::unix::fs::symlink(&dm0, root.join("class/block/dm-0")).unwrap();
+    std::os::unix::fs::symlink(&sda, root.join("class/block/sda")).unwrap();
+
+    let mut slaves = sysfs_lower_devices(&root, "dm-0");
+    slaves.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(
+        slaves,
+        vec![device("sda1", "sda"), device("sdb", "sdb")],
+        "a device-mapper device's slaves, a partition resolved to its disk"
+    );
+    assert_eq!(
+        sysfs_lower_devices(&root, "sda"),
+        Vec::new(),
+        "a disk with no slaves directory is on nothing"
+    );
+    assert_eq!(
+        sysfs_lower_devices(&root, "nvme9n1"),
+        Vec::new(),
+        "a device sysfs does not list is on nothing"
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
