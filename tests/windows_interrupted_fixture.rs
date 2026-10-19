@@ -4926,6 +4926,191 @@ fn a_torn_journal_tail_resumes_only_as_a_prefix_of_the_record_the_plan_expects_n
     }
 }
 
+#[cfg(feature = "plan-file")]
+#[test]
+fn a_resume_refuses_a_corrupt_or_foreign_journal_with_nothing_written() {
+    // While an in-place apply is stopped, its journal can be damaged or
+    // swapped for the journal of another repair (#935). At every stop of
+    // each capture's cut apply, a byte flipped in the header, in an intent
+    // and in an applied record, and the journal another capture's apply
+    // left, must each refuse the resume, naming the record and the reason,
+    // before anything is written: no write reaches the device or the
+    // journal, and the journal holds the bytes it was given. Resumed
+    // afterwards from an intact copy of the journal, the device reaches
+    // the uninterrupted apply, and so the files and metadata Windows' own
+    // restart reached.
+    use fs_ntfs::repair_journal::{
+        apply_in_place, read_journal, resume_in_place, InPlaceError, JournalBinding, JournalError,
+        JournalFault, JournalRecord,
+    };
+    let captures = captures_holding_work();
+    // The journal each capture's whole apply leaves, which no other
+    // capture's plan may resume from.
+    let finished: Vec<Vec<u8>> = captures
+        .iter()
+        .map(|&(k, _)| {
+            let src = unpack(&format!("windows-interrupted-{k}"));
+            let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+            let (mut device, mut journal, _) = recording_pair(&pristine, None);
+            apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+                .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+            std::fs::remove_file(&src).unwrap();
+            journal.bytes
+        })
+        .collect();
+    for (i, &(k, log_end)) in captures.iter().enumerate() {
+        let foreign = &finished[(i + 1) % finished.len()];
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+        let (mut device, mut journal, log) = recording_pair(&pristine, None);
+        apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+            .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+        let whole = device.bytes;
+        let writes = log
+            .borrow()
+            .iter()
+            .filter(|(_, e)| *e == IoEvent::Write)
+            .count();
+        let binding = JournalBinding {
+            plan_sha256,
+            source_size: loaded.source_size,
+            volume_serial: loaded.volume_serial,
+        };
+        let kinds = ["header", "intent", "applied record"];
+
+        let mut bad = Vec::new();
+        let mut flipped = [0usize; 3];
+        let mut resumed = None;
+        for stop in 0..writes {
+            let (mut device, mut journal, log) = recording_pair(&pristine, None);
+            cut_pair(&mut device, &mut journal, Some(stop));
+            if apply_in_place(&loaded, plan_sha256, &mut device, &mut journal).is_ok() {
+                bad.push(format!("stop after {stop}: the cut apply reported success"));
+                continue;
+            }
+            cut_pair(&mut device, &mut journal, None);
+            let intact = journal.bytes.clone();
+            let read = match read_journal(&intact, &binding) {
+                Ok(read) => read,
+                Err(e) => {
+                    bad.push(format!(
+                        "stop after {stop}: the cut journal reads back as {e}"
+                    ));
+                    continue;
+                }
+            };
+            // The first whole record of each kind: its index, where it
+            // starts and its length (type, payload length, payload, sum).
+            let mut first = [None; 3];
+            let mut at = 0usize;
+            for (n, record) in read.records.iter().enumerate() {
+                let kind = match record {
+                    JournalRecord::Header(_) => 0,
+                    JournalRecord::Intent { .. } => 1,
+                    JournalRecord::Applied { .. } => 2,
+                };
+                let payload = u32::from_le_bytes(intact[at + 4..at + 8].try_into().unwrap());
+                let length = 4 + 4 + payload as usize + 32;
+                first[kind].get_or_insert((n, at, length));
+                at += length;
+            }
+
+            let mut cases = Vec::new();
+            for (kind, what) in kinds.iter().enumerate() {
+                let Some((record, offset, length)) = first[kind] else {
+                    continue;
+                };
+                let mut bytes = intact.clone();
+                bytes[offset + length / 2] ^= 0xff;
+                flipped[kind] += 1;
+                let want = JournalError {
+                    record,
+                    offset: offset as u64,
+                    fault: JournalFault::ChecksumMismatch,
+                };
+                cases.push((format!("a byte flipped in the first {what}"), bytes, want));
+            }
+            let want = JournalError {
+                record: 0,
+                offset: 0,
+                fault: JournalFault::OtherPlan,
+            };
+            cases.push((
+                "another capture's journal".to_string(),
+                foreign.clone(),
+                want,
+            ));
+
+            for (what, bytes, want) in cases {
+                journal.bytes = bytes.clone();
+                let from = log.borrow().len();
+                match resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
+                    Err(InPlaceError::Journal(e)) if e == want => {}
+                    other => bad.push(format!(
+                        "stop after {stop}: {what}: the resume gave {other:?}, not {want}"
+                    )),
+                }
+                let wrote = log.borrow()[from..]
+                    .iter()
+                    .filter(|(_, e)| *e == IoEvent::Write)
+                    .count();
+                if wrote > 0 || journal.bytes != bytes {
+                    bad.push(format!(
+                        "stop after {stop}: {what}: the refused resume made {wrote} writes"
+                    ));
+                }
+            }
+
+            journal.bytes = intact;
+            if let Err(e) = resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
+                bad.push(format!(
+                    "stop after {stop}: from an intact copy, the resume refused: {e}"
+                ));
+                continue;
+            }
+            if device.bytes != whole {
+                bad.push(format!(
+                    "stop after {stop}: from an intact copy, the device holds other bytes than \
+                     an uninterrupted apply"
+                ));
+                continue;
+            }
+            resumed = Some(device.bytes);
+        }
+        for (kind, what) in kinds.iter().enumerate() {
+            assert!(flipped[kind] > 0, "{k}: no stop left a whole {what}");
+        }
+        assert!(
+            bad.is_empty(),
+            "{k}: of {writes} stops, {} did not refuse or resume as they must:\n{}",
+            bad.len(),
+            bad.iter().take(6).cloned().collect::<Vec<_>>().join("\n")
+        );
+
+        let device = format!("{src}.resumed");
+        std::fs::write(&device, resumed.expect("no stop resumed")).unwrap();
+        let want = manifest(k);
+        let got = walk(&device);
+        assert!(
+            got == want,
+            "{k}: {} files after the resumed repair, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+        let recovered = unpack(&format!("windows-interrupted-{k}.recovered"));
+        oracle::same_metadata_as_windows(
+            k,
+            &Image::read(&src),
+            &Image::read(&device),
+            &Image::read(&recovered),
+            log_end,
+        );
+        std::fs::remove_file(&recovered).unwrap();
+        std::fs::remove_file(&device).unwrap();
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
 #[test]
 fn a_plan_for_an_in_place_apply_opens_by_setting_the_dirty_flag() {
     // An in-place repair keeps the volume dirty until it has been audited
