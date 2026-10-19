@@ -3143,6 +3143,161 @@ fn a_copy_repair_syncs_after_every_unit_and_never_inside_one() {
     );
 }
 
+/// A target that changes one byte once it has seen `after` syncs, that
+/// is between unit `after - 1` and unit `after`; with `after` 0 the byte
+/// is changed before anything is written.
+#[cfg(feature = "plan-file")]
+struct ChangingTarget {
+    bytes: Vec<u8>,
+    syncs: usize,
+    after: usize,
+    at: usize,
+}
+
+#[cfg(feature = "plan-file")]
+impl ChangingTarget {
+    fn new(bytes: Vec<u8>, after: usize, at: usize) -> Self {
+        let mut t = ChangingTarget {
+            bytes,
+            syncs: 0,
+            after,
+            at,
+        };
+        if after == 0 {
+            t.bytes[at] ^= 0xff;
+        }
+        t
+    }
+}
+
+#[cfg(feature = "plan-file")]
+impl fs_ntfs::block_io::BlockIo for ChangingTarget {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        let at = offset as usize;
+        let there = self
+            .bytes
+            .get(at..at + buf.len())
+            .ok_or("read past the end")?;
+        buf.copy_from_slice(there);
+        Ok(())
+    }
+
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        let at = offset as usize;
+        self.bytes
+            .get_mut(at..at + buf.len())
+            .ok_or("write past the end")?
+            .copy_from_slice(buf);
+        Ok(())
+    }
+
+    fn size(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn sync(&mut self) -> Result<(), String> {
+        self.syncs += 1;
+        if self.syncs == self.after {
+            self.bytes[self.at] ^= 0xff;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn applying_a_plan_rechecks_each_unit_on_the_target_and_stops_with_earlier_units_intact() {
+    // Each unit is re-checked on the target immediately before it is
+    // written (#914). One byte of the first, a middle or the last unit's
+    // ranges changed on the target after the previous unit's sync must
+    // stop the apply before that unit, naming the unit and the range: the
+    // earlier units stay written and synced, nothing of the refused unit
+    // is written, and the source keeps its SHA-256. A plan made again from
+    // the target as it now stands applies without refusal.
+    use fs_ntfs::repair_plan::{apply_plan_units, load_plan, plan_fsck_io, save_plan};
+    let volume = |bytes: Vec<u8>| RecordedRepair {
+        bytes,
+        units: Vec::new(),
+        open: Vec::new(),
+    };
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let pristine_sha = hex_sha256(&pristine);
+        let mut v = volume(pristine.clone());
+        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        let n = loaded.units.len();
+        assert!(n > 0, "{k}: a log holding work planned nothing");
+
+        let mut positions = vec![0, n / 2, n - 1];
+        positions.dedup();
+        for u in positions {
+            let unit = &loaded.units[u];
+            let (w, at) = (0..unit.writes.len())
+                .find_map(|w| uncovered_in_unit(unit, w).map(|b| (w, b as usize)))
+                .unwrap_or_else(|| panic!("{k}: unit {u} has no byte its own writes do not cover"));
+            let write = &unit.writes[w];
+            let range = format!(
+                "{}..{}",
+                write.offset,
+                write.offset + write.before.len() as u64
+            );
+            let mut target = ChangingTarget::new(pristine.clone(), u, at);
+            match apply_plan_units(&loaded, &mut target) {
+                Ok(()) => panic!("{k}: unit {u}: byte {at} changed on the target, applied anyway"),
+                Err(e) => {
+                    let e = e.to_string();
+                    assert!(
+                        e.contains(&format!("unit {u} write {w}")) && e.contains(&range),
+                        "{k}: unit {u}: byte {at} changed, refused as {e}, not naming unit {u} \
+                         write {w} and bytes {range}"
+                    );
+                }
+            }
+            assert_eq!(
+                target.syncs, u,
+                "{k}: unit {u} refused after {} syncs, not one per earlier unit",
+                target.syncs
+            );
+            let mut expected = pristine.clone();
+            apply_plan(k, &mut expected, &loaded.units[..u]);
+            expected[at] ^= 0xff;
+            assert!(
+                target.bytes == expected,
+                "{k}: unit {u} refused: the target holds other bytes than the earlier units \
+                 and the changed byte, so the refused unit was written or an earlier one lost"
+            );
+            assert_eq!(
+                hex_sha256(&std::fs::read(&src).unwrap()),
+                pristine_sha,
+                "{k}: unit {u}: the source changed"
+            );
+
+            // A plan made again from the target as it now stands applies.
+            let mut now = volume(target.bytes.clone());
+            let again = plan_fsck_io(&mut now, fsck::FsckOptions::default())
+                .unwrap_or_else(|e| panic!("{k}: unit {u}: planning again: {e}"));
+            let again = save_plan(&again, &mut now)
+                .unwrap_or_else(|e| panic!("{k}: unit {u}: saving again: {e}"));
+            let again =
+                load_plan(&again).unwrap_or_else(|e| panic!("{k}: unit {u}: loading again: {e}"));
+            let mut retry = ChangingTarget {
+                bytes: target.bytes.clone(),
+                syncs: 0,
+                after: usize::MAX,
+                at,
+            };
+            apply_plan_units(&again, &mut retry)
+                .unwrap_or_else(|e| panic!("{k}: unit {u}: the plan made again was refused: {e}"));
+        }
+
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
 #[cfg(feature = "plan-file")]
 #[test]
 fn a_repair_journal_reads_back_to_its_last_whole_record_and_refuses_the_rest() {
