@@ -424,6 +424,12 @@ pub enum PlanSourceError {
     Size { source: u64, plan: u64 },
     /// The source's volume serial number is not the plan's.
     Serial { source: u64, plan: u64 },
+    /// The device about to receive the first unit is not the size the
+    /// plan's source was.
+    DeviceSize { device: u64, plan: u64 },
+    /// The device about to receive the first unit does not hold the plan's
+    /// volume serial number.
+    DeviceSerial { device: u64, plan: u64 },
     /// The source does not hold a write's before-image at its turn.
     BeforeImage {
         unit: usize,
@@ -455,6 +461,15 @@ impl std::fmt::Display for PlanSourceError {
             Self::Serial { source, plan } => write!(
                 f,
                 "source volume serial is {source:#018x}, the plan was made from {plan:#018x}"
+            ),
+            Self::DeviceSize { device, plan } => write!(
+                f,
+                "device size is {device} bytes, the plan was made from {plan}: no unit written"
+            ),
+            Self::DeviceSerial { device, plan } => write!(
+                f,
+                "device volume serial is {device:#018x}, the plan was made from {plan:#018x}: \
+                 no unit written"
             ),
             Self::BeforeImage {
                 unit,
@@ -501,11 +516,7 @@ pub fn check_plan_source<T: BlockIo + ?Sized>(
             plan: plan.source_size,
         });
     }
-    let mut serial = [0u8; 8];
-    source
-        .read_exact_at(VOLUME_SERIAL_OFFSET, &mut serial)
-        .map_err(PlanSourceError::Read)?;
-    let serial = u64::from_le_bytes(serial);
+    let serial = volume_serial(source)?;
     if serial != plan.volume_serial {
         return Err(PlanSourceError::Serial {
             source: serial,
@@ -526,6 +537,44 @@ pub fn check_plan_source<T: BlockIo + ?Sized>(
         }
     }
     Ok(())
+}
+
+/// Check that `device`, about to receive `plan`'s first unit, is the
+/// volume the plan was made from, reading only: its size in bytes and the
+/// volume serial number in its boot sector must be the plan's source's.
+/// [`check_plan_source`] checks the source before a copy; this checks the
+/// device written after it, so a short copy or another device behind the
+/// path is refused before anything of the plan is written.
+#[cfg(feature = "plan-file")]
+pub fn check_device_identity<T: BlockIo + ?Sized>(
+    plan: &SavedPlan,
+    device: &mut T,
+) -> Result<(), PlanSourceError> {
+    let size = device.size();
+    if size != plan.source_size {
+        return Err(PlanSourceError::DeviceSize {
+            device: size,
+            plan: plan.source_size,
+        });
+    }
+    let serial = volume_serial(device)?;
+    if serial != plan.volume_serial {
+        return Err(PlanSourceError::DeviceSerial {
+            device: serial,
+            plan: plan.volume_serial,
+        });
+    }
+    Ok(())
+}
+
+/// The volume serial number in `device`'s boot sector.
+#[cfg(feature = "plan-file")]
+fn volume_serial<T: BlockIo + ?Sized>(device: &mut T) -> Result<u64, PlanSourceError> {
+    let mut serial = [0u8; 8];
+    device
+        .read_exact_at(VOLUME_SERIAL_OFFSET, &mut serial)
+        .map_err(PlanSourceError::Read)?;
+    Ok(u64::from_le_bytes(serial))
 }
 
 /// Check unit `unit` of `plan` against the `device` about to receive it,
@@ -571,9 +620,10 @@ pub enum CopyRepairError {
     Source(PlanSourceError),
     /// Something already exists at the target path; it is left as it was.
     TargetExists(std::path::PathBuf),
-    /// A unit's ranges on the target did not hold their before-images at
-    /// its turn: the earlier units are written and synced, nothing of this
-    /// one is.
+    /// The target is not the plan's volume by size or serial, and nothing
+    /// is written; or a unit's ranges on the target did not hold their
+    /// before-images at its turn: the earlier units are written and
+    /// synced, nothing of this one is.
     Target(PlanSourceError),
     /// Opening, copying, writing or flushing failed.
     Io(String),
@@ -645,7 +695,9 @@ const COPY_CHUNK: usize = 1 << 20;
 
 /// Apply `plan`'s units to `target` in order, each unit's writes in order
 /// and then a [`BlockIo::sync`]: a sync at every unit boundary and none
-/// inside a unit, so a stop leaves whole units. Immediately before it is
+/// inside a unit, so a stop leaves whole units. Before the first unit,
+/// `target` is checked with [`check_device_identity`]; a target of another
+/// size or serial is refused with nothing written. Immediately before it is
 /// written, each unit is checked on `target` with [`check_unit_on_device`];
 /// a unit whose ranges do not hold their before-images stops the apply
 /// there, the earlier units written and synced and nothing of it written.
@@ -654,6 +706,7 @@ pub fn apply_plan_units<T: BlockIo + ?Sized>(
     plan: &SavedPlan,
     target: &mut T,
 ) -> Result<(), CopyRepairError> {
+    check_device_identity(plan, target).map_err(CopyRepairError::Target)?;
     for (u, unit) in plan.units.iter().enumerate() {
         check_unit_on_device(plan, u, target).map_err(CopyRepairError::Target)?;
         for (w, write) in unit.writes.iter().enumerate() {
