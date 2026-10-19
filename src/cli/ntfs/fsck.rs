@@ -668,6 +668,16 @@ extern "C" fn on_interrupt(_: libc::c_int) {
     INTERRUPTED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Set by SIGUSR1 in the harness build: a held apply goes on without being
+/// stopped, so a test can hold it at a known point and then let it finish.
+#[cfg(all(unix, feature = "harness"))]
+static RELEASED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(all(unix, feature = "harness"))]
+extern "C" fn on_release(_: libc::c_int) {
+    RELEASED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Watches an in-place apply from the CLI (#964): each progress report is
 /// a line on stderr, and a SIGINT stops the apply before its next unit, so
 /// the unit in hand is finished first.
@@ -675,7 +685,8 @@ extern "C" fn on_interrupt(_: libc::c_int) {
 struct CliObserver {
     name: String,
     /// The harness build holds the apply once this many units are applied,
-    /// until a signal arrives, so a test can send SIGINT at a known point.
+    /// until a signal arrives, so a test can send SIGINT at a known point,
+    /// or SIGUSR1 to let it finish.
     #[cfg(feature = "harness")]
     hold_after: Option<u32>,
 }
@@ -688,6 +699,11 @@ impl CliObserver {
         unsafe {
             let handler = on_interrupt as extern "C" fn(libc::c_int) as libc::sighandler_t;
             libc::signal(libc::SIGINT, handler);
+            #[cfg(feature = "harness")]
+            libc::signal(
+                libc::SIGUSR1,
+                on_release as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            );
         }
         Self {
             name: name.to_string(),
@@ -710,6 +726,7 @@ impl fs_ntfs::repair_journal::ApplyObserver for CliObserver {
         if self.hold_after == Some(at.units) {
             let held = std::time::Instant::now();
             while !INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)
+                && !RELEASED.load(std::sync::atomic::Ordering::Relaxed)
                 && held.elapsed() < std::time::Duration::from_secs(60)
             {
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -764,6 +781,20 @@ fn apply_in_place(
     let bytes = std::fs::read(plan).map_err(|e| failed(format!("read plan '{plan_name}': {e}")))?;
     let saved =
         load_plan(&bytes).map_err(|e| failed(format!("plan '{plan_name}' refused: {e}")))?;
+    // The journal is held exclusively for the whole apply or resume (#936),
+    // by the same lock as the device: a second resume of a journal another
+    // holds is refused before either is written. A resume takes the hold
+    // before the device's, so the refusal names the journal.
+    let journal_held = |e: String| {
+        failed(format!(
+            "--journal '{journal_name}' refused, nothing written: {e}"
+        ))
+    };
+    let mut held = if resume {
+        Some(PathIo::open_exclusive(journal).map_err(journal_held)?)
+    } else {
+        None
+    };
     let mut io = PathIo::open_exclusive(device)
         .map_err(|e| failed(format!("{name}: refused, nothing written: {e}")))?;
     if !resume {
@@ -778,7 +809,10 @@ fn apply_in_place(
             .open(journal)
             .map_err(|e| failed(format!("create journal '{journal_name}': {e}")))?;
     }
-    let mut journal_io = PathIo::open_rw(journal).map_err(failed)?;
+    let mut journal_io = match held.take() {
+        Some(held) => held,
+        None => PathIo::open_exclusive(journal).map_err(journal_held)?,
+    };
     let sha: [u8; 32] = Sha256::digest(&bytes).into();
     let mut observer = CliObserver::new(&name);
     let done = if resume {
