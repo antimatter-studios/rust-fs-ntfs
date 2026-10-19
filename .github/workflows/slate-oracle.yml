@@ -36,6 +36,8 @@ on:
       - tests/scripts/slate-windows-manifest.ps1
       - test-disks/capture-slate-windows-allocation.ps1
       - tests/scripts/slate-windows-allocation.ps1
+      - test-disks/capture-slate-windows-acl.ps1
+      - tests/scripts/slate-windows-acl.ps1
       - chores.yml
       - src/**
   schedule:
@@ -118,6 +120,9 @@ jobs:
       - name: Windows cluster allocation contracts (floor 14)
         shell: pwsh
         run: ./tests/scripts/slate-windows-allocation.ps1
+      - name: Windows security descriptor contracts (floor 16)
+        shell: pwsh
+        run: ./tests/scripts/slate-windows-acl.ps1
       - name: Build the release CLI
         shell: bash
         env:
@@ -143,6 +148,7 @@ jobs:
             tmp/slate-oracle/chkdsk/
             tmp/slate-oracle/windows-read/
             tmp/slate-oracle/windows-alloc/
+            tmp/slate-oracle/windows-acl/
             tmp/slate-oracle/windows-read-diag/
           if-no-files-found: error
           retention-days: 7
@@ -259,6 +265,7 @@ jobs:
             tmp/slate-write-grades/chkdsk/
             tmp/slate-write-grades/windows-read/
             tmp/slate-write-grades/windows-alloc/
+            tmp/slate-write-grades/windows-acl/
             tmp/slate-write-grades/windows-read-diag/
           if-no-files-found: error
           retention-days: 14
