@@ -19,12 +19,13 @@ All integers are little-endian.
 | offset | size | field |
 |---|---|---|
 | 0 | 8 | magic, the ASCII bytes `NTFSPLAN` |
-| 8 | 4 | format version, `1` |
+| 8 | 4 | format version, `2` |
 | 12 | 4 | unit count |
 | 16 | 8 | file length in bytes, including the trailer |
 | 24 | 8 | source size in bytes |
 | 32 | 8 | volume serial number: the source's boot sector bytes `0x48..0x50` |
-| 40 | ... | the units, in the order they are applied |
+| 40 | 4 | the first clear-dirty unit: the unit count when no unit clears the dirty flag |
+| 44 | ... | the units, in the order they are applied |
 | length - 32 | 32 | SHA-256 of every byte before it |
 
 Each unit, one per durable boundary of the repair (the writes between two
@@ -39,6 +40,14 @@ flushes):
 | per write: `n` | before-image: what the volume holds there at this write's turn |
 | per write: `n` | after-image: what the write leaves there |
 
+The clear-dirty units (#1132) are the writes that clear the volume's dirty
+flag, `$Volume`'s flags and then its `$MFTMirr` copy, which an in-place
+plan asked to clear the flag ends with. They run from the unit the field
+names to the last; the in-place apply audits the volume before them.
+
+A version 1 file has no clear-dirty field: its units start at offset 40,
+and none of them clears the flag. A reader still loads it.
+
 ## What a reader must refuse
 
 A reader refuses the whole file, and applies none of it, when:
@@ -46,6 +55,7 @@ A reader refuses the whole file, and applies none of it, when:
 - it does not start with the magic (`not a repair plan file`);
 - the version is not one it knows, including any newer version
   (`plan file format version N is not supported`);
+- the first clear-dirty unit is past the last unit (`plan file malformed`);
 - it is shorter than its file-length field says, or than a header
   (`plan file truncated`);
 - it is longer than its file-length field says (`plan file has trailing
@@ -128,7 +138,15 @@ interrupted capture, loads it back, applies it by its own writes and
 compares the result with Windows' own restart. It computes the section
 boundaries from this layout, independently of the reader, truncates the
 file at each one and one byte past it, flips a byte in every section, and
-writes a version 2 header, and checks that each is refused.
+writes a version 3 header, and checks that each is refused.
+
+`an_in_place_plan_ends_with_marked_clear_dirty_units_only_when_asked`
+plans an in-place repair of each Windows capture with and without
+`clear_dirty`. Asked, the plan must end with exactly the writes
+`clear_dirty_io` makes, marked, with no earlier unit clearing the flag;
+not asked, it must mark nothing and leave the flag set. The mark must load
+back, a mark past the last unit must be refused, and the same plan
+rewritten as a version 1 file must load with no mark.
 
 `a_loaded_plan_is_checked_against_its_source_and_refused_on_the_first_mismatch`
 checks a plan from each Windows capture against that capture, then against
