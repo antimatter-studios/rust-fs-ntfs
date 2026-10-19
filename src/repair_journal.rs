@@ -16,6 +16,7 @@
 //! Everything here is behind the `plan-file` feature.
 
 use crate::block_io::BlockIo;
+use crate::fsck::{check_io, CheckReport};
 use crate::repair_plan::{
     check_unit_on_device, load_plan, PlanFileError, PlanSourceError, PlanUnit, PlannedWrite,
     SavedPlan,
@@ -670,12 +671,19 @@ impl ApplyObserver for Unwatched {}
 ///
 /// Nothing reaches the device outside the plan's ranges, and nothing is
 /// written into the volume's `$LogFile` but the plan's own units.
+///
+/// After the last unit, the whole repaired device is audited (#941):
+/// [`check_io`] reads it back and its report is returned. The audit writes
+/// nothing, so the dirty flag the plan set is left set, and the report
+/// shows it so; every finding the report holds is one the repair left.
+/// The audit is [`check_io`]'s scope, which is not a structural check of
+/// the whole volume, until #583's structural checker takes its place.
 pub fn apply_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
     plan: &SavedPlan,
     plan_sha256: [u8; SHA256_LEN],
     device: &mut D,
     journal: &mut J,
-) -> Result<(), InPlaceError> {
+) -> Result<CheckReport, InPlaceError> {
     apply_in_place_observed(plan, plan_sha256, device, journal, &mut Unwatched)
 }
 
@@ -690,7 +698,7 @@ pub fn apply_in_place_observed<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
     device: &mut D,
     journal: &mut J,
     observer: &mut dyn ApplyObserver,
-) -> Result<(), InPlaceError> {
+) -> Result<CheckReport, InPlaceError> {
     let binding = JournalBinding {
         plan_sha256,
         source_size: plan.source_size,
@@ -710,7 +718,7 @@ pub fn apply_in_place_observed<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
         done.past(&plan.units[u]);
         observer.progress(done);
     }
-    Ok(())
+    audit(device)
 }
 
 /// Continue the in-place apply of `plan` that stopped, on the same
@@ -748,12 +756,15 @@ pub fn apply_in_place_observed<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
 /// A journal holding no whole record is started again from its header.
 /// The record appended over a torn one is always the record that was torn,
 /// as long or longer, so no torn bytes are left after it.
+///
+/// Once every unit is applied, the device is audited and the report
+/// returned, as [`apply_in_place`] does (#941).
 pub fn resume_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
     plan: &SavedPlan,
     plan_sha256: [u8; SHA256_LEN],
     device: &mut D,
     journal: &mut J,
-) -> Result<(), InPlaceError> {
+) -> Result<CheckReport, InPlaceError> {
     resume_in_place_observed(plan, plan_sha256, device, journal, &mut Unwatched)
 }
 
@@ -769,7 +780,7 @@ pub fn resume_in_place_observed<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
     device: &mut D,
     journal: &mut J,
     observer: &mut dyn ApplyObserver,
-) -> Result<(), InPlaceError> {
+) -> Result<CheckReport, InPlaceError> {
     let binding = JournalBinding {
         plan_sha256,
         source_size: plan.source_size,
@@ -871,7 +882,19 @@ pub fn resume_in_place_observed<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
         done.past(&plan.units[u]);
         observer.progress(done);
     }
-    Ok(())
+    audit(device)
+}
+
+/// Audit `device` once every unit of a plan is applied and read back
+/// (#941): [`check_io`] over the whole device as it now reads, writing
+/// nothing.
+fn audit<D: BlockIo + ?Sized>(device: &mut D) -> Result<CheckReport, InPlaceError> {
+    let mut device = device;
+    check_io(&mut device).map_err(|e| {
+        InPlaceError::Io(format!(
+            "every unit applied; auditing the repaired device: {e}"
+        ))
+    })
 }
 
 /// The device bytes, first to last, of the `len` bytes from `offset` for
