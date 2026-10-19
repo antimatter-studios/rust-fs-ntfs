@@ -663,7 +663,8 @@ fn apply(source: &Path, plan: &Path, target: &Path) -> Result<Outcome, CliError>
     Ok(Outcome::report(report).with_text(text).with_code(CLEAN))
 }
 
-/// Set by SIGINT; an in-place apply stops before its next unit (#964).
+/// Set by SIGINT or SIGTERM; an in-place apply stops before its next unit
+/// (#964, #967).
 #[cfg(unix)]
 static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -683,14 +684,14 @@ extern "C" fn on_release(_: libc::c_int) {
 }
 
 /// Watches an in-place apply from the CLI (#964): each progress report is
-/// a line on stderr, and a SIGINT stops the apply before its next unit, so
-/// the unit in hand is finished first.
+/// a line on stderr, and a SIGINT or SIGTERM stops the apply before its next
+/// unit, so the unit in hand is finished first.
 #[cfg(unix)]
 struct CliObserver {
     name: String,
     /// The harness build holds the apply once this many units are applied,
-    /// until a signal arrives, so a test can send SIGINT at a known point,
-    /// or SIGUSR1 to let it finish.
+    /// until a signal arrives, so a test can send SIGINT or SIGTERM at a
+    /// known point, or SIGUSR1 to let it finish.
     #[cfg(feature = "harness")]
     hold_after: Option<u32>,
 }
@@ -703,6 +704,7 @@ impl CliObserver {
         unsafe {
             let handler = on_interrupt as extern "C" fn(libc::c_int) as libc::sighandler_t;
             libc::signal(libc::SIGINT, handler);
+            libc::signal(libc::SIGTERM, handler);
             #[cfg(feature = "harness")]
             libc::signal(
                 libc::SIGUSR1,
