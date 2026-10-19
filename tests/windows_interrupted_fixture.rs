@@ -2606,8 +2606,8 @@ fn a_dry_run_plans_the_writes_that_reach_what_windows_recovered_and_makes_none()
 /// the units' starts, then the trailer's, then the file's end.
 fn plan_file_sections(units: &[fs_ntfs::repair_plan::PlanUnit]) -> (Vec<usize>, usize, usize) {
     // Header: magic, version, unit count, file length. Identity: source
-    // size, volume serial number.
-    let mut at = 8 + 4 + 4 + 8 + 8 + 8;
+    // size, volume serial number. Then the first clear-dirty unit (#1132).
+    let mut at = 8 + 4 + 4 + 8 + 8 + 8 + 4;
     let mut starts = Vec::new();
     for unit in units {
         starts.push(at);
@@ -2741,10 +2741,159 @@ fn a_saved_plan_loads_back_to_what_windows_recovered_and_only_when_intact() {
             refused(&format!("{section} byte {at} flipped"), &flipped, "");
         }
         let mut newer = saved.clone();
-        newer[8..12].copy_from_slice(&2u32.to_le_bytes());
+        newer[8..12].copy_from_slice(&3u32.to_le_bytes());
         let sum = Sha256::digest(&newer[..trailer]);
         newer[trailer..].copy_from_slice(&sum);
-        refused("format version 2", &newer, "version 2");
+        refused("format version 3", &newer, "version 3");
+
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn an_in_place_plan_ends_with_marked_clear_dirty_units_only_when_asked() {
+    // An in-place repair clears the dirty flag only when the caller asks
+    // (#1132): the plan then ends with the writes clear_dirty_io makes,
+    // marked as its clear-dirty units, and no earlier unit clears the
+    // flag. The plan file keeps the mark; a mark past the last unit is
+    // refused, and a version 1 file, which has no mark, still loads.
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
+    let dirty = |k: &str, bytes: &[u8]| {
+        let mut v = RecordedRepair {
+            bytes: bytes.to_vec(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        fsck::is_dirty_io(&mut v).unwrap_or_else(|e| panic!("{k}: dirty flag: {e}"))
+    };
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let mut volume = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+
+        let asked = fsck::FsckOptions { clear_dirty: true };
+        let plan = plan_in_place_io(&mut volume, asked)
+            .unwrap_or_else(|e| panic!("{k}: plan with clear_dirty: {e}"));
+        assert!(
+            volume.bytes == pristine,
+            "{k}: planning wrote to the volume"
+        );
+        let from = plan
+            .clear_dirty_from
+            .unwrap_or_else(|| panic!("{k}: asked to clear the flag, the plan marks no unit"));
+        assert!(
+            from < plan.units.len(),
+            "{k}: the mark {from} names no unit"
+        );
+        let mut copy = pristine.clone();
+        let mut set = false;
+        for (u, unit) in plan.units[..from].iter().enumerate() {
+            apply_plan(k, &mut copy, std::slice::from_ref(unit));
+            let now = dirty(k, &copy);
+            assert!(
+                !set || now,
+                "{k}: unit {u}, before the clear-dirty units, cleared the flag"
+            );
+            set |= now;
+        }
+        assert!(
+            set,
+            "{k}: the units before the clear-dirty units left the flag clear"
+        );
+        let mut clearing = RecordedRepair {
+            bytes: copy.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        assert!(
+            fsck::clear_dirty_io(&mut clearing).unwrap_or_else(|e| panic!("{k}: clear: {e}")),
+            "{k}: clear_dirty_io found the flag clear"
+        );
+        fs_ntfs::block_io::BlockIo::sync(&mut clearing).unwrap();
+        let marked: Vec<Vec<PlannedWrite>> = plan.units[from..]
+            .iter()
+            .map(|unit| {
+                unit.writes
+                    .iter()
+                    .map(|w| {
+                        (
+                            w.offset,
+                            w.after.len() as u64,
+                            hex_sha256(&w.before),
+                            hex_sha256(&w.after),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            marked, clearing.units,
+            "{k}: the clear-dirty units are not clear_dirty_io's writes"
+        );
+        apply_plan(k, &mut copy, &plan.units[from..]);
+        assert!(!dirty(k, &copy), "{k}: the whole plan left the flag set");
+
+        let saved = save_plan(&plan, &mut volume).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        assert!(
+            loaded.units == plan.units,
+            "{k}: the units loaded back differ"
+        );
+        assert_eq!(
+            loaded.clear_dirty_from,
+            Some(from),
+            "{k}: the mark loaded back"
+        );
+
+        let trailer = saved.len() - 32;
+        let mut past = saved.clone();
+        past[40..44].copy_from_slice(&(plan.units.len() as u32 + 1).to_le_bytes());
+        let sum = Sha256::digest(&past[..trailer]);
+        past[trailer..].copy_from_slice(&sum);
+        match load_plan(&past) {
+            Ok(_) => panic!("{k}: a mark past the last unit loaded"),
+            Err(e) => assert!(
+                e.to_string().contains("malformed"),
+                "{k}: a mark past the last unit refused as {e:?}"
+            ),
+        }
+
+        let mut old = [&saved[..40], &saved[44..trailer]].concat();
+        old[8..12].copy_from_slice(&1u32.to_le_bytes());
+        let length = (old.len() + 32) as u64;
+        old[16..24].copy_from_slice(&length.to_le_bytes());
+        let sum = Sha256::digest(&old);
+        old.extend_from_slice(&sum);
+        let v1 = load_plan(&old).unwrap_or_else(|e| panic!("{k}: a version 1 file: {e}"));
+        assert!(
+            v1.units == plan.units,
+            "{k}: a version 1 file's units differ"
+        );
+        assert_eq!(
+            v1.clear_dirty_from, None,
+            "{k}: a version 1 file has no mark"
+        );
+
+        let plan = plan_in_place_io(&mut volume, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        assert_eq!(
+            plan.clear_dirty_from, None,
+            "{k}: not asked, the plan marks a unit"
+        );
+        let mut copy = pristine.clone();
+        apply_plan(k, &mut copy, &plan.units);
+        assert!(dirty(k, &copy), "{k}: not asked, the plan cleared the flag");
+        let saved = save_plan(&plan, &mut volume).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        assert_eq!(
+            loaded.clear_dirty_from, None,
+            "{k}: not asked, the loaded plan marks a unit"
+        );
 
         std::fs::remove_file(&src).unwrap();
     }
