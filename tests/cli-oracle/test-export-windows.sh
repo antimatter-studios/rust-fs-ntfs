@@ -18,7 +18,8 @@ while IFS="$(printf '\t')" read -r item size hash; do
     rows=$((rows + 1))
     dest="$SANDBOX/file-$rows"
     fs.ntfs "$img" export "$item" "$dest" >"$SANDBOX/out" 2>"$SANDBOX/err"
-    check "export $item succeeds ($(cat "$SANDBOX/err"))" test $? -eq 0
+    status=$?
+    check "export $item succeeds ($(cat "$SANDBOX/err"))" test "$status" -eq 0
     check "export $item publishes Windows' size" test "$(wc -c <"$dest")" -eq "$size"
     check "export $item matches Windows SHA-256" test "$(sha256 <"$dest")" = "$hash"
     jq_check "export reports Windows' byte count and digest" \
