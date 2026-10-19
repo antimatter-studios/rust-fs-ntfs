@@ -955,6 +955,43 @@ fn resident_value(record: &[u8], attr_type: u32) -> Vec<u8> {
 /// keys, which Slate reports as `index-duplicate-information` against
 /// records 16 to 18 (#838).
 #[test]
+fn quota_default_policy_is_present_for_every_supported_cluster_size() {
+    for cluster_size in [4096u32, 65536] {
+        let mut dev = MemDev::new(VOL_SIZE);
+        format_filesystem(&mut dev, VOL_SIZE, cluster_size, 4096, Some("QUOTA"), None)
+            .expect("format");
+
+        let q = raw_attribute(&dev, rec::QUOTA as u64, 0x90, stream::Q);
+        let value_len = u32::from_le_bytes(q[0x10..0x14].try_into().unwrap()) as usize;
+        let value_off = u16::from_le_bytes(q[0x14..0x16].try_into().unwrap()) as usize;
+        let value = &q[value_off..value_off + value_len];
+        let entry = &value[32..];
+        let entry_len = u16::from_le_bytes(entry[8..10].try_into().unwrap()) as usize;
+        let key_len = u16::from_le_bytes(entry[10..12].try_into().unwrap()) as usize;
+        assert_eq!(key_len, 4, "{cluster_size}: default quota key length");
+        assert_eq!(u32::from_le_bytes(entry[16..20].try_into().unwrap()), 1);
+
+        let data_off = u16::from_le_bytes(entry[0..2].try_into().unwrap()) as usize;
+        let data_len = u16::from_le_bytes(entry[2..4].try_into().unwrap()) as usize;
+        assert_eq!(data_off, 20, "{cluster_size}: quota value follows its key");
+        assert_eq!(data_len, 48, "{cluster_size}: quota control length");
+        assert_eq!(entry_len, data_off + data_len);
+        let control = &entry[data_off..data_off + data_len];
+        assert_eq!(u32::from_le_bytes(control[0..4].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(control[4..8].try_into().unwrap()), 1);
+        assert_eq!(i64::from_le_bytes(control[24..32].try_into().unwrap()), -1);
+        assert_eq!(i64::from_le_bytes(control[32..40].try_into().unwrap()), -1);
+
+        let last = &entry[entry_len..];
+        assert_eq!(
+            u32::from_le_bytes(last[12..16].try_into().unwrap()) & 2,
+            2,
+            "{cluster_size}: quota index has its LAST entry"
+        );
+    }
+}
+
+#[test]
 fn extend_index_keys_duplicate_child_file_names() {
     for cluster_size in [4096u32, 65536] {
         let mut dev = MemDev::new(VOL_SIZE);
