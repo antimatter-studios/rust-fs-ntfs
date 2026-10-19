@@ -59,6 +59,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\windows-fixture.ps1"
 . "$PSScriptRoot\capture-slate-windows-manifest.ps1"
 . "$PSScriptRoot\capture-slate-windows-allocation.ps1"
+. "$PSScriptRoot\capture-slate-windows-acl.ps1"
 
 if ([bool]$SlateWrites -ne [bool]$SlateWriteImages) {
     throw 'SlateWrites and SlateWriteImages must be supplied together'
@@ -74,7 +75,8 @@ $images = Join-Path $out 'images'
 $scratch = Join-Path $out 'scratch'
 $manifests = Join-Path $out 'windows-read'
 $allocations = Join-Path $out 'windows-alloc'
-New-Item -ItemType Directory -Force -Path $images, $scratch, $manifests, $allocations | Out-Null
+$acls = Join-Path $out 'windows-acl'
+New-Item -ItemType Directory -Force -Path $images, $scratch, $manifests, $allocations, $acls | Out-Null
 
 function Get-Sha256([string]$Path) {
     (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
@@ -215,7 +217,9 @@ foreach ($case in $cases) {
         $readVhd = [IO.Path]::ChangeExtension($readCopy, '.vhd')
         $manifestPath = Join-Path $manifests "$($case.Name).json"
         $allocationPath = Join-Path $allocations "$($case.Name).json"
+        $aclPath = Join-Path $acls "$($case.Name).json"
         if ((Test-Path -LiteralPath $manifestPath) -or (Test-Path -LiteralPath $allocationPath) -or
+            (Test-Path -LiteralPath $aclPath) -or
             (Test-Path -LiteralPath $readVhd)) {
             throw "Stale Windows read capture for $($case.Name); use a fresh OutDir"
         }
@@ -227,10 +231,11 @@ foreach ($case in $cases) {
                 New-Item -ItemType Directory -Force -Path $readDiag | Out-Null
                 $state = Initialize-VhdFromImg -ImagePath $readCopy -Diag $readDiag
                 $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
-                # One mount, so the names and the clusters are the same state (#875).
+                # One mount, so the names, clusters and descriptors are the same state (#875, #876).
                 @{
                     Read = Get-SlateWindowsManifest -Root "${letter}:\" -Case $case.Name -ImageSha256 $digest
                     Allocation = Get-SlateWindowsAllocation -Root "${letter}:\" -Case $case.Name -ImageSha256 $digest
+                    Acl = Get-SlateWindowsAcl -Root "${letter}:\" -Case $case.Name -ImageSha256 $digest
                 }
             }
         } finally {
@@ -251,6 +256,8 @@ foreach ($case in $cases) {
         }
         if ((Get-Sha256 $image) -ne $digest) { throw "$($case.Name) changed during Windows read capture" }
         [IO.File]::WriteAllText($allocationPath, ($capture.Allocation | ConvertTo-Json -Depth 10),
+            [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($aclPath, ($capture.Acl | ConvertTo-Json -Depth 10),
             [Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllText($manifestPath, ($capture.Read | ConvertTo-Json -Depth 10),
             [Text.UTF8Encoding]::new($false))
