@@ -35,6 +35,12 @@ reader from this crate or Slate supplies expected paths or bytes.
 case or image SHA-256 differs from its `cases.tsv` row, then compares Slate's
 manifest of the same image with this one by path and stream (#1103).
 
+`scripts/reader-write-compare.py` is the second consumer (#1115, part of
+#865): for every copy `slate-writes-graded.tsv` marks `accepted`, it compares
+the manifest of this crate's read-only reader of that copy with Windows' by
+path and stream, under the same hash and case binding. Nothing is excused, and
+a copy Windows rejected is never compared.
+
 This is the capture slice (#856) of #689. Slate extraction and comparison are
 #857; the Windows-authored CLI image, complete writer coverage and read-case
 floor are #858. The existing seven-case checker floor is unchanged because
