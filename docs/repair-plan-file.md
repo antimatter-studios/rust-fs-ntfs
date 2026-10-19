@@ -108,7 +108,12 @@ opened for writing, and a refused check leaves no target behind.
 
 `apply_plan_units` writes each unit's writes in order and then flushes the
 device: a flush at every unit boundary and none inside a unit, so the
-device holds whole units whenever a flush has returned.
+device holds whole units whenever a flush has returned. Immediately before
+a unit is written, it is checked on the device with `check_unit_on_device`.
+A unit whose ranges do not hold their before-images stops the apply before
+it: every earlier unit stays written and flushed, nothing of the refused
+unit is written, and the refusal names the unit, the write and its byte
+range.
 
 ## Tests
 
@@ -148,3 +153,12 @@ refused check leaves no target.
 from each Windows capture to a counting target and checks that every
 unit's writes arrive in order with one flush after them and none among
 them.
+
+`applying_a_plan_rechecks_each_unit_on_the_target_and_stops_with_earlier_units_intact`
+applies a plan from each Windows capture to a target that changes one
+byte, which no earlier write of the same unit covers, inside the first, a
+middle and the last unit's ranges after the previous unit's flush. It
+checks that each apply is refused naming that unit and range, that the
+target holds exactly the earlier units' writes and the changed byte, that
+the capture keeps its SHA-256, and that a plan made again from the target
+as it now stands applies without refusal.
