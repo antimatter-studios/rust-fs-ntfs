@@ -6193,13 +6193,28 @@ fn apply_progress_lines(said: &str) -> Vec<(u64, u64)> {
 fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
     // `fsck.ntfs --apply PLAN --in-place --journal FILE` (#964) reports
     // its progress on stderr and stops on SIGINT at the next unit
-    // boundary. The harness build's FSCK_NTFS_HOLD_AFTER_UNITS holds the
-    // apply after that many units until a signal arrives, so this test
-    // sends a real SIGINT at a known point. The apply must exit with
-    // fsck(8)'s operational status (8), name the units applied, and leave
-    // a journal that `--resume` finishes into what Windows' own restart
-    // produced. Progress lines must rise, and a finished apply's last one
-    // must name the plan's total.
+    // boundary.
+    apply_in_place_stops_at_a_unit_boundary_on(libc::SIGINT, "sigint");
+}
+
+#[cfg(all(unix, feature = "cli", feature = "harness"))]
+#[test]
+fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigterm() {
+    // SIGTERM, what a service manager, a shutdown or timeout(1) sends,
+    // stops the apply at the next unit boundary just as SIGINT does (#967).
+    apply_in_place_stops_at_a_unit_boundary_on(libc::SIGTERM, "sigterm");
+}
+
+/// Applies a plan in place on every Windows interrupted capture holding
+/// work and sends `signal` mid-apply. The harness build's
+/// FSCK_NTFS_HOLD_AFTER_UNITS holds the apply after that many units until a
+/// signal arrives, so the signal is real and lands at a known point. The
+/// apply must exit with fsck(8)'s operational status (8), name the units
+/// applied, and leave a journal that `--resume` finishes into what Windows'
+/// own restart produced. Progress lines must rise, and a finished apply's
+/// last one must name the plan's total.
+#[cfg(all(unix, feature = "cli", feature = "harness"))]
+fn apply_in_place_stops_at_a_unit_boundary_on(signal: libc::c_int, name: &str) {
     use fs_ntfs::repair_journal::{progress, read_journal, JournalBinding};
     use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
     use std::io::BufRead;
@@ -6218,13 +6233,13 @@ fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
         let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
         let units = loaded.units.len() as u64;
         assert!(units > 0, "{k}: a log holding work planned nothing");
-        let plan_file = format!("{src}.sigint.plan");
+        let plan_file = format!("{src}.{name}.plan");
         std::fs::write(&plan_file, &saved).unwrap();
-        let journal_dir = format!("{src}.sigint.d");
+        let journal_dir = format!("{src}.{name}.d");
         let _ = std::fs::remove_dir_all(&journal_dir);
         std::fs::create_dir(&journal_dir).unwrap();
         let journal = format!("{journal_dir}/repair.journal");
-        let device = format!("{src}.sigint.img");
+        let device = format!("{src}.{name}.img");
         std::fs::write(&device, &pristine).unwrap();
         drop(pristine);
 
@@ -6259,14 +6274,14 @@ fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
             }
         }
         // SAFETY: kill(2) on the child this test spawned and has not reaped.
-        let sent = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
-        assert_eq!(sent, 0, "{k}: SIGINT: {}", std::io::Error::last_os_error());
+        let sent = unsafe { libc::kill(child.id() as libc::pid_t, signal) };
+        assert_eq!(sent, 0, "{k}: {name}: {}", std::io::Error::last_os_error());
         stderr.read_to_string(&mut said).unwrap();
         let status = child.wait().unwrap();
         assert_eq!(
             status.code(),
             Some(8),
-            "{k}: the interrupted apply exited {status}: {said}"
+            "{k}: the apply interrupted by {name} exited {status}: {said}"
         );
         assert!(
             said.contains(&format!("stopped after {hold} of {units} units")),
