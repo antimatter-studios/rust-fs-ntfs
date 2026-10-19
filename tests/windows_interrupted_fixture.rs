@@ -6538,3 +6538,126 @@ fn fsck_a_second_resume_of_a_journal_another_holds_is_refused_and_the_first_comp
         std::fs::remove_file(&src).unwrap();
     }
 }
+
+#[cfg(feature = "cli")]
+#[test]
+fn fsck_apply_in_place_reports_the_post_repair_audit() {
+    // `fsck.ntfs --apply PLAN --in-place --journal FILE TARGET` prints the
+    // audit the library makes of the repaired volume (#943). Over every
+    // capture holding work it finds only the dirty flag, which an in-place
+    // repair leaves set, and exits 0. A byte of a `$MFTMirr` record that no
+    // unit writes, changed before the apply, is a finding the audit reads off
+    // the device: the report names it, the flag stays set and the exit
+    // status is fsck(8)'s 4.
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
+    for (k, _) in captures_holding_work() {
+        for outside in [false, true] {
+            let src = unpack(&format!("windows-interrupted-{k}"));
+            let mut pristine = std::fs::read(&src).unwrap();
+            let mut v = RecordedRepair {
+                bytes: pristine.clone(),
+                units: Vec::new(),
+                open: Vec::new(),
+            };
+            let plan = plan_in_place_io(&mut v, fsck::FsckOptions::default())
+                .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+            let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+            let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+            let plan_file = format!("{src}.plan");
+            std::fs::write(&plan_file, &saved).unwrap();
+            let journal = format!("{src}.journal");
+            let _ = std::fs::remove_file(&journal);
+
+            let mut record = None;
+            if outside {
+                let sector = u64::from(u16::from_le_bytes([pristine[0x0B], pristine[0x0C]]));
+                let cluster = sector * u64::from(pristine[0x0D]);
+                let mirror_lcn = u64::from_le_bytes(pristine[0x38..0x40].try_into().unwrap());
+                let record_size = match pristine[0x40] as i8 {
+                    n if n < 0 => 1u64 << -n,
+                    n => n as u64 * cluster,
+                };
+                let planned = |at: u64| {
+                    loaded.units.iter().any(|u| {
+                        u.writes
+                            .iter()
+                            .any(|w| (w.offset..w.offset + w.after.len() as u64).contains(&at))
+                    })
+                };
+                let (r, at) = [1u64, 2, 0, 3]
+                    .into_iter()
+                    .map(|r| (r, mirror_lcn * cluster + r * record_size + 0x100))
+                    .find(|&(_, at)| !planned(at))
+                    .unwrap_or_else(|| {
+                        panic!("{k}: the plan writes every mirror record's byte 0x100")
+                    });
+                pristine[at as usize] ^= 0xFF;
+                std::fs::write(&src, &pristine).unwrap();
+                record = Some(r);
+            }
+            drop(pristine);
+
+            let (code, said) = fsck_cli(&[
+                "--apply",
+                &plan_file,
+                "--in-place",
+                "--journal",
+                &journal,
+                &src,
+            ]);
+            let report: serde_json::Value = serde_json::from_str(
+                said.lines()
+                    .find(|l| l.starts_with('{'))
+                    .unwrap_or_else(|| panic!("{k}: no JSON report: {said}")),
+            )
+            .unwrap_or_else(|e| panic!("{k}: the report is not JSON ({e}): {said}"));
+            let audit = &report["audit"];
+            assert_eq!(
+                audit["dirty"],
+                serde_json::Value::Bool(true),
+                "{k}: the audit does not report the dirty flag set: {said}"
+            );
+            let kinds: Vec<&str> = audit["findings"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{k}: the report has no audit findings: {said}"))
+                .iter()
+                .map(|f| f["kind"].as_str().unwrap_or(""))
+                .collect();
+            match record {
+                None => {
+                    assert_eq!(code, 0, "{k}: a clean audit exited {code}: {said}");
+                    assert_eq!(
+                        kinds,
+                        vec!["dirty"],
+                        "{k}: the audit found more than the dirty flag: {said}"
+                    );
+                }
+                Some(r) => {
+                    assert_eq!(
+                        code, 4,
+                        "{k}: an audit with a finding exited {code}: {said}"
+                    );
+                    assert!(
+                        audit["findings"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|f| f["kind"] == "mft_mirror_mismatch" && f["record"] == r),
+                        "{k}: the audit does not name mirror record {r}: {said}"
+                    );
+                }
+            }
+            assert!(
+                fsck::is_dirty_io(
+                    &mut fs_ntfs::block_io::PathIo::open_rw(std::path::Path::new(&src)).unwrap()
+                )
+                .unwrap_or_else(|e| panic!("{k}: dirty flag: {e}")),
+                "{k}: the in-place apply left the dirty flag clear"
+            );
+
+            std::fs::remove_file(&journal).unwrap();
+            std::fs::remove_file(&plan_file).unwrap();
+            std::fs::remove_file(&src).unwrap();
+        }
+    }
+}
