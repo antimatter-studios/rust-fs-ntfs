@@ -1245,8 +1245,8 @@ fn check_quota_usage<T: FsckIo>(
         value[..n].copy_from_slice(bytes);
         Ok(u64::from_le_bytes(value))
     };
-    // No quota control entry, as this crate's mkfs writes `$Q`, is no flags
-    // saying tracking is on.
+    // No quota control entry, as earlier versions of this crate's mkfs
+    // wrote `$Q`, is no flags saying tracking is on (#1111 revisits this).
     let control_key = QUOTA_CONTROL_OWNER.to_le_bytes();
     let Some(control) = data_io(io, quota_rec, QUOTA_INDEX, &control_key)? else {
         return Ok(());
