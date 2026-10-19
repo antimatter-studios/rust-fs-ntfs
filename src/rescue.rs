@@ -1032,8 +1032,10 @@ pub fn export_manifest_path(destination: &Path) -> std::path::PathBuf {
 /// An archive with any source byte no data record holds is refused before
 /// anything is created, naming the first missing span. Otherwise the image
 /// is written to [`export_temp_path`], flushed, read back against every
-/// data record, and only then renamed into place. An existing destination
-/// is refused, and the archive is only ever read.
+/// data record, and only then moved into place by a rename that refuses an
+/// existing destination, so a file created there during the export is
+/// never replaced. An existing destination is refused, and the archive is
+/// only ever read.
 pub fn export_to_path(archive: &Path, destination: &Path) -> Result<ExportReport, String> {
     export_with(archive, destination, ExportOptions::default())
 }
@@ -1106,11 +1108,23 @@ pub fn export_with(
             if !report.is_complete() {
                 write_manifest(&manifest, &report)?;
             }
-            std::fs::rename(&temp, destination).map_err(|e| {
+            BEFORE_EXPORT_RENAME.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().as_mut() {
+                    hook(destination);
+                }
+            });
+            rename_no_replace(&temp, destination).map_err(|e| {
                 if !report.is_complete() {
                     let _ = std::fs::remove_file(&manifest);
                 }
-                format!("rename into '{}': {e}", destination.display())
+                if e.kind() == io::ErrorKind::AlreadyExists {
+                    format!(
+                        "the destination '{}' appeared during the export; an export never replaces a file",
+                        destination.display()
+                    )
+                } else {
+                    format!("rename into '{}': {e}", destination.display())
+                }
             })?;
             Ok(report)
         });
@@ -1124,6 +1138,24 @@ pub fn export_with(
             Err(e)
         }
     }
+}
+
+/// A hook [`set_before_export_rename`] installs.
+#[doc(hidden)]
+pub type ExportRenameHook = Box<dyn FnMut(&Path)>;
+
+thread_local! {
+    static BEFORE_EXPORT_RENAME: std::cell::RefCell<Option<ExportRenameHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `hook` with the destination on this thread's next exports, after
+/// their last check of the destination and immediately before the image
+/// is moved into place; `None` removes it. A test hook: it lets a test
+/// create the destination inside the window a check cannot close.
+#[doc(hidden)]
+pub fn set_before_export_rename(hook: Option<ExportRenameHook>) {
+    BEFORE_EXPORT_RENAME.with(|slot| *slot.borrow_mut() = hook);
 }
 
 /// Write `report`'s missing spans to the error manifest at `path` through a
@@ -1165,13 +1197,62 @@ fn write_manifest(path: &Path, report: &ExportReport) -> Result<(), String> {
                     path.display()
                 ));
             }
-            std::fs::rename(&temp, path)
+            rename_no_replace(&temp, path)
                 .map_err(|e| format!("rename into '{}': {e}", path.display()))
         });
     if written.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
     written
+}
+
+/// Move `from` to `to` in one step that fails with
+/// [`io::ErrorKind::AlreadyExists`] when anything is at `to`, however late
+/// it appeared: `renameat2(RENAME_NOREPLACE)` on Linux, `renamex_np`
+/// with `RENAME_EXCL` on Apple platforms, and otherwise, or where the
+/// filesystem lacks those, a hard link to `to` followed by removing
+/// `from`. Where none of them works the move fails; it never falls back
+/// to a rename that replaces.
+fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = |p: &Path| {
+            CString::new(p.as_os_str().as_bytes())
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+        };
+        let (from_c, to_c) = (c_path(from)?, c_path(to)?);
+        // SAFETY: both arguments are NUL-terminated paths that outlive the call.
+        #[cfg(target_os = "linux")]
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                from_c.as_ptr(),
+                libc::AT_FDCWD,
+                to_c.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        // SAFETY: as above.
+        #[cfg(target_vendor = "apple")]
+        let rc = unsafe { libc::renamex_np(from_c.as_ptr(), to_c.as_ptr(), libc::RENAME_EXCL) };
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        // Only a kernel or filesystem without the flag falls through to
+        // the link: every other failure, `EEXIST` included, is the answer.
+        if !matches!(
+            err.raw_os_error(),
+            Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::ENOTSUP)
+        ) {
+            return Err(err);
+        }
+    }
+    std::fs::hard_link(from, to)?;
+    std::fs::remove_file(from)
 }
 
 /// Write each data record of `archive` into `out` at its offset, leaving
