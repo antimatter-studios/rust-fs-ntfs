@@ -3792,6 +3792,8 @@ fn an_in_place_repair_makes_each_unit_durable_in_the_journal_before_writing_it()
     // back before the applied record is written and flushed; and no device
     // write falls between units. The expected order is built here from the
     // plan, one unit at a time, and must be exactly what reached the pair.
+    // After the last unit's applied record, the audit (#941) reads the
+    // device and does nothing else: no write and no sync on either side.
     use fs_ntfs::repair_journal::apply_in_place;
     use IoEvent::{Read, Sync, Write};
     const J: bool = true;
@@ -3816,11 +3818,15 @@ fn an_in_place_repair_makes_each_unit_durable_in_the_journal_before_writing_it()
         let got = log.borrow().clone();
         let first = got.iter().zip(&want).position(|(a, b)| a != b);
         assert!(
-            got == want,
-            "{k}: {} events reached the device and journal, {} expected; first difference at \
-             event {first:?}",
+            got.len() > want.len() && got[..want.len()] == want[..],
+            "{k}: {} events reached the device and journal, the units' {} expected first and \
+             the audit's after them; first difference at event {first:?}",
             got.len(),
             want.len()
+        );
+        assert!(
+            got[want.len()..].iter().all(|&e| e == (D, Read)),
+            "{k}: the audit after the last unit did more than read the device"
         );
         let mut expected = pristine.clone();
         apply_plan(k, &mut expected, &loaded.units);
@@ -3830,6 +3836,91 @@ fn an_in_place_repair_makes_each_unit_durable_in_the_journal_before_writing_it()
         );
         std::fs::remove_file(&src).unwrap();
     }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn a_completed_in_place_apply_returns_an_audit_finding_only_the_dirty_flag() {
+    // After the last unit (#941), an in-place apply and a resume run the
+    // read-only check over the whole repaired device and return its report.
+    // The repair leaves the dirty flag set, so the report's flag is set and
+    // nothing else is found; the device still reads dirty afterwards.
+    use fs_ntfs::repair_journal::{apply_in_place, resume_in_place};
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+        let (mut device, mut journal, _) = recording_pair(&pristine, None);
+        let audit = apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+            .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+        assert!(audit.dirty, "{k}: the audit read the dirty flag clear");
+        assert!(
+            audit.findings.is_empty(),
+            "{k}: the audit found more than the dirty flag: {:?}",
+            audit.findings
+        );
+        assert!(
+            fsck::is_dirty_io(&mut device).unwrap_or_else(|e| panic!("{k}: dirty flag: {e}")),
+            "{k}: the in-place repair left the dirty flag clear"
+        );
+        let audit = resume_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+            .unwrap_or_else(|e| panic!("{k}: resuming the finished repair: {e}"));
+        assert!(
+            audit.dirty && audit.findings.is_empty(),
+            "{k}: the resume's audit: dirty {}, findings {:?}",
+            audit.dirty,
+            audit.findings
+        );
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn an_in_place_apply_audit_reports_a_mirror_record_changed_outside_every_plan_range() {
+    // A byte of a `$MFTMirr` record that no unit writes is changed on the
+    // device before the apply (#941). The units never read it, so only an
+    // audit that reads the device rather than the planned bytes can see it:
+    // the report names the mirror mismatch, and the flag stays set.
+    use fs_ntfs::repair_journal::apply_in_place;
+    let (k, _) = captures_holding_work()[0];
+    let src = unpack(&format!("windows-interrupted-{k}"));
+    let (loaded, plan_sha256, mut pristine) = saved_plan(k, &src);
+    let sector = u64::from(u16::from_le_bytes([pristine[0x0B], pristine[0x0C]]));
+    let cluster = sector * u64::from(pristine[0x0D]);
+    let mirror_lcn = u64::from_le_bytes(pristine[0x38..0x40].try_into().unwrap());
+    let record_size = match pristine[0x40] as i8 {
+        n if n < 0 => 1u64 << -n,
+        n => n as u64 * cluster,
+    };
+    let planned = |at: u64| {
+        loaded.units.iter().any(|u| {
+            u.writes
+                .iter()
+                .any(|w| (w.offset..w.offset + w.after.len() as u64).contains(&at))
+        })
+    };
+    let (record, at) = [1u64, 2, 0, 3]
+        .into_iter()
+        .map(|r| (r, mirror_lcn * cluster + r * record_size + 0x100))
+        .find(|&(_, at)| !planned(at))
+        .unwrap_or_else(|| panic!("{k}: the plan writes every mirror record's byte 0x100"));
+    pristine[at as usize] ^= 0xFF;
+    let (mut device, mut journal, _) = recording_pair(&pristine, None);
+    let audit = apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+        .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+    assert!(
+        audit
+            .findings
+            .contains(&fsck::CheckFinding::MirrorMismatch { record }),
+        "{k}: the audit did not report mirror record {record}: {:?}",
+        audit.findings
+    );
+    assert!(audit.dirty, "{k}: the audit read the dirty flag clear");
+    assert!(
+        fsck::is_dirty_io(&mut device).unwrap_or_else(|e| panic!("{k}: dirty flag: {e}")),
+        "{k}: the in-place repair left the dirty flag clear"
+    );
+    std::fs::remove_file(&src).unwrap();
 }
 
 #[cfg(feature = "plan-file")]
@@ -3852,7 +3943,7 @@ fn an_in_place_repair_stops_at_a_unit_the_device_reads_back_wrong_and_never_mark
         );
         let (mut device, mut journal, _) = recording_pair(&pristine, Some(first_of_last));
         match apply_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
-            Ok(()) => panic!("{k}: unit {last}'s first write was dropped, the apply went ahead"),
+            Ok(_) => panic!("{k}: unit {last}'s first write was dropped, the apply went ahead"),
             Err(e) => {
                 let e = e.to_string();
                 assert!(
@@ -4902,7 +4993,7 @@ fn a_torn_journal_tail_resumes_only_as_a_prefix_of_the_record_the_plan_expects_n
             let (mut device, mut journal, _) = recording_pair(held, None);
             journal.bytes = bytes.clone();
             match resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
-                Ok(()) => bad.push(format!("{what}: the resume reported success")),
+                Ok(_) => bad.push(format!("{what}: the resume reported success")),
                 Err(InPlaceError::Journal(e)) if e.record == record => {
                     if device.bytes != held {
                         bad.push(format!("{what}: refused as {e}, but the device changed"));
@@ -4938,8 +5029,8 @@ fn a_torn_journal_tail_resumes_only_as_a_prefix_of_the_record_the_plan_expects_n
             let (mut device, mut journal, _) = recording_pair(held, None);
             journal.bytes = bytes;
             match resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
-                Ok(()) if device.bytes == whole => {}
-                Ok(()) => bad.push(format!(
+                Ok(_) if device.bytes == whole => {}
+                Ok(_) => bad.push(format!(
                     "{what}: the device holds other bytes than an uninterrupted apply"
                 )),
                 Err(e) => bad.push(format!("{what}: the resume refused: {e}")),
