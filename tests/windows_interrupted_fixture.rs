@@ -1711,7 +1711,10 @@ fn attrs(rec: &[u8]) -> Vec<(usize, u32, bool)> {
 
 impl Image {
     fn read(path: &str) -> Image {
-        let bytes = std::fs::read(path).unwrap();
+        Image::of(std::fs::read(path).unwrap())
+    }
+
+    fn of(bytes: Vec<u8>) -> Image {
         let cluster = le(&bytes, 0x0B, 2) * le(&bytes, 0x0D, 1);
         let c = bytes[0x40] as i8;
         let record = if c > 0 { c as u64 * cluster } else { 1 << -c };
@@ -3529,14 +3532,14 @@ fn a_repair_journal_reads_back_to_its_last_whole_record_and_refuses_the_rest() {
 /// that file and the capture's bytes.
 #[cfg(feature = "plan-file")]
 fn saved_plan(k: &str, src: &str) -> (fs_ntfs::repair_plan::SavedPlan, [u8; 32], Vec<u8>) {
-    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
     let pristine = std::fs::read(src).unwrap();
     let mut v = RecordedRepair {
         bytes: pristine.clone(),
         units: Vec::new(),
         open: Vec::new(),
     };
-    let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+    let plan = plan_in_place_io(&mut v, fsck::FsckOptions::default())
         .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
     let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
     let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
@@ -3545,6 +3548,27 @@ fn saved_plan(k: &str, src: &str) -> (fs_ntfs::repair_plan::SavedPlan, [u8; 32],
         "{k}: a log holding work planned nothing"
     );
     (loaded, Sha256::digest(&saved).into(), pristine)
+}
+
+/// An in-place-repaired `device` as Windows' recovery is compared with
+/// it. An in-place repair leaves the volume dirty until it is audited
+/// (#716), and Windows' recovery leaves it clean, so the flag must be set
+/// and is cleared on a copy in memory before the comparison: `$Volume`'s
+/// `VOLUME_IS_DIRTY` bit, and its `$MFTMirr` copy, are the only bytes that
+/// differ from the device (#1127).
+#[cfg(feature = "plan-file")]
+fn in_place_image(k: &str, device: &str) -> Image {
+    let mut v = RecordedRepair {
+        bytes: std::fs::read(device).unwrap(),
+        units: Vec::new(),
+        open: Vec::new(),
+    };
+    assert!(
+        fsck::is_dirty_io(&mut v).unwrap_or_else(|e| panic!("{k}: dirty flag: {e}")),
+        "{k}: the in-place repair left the dirty flag clear"
+    );
+    fsck::clear_dirty_io(&mut v).unwrap_or_else(|e| panic!("{k}: clear dirty: {e}"));
+    Image::of(v.bytes)
 }
 
 #[cfg(feature = "plan-file")]
@@ -3617,7 +3641,7 @@ fn an_in_place_repair_reaches_what_windows_recovered_and_equals_the_copy_repair(
         oracle::same_metadata_as_windows(
             k,
             &Image::read(&src),
-            &Image::read(&device),
+            &in_place_image(k, &device),
             &Image::read(&recovered),
             log_end,
         );
@@ -4084,7 +4108,7 @@ fn an_in_place_repair_stopped_after_any_write_resumes_to_the_uninterrupted_volum
         oracle::same_metadata_as_windows(
             k,
             &Image::read(&src),
-            &Image::read(&device),
+            &in_place_image(k, &device),
             &Image::read(&recovered),
             log_end,
         );
@@ -4342,7 +4366,7 @@ fn an_in_place_repair_cancelled_anywhere_stops_after_a_whole_unit_and_resumes() 
         oracle::same_metadata_as_windows(
             k,
             &Image::read(&src),
-            &Image::read(&device),
+            &in_place_image(k, &device),
             &Image::read(&recovered),
             log_end,
         );
@@ -4397,7 +4421,7 @@ fn a_c_abi_in_place_repair_cancelled_by_its_callback_resumes_through_the_c_abi()
     // uninterrupted apply, and the files and metadata Windows' own restart
     // reached. Progress must rise to the stop, then from there to the end.
     use fs_ntfs::repair_journal::apply_in_place;
-    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
     use fs_ntfs::{
         fs_ntfs_repair_apply_in_place, fs_ntfs_repair_resume_in_place, FS_NTFS_REPAIR_CANCELLED,
     };
@@ -4409,7 +4433,7 @@ fn a_c_abi_in_place_repair_cancelled_by_its_callback_resumes_through_the_c_abi()
             units: Vec::new(),
             open: Vec::new(),
         };
-        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+        let plan = plan_in_place_io(&mut v, fsck::FsckOptions::default())
             .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
         let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
         let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
@@ -4505,7 +4529,7 @@ fn a_c_abi_in_place_repair_cancelled_by_its_callback_resumes_through_the_c_abi()
         oracle::same_metadata_as_windows(
             k,
             &Image::read(&src),
-            &Image::read(&device),
+            &in_place_image(k, &device),
             &Image::read(&recovered),
             log_end,
         );
@@ -5101,7 +5125,7 @@ fn a_resume_refuses_a_corrupt_or_foreign_journal_with_nothing_written() {
         oracle::same_metadata_as_windows(
             k,
             &Image::read(&src),
-            &Image::read(&device),
+            &in_place_image(k, &device),
             &Image::read(&recovered),
             log_end,
         );
@@ -5512,7 +5536,7 @@ fn fsck_apply_in_place_repairs_a_copy_through_an_external_journal() {
     // library (#905) until `--dry-run --plan FILE` (#906) writes it from the
     // CLI.
     use fs_ntfs::repair_journal::{progress, read_journal, JournalBinding};
-    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
     use std::path::Path;
     for (k, _) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
@@ -5523,7 +5547,7 @@ fn fsck_apply_in_place_repairs_a_copy_through_an_external_journal() {
             units: Vec::new(),
             open: Vec::new(),
         };
-        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+        let plan = plan_in_place_io(&mut v, fsck::FsckOptions::default())
             .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
         let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
         let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
@@ -5771,7 +5795,7 @@ fn fsck_apply_in_place_resume_finishes_a_stopped_repair_from_its_journal() {
         apply_in_place_observed, progress, read_journal, ApplyObserver, InPlaceError,
         JournalBinding,
     };
-    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
     use std::path::Path;
 
     /// Asks for a stop once `stop` units have begun.
@@ -5794,7 +5818,7 @@ fn fsck_apply_in_place_resume_finishes_a_stopped_repair_from_its_journal() {
             units: Vec::new(),
             open: Vec::new(),
         };
-        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+        let plan = plan_in_place_io(&mut v, fsck::FsckOptions::default())
             .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
         let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
         let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
@@ -5892,7 +5916,7 @@ fn fsck_apply_in_place_resume_finishes_a_stopped_repair_from_its_journal() {
         oracle::same_metadata_as_windows(
             k,
             &Image::read(&src),
-            &Image::read(&device),
+            &in_place_image(k, &device),
             &Image::read(&recovered),
             log_end,
         );
@@ -5937,7 +5961,7 @@ fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
     // produced. Progress lines must rise, and a finished apply's last one
     // must name the plan's total.
     use fs_ntfs::repair_journal::{progress, read_journal, JournalBinding};
-    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
     use std::io::BufRead;
 
     for (k, log_end) in captures_holding_work() {
@@ -5948,7 +5972,7 @@ fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
             units: Vec::new(),
             open: Vec::new(),
         };
-        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+        let plan = plan_in_place_io(&mut v, fsck::FsckOptions::default())
             .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
         let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
         let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
@@ -6063,7 +6087,7 @@ fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
         oracle::same_metadata_as_windows(
             k,
             &Image::read(&src),
-            &Image::read(&device),
+            &in_place_image(k, &device),
             &Image::read(&recovered),
             log_end,
         );
@@ -6092,7 +6116,7 @@ fn fsck_a_second_resume_of_a_journal_another_holds_is_refused_and_the_first_comp
         apply_in_place_observed, progress, read_journal, ApplyObserver, InPlaceError,
         JournalBinding,
     };
-    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
     use std::io::BufRead;
     use std::path::Path;
 
@@ -6116,7 +6140,7 @@ fn fsck_a_second_resume_of_a_journal_another_holds_is_refused_and_the_first_comp
             units: Vec::new(),
             open: Vec::new(),
         };
-        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+        let plan = plan_in_place_io(&mut v, fsck::FsckOptions::default())
             .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
         let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
         let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
@@ -6249,7 +6273,7 @@ fn fsck_a_second_resume_of_a_journal_another_holds_is_refused_and_the_first_comp
         oracle::same_metadata_as_windows(
             k,
             &Image::read(&src),
-            &Image::read(&device),
+            &in_place_image(k, &device),
             &Image::read(&recovered),
             log_end,
         );
