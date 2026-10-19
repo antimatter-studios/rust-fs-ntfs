@@ -108,7 +108,12 @@ opened for writing, and a refused check leaves no target behind.
 
 `apply_plan_units` writes each unit's writes in order and then flushes the
 device: a flush at every unit boundary and none inside a unit, so the
-device holds whole units whenever a flush has returned. Immediately before
+device holds whole units whenever a flush has returned. Before the first
+unit, `check_device_identity` checks the device being written, not only the
+source: its size in bytes and the volume serial number at boot-sector bytes
+`0x48..0x50` must be the plan's. A short copy, or another device behind the
+path, is refused naming the size or serial, with nothing of the plan
+written. Immediately before
 a unit is written, it is checked on the device with `check_unit_on_device`.
 A unit whose ranges do not hold their before-images stops the apply before
 it: every earlier unit stays written and flushed, nothing of the refused
@@ -162,3 +167,9 @@ checks that each apply is refused naming that unit and range, that the
 target holds exactly the earlier units' writes and the changed byte, that
 the capture keeps its SHA-256, and that a plan made again from the target
 as it now stands applies without refusal.
+
+`applying_a_plan_refuses_a_target_of_another_size_or_serial_before_the_first_unit`
+applies a plan from each Windows capture to a copy one sector short and to
+a copy whose boot-sector volume serial changed after the copy. It checks
+that each apply is refused naming the size or the serial, that no write or
+flush reaches the target, and that the capture keeps its SHA-256.
