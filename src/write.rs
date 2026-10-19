@@ -5081,7 +5081,7 @@ fn finish_data_write_io<T: BlockIo + ?Sized>(io: &mut T, rec: u64) -> Result<(),
 /// read from the stream's first extent. Resident attributes add nothing
 /// beyond the record (measured on
 /// `test-disks/windows-interrupted-quota.recovered`).
-fn quota_charge_due(record: &[u8], record_size: u64) -> u64 {
+pub(crate) fn quota_charge_due(record: &[u8], record_size: u64) -> u64 {
     let field = |at: usize| {
         record
             .get(at..at + 8)
