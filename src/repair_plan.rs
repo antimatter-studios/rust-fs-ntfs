@@ -19,7 +19,9 @@
 
 use crate::block_io::BlockIo;
 use crate::error::Error;
-use crate::fsck::{fsck_io_with, set_dirty_io, FsckOptions, FsckReport};
+use crate::fsck::{
+    clear_dirty_io, fsck_io_with, is_dirty_io, set_dirty_io, FsckOptions, FsckReport,
+};
 
 /// One write a repair would make.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +45,9 @@ pub struct PlanUnit {
 pub struct RepairPlan {
     /// In the order the repair makes them; empty when it writes nothing.
     pub units: Vec<PlanUnit>,
+    /// The first of the units that clear the dirty flag, which run to the
+    /// plan's end (#1132); `None` when no unit clears it.
+    pub clear_dirty_from: Option<usize>,
     /// What the repair would report once every unit is applied.
     pub report: FsckReport,
 }
@@ -64,6 +69,7 @@ pub fn plan_fsck_io<T: BlockIo + ?Sized>(
     planning.close_unit();
     Ok(RepairPlan {
         units: planning.units,
+        clear_dirty_from: None,
         report,
     })
 }
@@ -73,6 +79,13 @@ pub fn plan_fsck_io<T: BlockIo + ?Sized>(
 /// `$MFTMirr` copy -- each a unit of its own, flushed before the repair's
 /// first write (#939). On a volume whose flag is already set nothing is
 /// added. Writes nothing.
+///
+/// When `options` asks for the dirty flag to be cleared, the repair's own
+/// units leave it set, and the plan ends with the writes [`clear_dirty_io`]
+/// makes -- `$Volume`'s flags, then its `$MFTMirr` copy -- each a unit of
+/// its own, marked by [`RepairPlan::clear_dirty_from`] (#1132). The
+/// in-place apply audits the volume before them. Without it the plan
+/// clears nothing.
 ///
 /// An in-place repair keeps the volume dirty until it has been audited
 /// (#716), so a cut at any unit leaves a volume Windows checks at its next
@@ -91,10 +104,20 @@ pub fn plan_in_place_io<T: BlockIo + ?Sized>(
     };
     set_dirty_io(&mut planning)?;
     planning.close_unit();
-    let report = fsck_io_with(&mut planning, options, None)?;
+    let repair = FsckOptions { clear_dirty: false };
+    let mut report = fsck_io_with(&mut planning, repair, None)?;
     planning.close_unit();
+    let mut clear_dirty_from = None;
+    if options.clear_dirty {
+        let from = planning.units.len();
+        report.dirty_cleared = clear_dirty_io(&mut planning)?;
+        planning.close_unit();
+        report.dirty = is_dirty_io(&mut planning)?;
+        clear_dirty_from = (planning.units.len() > from).then_some(from);
+    }
     Ok(RepairPlan {
         units: planning.units,
+        clear_dirty_from,
         report,
     })
 }
@@ -205,6 +228,9 @@ pub struct SavedPlan {
     /// The volume serial number from the source's boot sector.
     pub volume_serial: u64,
     pub units: Vec<PlanUnit>,
+    /// The first of the units that clear the dirty flag, which run to the
+    /// plan's end (#1132); `None` when no unit clears it.
+    pub clear_dirty_from: Option<usize>,
 }
 
 /// Why a plan file was refused.
@@ -256,7 +282,7 @@ impl std::error::Error for PlanFileError {}
 
 /// The plan file format this reader writes and reads.
 #[cfg(feature = "plan-file")]
-pub const PLAN_FILE_VERSION: u32 = 1;
+pub const PLAN_FILE_VERSION: u32 = 2;
 
 /// The first bytes of every plan file.
 #[cfg(feature = "plan-file")]
@@ -293,6 +319,9 @@ pub fn save_plan<T: BlockIo + ?Sized>(
     out.extend_from_slice(&0u64.to_le_bytes()); // the file length, below
     out.extend_from_slice(&source.size().to_le_bytes());
     out.extend_from_slice(&serial);
+    let from = plan.clear_dirty_from.map_or(Ok(units), u32::try_from);
+    let from = from.map_err(|_| "a clear-dirty mark past the units")?;
+    out.extend_from_slice(&from.to_le_bytes());
     for unit in &plan.units {
         let writes =
             u32::try_from(unit.writes.len()).map_err(|_| "too many writes in a plan unit")?;
@@ -352,7 +381,7 @@ pub fn load_plan(bytes: &[u8]) -> Result<SavedPlan, PlanFileError> {
     }
     r.at = 8;
     let version = r.u32().ok_or(truncated(PLAN_FILE_PREFIX + SHA256_LEN))?;
-    if version != PLAN_FILE_VERSION {
+    if version != 1 && version != PLAN_FILE_VERSION {
         return Err(PlanFileError::UnsupportedVersion(version));
     }
     let units = r.u32().ok_or(truncated(PLAN_FILE_PREFIX + SHA256_LEN))?;
@@ -383,6 +412,17 @@ pub fn load_plan(bytes: &[u8]) -> Result<SavedPlan, PlanFileError> {
     };
     let source_size = r.u64().ok_or(malformed.clone())?;
     let volume_serial = r.u64().ok_or(malformed.clone())?;
+    // A version 1 file has no mark: none of its units clears the flag.
+    let from = if version == 1 {
+        units
+    } else {
+        r.u32().ok_or(malformed.clone())?
+    };
+    if from > units {
+        return Err(PlanFileError::Malformed(
+            "the first clear-dirty unit is past the last unit",
+        ));
+    }
     let mut loaded = Vec::new();
     for unit in 0..units as usize {
         let writes = r.u32().ok_or(malformed.clone())?;
@@ -413,6 +453,7 @@ pub fn load_plan(bytes: &[u8]) -> Result<SavedPlan, PlanFileError> {
         source_size,
         volume_serial,
         units: loaded,
+        clear_dirty_from: (from < units).then_some(from as usize),
     })
 }
 
