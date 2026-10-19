@@ -64,6 +64,7 @@ States:
 | A read-only mount of a volume whose log holds work | Partial: read as it is on disk, without replaying | 0.8.0 | #137 | |
 | A replay, or a dirty-flag repair, through the read/write callback pair (`FsNtfsBlockdevCfg`), which has no flush callback to order its writes | Refused, with nothing written; the path backends and an fs-core device (`fs_core_device_from_callbacks` with a flush callback) replay, flushing where `fsync` would | 0.10.0 (#518) | #137 | `windows_interrupted_fixture.rs` |
 | Clear the dirty flag; reset the log | Supported, for volumes known consistent: fsck clears the flag only when asked (`--clear-dirty`, `FsckOptions::clear_dirty`, `FS_NTFS_FSCK_CLEAR_DIRTY`) and the log holds nothing to redo or undo, and otherwise leaves it for Windows' chkdsk | 0.1.0; left set by default 0.10.0 (#519) | | `fsck.rs`, `capi_fsck.rs`, `capi_fsck_callbacks.rs`, `tests/cli/test-fsck.sh` |
+| `fsck.ntfs --apply PLAN --in-place`: the audit of the repaired volume in the report, exit 4 when it finds anything but the dirty flag the repair leaves set | Supported | Unreleased (#1138) | | `windows_interrupted_fixture.rs` |
 | Repair beyond log replay and the dirty flag | Not supported | | | |
 
 ## Writing
