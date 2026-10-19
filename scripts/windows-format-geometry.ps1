@@ -39,7 +39,10 @@ function ConvertFrom-GeometryNtfsInfo([string[]]$Lines) {
         record_bytes = 'Bytes Per FileRecord Segment'; mft_lcn = 'Mft Start Lcn'; mftmirr_lcn = 'Mft2 Start Lcn' }
     $result = [ordered]@{}
     foreach ($key in $fields.Keys) {
-        $pattern = '^\s*' + [regex]::Escape($fields[$key]) + '\s*:\s*(0x[0-9a-fA-F]+|[0-9]+)\s*$'
+        # fsutil renders some byte counts with a parenthesized unit, e.g.
+        # `Bytes Per Cluster : 4096 (4 KB)`. Parse the numeric value while
+        # allowing that display-only annotation.
+        $pattern = '^\s*' + [regex]::Escape($fields[$key]) + '\s*:\s*(0x[0-9a-fA-F]+|[0-9]+)(?:\s+\([0-9]+\s*[A-Za-z]+\))?\s*$'
         $values = @($Lines | ForEach-Object { if ($_ -match $pattern) { $Matches[1] } })
         if ($values.Count -ne 1) { throw "fsutil must report exactly one $($fields[$key]) field" }
         $result[$key] = if ($values[0].StartsWith('0x')) {
