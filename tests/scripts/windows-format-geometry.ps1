@@ -39,11 +39,12 @@ $boot[510] = 0
 Assert-GeometryFailure { ConvertFrom-FormatBoot $boot } 'missing signature fails'
 $boot[510] = 85; $boot[3] = 0
 Assert-GeometryFailure { ConvertFrom-FormatBoot $boot } 'non-NTFS boot sector fails'
-$lines = @('Bytes Per Sector : 512', 'Bytes Per Cluster : 4096',
+$lines = @('Bytes Per Sector : 512', 'Bytes Per Cluster : 4096 (4 KB)',
     'Bytes Per FileRecord Segment : 1024', 'Mft Start Lcn : 0x0000000000000004',
     'Mft2 Start Lcn : 0x0000000000000080')
 $native = ConvertFrom-GeometryNtfsInfo $lines
-Assert-Geometry ($native.record_bytes -eq 1024 -and $native.mftmirr_lcn -eq 128) 'fsutil decimal and hex fields'
+Assert-Geometry ($native.cluster_bytes -eq 4096 -and $native.record_bytes -eq 1024 -and
+    $native.mftmirr_lcn -eq 128) 'fsutil decimal, hex, and parenthesized units'
 Assert-GeometryFailure { ConvertFrom-GeometryNtfsInfo $lines[0..3] } 'missing fsutil field fails'
 Assert-GeometryFailure { ConvertFrom-GeometryNtfsInfo ($lines + $lines[0]) } 'duplicate fsutil field fails'
 Assert-FormatGeometryMatch $decoded $native 4096
