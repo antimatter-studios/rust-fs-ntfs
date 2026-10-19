@@ -31,6 +31,10 @@ streams through Windows and requires eleven contracts to execute. The advisory
 workflow runs it on `windows-latest` before building its image cases. No NTFS
 reader from this crate or Slate supplies expected paths or bytes.
 
+`scripts/slate-read-compare.py` is the consumer: it refuses a manifest whose
+case or image SHA-256 differs from its `cases.tsv` row, then compares Slate's
+manifest of the same image with this one by path and stream (#1103).
+
 This is the capture slice (#856) of #689. Slate extraction and comparison are
 #857; the Windows-authored CLI image, complete writer coverage and read-case
 floor are #858. The existing seven-case checker floor is unchanged because
