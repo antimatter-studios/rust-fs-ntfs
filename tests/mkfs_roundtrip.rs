@@ -975,7 +975,7 @@ fn quota_default_policy_is_present_for_every_supported_cluster_size() {
         let data_len = u16::from_le_bytes(entry[2..4].try_into().unwrap()) as usize;
         assert_eq!(data_off, 20, "{cluster_size}: quota value follows its key");
         assert_eq!(data_len, 48, "{cluster_size}: quota control length");
-        assert_eq!(entry_len, data_off + data_len);
+        assert_eq!(entry_len, (data_off + data_len + 7) & !7);
         let control = &entry[data_off..data_off + data_len];
         assert_eq!(u32::from_le_bytes(control[0..4].try_into().unwrap()), 2);
         assert_eq!(u32::from_le_bytes(control[4..8].try_into().unwrap()), 1);

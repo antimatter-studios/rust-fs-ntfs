@@ -1470,10 +1470,7 @@ pub fn format_with_plan(dev: &mut dyn BlockIo, plan: &FormatPlan) -> Result<(), 
     // record 11: $Extend — directory whose `$I30` enumerates three
     // $Extend children: $ObjId (slot 16), $Reparse (slot 17), $Quota
     // (slot 18). scan-f-scan experiments (2026-05-24) proved that
-    // chkdsk /scan exits 13 unless all three are present under $Extend
-    // at format time. $RmMetadata is intentionally omitted (shipping it
-    // incompletely causes TxF resource manager failures; see rec module
-    // comment).
+    // $Extend contains $ObjId, $Reparse and $Quota (slots 16, 17, 18).
     //
     // $Extend: $STD_INFO + $FILE_NAME + $I30 with entries for the
     // three children built immediately below.
@@ -1598,34 +1595,14 @@ pub fn format_with_plan(dev: &mut dyn BlockIo, plan: &FormatPlan) -> Result<(), 
         place_record(&mut mft_buf, rs, rec::REPARSE, reparse_rec)?;
 
         // $Quota: $O (SID→owner_id) and $Q (owner_id→quota_info) view indexes.
-        // Shipping $Quota preemptively prevents the Windows NTFS driver from
-        // creating it on first mount, which for sub-4K cluster sizes results in
-        // an incomplete record (missing $O/$Q initialization) that chkdsk flags.
-        //
-        // $Q default record (OwnerID=1) strategy:
-        //   cluster_size >= 4096 (cpib=1): Windows creates OwnerID=1 correctly on
-        //     first mount. Emitting it ourselves triggers a 180-second quota-rebuild
-        //     scan on every subsequent disk-online cycle (Windows sees $O empty and
-        //     rebuilds OwnerID→SID mappings by walking the entire MFT). Leave $Q
-        //     empty so Windows initialises it cleanly on first mount.
-        //   cluster_size < 4096 (cpib>1): Windows NTFS driver fails to create the
-        //     default quota record for sub-4K cluster volumes (observed empirically:
-        //     chkdsk /scan exits 1 with "default quota record missing in file 18"
-        //     unless OwnerID=1 is present at format time). Emit it here.
+        // The default policy control must exist at format time; Windows does
+        // not reliably initialize it on first mount for every cluster size.
         let q_name = stream::utf16(stream::Q);
-        let q_entries: Vec<u8> = if cluster_size < 4096 {
-            // Sub-4K: pre-populate OwnerID=1 so chkdsk /scan does not report
-            // "default quota record missing in file 18."
-            // QUOTA_CONTROL v2, FLAG_ID_ALLOCATED=1, zero usage, -1 thresholds.
-            let default_quota_key = 1u32.to_le_bytes(); // OwnerID = 1
-            let mut e = build_view_index_entry(&default_quota_key, &build_default_quota_control());
-            e.extend_from_slice(&last_entry);
-            e
-        } else {
-            // 4K+: leave $Q empty; Windows populates OwnerID=1 on first mount
-            // without triggering the MFT-wide quota rebuild that an empty $O causes.
-            last_entry.to_vec()
-        };
+        // QUOTA_CONTROL v2, FLAG_ID_ALLOCATED=1, zero usage, -1 thresholds.
+        let default_quota_key = 1u32.to_le_bytes(); // OwnerID = 1
+        let mut q_entries =
+            build_view_index_entry(&default_quota_key, &build_default_quota_control());
+        q_entries.extend_from_slice(&last_entry);
         let q_index_root = build_populated_named_index_root_attr(
             3,
             &q_name,
