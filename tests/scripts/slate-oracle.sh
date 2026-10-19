@@ -137,8 +137,8 @@ cat >"$WORK/writer" <<'SH'
 [ "$3" = target.bin ] && [ "$4" = 8 ] && [ "$5" = 00ff ] && [ "$6" = abcd ] ||
     { echo "stand-in: unexpected arguments $*" >&2; exit 16; }
 case "$(head -n 1 "$1")" in
-    copy) cp "$1" "$2" && echo written >>"$2" ;;
-    scribble) cp "$1" "$2" && echo written >>"$2"; chmod u+w "$1" && echo changed >>"$1" ;;
+    copy) cp "$1" "$2" && chmod u+w "$2" && echo written >>"$2" ;;
+    scribble) cp "$1" "$2" && chmod u+w "$2" && echo written >>"$2"; chmod u+w "$1" && echo changed >>"$1" ;;
     crash) echo "expected bytes do not match" >&2; exit 1 ;;
     same) cp "$1" "$2" ;;
     *) exit 16 ;;
