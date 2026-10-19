@@ -28,7 +28,8 @@ head -c 67108864 /dev/urandom >"$SANDBOX/big"
 for item in 'one /one' 'big /d/big'; do
     read -r src dest <<<"$item"
     fs.ntfs "$img" import "$SANDBOX/$src" "$dest" >"$SANDBOX/out" 2>"$SANDBOX/err"
-    check "import $dest exits 0 ($(cat "$SANDBOX/err"))" test $? -eq 0
+    status=$?
+    check "import $dest exits 0 ($(cat "$SANDBOX/err"))" test "$status" -eq 0
     hash="$(sha256 <"$SANDBOX/$src")"
     jq_check "import $dest reports the source's SHA-256" ".sha256 == \"$hash\" and .replaced == false" "$SANDBOX/out"
     check "ntfscat $dest has the source's SHA-256" test "$(ntfscat "$img" "$dest" 2>/dev/null | sha256)" = "$hash"
@@ -38,7 +39,8 @@ check "ntfsls / lists d and one, and no staging name" \
 check "ntfsls -p /d lists big alone" test "$(ntfsls -p /d "$img" 2>/dev/null | tr '\n' ' ')" = "big "
 
 printf 'from stdin' | fs.ntfs "$img" import - /stdin.txt --verify >"$SANDBOX/out" 2>"$SANDBOX/err"
-check "stdin import with --verify exits 0 ($(cat "$SANDBOX/err"))" test $? -eq 0
+status=$?
+check "stdin import with --verify exits 0 ($(cat "$SANDBOX/err"))" test "$status" -eq 0
 jq_check "--verify is reported" '.verified == true and .bytes == 10' "$SANDBOX/out"
 check "ntfscat /stdin.txt has the piped bytes" test "$(ntfscat "$img" /stdin.txt 2>/dev/null)" = "from stdin"
 
