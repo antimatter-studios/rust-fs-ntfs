@@ -1595,14 +1595,32 @@ pub fn format_with_plan(dev: &mut dyn BlockIo, plan: &FormatPlan) -> Result<(), 
         place_record(&mut mft_buf, rs, rec::REPARSE, reparse_rec)?;
 
         // $Quota: $O (SID→owner_id) and $Q (owner_id→quota_info) view indexes.
-        // The default policy control must exist at format time; Windows does
-        // not reliably initialize it on first mount for every cluster size.
+        // Shipping $Quota preemptively prevents the Windows NTFS driver from
+        // creating it on first mount, which for sub-4K cluster sizes results in
+        // an incomplete record (missing $O/$Q initialization) that chkdsk flags.
+        //
+        // Its contents are what Windows formats, at every cluster size (#862,
+        // measured on windows-interrupted-1 at 4K and
+        // windows-interrupted-small-cluster at 1K, tracking off): `$Q` holds
+        // the quota control entry (OwnerID=1) and the default owner's entry
+        // (OwnerID=0x100, BUILTIN\Administrators), and `$O` maps that owner's
+        // SID to 0x100. An earlier format wrote OwnerID=1 alone at 4K+ and
+        // Windows rebuilt quota on every online, having found `$O` empty;
+        // with `$O` populated as Windows populates it, nothing is missing.
         let q_name = stream::utf16(stream::Q);
-        // QUOTA_CONTROL v2, FLAG_ID_ALLOCATED=1, zero usage, -1 thresholds.
-        let default_quota_key = 1u32.to_le_bytes(); // OwnerID = 1
+        let quota_control = build_default_quota_control(mft_record_layout.nt_time);
         let mut q_entries =
-            build_view_index_entry(&default_quota_key, &build_default_quota_control());
+            build_view_index_entry(&QUOTA_CONTROL_OWNER.to_le_bytes(), &quota_control);
+        let mut default_owner = quota_control.to_vec();
+        default_owner.extend_from_slice(&DEFAULT_QUOTA_OWNER_SID);
+        q_entries.extend(build_view_index_entry(
+            &DEFAULT_QUOTA_OWNER.to_le_bytes(),
+            &default_owner,
+        ));
         q_entries.extend_from_slice(&last_entry);
+        let mut o_entries =
+            build_view_index_entry(&DEFAULT_QUOTA_OWNER_SID, &DEFAULT_QUOTA_OWNER.to_le_bytes());
+        o_entries.extend_from_slice(&last_entry);
         let q_index_root = build_populated_named_index_root_attr(
             3,
             &q_name,
@@ -1620,7 +1638,7 @@ pub fn format_with_plan(dev: &mut dyn BlockIo, plan: &FormatPlan) -> Result<(), 
             COLLATION_NTOFS_SID,
             index_block_size,
             cluster_size,
-            &last_entry,
+            &o_entries,
         );
         let quota_rec = build_system_record_with_parent(
             &mft_record_layout,
@@ -2590,16 +2608,26 @@ fn build_view_index_entry(key: &[u8], value: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// 48-byte on-disk QUOTA_CONTROL for the $Q default record (OwnerID=1).
-/// Version=2, FLAG_ID_ALLOCATED=1, zero usage, unlimited warning/hard
-/// limits (-1), zero exceeded-time. Extracted from a Windows-formatted
-/// cluster-4K image (post-mount, USA fixup applied).
-fn build_default_quota_control() -> [u8; 48] {
+/// `$Q`'s quota control entry's owner id.
+const QUOTA_CONTROL_OWNER: u32 = 1;
+/// The owner id Windows formats `$Quota` with, and its SID,
+/// S-1-5-32-544 (BUILTIN\Administrators), as `$O` keys it.
+const DEFAULT_QUOTA_OWNER: u32 = 0x100;
+const DEFAULT_QUOTA_OWNER_SID: [u8; 16] = [
+    0x01, 0x02, 0, 0, 0, 0, 0, 0x05, 0x20, 0, 0, 0, 0x20, 0x02, 0, 0,
+];
+
+/// 48-byte on-disk QUOTA_CONTROL Windows formats `$Q` entries with:
+/// version 2, flags 1, zero usage, `change_time` (the one field Windows
+/// sets per volume, to when it was formatted), unlimited warning and hard
+/// limits (-1), zero exceeded-time. Measured on windows-interrupted-1 and
+/// windows-interrupted-small-cluster (#862).
+fn build_default_quota_control(change_time: u64) -> [u8; 48] {
     let mut buf = [0u8; 48];
     buf[0..4].copy_from_slice(&2u32.to_le_bytes()); // Version
-    buf[4..8].copy_from_slice(&1u32.to_le_bytes()); // Flags = FLAG_ID_ALLOCATED
+    buf[4..8].copy_from_slice(&1u32.to_le_bytes()); // Flags
                                                     // bytes_used[8..16]  = 0  (already)
-                                                    // change_time[16..24] = 0 (already)
+    buf[16..24].copy_from_slice(&change_time.to_le_bytes()); // ChangeTime
     buf[24..32].copy_from_slice(&(-1i64).to_le_bytes()); // WarningLimit
     buf[32..40].copy_from_slice(&(-1i64).to_le_bytes()); // HardLimit
                                                          // exceeded_time[40..48] = 0 (already)
