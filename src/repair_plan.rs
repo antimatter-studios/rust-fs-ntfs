@@ -571,6 +571,10 @@ pub enum CopyRepairError {
     Source(PlanSourceError),
     /// Something already exists at the target path; it is left as it was.
     TargetExists(std::path::PathBuf),
+    /// A unit's ranges on the target did not hold their before-images at
+    /// its turn: the earlier units are written and synced, nothing of this
+    /// one is.
+    Target(PlanSourceError),
     /// Opening, copying, writing or flushing failed.
     Io(String),
 }
@@ -579,7 +583,7 @@ pub enum CopyRepairError {
 impl std::fmt::Display for CopyRepairError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Source(e) => write!(f, "{e}"),
+            Self::Source(e) | Self::Target(e) => write!(f, "{e}"),
             Self::TargetExists(path) => {
                 write!(f, "the target '{}' already exists", path.display())
             }
@@ -641,14 +645,17 @@ const COPY_CHUNK: usize = 1 << 20;
 
 /// Apply `plan`'s units to `target` in order, each unit's writes in order
 /// and then a [`BlockIo::sync`]: a sync at every unit boundary and none
-/// inside a unit, so a stop leaves whole units. `target` must already hold
-/// what the plan was made from; nothing is checked here.
+/// inside a unit, so a stop leaves whole units. Immediately before it is
+/// written, each unit is checked on `target` with [`check_unit_on_device`];
+/// a unit whose ranges do not hold their before-images stops the apply
+/// there, the earlier units written and synced and nothing of it written.
 #[cfg(feature = "plan-file")]
 pub fn apply_plan_units<T: BlockIo + ?Sized>(
     plan: &SavedPlan,
     target: &mut T,
 ) -> Result<(), CopyRepairError> {
     for (u, unit) in plan.units.iter().enumerate() {
+        check_unit_on_device(plan, u, target).map_err(CopyRepairError::Target)?;
         for (w, write) in unit.writes.iter().enumerate() {
             target
                 .write_all_at(write.offset, &write.after)

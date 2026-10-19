@@ -626,6 +626,9 @@ fn apply(source: &Path, plan: &Path, target: &Path) -> Result<Outcome, CliError>
         CopyRepairError::Source(_) => failed(format!(
             "{name}: refused for plan '{plan_name}', no target created: {e}"
         )),
+        CopyRepairError::Target(_) => failed(format!(
+            "{name}: copy-repair into '{to}' stopped, the earlier units written: {e}"
+        )),
         CopyRepairError::Io(_) => failed(format!("{name}: copy-repair into '{to}': {e}")),
     })?;
     let units = saved.units.len() as u64;
