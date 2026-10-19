@@ -1,0 +1,3 @@
+## Interfaces
+
+| Slate read comparison with Windows manifests (test support) | Experimental: a comparator checks a manifest of Slate's read of each image against Windows' image-bound manifest by case, path and stream; missing or extra paths and streams, wrong kinds, sizes and bytes fail by name, manifests of other images or cases are refused, and only an explicit capability list excuses an entry; producing Slate's manifest and running it in the workflow remain #1104 and #1105 | Unreleased | #1103, #857, #689 | `tests/scripts/slate-read-compare.sh` (27-check floor), `scripts/slate-read-compare.py` |
