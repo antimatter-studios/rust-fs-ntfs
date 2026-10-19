@@ -6087,3 +6087,190 @@ fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
         std::fs::remove_file(&src).unwrap();
     }
 }
+
+#[cfg(all(unix, feature = "cli", feature = "harness"))]
+#[test]
+fn fsck_a_second_resume_of_a_journal_another_holds_is_refused_and_the_first_completes() {
+    // `fsck.ntfs --apply PLAN --in-place --resume --journal FILE` (#936)
+    // holds the journal for the whole resume. A resume stopped halfway
+    // through a Windows interrupted capture's plan is resumed and held by
+    // the harness build's FSCK_NTFS_HOLD_AFTER_UNITS; a second resume of the
+    // same journal, on a copy of the stopped volume and on the volume
+    // itself, must be refused naming the journal, with the journal, the
+    // copy and the volume unchanged. Released by SIGUSR1, the first resume
+    // must reach the files and metadata Windows' own restart reached.
+    use fs_ntfs::block_io::PathIo;
+    use fs_ntfs::repair_journal::{
+        apply_in_place_observed, progress, read_journal, ApplyObserver, InPlaceError,
+        JournalBinding,
+    };
+    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use std::io::BufRead;
+    use std::path::Path;
+
+    /// Asks for a stop once `stop` units have begun.
+    struct StopAt {
+        asked: usize,
+        stop: usize,
+    }
+    impl ApplyObserver for StopAt {
+        fn cancel_requested(&mut self) -> bool {
+            self.asked += 1;
+            self.asked > self.stop
+        }
+    }
+
+    for (k, log_end) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let mut v = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        let units = loaded.units.len();
+        assert!(units > 0, "{k}: a log holding work planned nothing");
+        let plan_file = format!("{src}.held.plan");
+        std::fs::write(&plan_file, &saved).unwrap();
+        let journal_dir = format!("{src}.held.d");
+        let _ = std::fs::remove_dir_all(&journal_dir);
+        std::fs::create_dir(&journal_dir).unwrap();
+        let journal = format!("{journal_dir}/repair.journal");
+        let device = format!("{src}.held.img");
+        std::fs::write(&device, &pristine).unwrap();
+        drop(pristine);
+
+        let stop = units / 2;
+        std::fs::write(&journal, b"").unwrap();
+        {
+            let mut io = PathIo::open_rw(Path::new(&device)).unwrap();
+            let mut jrn = PathIo::open_rw(Path::new(&journal)).unwrap();
+            let sha: [u8; 32] = Sha256::digest(&saved).into();
+            match apply_in_place_observed(
+                &loaded,
+                sha,
+                &mut io,
+                &mut jrn,
+                &mut StopAt { asked: 0, stop },
+            ) {
+                Err(InPlaceError::Cancelled { applied }) => {
+                    assert_eq!(applied as usize, stop, "{k}: units applied before the stop")
+                }
+                other => panic!("{k}: the apply stopped at {stop} of {units} gave {other:?}"),
+            }
+        }
+        let other = format!("{src}.held.other.img");
+        std::fs::copy(&device, &other).unwrap();
+
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rust-fs-ntfs"))
+            .args([
+                "fsck",
+                "--apply",
+                &plan_file,
+                "--in-place",
+                "--resume",
+                "--journal",
+                &journal,
+                &device,
+            ])
+            .env("FSCK_NTFS_HOLD_AFTER_UNITS", stop.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn fsck.ntfs");
+        let mut stderr = std::io::BufReader::new(child.stderr.take().unwrap());
+        let mut said = String::new();
+        loop {
+            let mut line = String::new();
+            let read = stderr.read_line(&mut line).unwrap();
+            assert!(
+                read > 0,
+                "{k}: the first resume ended before reporting {stop} units applied: {said}"
+            );
+            said.push_str(&line);
+            if apply_progress_lines(&line).first().map(|p| p.0) == Some(stop as u64) {
+                break;
+            }
+        }
+
+        let journal_sha = hex_sha256(&std::fs::read(&journal).unwrap());
+        for (what, target) in [("a copy", &other), ("the held volume", &device)] {
+            let target_sha = hex_sha256(&std::fs::read(target).unwrap());
+            let (code, second) = fsck_cli(&[
+                "--apply",
+                &plan_file,
+                "--in-place",
+                "--resume",
+                "--journal",
+                &journal,
+                target,
+            ]);
+            assert_ne!(
+                code, 0,
+                "{k}: a second resume of the held journal on {what} went ahead: {second}"
+            );
+            assert!(
+                second.contains(&journal) && second.contains("held by another process"),
+                "{k}: a second resume on {what} was refused without naming the held journal: \
+                 {second}"
+            );
+            assert_eq!(
+                hex_sha256(&std::fs::read(target).unwrap()),
+                target_sha,
+                "{k}: a second resume of the held journal changed {what}"
+            );
+            assert_eq!(
+                hex_sha256(&std::fs::read(&journal).unwrap()),
+                journal_sha,
+                "{k}: a second resume on {what} changed the held journal"
+            );
+        }
+
+        // SAFETY: kill(2) on the child this test spawned and has not reaped.
+        let sent = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGUSR1) };
+        assert_eq!(sent, 0, "{k}: SIGUSR1: {}", std::io::Error::last_os_error());
+        stderr.read_to_string(&mut said).unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "{k}: the first resume, released, exited {status}: {said}"
+        );
+        let binding = JournalBinding::of(&saved).unwrap();
+        let read = read_journal(&std::fs::read(&journal).unwrap(), &binding)
+            .unwrap_or_else(|e| panic!("{k}: the journal read back refused: {e:?}"));
+        let done = progress(&read, &loaded).unwrap_or_else(|e| panic!("{k}: progress: {e:?}"));
+        assert_eq!(
+            (done.applied as usize, done.open),
+            (units, None),
+            "{k}: the first resume's journal does not mark every unit applied"
+        );
+        let want = manifest(k);
+        let got = walk(&device);
+        assert!(
+            got == want,
+            "{k}: {} files after the first resume, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+        let recovered = unpack(&format!("windows-interrupted-{k}.recovered"));
+        oracle::same_metadata_as_windows(
+            k,
+            &Image::read(&src),
+            &Image::read(&device),
+            &Image::read(&recovered),
+            log_end,
+        );
+
+        std::fs::remove_file(&recovered).unwrap();
+        std::fs::remove_dir_all(&journal_dir).unwrap();
+        std::fs::remove_file(&plan_file).unwrap();
+        std::fs::remove_file(&other).unwrap();
+        std::fs::remove_file(&device).unwrap();
+        std::fs::remove_file(&src).unwrap();
+    }
+}
