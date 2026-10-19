@@ -19,6 +19,7 @@ on:
       - tests/slate-disagreements.tsv
       - tests/slate-writes.tsv
       - tests/scripts/slate-write-workflow.sh
+      - tests/scripts/slate-write-grading.sh
       - scripts/slate-read-compare.py
       - tests/scripts/slate-read-compare.sh
       - tests/scripts/slate-writer-capture.sh
@@ -209,5 +210,53 @@ jobs:
           path: |
             tmp/slate-oracle/images/cli-write-at-win-verify-chkdsk.img
             tmp/slate-oracle/writes/
+          if-no-files-found: error
+          retention-days: 14
+  # Windows grades every Slate-written copy (#864): read-only chkdsk on a
+  # scratch copy of each, and the read manifest only for a copy it accepts.
+  # A copy chkdsk rejects is a Slate writer defect: named in the summary,
+  # kept with its chkdsk log, never used to grade our reader, and not a
+  # failure of this job. Runs even when the comparison disagreed.
+  slate-writes-windows:
+    name: Windows grades each Slate-written copy
+    needs: slate-check
+    if: ${{ !cancelled() }}
+    runs-on: windows-latest
+    # Three 256 MiB copies, each one read-only chkdsk and one read capture.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: slate-oracle-writes-${{ github.sha }}
+          path: tmp/slate-writes-input
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - name: Install rust-img-vhd
+        shell: pwsh
+        run: |
+          $vhd = (Select-String -Path chores.yml -Pattern '^\s*IMG_VHD_REF:\s*(\S+)').Matches[0].Groups[1].Value
+          if (-not $vhd) { throw 'IMG_VHD_REF is missing from chores.yml' }
+          git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
+          cargo install --locked --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
+      - name: Grade each Slate-written copy with read-only Windows chkdsk
+        shell: pwsh
+        run: >-
+          ./test-disks/build-slate-oracle-cases.ps1
+          -OutDir tmp/slate-write-grades
+          -SlateWrites tmp/slate-writes-input/writes/slate-writes.tsv
+          -SlateWriteImages tmp/slate-writes-input/writes/images
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: slate-oracle-write-grades-${{ github.sha }}
+          path: |
+            tmp/slate-write-grades/slate-writes-graded.tsv
+            tmp/slate-write-grades/images/*.img
+            tmp/slate-write-grades/chkdsk/
+            tmp/slate-write-grades/windows-read/
+            tmp/slate-write-grades/windows-alloc/
+            tmp/slate-write-grades/windows-read-diag/
           if-no-files-found: error
           retention-days: 14
