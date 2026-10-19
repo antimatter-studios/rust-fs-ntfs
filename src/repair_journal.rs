@@ -1068,6 +1068,16 @@ pub enum JournalLocationError {
     /// The target is a partition, and the journal's directory is on a
     /// filesystem the whole disk holding it holds (#948).
     OnTargetWholeDisk,
+    /// The journal's directory or the target is on a layered device (an
+    /// APFS container, device-mapper or md), and a device under one is
+    /// the same as, a partition of, or the disk holding a device under the
+    /// other (#952).
+    OnTargetStack {
+        /// The device under the journal's directory.
+        journal_device: String,
+        /// The device under the target it overlaps.
+        target_device: String,
+    },
     /// Something already exists at the journal path. A new journal is
     /// never written over an existing file.
     Exists,
@@ -1095,6 +1105,15 @@ impl std::fmt::Display for JournalLocationError {
             Self::OnTargetWholeDisk => write!(
                 f,
                 "the journal's directory is on the disk that holds the partition being repaired"
+            ),
+            Self::OnTargetStack {
+                journal_device,
+                target_device,
+            } => write!(
+                f,
+                "the journal's directory is on '{journal_device}' and the device being repaired \
+                 on '{target_device}', through an APFS container, device-mapper or md layer, \
+                 and the two are on the same disk"
             ),
             Self::Exists => write!(f, "a file already exists at the journal path"),
             Self::Io(e) => write!(f, "{e}"),
@@ -1198,6 +1217,66 @@ pub fn device_relation(journal: &DeviceRecord, target: &DeviceRecord) -> DeviceR
     }
 }
 
+/// The devices at the bottom of the layers under `device`: `under`
+/// lists the devices directly under a layered device (an APFS
+/// container's physical stores, a device-mapper or md device's slaves)
+/// and nothing for a device on no layer. A partition of a layered disk is
+/// on what its disk is on. A device met twice, as in a looping topology,
+/// is followed once.
+fn devices_under(
+    device: &DeviceRecord,
+    under: &dyn Fn(&str) -> Vec<DeviceRecord>,
+    seen: &mut Vec<String>,
+    bottom: &mut Vec<DeviceRecord>,
+) {
+    if seen.contains(&device.name) {
+        return;
+    }
+    seen.push(device.name.clone());
+    let mut lower = under(&device.name);
+    if lower.is_empty() && device.whole_disk != device.name {
+        lower = under(&device.whole_disk);
+    }
+    if lower.is_empty() {
+        bottom.push(device.clone());
+    }
+    for next in &lower {
+        devices_under(next, under, seen, bottom);
+    }
+}
+
+/// The refusal a journal on `journal` gets while `target` is repaired,
+/// following layered devices through `under` (#952): the refusal of
+/// their direct relationship, else [`JournalLocationError::OnTargetStack`]
+/// naming the first pair of devices at the bottom of their layers that
+/// are related, else `None`.
+pub fn layered_refusal(
+    journal: &DeviceRecord,
+    target: &DeviceRecord,
+    under: &dyn Fn(&str) -> Vec<DeviceRecord>,
+) -> Option<JournalLocationError> {
+    if let Some(refusal) = device_relation(journal, target).refusal() {
+        return Some(refusal);
+    }
+    let bottom = |device: &DeviceRecord| {
+        let mut bottom = Vec::new();
+        devices_under(device, under, &mut Vec::new(), &mut bottom);
+        bottom
+    };
+    let targets = bottom(target);
+    bottom(journal).into_iter().find_map(|journal_device| {
+        targets
+            .iter()
+            .find(|target_device| {
+                device_relation(&journal_device, target_device) != DeviceRelation::Unrelated
+            })
+            .map(|target_device| JournalLocationError::OnTargetStack {
+                journal_device: journal_device.name.clone(),
+                target_device: target_device.name.clone(),
+            })
+    })
+}
+
 /// The record of a macOS BSD device name: `disk2s1` is on `disk2`, and
 /// the raw `rdisk2s1` is the same device as `disk2s1`. A name that is not
 /// a disk is its own whole disk.
@@ -1230,6 +1309,11 @@ pub fn bsd_device_record(name: &str) -> DeviceRecord {
 /// as for tmpfs or NFS.
 pub fn sysfs_device_record(sys: &std::path::Path, major: u32, minor: u32) -> Option<DeviceRecord> {
     let dir = std::fs::canonicalize(sys.join(format!("dev/block/{major}:{minor}"))).ok()?;
+    sysfs_record_at(&dir)
+}
+
+/// The record of the sysfs block device directory `dir`.
+fn sysfs_record_at(dir: &std::path::Path) -> Option<DeviceRecord> {
     let name = dir.file_name()?.to_string_lossy().into_owned();
     let whole_disk = if dir.join("partition").exists() {
         dir.parent()?.file_name()?.to_string_lossy().into_owned()
@@ -1237,6 +1321,19 @@ pub fn sysfs_device_record(sys: &std::path::Path, major: u32, minor: u32) -> Opt
         name.clone()
     };
     Some(DeviceRecord { name, whole_disk })
+}
+
+/// The devices directly under the layered block device `name` in the
+/// sysfs tree at `sys` (#952): `class/block/<name>/slaves` links to the
+/// directory of each device a device-mapper or md device is built on.
+/// Empty for a device built on nothing, or one sysfs does not list.
+pub fn sysfs_lower_devices(sys: &std::path::Path, name: &str) -> Vec<DeviceRecord> {
+    let Ok(slaves) = std::fs::read_dir(sys.join("class/block").join(name).join("slaves")) else {
+        return Vec::new();
+    };
+    slaves
+        .filter_map(|slave| sysfs_record_at(&std::fs::canonicalize(slave.ok()?.path()).ok()?))
+        .collect()
 }
 
 /// The record of device number `dev`, a character device when `raw`, or
@@ -1275,6 +1372,20 @@ fn device_record(_dev: u64, _raw: bool) -> Option<DeviceRecord> {
     None
 }
 
+/// The devices directly under the layered device `name`: its sysfs
+/// slaves.
+#[cfg(target_os = "linux")]
+fn lower_devices(name: &str) -> Vec<DeviceRecord> {
+    sysfs_lower_devices(std::path::Path::new("/sys"), name)
+}
+
+/// The devices directly under the layered device `name`: none yet, as an
+/// APFS container's physical stores are not read (#1139).
+#[cfg(all(unix, not(target_os = "linux")))]
+fn lower_devices(_name: &str) -> Vec<DeviceRecord> {
+    Vec::new()
+}
+
 /// Check `journal` as the place an in-place repair of `target` keeps its
 /// journal, before anything is created or written (#921). It is refused,
 /// naming the reason, when:
@@ -1285,7 +1396,9 @@ fn device_record(_dev: u64, _raw: bool) -> Option<DeviceRecord> {
 /// - the target is a device and the journal's directory is on a
 ///   filesystem that device holds, a partition of it holds, or the whole
 ///   disk holding it holds (#948), the disks named through their BSD
-///   names on macOS and through sysfs on Linux;
+///   names on macOS and through sysfs on Linux, or either is on a layered
+///   device over such a disk (#952), followed through sysfs slaves on
+///   Linux;
 /// - something already exists at it, a dangling symlink included.
 ///
 /// Nothing is created at `journal` and nothing is written to `target`,
@@ -1326,7 +1439,8 @@ pub fn check_journal_location(
             device_record(directory_stat.dev, false),
             device_record(target_stat.rdev, raw),
         ) {
-            if let Some(refusal) = device_relation(&journal_device, &target_device).refusal() {
+            if let Some(refusal) = layered_refusal(&journal_device, &target_device, &lower_devices)
+            {
                 return Err(refusal);
             }
         }
