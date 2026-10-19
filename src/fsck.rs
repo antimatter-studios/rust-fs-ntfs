@@ -1011,6 +1011,14 @@ pub enum CheckFinding {
     /// The volume's `$Extend\$Quota:$Q` could not be read, so no owner's
     /// usage was compared.
     QuotaUnreadable { reason: String },
+    /// On a volume tracking quotas, the file whose base record is `record`
+    /// is `charged` in its `$STANDARD_INFORMATION`, but its allocation is
+    /// `due`: its record plus each non-resident `$DATA` stream's allocated
+    /// size, what this crate's recharge charges it (#861). Directories,
+    /// files with an `$ATTRIBUTE_LIST`, and sparse or compressed streams
+    /// are not compared: what Windows charges them is still being measured
+    /// (#1089, #1093, #1098).
+    QuotaChargeDrift { record: u64, charged: u64, due: u64 },
 }
 
 /// What [`check_io`] read, and what it found.
@@ -1109,6 +1117,9 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
     // `$STANDARD_INFORMATION`, and whether every in-use record was read.
     let mut charged = std::collections::BTreeMap::<u32, u64>::new();
     let mut every_charge_known = true;
+    // Files whose own charge is not what their allocation costs, reported
+    // only if the volume turns out to track quotas.
+    let mut charge_drift = Vec::new();
 
     // Every in-use record reads as a record.
     let bitmap = crate::mft_bitmap::locate_io(io)?;
@@ -1134,6 +1145,15 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
                     crate::write::quota_charge_of(&rec).filter(|&(o, _)| o != 0)
                 {
                     *charged.entry(owner).or_default() += charge;
+                    if let Some(due) = quota_charge_compared(&rec, record_size) {
+                        if charge != 0 && charge != due {
+                            charge_drift.push(CheckFinding::QuotaChargeDrift {
+                                record,
+                                charged: charge,
+                                due,
+                            });
+                        }
+                    }
                 }
                 if account {
                     every_claim_known &=
@@ -1180,7 +1200,7 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
     // Quota usage is compared only when every record's charge is known and
     // the log holds no work, for the same reason clusters are.
     if account && every_charge_known {
-        if let Err(e) = check_quota_usage(io, &charged, &mut findings) {
+        if let Err(e) = check_quota_usage(io, &charged, charge_drift, &mut findings) {
             findings.push(CheckFinding::QuotaUnreadable {
                 reason: e.to_string(),
             });
@@ -1201,10 +1221,12 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
 /// against `charged`, the sum of what its files' `$STANDARD_INFORMATION`
 /// charge it, as chkdsk recounts it (#678). A volume with no `$Quota`, or
 /// one whose quota control entry is missing or has tracking off, is not
-/// checked.
+/// checked. On a volume that is, `charge_drift`, the files whose own charge
+/// is not what their allocation costs (#861), is reported too.
 fn check_quota_usage<T: FsckIo>(
     io: &mut T,
     charged: &std::collections::BTreeMap<u32, u64>,
+    charge_drift: Vec<CheckFinding>,
     findings: &mut Vec<CheckFinding>,
 ) -> Result<(), Error> {
     use crate::view_index::{data_io, keys_io, QUOTA_INDEX, QUOTA_PATH};
@@ -1232,6 +1254,7 @@ fn check_quota_usage<T: FsckIo>(
     if field(&control, QUOTA_DATA_FLAGS, 4)? & u64::from(QUOTA_FLAG_TRACKING_ENABLED) == 0 {
         return Ok(());
     }
+    findings.extend(charge_drift);
     let mut seen = std::collections::BTreeSet::new();
     for (key, _) in keys_io(io, quota_rec, QUOTA_INDEX)? {
         let owner =
@@ -1264,6 +1287,33 @@ fn check_quota_usage<T: FsckIo>(
         }
     }
     Ok(())
+}
+
+/// What the file whose base record is `record` is due to be charged, as
+/// this crate's recharge works it out ([`crate::write::quota_charge_due`]),
+/// or `None` when its charge is not compared: an extension record, which
+/// carries no charge of its own; a directory; a file with an
+/// `$ATTRIBUTE_LIST` (what Windows charges for extension records is
+/// #1093); and one with a sparse (#1089) or compressed (#1098) `$DATA`
+/// stream, whose charges Windows has not been measured making yet.
+fn quota_charge_compared(record: &[u8], record_size: u64) -> Option<u64> {
+    const SPARSE_OR_COMPRESSED: u16 = 0x8000 | 0x00FF;
+    const ATTR_FLAGS: usize = 0x0C;
+    let base = record.get(REC_BASE_REFERENCE..REC_BASE_REFERENCE + 8)?;
+    if base != [0; 8]
+        || crate::mft_io::record_flags(record) & crate::mft_io::MFT_FLAG_DIRECTORY != 0
+        || crate::attr_io::find_attribute(record, AttrType::AttributeList, None).is_some()
+    {
+        return None;
+    }
+    let plain = crate::attr_io::iter_attributes(record)
+        .filter(|a| a.type_code == AttrType::Data as u32)
+        .all(|a| {
+            record
+                .get(a.attr_offset + ATTR_FLAGS..a.attr_offset + ATTR_FLAGS + 2)
+                .is_some_and(|f| u16::from_le_bytes([f[0], f[1]]) & SPARSE_OR_COMPRESSED == 0)
+        });
+    plain.then(|| crate::write::quota_charge_due(record, record_size))
 }
 
 /// The records `$MFTMirr` holds, as stored: as many as its data declares,
