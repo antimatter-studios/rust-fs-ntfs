@@ -28,8 +28,23 @@ fn fresh_volume(tag: &str) -> (String, PathIo) {
     let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
     format_filesystem(&mut io, VOL_SIZE, 4096, 1024, None, Some(1)).expect("format_filesystem");
     write::create_file_io(&mut io, "/", "f").expect("create /f");
+    assert_eq!(
+        write::read_security_id_io(&mut io, "/f").expect("read /f security id"),
+        Some(0x100),
+        "a newly created file inherits a descriptor present in $Secure:$SII"
+    );
     <PathIo as BlockIo>::sync(&mut io).expect("sync");
     (img, io)
+}
+
+#[test]
+fn a_new_directory_inherits_a_valid_security_descriptor() {
+    let (_img, mut io) = fresh_volume("mkdir-inherits-security");
+    write::mkdir_io(&mut io, "/", "dir").expect("mkdir /dir");
+    assert_eq!(
+        write::read_security_id_io(&mut io, "/dir").expect("read /dir security id"),
+        Some(0x100)
+    );
 }
 
 fn refused(id: u32, got: Result<(), fs_ntfs::error::Error>) {
