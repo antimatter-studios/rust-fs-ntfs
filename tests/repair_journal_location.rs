@@ -8,7 +8,7 @@
 //!
 //! A journal on a filesystem the target device holds cannot be set up in
 //! CI without root, so that comparison is tested over `stat` values.
-#![cfg(feature = "plan-file")]
+#![cfg(all(feature = "plan-file", unix))]
 
 mod common;
 
@@ -128,7 +128,11 @@ fn a_journal_location_that_is_missing_the_target_or_taken_is_refused_with_nothin
 
     // A symlink to the target.
     let soft = dir.join("soft.journal");
-    std::os::unix::fs::symlink(&img, &soft).expect("symlink to the target");
+    std::os::unix::fs::symlink(
+        std::fs::canonicalize(&img).expect("canonicalize target"),
+        &soft,
+    )
+    .expect("symlink to the target");
     refused(
         &soft,
         &img,
