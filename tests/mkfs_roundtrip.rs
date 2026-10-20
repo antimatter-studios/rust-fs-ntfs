@@ -98,6 +98,36 @@ fn raw_attribute(dev: &MemDev, record_number: u64, attr_type: u32, name: &str) -
 }
 
 #[test]
+fn created_records_reference_the_parent_security_descriptor() {
+    use ntfs::structured_values::NtfsStandardInformation;
+
+    let mut dev = MemDev::new(VOL_SIZE);
+    format_filesystem(&mut dev, VOL_SIZE, 4096, 4096, None, None).unwrap();
+    let directory = fs_ntfs::write::mkdir_io(&mut dev, "/", "directory").unwrap();
+    let file = fs_ntfs::write::create_file_io(&mut dev, "/", "file").unwrap();
+    let nested = fs_ntfs::write::create_file_io(&mut dev, "/directory", "nested").unwrap();
+
+    // The independent reader must see mkfs's existing catalog ID in
+    // every new record, including creation beneath a new directory.
+    let mut cursor = std::io::Cursor::new(&dev.buf);
+    let ntfs = Ntfs::new(&mut cursor).unwrap();
+    for number in [5, directory, file, nested] {
+        let record = ntfs.file(&mut cursor, number).unwrap();
+        let mut attributes = record.attributes();
+        let item = attributes.next(&mut cursor).unwrap().unwrap();
+        let attribute = item.to_attribute().unwrap();
+        assert_eq!(
+            attribute.ty().unwrap(),
+            NtfsAttributeType::StandardInformation
+        );
+        let info = attribute
+            .resident_structured_value::<NtfsStandardInformation>()
+            .unwrap();
+        assert_eq!(info.security_id(), Some(0x100), "record {number}");
+    }
+}
+
+#[test]
 fn format_and_parse_back() {
     let mut dev = MemDev::new(VOL_SIZE);
     format_filesystem(

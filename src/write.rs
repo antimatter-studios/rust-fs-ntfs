@@ -416,15 +416,22 @@ fn security_id_is_defined_io<T: BlockIo + ?Sized>(
 /// Pick a valid security descriptor for a newly created child. Files inherit
 /// their parent's descriptor; when the parent uses the implicit zero id or
 /// the old 48-byte STANDARD_INFORMATION form, use the volume's canonical
-/// default descriptor instead. A new 72-byte STANDARD_INFORMATION must not
-/// carry security_id=0: that id has no entry in $Secure:$SII.
+/// default descriptor instead. A nonzero parent id that is absent from the
+/// catalog is corruption, so refuse rather than silently changing its ACL.
+/// A new 72-byte STANDARD_INFORMATION must not carry security_id=0: that id
+/// has no entry in $Secure:$SII.
 fn inherited_security_id_io<T: BlockIo + ?Sized>(
     io: &mut T,
     parent_path: &str,
 ) -> Result<u32, Error> {
     if let Some(id) = read_security_id_io(io, parent_path)? {
-        if id != 0 && security_id_is_defined_io(io, id)? {
-            return Ok(id);
+        if id != 0 {
+            if security_id_is_defined_io(io, id)? {
+                return Ok(id);
+            }
+            return Err(Error::refused(format!(
+                "parent security id {id:#x} names no descriptor in $Secure:$SII"
+            )));
         }
     }
     const DEFAULT_SECURITY_ID: u32 = 0x100;
@@ -8864,6 +8871,24 @@ mod tests {
     }
 
     // --- create_file_io -------------------------------------------------------
+
+    #[test]
+    fn creation_refuses_an_undefined_parent_security_id_without_writing() {
+        let mut dev = fresh_vol();
+        update_mft_record_io(&mut dev, 5, |record| {
+            let off = si_security_id_offset(record)?;
+            record[off..off + 4].copy_from_slice(&0x200u32.to_le_bytes());
+            Ok(())
+        })
+        .unwrap();
+        let before = dev.buf.clone();
+        let err = create_file_io(&mut dev, "/", "file").unwrap_err();
+        assert!(err.contains("parent security id 0x200"), "{err}");
+        assert_eq!(dev.buf, before);
+        let err = mkdir_io(&mut dev, "/", "directory").unwrap_err();
+        assert!(err.contains("parent security id 0x200"), "{err}");
+        assert_eq!(dev.buf, before);
+    }
 
     // ---------------------------------------------------------------
     // A non-resident header has to agree with its own run list
