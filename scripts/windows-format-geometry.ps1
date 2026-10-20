@@ -222,6 +222,11 @@ public static class GeometryRetrievalPointers {
     @([GeometryRetrievalPointers]::Query($Target) | ForEach-Object {
         [pscustomobject][ordered]@{ vcn = $_[0]; next_vcn = $_[1]; lcn = $_[2] } })
 }
+function Get-NtfsLogFilePath([string]$Letter) {
+    # Windows protects NTFS metadata files from ordinary drive-letter opens.
+    # The device namespace opens the volume's system file for its extent query.
+    '\\.\' + $Letter + ':\$LogFile'
+}
 function Get-LargeClusterLayout([string]$Letter, [int]$Size) {
     $targets = [ordered]@{ mftmirr = $Letter + ':\$MFTMirr'; sds = $Letter + ':\$Secure:$SDS';
         root_index = $Letter + ':\:$I30:$INDEX_ALLOCATION' }
@@ -497,7 +502,7 @@ function Invoke-WindowsSectorGeometryCapture([string]$OutDir, [int]$SectorBytes 
         $index = $base + $root.lcn * $row.boot.cluster_bytes
         $row.root_index_usa = ConvertFrom-UpdateSequenceHeader (Read-GeometryDisk $disk.Number $index $row.boot.index_block_bytes) 'INDX'
         if ($SectorBytes -eq 512) {
-            $row.logfile = ConvertFrom-RetrievalExtents (Get-NtfsStreamExtents ($letter + ':\$LogFile'))
+            $row.logfile = ConvertFrom-RetrievalExtents (Get-NtfsStreamExtents (Get-NtfsLogFilePath $letter))
         }
         ConvertTo-Json -InputObject ([pscustomobject]$row) -Depth 8 | Set-Content $rowPath -Encoding utf8
         if ($SectorBytes -eq 512) { Assert-PhysicalSectorGeometryRow ([pscustomobject]$row) $PhysicalBytes }
