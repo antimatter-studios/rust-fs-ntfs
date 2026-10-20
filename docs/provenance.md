@@ -149,6 +149,13 @@ extension record, retaining the attributes themselves unchanged. The same
 Windows job requires damage on these exact copies and retains both verdicts;
 the untouched Windows volume remains the clean control.
 
+The self-entry check (#1040, part of #823) inserts an entry for the list
+itself between `$STANDARD_INFORMATION` and the following type, preserving
+every existing entry and the list's allocation. Its type, base reference,
+sequence, lowest VCN and instance identify the actual list attribute. The
+same Windows job requires `chkdsk` to report this exact copy damaged and
+retains both verdicts; no Windows VM is run during local development.
+
 The listed-directory cycle (#818) uses Windows' own enumeration, EA query,
 stream readback and `chkdsk` to grade the grown and folded indexes. Directory
 stream readback uses the documented [FindFirstStreamW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirststreamw),
