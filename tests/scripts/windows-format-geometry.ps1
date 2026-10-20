@@ -16,6 +16,7 @@ $requests = @(Get-FormatGeometryRequests)
 Assert-Geometry ($requests.Count -eq 26) 'exactly 26 geometry requests'
 Assert-Geometry (($requests | Where-Object allocation_unit_bytes -eq 512).Count -eq 2) 'both 512-byte modes'
 Assert-Geometry (($requests | Where-Object allocation_unit_bytes -eq 2097152).Count -eq 2) 'both 2 MiB modes'
+Assert-Geometry ((Get-NtfsLogFilePath 'E') -ceq '\\.\E:\$LogFile') 'the volume system-file path uses the device namespace'
 Assert-Geometry (($requests | Where-Object large_frs).Count -eq 13) '13 large-record requests'
 $boot = [byte[]]::new(512)
 [Text.Encoding]::ASCII.GetBytes('NTFS    ').CopyTo($boot, 3)
@@ -175,5 +176,5 @@ $diff = @(Compare-PhysicalSectorGeometryRows $row512n $row512e)
 Assert-Geometry (($diff -join ',') -eq 'boot.mft_lcn,logfile.clusters') 'the diff names each changed field'
 $row512e.partition_offset = 1048576
 Assert-Geometry (@(Compare-PhysicalSectorGeometryRows $row512n $row512e) -contains 'partition_offset') 'the diff names a moved partition'
-if ($checks -ne 59) { throw "only $checks geometry contracts executed, expected 59" }
-Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 59)"
+if ($checks -ne 60) { throw "only $checks geometry contracts executed, expected 60" }
+Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 60)"
