@@ -223,9 +223,9 @@ public static class GeometryRetrievalPointers {
         [pscustomobject][ordered]@{ vcn = $_[0]; next_vcn = $_[1]; lcn = $_[2] } })
 }
 function Get-NtfsLogFilePath([string]$Letter) {
-    # Windows protects NTFS metadata files from ordinary drive-letter opens.
-    # The device namespace opens the volume's system file for its extent query.
-    '\\.\' + $Letter + ':\$LogFile'
+    # This is a file path, so use the extended file namespace. The device
+    # namespace (\\.\) is for device objects, not files on a volume.
+    '\\?\' + $Letter + ':\$LogFile'
 }
 function Get-LargeClusterLayout([string]$Letter, [int]$Size) {
     $targets = [ordered]@{ mftmirr = $Letter + ':\$MFTMirr'; sds = $Letter + ':\$Secure:$SDS';
