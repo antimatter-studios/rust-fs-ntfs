@@ -72,6 +72,73 @@ fn the_untouched_windows_attribute_list_is_clean() {
 }
 
 #[test]
+fn an_attribute_list_that_lists_itself_is_reported() {
+    let (img, base, mut list) = copy("self-entry");
+    let mut io = PathIo::open_rw(&img).unwrap();
+    let (_, record) = mft_io::read_mft_record_io(&mut io, base).unwrap();
+    let loc = attr_io::find_attribute(&record, AttrType::AttributeList, None).unwrap();
+    assert!(
+        !loc.is_resident,
+        "Windows' 96 streams need a non-resident list"
+    );
+    let at = u16::from_le_bytes([list[4], list[5]]) as usize;
+    assert_eq!(
+        u32::from_le_bytes(list[..4].try_into().unwrap()),
+        AttrType::StandardInformation as u32
+    );
+    assert!(
+        u32::from_le_bytes(list[at..at + 4].try_into().unwrap()) > AttrType::AttributeList as u32
+    );
+    // Add a correctly ordered entry identifying the list itself. No original
+    // entry is removed or changed, and its two allocated clusters still fit.
+    let mut entry = [0u8; 32];
+    entry[..4].copy_from_slice(&(AttrType::AttributeList as u32).to_le_bytes());
+    entry[4..6].copy_from_slice(&32u16.to_le_bytes());
+    entry[7] = 0x1a;
+    let sequence = u16::from_le_bytes([record[0x10], record[0x11]]);
+    entry[16..24].copy_from_slice(&(base | (u64::from(sequence) << 48)).to_le_bytes());
+    entry[24..26].copy_from_slice(&loc.attribute_id.to_le_bytes());
+    list.splice(at..at, entry);
+    let allocated = u64::from_le_bytes(
+        record[loc.attr_offset + 40..loc.attr_offset + 48]
+            .try_into()
+            .unwrap(),
+    );
+    assert!(list.len() as u64 <= allocated);
+    write_list(&mut io, base, &list);
+    mft_io::update_mft_record_io(&mut io, base, |record| {
+        for offset in [48, 56] {
+            record[loc.attr_offset + offset..loc.attr_offset + offset + 8]
+                .copy_from_slice(&(list.len() as u64).to_le_bytes());
+        }
+        Ok(())
+    })
+    .unwrap();
+    <PathIo as BlockIo>::sync(&mut io).unwrap();
+    drop(io);
+    let before = std::fs::read(&img).unwrap();
+    let mut io = PathIo::open_ro(&img).unwrap();
+    let report = fsck::check_io(&mut io).unwrap();
+    if std::env::var_os("NTFS_LIST_CHECK_IMAGES").is_some() {
+        std::fs::write(img.with_extension("findings.txt"), format!("{report:#?}")).unwrap();
+    }
+    assert_eq!(report.findings.len(), 1, "{report:#?}");
+    assert!(
+        report.findings.iter().any(|f| matches!(f,
+            CheckFinding::BadAttributeList { record, reason }
+                if *record == base && reason.contains(&format!("entry at {at}"))
+                    && reason.contains("lists itself") && reason.contains("0x20")
+        )),
+        "{report:#?}"
+    );
+    assert_eq!(
+        std::fs::read(&img).unwrap(),
+        before,
+        "checking must not write"
+    );
+}
+
+#[test]
 fn each_entry_field_must_identify_an_attribute_in_its_record() {
     let mut missed = Vec::new();
     for tag in ["type", "name", "vcn", "instance"] {

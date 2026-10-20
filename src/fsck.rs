@@ -1377,6 +1377,7 @@ const LIST_ENTRY_MIN: usize = 0x1A;
 /// in use, whose sequence number is not the entry's, or whose base
 /// reference names another file; or an entry identifies no attribute in
 /// that record by type, exact UTF-16 name, lowest VCN and instance (#821).
+/// An entry for the list itself is invalid even when it matches (#1040).
 /// `rec` is the fixed-up base record. A record with no list, or an
 /// extension record, is left alone.
 fn check_list_records<T: FsckIo>(
@@ -1414,6 +1415,13 @@ fn check_list_records<T: FsckIo>(
                 "its $ATTRIBUTE_LIST entry at {at} has length {length}, which the list's {} \
                  bytes cannot hold",
                 value.len()
+            ));
+        }
+        if u32::from_le_bytes(value[at..at + 4].try_into().expect("type"))
+            == AttrType::AttributeList as u32
+        {
+            report(format!(
+                "its $ATTRIBUTE_LIST entry at {at} has type 0x20 and lists itself"
             ));
         }
         let reference = u64_le(&value, at + LIST_ENTRY_REFERENCE);
@@ -2909,6 +2917,68 @@ mod check_tests {
             report.logfile,
             LogfileState::Clean(crate::logfile::CleanBecause::MarkedClean)
         );
+    }
+
+    #[test]
+    fn an_attribute_list_entry_for_itself_is_reported() {
+        let mut dev = fresh();
+        let base = crate::write::create_file_io(&mut dev, "/", "listed").unwrap();
+        for i in 0..16 {
+            crate::write::write_named_stream_io(
+                &mut dev,
+                "/listed",
+                &format!("stream{i:02}"),
+                &[42; 400],
+            )
+            .unwrap();
+        }
+        assert!(check_io(&mut dev).unwrap().findings.is_empty());
+        let mut list =
+            crate::read::read_attribute_value(&mut dev, base, AttrType::AttributeList, None)
+                .unwrap();
+        let (_, record) = crate::mft_io::read_mft_record_io(&mut dev, base).unwrap();
+        let loc = crate::attr_io::find_attribute(&record, AttrType::AttributeList, None).unwrap();
+        assert!(loc.is_resident);
+        // Insert after $STANDARD_INFORMATION, preserving type order and every
+        // existing entry. Every field identifies the actual list attribute.
+        let at = u16::from_le_bytes([list[4], list[5]]) as usize;
+        assert_eq!(
+            u32::from_le_bytes(list[..4].try_into().unwrap()),
+            AttrType::StandardInformation as u32
+        );
+        assert!(
+            u32::from_le_bytes(list[at..at + 4].try_into().unwrap())
+                > AttrType::AttributeList as u32
+        );
+        let mut entry = [0u8; 32];
+        entry[..4].copy_from_slice(&(AttrType::AttributeList as u32).to_le_bytes());
+        entry[4..6].copy_from_slice(&32u16.to_le_bytes());
+        entry[7] = LIST_ENTRY_MIN as u8;
+        let sequence = u16::from_le_bytes([record[REC_SEQUENCE], record[REC_SEQUENCE + 1]]);
+        let reference = base | (u64::from(sequence) << 48);
+        entry[16..24].copy_from_slice(&reference.to_le_bytes());
+        entry[24..26].copy_from_slice(&loc.attribute_id.to_le_bytes());
+        list.splice(at..at, entry);
+        crate::mft_io::update_mft_record_io(&mut dev, base, |record| {
+            crate::attr_resize::resize_resident_value(record, loc.attr_offset, list.len() as u32)?;
+            let value_at = loc.attr_offset + loc.resident_value_offset.unwrap() as usize;
+            record[value_at..value_at + list.len()].copy_from_slice(&list);
+            Ok(())
+        })
+        .unwrap();
+        let before = dev.0.clone();
+        let report = check_io(&mut dev).unwrap();
+        assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+        assert!(
+            report.findings.iter().any(|f| matches!(f,
+                CheckFinding::BadAttributeList { record, reason }
+                    if *record == base && reason.contains(&format!("entry at {at}"))
+                        && reason.contains("lists itself") && reason.contains("0x20")
+            )),
+            "{:?}",
+            report.findings
+        );
+        assert_eq!(dev.0, before, "checking must not write");
     }
 
     #[test]
