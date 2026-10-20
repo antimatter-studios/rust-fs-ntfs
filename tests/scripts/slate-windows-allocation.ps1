@@ -38,8 +38,18 @@ try {
             & fsutil sparse setflag "${root}sparse" | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "fsutil sparse setflag exited $LASTEXITCODE" }
             $stream = [IO.File]::Open("${root}sparse", 'Open', 'ReadWrite')
-            try { $stream.SetLength(1MB); $stream.Position = 1MB - 4KB; $stream.Write($bytes, 0, 4KB) }
+            try { $stream.SetLength(1MB) }
             finally { $stream.Dispose() }
+            # Make the leading range a hole, then write the tail so its clusters
+            # cannot be released with the zero range on Windows.
+            & fsutil sparse setrange "${root}sparse" 0 (1MB - 64KB) | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "fsutil sparse setrange exited $LASTEXITCODE" }
+            $stream = [IO.File]::Open("${root}sparse", 'Open', 'ReadWrite')
+            try {
+                $stream.Position = 1MB - 4KB
+                $stream.Write($bytes, 0, 4KB)
+                $stream.Flush($true)
+            } finally { $stream.Dispose() }
             $captured.volumeFree = (Get-Volume -DriveLetter $root.Substring(0, 1)).SizeRemaining
             $captured.manifest = Get-SlateWindowsAllocation -Root $root -Case 'contract' -ImageSha256 $digest
             $captured.again = Get-SlateWindowsAllocation -Root $root -Case 'contract' -ImageSha256 $digest
@@ -80,9 +90,10 @@ try {
     # NTFS may allocate a whole 16-cluster compression unit for the write.
     $runs = @($sparse.extents)
     $last = $runs[$runs.Count - 1]
+    $sparseDescription = $sparse | ConvertTo-Json -Depth 8 -Compress
     Assert-Allocation ($runs.Count -ge 2 -and $runs[0].vcn -eq 0 -and $null -eq $runs[0].lcn -and
         $null -ne $last.lcn -and $last.vcn + $last.clusters -eq 256 -and
-        $sparse.allocated_clusters -ge 1 -and $sparse.allocated_clusters -le 16) 'a sparse stream records its leading hole and its allocated tail'
+        $sparse.allocated_clusters -ge 1 -and $sparse.allocated_clusters -le 16) "a sparse stream records its leading hole and its allocated tail: $sparseDescription"
     $directory = @($manifest.entries | Where-Object path -CEQ '/dir')[0]
     Assert-Allocation ($directory.kind -eq 'directory' -and $directory.streams.Count -eq 0) 'a directory without named streams has no stream records'
     Assert-Allocation (($manifest | ConvertTo-Json -Depth 10 -Compress) -ceq
