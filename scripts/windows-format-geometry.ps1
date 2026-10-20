@@ -101,14 +101,12 @@ function Assert-SectorGeometryRow($Row, [int]$SectorBytes = 4096) {
     Assert-FormatGeometryMatch $Row.boot $Row.fsutil $Row.boot.cluster_bytes
 }
 # 512e beside 512n: the row comes from a disk reporting 512-byte logical
-# sectors and the physical size asked for, with the extra layout the 512e
-# comparison needs ($LogFile and where the partition starts).
+# sectors and the physical size asked for. Windows keeps the live $LogFile
+# metadata file locked against extent queries, so the comparison uses the
+# partition and other filesystem geometry that Windows exposes.
 function Assert-PhysicalSectorGeometryRow($Row, [int]$PhysicalBytes) {
-    foreach ($field in 'partition_offset', 'logfile') {
+    foreach ($field in 'partition_offset') {
         if ($null -eq $Row.$field) { throw "the $PhysicalBytes-byte physical sector row lacks $field" }
-    }
-    if ($null -eq $Row.logfile.lcn -or -not $Row.logfile.clusters) {
-        throw "the $PhysicalBytes-byte physical sector row lacks the `$LogFile layout"
     }
     Assert-SectorGeometryRow $Row 512
     if ($Row.physical_sector_bytes -ne $PhysicalBytes) {
@@ -126,7 +124,6 @@ function Get-PhysicalSectorComparedFields {
     'boot.record_bytes', 'boot.clusters_per_index_block_byte', 'boot.index_block_bytes', 'boot.mft_lcn',
     'boot.mftmirr_lcn', 'boot.number_sectors',
     'fsutil.bytes_per_sector', 'fsutil.cluster_bytes', 'fsutil.record_bytes', 'fsutil.mft_lcn', 'fsutil.mftmirr_lcn',
-    'logfile.lcn', 'logfile.clusters',
     'mft_usa.usa_offset', 'mft_usa.usa_count', 'mft_usa.stride_bytes',
     'root_index_usa.usa_offset', 'root_index_usa.usa_count', 'root_index_usa.stride_bytes'
 }
@@ -221,11 +218,6 @@ public static class GeometryRetrievalPointers {
     }
     @([GeometryRetrievalPointers]::Query($Target) | ForEach-Object {
         [pscustomobject][ordered]@{ vcn = $_[0]; next_vcn = $_[1]; lcn = $_[2] } })
-}
-function Get-NtfsLogFilePath([string]$Letter) {
-    # This is a file path, so use the extended file namespace. The device
-    # namespace (\\.\) is for device objects, not files on a volume.
-    '\\?\' + $Letter + ':\$LogFile'
 }
 function Get-LargeClusterLayout([string]$Letter, [int]$Size) {
     $targets = [ordered]@{ mftmirr = $Letter + ':\$MFTMirr'; sds = $Letter + ':\$Secure:$SDS';
@@ -477,7 +469,7 @@ function Invoke-WindowsSectorGeometryCapture([string]$OutDir, [int]$SectorBytes 
             disk_info = 'Get-Disk LogicalSectorSize and PhysicalSectorSize of the attached image';
             boot_read = "$SectorBytes bytes at the scratch partition offset through PhysicalDrive";
             backup_boot_read = "$SectorBytes bytes at NumberSectors x $SectorBytes and at the partition's last sector, kept when the first 512 bytes equal the boot sector's";
-            logfile_read = 'FSCTL_GET_RETRIEVAL_POINTERS on <scratch-drive>:\$LogFile: its first LCN and allocated clusters';
+            logfile_read = 'not captured: Windows denies opening the live NTFS $LogFile metadata file for extent queries';
             usa_read = "the boot sector's record size at Mft Start Lcn, and its index block size at the first LCN FSCTL_GET_RETRIEVAL_POINTERS reports for <scratch-drive>:\:`$I30:`$INDEX_ALLOCATION, both through PhysicalDrive" } |
             ConvertTo-Json -Depth 5 | Set-Content (Join-Path $out "$name-provenance.json") -Encoding utf8
         Format-Volume -DriveLetter $letter -FileSystem NTFS -NewFileSystemLabel SECTORS -Force -Confirm:$false | Out-Null
@@ -501,9 +493,6 @@ function Invoke-WindowsSectorGeometryCapture([string]$OutDir, [int]$SectorBytes 
         $root = ConvertFrom-RetrievalExtents (Get-NtfsStreamExtents ($letter + ':\:$I30:$INDEX_ALLOCATION'))
         $index = $base + $root.lcn * $row.boot.cluster_bytes
         $row.root_index_usa = ConvertFrom-UpdateSequenceHeader (Read-GeometryDisk $disk.Number $index $row.boot.index_block_bytes) 'INDX'
-        if ($SectorBytes -eq 512) {
-            $row.logfile = ConvertFrom-RetrievalExtents (Get-NtfsStreamExtents (Get-NtfsLogFilePath $letter))
-        }
         ConvertTo-Json -InputObject ([pscustomobject]$row) -Depth 8 | Set-Content $rowPath -Encoding utf8
         if ($SectorBytes -eq 512) { Assert-PhysicalSectorGeometryRow ([pscustomobject]$row) $PhysicalBytes }
         else { Assert-SectorGeometryRow ([pscustomobject]$row) $SectorBytes }
