@@ -70,8 +70,10 @@ measured, not assumed. The same collector makes each disk with the logical
 and physical sizes set separately, and `Get-Disk` must report 512 and 4096
 (512e) or 512 and 512 (512n) before anything is formatted, so a mislabelled
 disk cannot pass. Each row (`sector-512.json`, `sector-512-4096.json`) carries
-the 4Kn row's fields plus the partition offset and `$LogFile`'s first LCN and
-allocated clusters from `FSCTL_GET_RETRIEVAL_POINTERS`. `sector-512e-diff.json`
+the 4Kn row's fields plus the partition offset. Windows denies opening its
+live `$LogFile` metadata file for extent queries, so its layout is recorded as
+unavailable in the provenance and is not part of this comparison.
+`sector-512e-diff.json`
 then names every compared field where the two formats differ; the physical
 sector size itself is the variable under test and is not compared. An empty
 list is a valid, recorded result: it means Windows' layout does not depend on
