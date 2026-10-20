@@ -183,12 +183,42 @@ public static class GeometryRetrievalPointers {
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool DeviceIoControl(SafeFileHandle device, uint code, ref long input, int inputSize,
         byte[] output, int outputSize, out int returned, IntPtr overlapped);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool OpenProcessToken(IntPtr process, int access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool LookupPrivilegeValueW(string system, string name, out long luid);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPrivilege state,
+        int length, IntPtr previous, IntPtr returned);
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr handle);
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    struct TokenPrivilege { public int Count; public long Luid; public int Attributes; }
     const uint FsctlGetRetrievalPointers = 0x00090073;
     const int ErrorMoreData = 234;
+    static void EnableBackupPrivilege() {
+        IntPtr token;
+        // TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
+        if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenProcessToken");
+        try {
+            var state = new TokenPrivilege { Count = 1, Attributes = 2 }; // SE_PRIVILEGE_ENABLED
+            if (!LookupPrivilegeValueW(null, "SeBackupPrivilege", out state.Luid))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "LookupPrivilegeValueW");
+            if (!AdjustTokenPrivileges(token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "AdjustTokenPrivileges");
+            // ERROR_NOT_ALL_ASSIGNED: this runner's token lacks the privilege.
+            int status = Marshal.GetLastWin32Error();
+            if (status != 0) throw new Win32Exception(status, "SeBackupPrivilege");
+        } finally { CloseHandle(token); }
+    }
     // This FILE_ANY_ACCESS control needs a metadata-only handle. Request
     // no file access, all share modes, OPEN_EXISTING, and backup semantics
-    // for directory index streams; protected metadata need not grant reads.
+    // for directory index streams; enable backup privilege for protected metadata.
     public static long[][] Query(string target) {
+        EnableBackupPrivilege();
         using (SafeFileHandle handle = CreateFileW(target, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero)) {
             if (handle.IsInvalid) {
                 int openError = Marshal.GetLastWin32Error();
