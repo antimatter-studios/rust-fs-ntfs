@@ -13,6 +13,12 @@
 #
 # STEPS
 #   mkfs IMAGE SIZE_MIB LABEL        mkfs.ntfs --size, exit 0, the label read back
+#   mkfs-plan IMAGE SIZE_MIB LABEL CLUSTER RECORD SERIAL
+#                                    mkfs.ntfs --dry-run reports a plan and creates
+#                                    nothing; the same command without --dry-run
+#                                    applies that plan. IMAGE.plan then holds the
+#                                    plan's fields, one `key<TAB>value` per line,
+#                                    for win-ntfsinfo.ps1
 #   set-dirty IMAGE                  fs.ntfs set dirty true
 #   corrupt IMAGE mirror|signature   damage the volume by its on-disk layout
 #   fsck-finds IMAGE KIND            fsck.ntfs exits 4 and reports a finding of KIND
@@ -129,6 +135,34 @@ case "$step" in
         [ "$status" -eq 0 ] || die "mkfs.ntfs exited $status: $(cat "$image.cli-err")"
         has "\"label\": \"$2\"" || die "mkfs.ntfs's report does not read back the label $2"
         has '"formatted": true' || die "mkfs.ntfs's report does not say it formatted"
+        ;;
+    mkfs-plan)
+        [ $# -eq 5 ] || die "mkfs-plan IMAGE SIZE_MIB LABEL CLUSTER RECORD SERIAL"
+        mkdir -p "$(dirname "$image")"
+        rm -f "$image" "$image.plan"
+        flags=(--size "$1M" --label "$2" --cluster-size "$3" --mft-record-size "$4" --serial "$5")
+        run mkfs --dry-run "${flags[@]}" "$image"
+        [ "$status" -eq 0 ] || die "mkfs.ntfs --dry-run exited $status: $(cat "$image.cli-err")"
+        [ ! -e "$image" ] || die "mkfs.ntfs --dry-run created $image"
+        # The plan is the report's one nested object, so its fields are the
+        # only ones indented twice in the pretty JSON.
+        plan_fields() {
+            awk -F '": ' '/^    "[a-z_]+": / {
+                key = $1; sub(/^    "/, "", key)
+                value = $2; sub(/,$/, "", value); gsub(/^"|"$/, "", value)
+                print key "\t" value
+            }' <<<"$out"
+        }
+        planned="$(plan_fields)"
+        [ -n "$planned" ] || die "mkfs.ntfs --dry-run reported no plan: $out"
+        for key in bytes_per_sector cluster_size mft_record_size total_sectors total_clusters mft_lcn mftmirr_lcn serial label; do
+            grep -q "^$key"$'\t' <<<"$planned" || die "the dry run's plan has no $key: $out"
+        done
+        run mkfs "${flags[@]}" "$image"
+        [ "$status" -eq 0 ] || die "mkfs.ntfs exited $status: $(cat "$image.cli-err")"
+        [ "$(plan_fields)" = "$planned" ] ||
+            die "formatting applied a plan other than the dry run's: $out"
+        printf '%s\n' "$planned" >"$image.plan"
         ;;
     set-dirty)
         run fs "$image" set dirty true

@@ -96,7 +96,7 @@ foreach ($case in $cases) {
     $length = (Get-Item -LiteralPath $image).Length
     $geometry = Get-NtfsGeometryBytes $image
     if ($geometry -gt $length) {
-        throw "$($case.Name) is $length bytes but its boot sector describes $geometry: the volume was cut short"
+        throw "$($case.Name) is $length bytes but its boot sector describes ${geometry}: the volume was cut short"
     }
 }
 
