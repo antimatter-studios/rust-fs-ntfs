@@ -481,6 +481,15 @@ jobs:
           # Four original seeds plus four declared #682 image-harness contracts.
           test "$n" -ge 8 || { echo "::error::readback contracts: $n executed, floor 8"; exit 1; }
 
+      - name: Every explorer has a stable corpus gate
+        run: |
+          read -r lines bytes < <(awk '$1 == "mkfs" { print $2, $3 }' scripts/tier-budgets.txt)
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored \
+            fuzz-coverage fuzz-coverage "$lines" "$bytes" -- \
+            cargo test --release --locked --features cli,harness --test fuzz_decoders \
+              the_gate_covers_every_explorer_target -- --exact
+          grep -Fxq 'test the_gate_covers_every_explorer_target ... ok' tmp/logs/fuzz-coverage.log
+
       - name: Operation sequences against ntfs-3g
         if: matrix.os == 'ubuntu-latest'
         timeout-minutes: 10
