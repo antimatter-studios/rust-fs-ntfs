@@ -1991,8 +1991,8 @@ jobs:
         if: always() && steps.suite.outcome != 'skipped'
         run: |
           mkdir -p tmp/merge-validation
-          cargo llvm-cov report --release --features cli,harness --json --summary-only --output-path tmp/merge-validation/coverage.json
-          cargo llvm-cov report --release --features cli,harness > tmp/merge-validation/coverage.txt
+          cargo llvm-cov report --release --json --summary-only --output-path tmp/merge-validation/coverage.json
+          cargo llvm-cov report --release > tmp/merge-validation/coverage.txt
           grep -E '^test .+ \.\.\. ok$' tmp/logs/suite.log | sort > tmp/merge-validation/passing-tests.txt
           tail -n 1 tmp/merge-validation/coverage.txt
       - name: Judge the expected red or green
