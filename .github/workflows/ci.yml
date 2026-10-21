@@ -2057,6 +2057,143 @@ jobs:
           git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
           cargo install --locked --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Probe the exact metadata denial without swallowing the original failure
+        shell: pwsh
+        env:
+          EXPECTED_SOURCE: ${{ inputs.revision }}
+        run: |
+          if ((git rev-parse HEAD).Trim() -ne $env:EXPECTED_SOURCE) { throw "wrong diagnostic source head" }
+          $ErrorActionPreference = 'Stop'
+          $path = 'test-disks/build-windows-native-read-fixtures.ps1'
+          $expectedHash = '551f63bdd022a7e6711908d22e394e49eed6c281d7255098cda4f8af845882e5'
+          $source = [IO.File]::ReadAllText($path).Replace(([char]13).ToString() + [char]10, ([char]10).ToString())
+          $sourceHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($source))).ToLowerInvariant()
+          if ($sourceHash -ne $expectedHash) {
+              throw 'native fixture source differs from the recorded exact PR head'
+          }
+          $methods = @'
+              [StructLayout(LayoutKind.Sequential)]
+              struct ProbeLuid { public uint Low; public int High; }
+              [StructLayout(LayoutKind.Sequential)]
+              struct ProbePrivileges { public uint Count; public ProbeLuid Luid; public uint Attributes; }
+              [DllImport("kernel32.dll")]
+              static extern IntPtr GetCurrentProcess();
+              [DllImport("advapi32.dll", SetLastError = true)]
+              static extern bool OpenProcessToken(IntPtr process, uint access, out SafeFileHandle token);
+              [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+              static extern bool LookupPrivilegeValueW(string system, string name, out ProbeLuid luid);
+              [DllImport("advapi32.dll", SetLastError = true)]
+              static extern bool AdjustTokenPrivileges(SafeFileHandle token, bool disableAll,
+                  ref ProbePrivileges state, uint size, out ProbePrivileges previous, out uint returned);
+          
+              public static string ProbeMetadata(string path, uint access) {
+                  using (var handle = CreateFileW(path, access, 7, IntPtr.Zero, 3,
+                      0x02000000 | 0x00200000, IntPtr.Zero)) {
+                      if (handle.IsInvalid)
+                          return String.Format("open access=0x{0:X} error={1}", access, Marshal.GetLastWin32Error());
+                      var report = new System.Text.StringBuilder(String.Format("open access=0x{0:X} ok", access));
+                      var id = new byte[52];
+                      bool ok = GetFileInformationByHandle(handle, id);
+                      int error = Marshal.GetLastWin32Error();
+                      report.AppendFormat("; by-handle ok={0} error={1}", ok, ok ? 0 : error);
+                      foreach (int kind in new int[] { 0, 1, 9 }) {
+                          uint size = kind == 0 ? 40U : kind == 1 ? 24U : 8U;
+                          var info = new byte[size];
+                          ok = GetFileInformationByHandleEx(handle, kind, info, size);
+                          error = Marshal.GetLastWin32Error();
+                          report.AppendFormat("; kind={0} ok={1} error={2}", kind, ok, ok ? 0 : error);
+                      }
+                      return report.ToString();
+                  }
+              }
+          
+              public static string ProbeWithBackup(string path) {
+                  SafeFileHandle token;
+                  if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token))
+                      throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenProcessToken for backup experiment");
+                  using (token) {
+                      ProbeLuid luid;
+                      if (!LookupPrivilegeValueW(null, "SeBackupPrivilege", out luid))
+                          throw new Win32Exception(Marshal.GetLastWin32Error(), "LookupPrivilegeValueW backup");
+                      var requested = new ProbePrivileges { Count = 1, Luid = luid, Attributes = 2 };
+                      ProbePrivileges previous;
+                      uint returned;
+                      bool adjusted = AdjustTokenPrivileges(token, false, ref requested,
+                          (uint)Marshal.SizeOf(typeof(ProbePrivileges)), out previous, out returned);
+                      int error = Marshal.GetLastWin32Error();
+                      if (!adjusted || error != 0)
+                          throw new Win32Exception(error, "AdjustTokenPrivileges backup (including not-all-assigned)");
+                      try {
+                          return ProbeMetadata(path, 0x80) + "; zero-access: " + ProbeMetadata(path, 0);
+                      } finally {
+                          if (previous.Count != 0) {
+                              ProbePrivileges ignored;
+                              bool restored = AdjustTokenPrivileges(token, false, ref previous,
+                                  (uint)Marshal.SizeOf(typeof(ProbePrivileges)), out ignored, out returned);
+                              error = Marshal.GetLastWin32Error();
+                              if (!restored || error != 0)
+                                  throw new Win32Exception(error, "restore original backup privilege state");
+                          }
+                      }
+                  }
+              }
+          
+          '@
+          $marker = '    public static void SetTimes(string path, long created, long accessed, long written, long changed) {'
+          if ([regex]::Matches($source, [regex]::Escape($marker)).Count -ne 1) { throw 'unexpected WindowsStat shape' }
+          $source = $source.Replace($marker, $methods + [Environment]::NewLine + $marker)
+          $marker = '    if (Test-Path -LiteralPath $system) {'
+          if ([regex]::Matches($source, [regex]::Escape($marker)).Count -ne 1) { throw 'unexpected system tree guard' }
+          $source = $source.Replace($marker, @'
+              $systemExistedAtEntry = [bool](Test-Path -LiteralPath $system)
+              Write-Host "system-tree-before-grant=$systemExistedAtEntry"
+              $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+              Write-Host "fixture-identity=$($identity.Name) sid=$($identity.User.Value) impersonation=$($identity.ImpersonationLevel)"
+              & whoami.exe /priv | ForEach-Object { Write-Host $_ }
+              if ($systemExistedAtEntry) {
+          '@)
+          $marker = "    foreach ($" + "dir in @('a/b/c', 'empty')) {"
+          if ([regex]::Matches($source, [regex]::Escape($marker)).Count -ne 1) { throw 'unexpected recursive fixture directory list' }
+          $source = $source.Replace($marker, @'
+              $probeSettings = Join-Path $system 'WPSettings.dat'
+              Write-Host "settings-present-immediately-after-grant=$([bool](Test-Path -LiteralPath $probeSettings))"
+              if (Test-Path -LiteralPath $probeSettings) {
+                  & icacls.exe $probeSettings 2>&1 | ForEach-Object { Write-Host "post-grant-acl $_" }
+                  try { Write-Host "post-grant-sddl=$((Get-Acl -LiteralPath $probeSettings).Sddl)" }
+                  catch { Write-Host "post-grant-sddl-error=$($_.Exception.Message)" }
+              }
+              foreach ($dir in @('a/b/c', 'empty')) {
+          '@)
+          $marker = '        $info = [WindowsStat]::Read($item.FullName)'
+          if ([regex]::Matches($source, [regex]::Escape($marker)).Count -ne 1) { throw 'unexpected recursive metadata query' }
+          $source = $source.Replace($marker, @'
+                  try {
+                      $info = [WindowsStat]::Read($item.FullName)
+                  } catch {
+                      $originalMetadataFailure = $_
+                      Write-Host "original-metadata-failure=$($item.FullName) $($_.Exception.Message)"
+                      & icacls.exe $item.FullName 2>&1 | ForEach-Object { Write-Host "failure-acl $_" }
+                      try { Write-Host "failure-sddl=$((Get-Acl -LiteralPath $item.FullName).Sddl)" }
+                      catch { Write-Host "failure-sddl-error=$($_.Exception.Message)" }
+                      Write-Host "same-access-repeat=$([WindowsStat]::ProbeMetadata($item.FullName, 0x80))"
+                      Write-Host "zero-access=$([WindowsStat]::ProbeMetadata($item.FullName, 0))"
+                      try { Write-Host "backup-enabled=$([WindowsStat]::ProbeWithBackup($item.FullName))" }
+                      catch { Write-Host "backup-experiment-error=$($_.Exception.Message)" }
+                      Write-Host "after-backup-restored=$([WindowsStat]::ProbeMetadata($item.FullName, 0x80))"
+                      $retryOwner = & takeown.exe /F $item.FullName /A 2>&1
+                      Write-Host "target-takeown-exit=$LASTEXITCODE"
+                      $retryOwner | ForEach-Object { Write-Host $_ }
+                      $retrySid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                      $retryAccess = & icacls.exe $item.FullName /grant ('*{0}:F' -f $retrySid) 2>&1
+                      Write-Host "target-grant-exit=$LASTEXITCODE"
+                      $retryAccess | ForEach-Object { Write-Host $_ }
+                      & icacls.exe $item.FullName 2>&1 | ForEach-Object { Write-Host "target-regrant-acl $_" }
+                      Write-Host "after-target-regrant=$([WindowsStat]::ProbeMetadata($item.FullName, 0x80))"
+                      throw $originalMetadataFailure
+                  }
+          '@)
+          Set-Content -LiteralPath $path -Value $source -NoNewline
+          Write-Host 'Diagnostic instrumentation installed; the original metadata error will still fail the job.'
       - name: Retain native results and complete nested PowerShell errors
         shell: pwsh
         run: |
