@@ -768,8 +768,18 @@ fn collect_entries(
         as usize;
     let total_size = read_u32_le(buf, ih_start + IH_TOTAL_SIZE_OF_ENTRIES)
         .ok_or(Error::io("index node too short to read total_size"))? as usize;
-    let mut cursor = ih_start + first_entry_rel;
-    let end = (ih_start + total_size).min(limit);
+    if first_entry_rel < INDEX_HEADER_SIZE || !first_entry_rel.is_multiple_of(8) {
+        return Err(Error::io("index node first entry is not an entry boundary"));
+    }
+    let end = ih_start
+        .checked_add(total_size)
+        .filter(|&end| end <= limit)
+        .ok_or_else(|| Error::io("index node entries run past their container"))?;
+    // A corrupt start past the declared entries is unreadable, not empty.
+    let mut cursor = ih_start
+        .checked_add(first_entry_rel)
+        .filter(|&cursor| cursor <= end)
+        .ok_or_else(|| Error::io("index node first entry runs past its entries"))?;
     while cursor < end && cursor + IE_KEY_START <= limit {
         let length =
             u16::from_le_bytes([buf[cursor + IE_LENGTH], buf[cursor + IE_LENGTH + 1]]) as usize;

@@ -315,9 +315,31 @@ public static class WindowsStat {
     static extern bool SetFileInformationByHandle(SafeFileHandle handle, int kind,
         byte[] info, uint size);
 
+    [StructLayout(LayoutKind.Sequential)]
+    struct PrivilegeIdentifier { public uint Low; public int High; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct TokenPrivilegeState {
+        public uint Count;
+        public PrivilegeIdentifier Identifier;
+        public uint Attributes;
+    }
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool OpenProcessToken(IntPtr process, uint access, out SafeFileHandle token);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool LookupPrivilegeValueW(string system, string name, out PrivilegeIdentifier identifier);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool AdjustTokenPrivileges(SafeFileHandle token, bool disableAll,
+        ref TokenPrivilegeState state, uint size, out TokenPrivilegeState previous, out uint returned);
+
     static SafeFileHandle Open(string path, uint access) {
         var h = CreateFileW(path, access, 7, IntPtr.Zero, 3, 0x02000000 | 0x00200000, IntPtr.Zero);
-        if (h.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error(), path);
+        if (h.IsInvalid) {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error,
+                $"{path}: CreateFileW access=0x{access:X}, Win32 {error}: {new Win32Exception(error).Message}");
+        }
         return h;
     }
 
@@ -338,6 +360,43 @@ public static class WindowsStat {
         using (var h = Open(path, 0x100)) {
             if (!SetFileInformationByHandle(h, 0, basic, 40))
                 throw new Win32Exception(Marshal.GetLastWin32Error(), path);
+        }
+    }
+
+    // Protected Windows system files can keep a SYSTEM-only DACL even after
+    // a successful icacls grant. Read their metadata as a backup operation,
+    // restoring the caller's exact previous privilege state on every exit.
+    // https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-adjusttokenprivileges
+    public static string[] ReadBackup(string path) {
+        SafeFileHandle token;
+        // TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES.
+        if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), path + ": open backup token");
+        using (token) {
+            PrivilegeIdentifier identifier;
+            if (!LookupPrivilegeValueW(null, "SeBackupPrivilege", out identifier))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), path + ": locate backup privilege");
+            var requested = new TokenPrivilegeState { Count = 1, Identifier = identifier, Attributes = 2 };
+            TokenPrivilegeState previous;
+            uint returned;
+            bool adjusted = AdjustTokenPrivileges(token, false, ref requested,
+                (uint)Marshal.SizeOf(typeof(TokenPrivilegeState)), out previous, out returned);
+            int error = Marshal.GetLastWin32Error();
+            // Success can still report ERROR_NOT_ALL_ASSIGNED: that is a failure.
+            if (!adjusted || error != 0)
+                throw new Win32Exception(error, path + ": enable backup privilege");
+            try {
+                return Read(path);
+            } finally {
+                if (previous.Count != 0) {
+                    TokenPrivilegeState ignored;
+                    bool restored = AdjustTokenPrivileges(token, false, ref previous,
+                        (uint)Marshal.SizeOf(typeof(TokenPrivilegeState)), out ignored, out returned);
+                    error = Marshal.GetLastWin32Error();
+                    if (!restored || error != 0)
+                        throw new Win32Exception(error, path + ": restore backup privilege");
+                }
+            }
         }
     }
 
@@ -470,5 +529,55 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-stat.img' -Label 'STAT' -Populate
         (New-Object System.Text.UTF8Encoding($false)))
 }
 
-Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img,test-disks/ntfs-format-64k.img,test-disks/ntfs-usnjrnl.img,test-disks/ntfs-inventory.img,test-disks/ntfs-stat.img |
+# Get-ChildItem supplies the paths; WindowsStat opens the reparse itself
+# for its metadata. No expected entry comes from this crate (#644).
+$walkReport = [IO.Path]::GetFullPath('test-disks/ntfs-ls-recursive.windows.tsv')
+New-WindowsFixture -ImagePath 'test-disks/ntfs-ls-recursive.img' -Label 'LSRECURSIVE' -Populate {
+    param($root)
+    $system = Join-Path $root 'System Volume Information'
+    if (Test-Path -LiteralPath $system) {
+        # WPSettings.dat keeps its own protected ACL: taking ownership of
+        # only the directory leaves the recursive grant unable to change it.
+        $ownership = & takeown.exe /F $system /A /R /D Y 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "takeown of fixture system tree failed: $($ownership -join '; ')"
+        }
+        # Grant the identity that opens the metadata handles directly;
+        # fixture readability must not depend on an enabled group SID.
+        $fixtureUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        if (-not $fixtureUserSid) { throw 'fixture enumeration has no Windows user SID' }
+        $grant = '*{0}:(OI)(CI)F' -f $fixtureUserSid
+        $access = & icacls.exe $system /grant $grant /T 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "grant of fixture enumeration access failed: $($access -join '; ')"
+        }
+    }
+    foreach ($dir in @('a/b/c', 'empty')) {
+        New-Item -ItemType Directory -Path (Join-Path $root $dir) -Force | Out-Null
+    }
+    foreach ($file in @('a/b/c/deep', 'a/b/file', 'a/hard', 'a/with space', 'B', "$([char]0x00E9)")) {
+        [IO.File]::WriteAllText((Join-Path $root $file), "contents of $file")
+    }
+    New-Item -ItemType HardLink -Path (Join-Path $root 'z') -Target (Join-Path $root 'a/hard') | Out-Null
+    New-Item -ItemType SymbolicLink -Path (Join-Path $root 'dir-link') -Value 'a' | Out-Null
+    New-Item -ItemType SymbolicLink -Path (Join-Path $root 'a/back') -Value '..' | Out-Null
+    New-Item -ItemType SymbolicLink -Path (Join-Path $root 'dangling') -Value 'missing' | Out-Null
+    New-Item -ItemType Junction -Path (Join-Path $root 'junction') -Value (Join-Path $root 'a') | Out-Null
+    # Include root's empty directories too; never follow a reparse point.
+    $items = @(Get-ChildItem -LiteralPath $root -Force) +
+        @(Get-ChildItem -LiteralPath $root -Recurse -Force -Attributes !ReparsePoint) +
+        @(Get-ChildItem -LiteralPath $root -Recurse -Force -Attributes ReparsePoint)
+    $lines = foreach ($item in ($items | Sort-Object FullName -Unique)) {
+        $rel = '/' + $item.FullName.Substring($root.Length).Replace('\', '/')
+        $info = [WindowsStat]::ReadBackup($item.FullName)
+        $kind = if ($info[3] -eq 'a000000c') { 'symlink' }
+            elseif ($info[3] -eq 'a0000003') { 'junction' }
+            elseif ($item.PSIsContainer) { 'dir' } else { 'file' }
+        $record = [Convert]::ToUInt64($info[0], 16) -band 0xFFFFFFFFFFFFL
+        "$rel`t$kind`t$($info[4])`t$record`t$($rel.Split('/').Count - 1)"
+    }
+    [IO.File]::WriteAllText($walkReport, (($lines -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
+}
+
+Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img,test-disks/ntfs-format-64k.img,test-disks/ntfs-usnjrnl.img,test-disks/ntfs-inventory.img,test-disks/ntfs-stat.img,test-disks/ntfs-ls-recursive.img |
     Format-Table Name,Length

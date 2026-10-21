@@ -811,6 +811,8 @@ jobs:
             test-disks/ntfs-inventory.fileids.txt
             test-disks/ntfs-stat.img
             test-disks/ntfs-stat.windows.tsv
+            test-disks/ntfs-ls-recursive.img
+            test-disks/ntfs-ls-recursive.windows.tsv
             test-disks/ntfs-i30-slack.img
             test-disks/ntfs-i30-slack.manifest.json
           if-no-files-found: error
@@ -992,10 +994,10 @@ jobs:
         run: |
           bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli,harness --no-fail-fast
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
-          # Previous floor 1366 plus four declared #682 image-harness contracts.
-          echo "tests executed: $n (floor 1370)"
-          if [ "$n" -lt 1370 ]; then
-              echo "::error::only $n tests executed, floor is 1370 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680, eight generator contracts in #681 and four image-harness contracts in #682. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
+          # Previous floor 1370 plus the #644 recursive-walk fault contract.
+          echo "tests executed: $n (floor 1371)"
+          if [ "$n" -lt 1371 ]; then
+              echo "::error::only $n tests executed, floor is 1371 -- baseline: 1427 ran on 2026-09-17 in run 34985102618, plus eight model contracts in #680, eight generator contracts in #681, four image-harness contracts in #682 and one recursive-walk fault contract in #644. The suite passed, so this is not a failing test and not a missing fixture (a missing fixture makes the suite FAIL, loudly). Something stopped tests from being selected: a renamed or unbuilt test binary, or a changed filter. Read tmp/logs/suite.log, uploaded as test-logs-integration."
               exit 1
           fi
       - run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness -- -D warnings
