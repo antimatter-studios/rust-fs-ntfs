@@ -2053,23 +2053,52 @@ jobs:
           git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
           cargo install --locked --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Retain native utility output without changing the commands
+      - name: Retain native results and complete nested PowerShell errors
         shell: pwsh
         run: |
           $path = 'test-disks/build-windows-native-read-fixtures.ps1'
           $source = Get-Content -Raw -LiteralPath $path
           foreach ($tool in 'takeown', 'icacls') {
-              $pattern = "(?m)(^[ \t]*& $tool\.exe[^\r\n|]+)\| Out-Null"
+              $pattern = '(?m)(^[ \t]*\$(?:ownership|access) = & ' + $tool + '\.exe[^\r\n]+)'
               $matches = [regex]::Matches($source, $pattern)
               if ($matches.Count -ne 1) { throw "expected one $tool invocation, found $($matches.Count)" }
-              $replacement = $matches[0].Groups[1].Value + '2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/fixture-' + $tool + '.txt"'
+              $variable = if ($tool -eq 'takeown') { '$ownership' } else { '$access' }
+              $replacement = '        Write-Host "before ' + $tool + '"' + "`n" + $matches[0].Value + "`n" +
+                  '        Write-Host "' + $tool + ' exit=$LASTEXITCODE"' + "`n" +
+                  '        ' + $variable + ' | Tee-Object -FilePath "$env:RUNNER_TEMP/fixture-' + $tool + '.txt" | ForEach-Object { Write-Host $_ }'
               $source = $source.Replace($matches[0].Value, $replacement)
           }
           Set-Content -LiteralPath $path -Value $source -NoNewline
-          git diff --numstat
-      - name: Build the actual Windows-native fixtures
+          $helper = 'test-disks/windows-fixture.ps1'
+          $source = Get-Content -Raw -LiteralPath $helper
+          $old = '        $failure = $_.Exception'
+          if ([regex]::Matches($source, [regex]::Escape($old)).Count -ne 1) { throw 'unexpected phase catch shape' }
+          $detail = @'
+                  $_ | Format-List * -Force | Out-String | Write-Host
+                  $exception = $_.Exception
+                  while ($exception) {
+                      Write-Host "exception-type=$($exception.GetType().FullName)"
+                      $exception | Format-List * -Force | Out-String | Write-Host
+                      if ($exception.PSObject.Properties['ErrorRecord']) {
+                          $exception.ErrorRecord | Format-List * -Force | Out-String | Write-Host
+                      }
+                      $exception = $exception.InnerException
+                  }
+          '@
+          $source = $source.Replace($old, $detail + "`n" + $old)
+          $old = '    if ($errors.Count -gt 0) { throw $errors[0].Exception }'
+          if (-not $source.Contains($old)) { throw 'unexpected phase error stream shape' }
+          $source = $source.Replace($old, '    if ($errors.Count -gt 0) { $errors | Format-List * -Force | Out-String | Write-Host; throw $errors[0].Exception }')
+          Set-Content -LiteralPath $helper -Value $source -NoNewline
+      - name: Build the actual Windows-native fixtures with diagnostic context
         shell: pwsh
-        run: pwsh -NoProfile -File test-disks/build-windows-native-read-fixtures.ps1
+        run: |
+          Start-Transcript -Path "$env:RUNNER_TEMP/fixture-transcript.txt"
+          try {
+              & ./test-disks/build-windows-native-read-fixtures.ps1
+          } finally {
+              Stop-Transcript
+          }
       - name: Retain access diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -2078,6 +2107,7 @@ jobs:
           path: |
             ${{ runner.temp }}/fixture-takeown.txt
             ${{ runner.temp }}/fixture-icacls.txt
+            ${{ runner.temp }}/fixture-transcript.txt
           if-no-files-found: error
 
   default-hook-validation:
