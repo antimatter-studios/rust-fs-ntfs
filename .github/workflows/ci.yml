@@ -23,6 +23,10 @@ on:
         description: The unmodified fuzz coverage guard must fail
         type: boolean
         default: true
+      default_lint:
+        description: Run the default-feature commit checks on GitHub
+        type: boolean
+        default: false
       native_fixture:
         description: Diagnose the Windows recursive-listing fixture instead
         type: boolean
@@ -1961,7 +1965,7 @@ jobs:
         run: bash scripts/ci-verdict.sh aggregate
 
   corpus-coverage:
-    if: inputs.native_fixture != true
+    if: inputs.native_fixture != true && inputs.default_lint != true
     name: instrumented corpus gates
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -2074,4 +2078,37 @@ jobs:
           path: |
             ${{ runner.temp }}/fixture-takeown.txt
             ${{ runner.temp }}/fixture-icacls.txt
+          if-no-files-found: error
+
+  default-hook-validation:
+    if: inputs.default_lint == true
+    name: default-feature commit checks on GitHub
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
+      - name: Verify the exact PR source
+        env:
+          EXPECTED_HEAD: ${{ inputs.revision }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.95.0'
+          components: clippy, rustfmt
+      - name: Check out the pinned tier runner
+        run: |
+          core_ref="$(sed -n 's/^  FS_CORE_REF: *//p' chores.yml | tr -d '\r')"
+          test -n "$core_ref"
+          git clone --quiet --depth 1 --branch "$core_ref" https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+      - name: Rust format checks
+        run: cargo fmt --all -- --check
+      - name: The ordinary default-feature Clippy commit check
+        run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets -- -D warnings
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: default-hook-validation-${{ inputs.revision }}
+          path: tmp/logs/clippy.log
           if-no-files-found: error
