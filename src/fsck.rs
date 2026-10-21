@@ -1066,6 +1066,14 @@ pub enum CheckFinding {
     /// are not compared: what Windows charges them is still being measured
     /// (#1089, #1093, #1098).
     QuotaChargeDrift { record: u64, charged: u64, due: u64 },
+    /// The hard-link count in this base record's header is `links`, and
+    /// the record holds `names` `$FILE_NAME` attributes a link counts: every
+    /// one but a DOS-namespace name, which shares its link with the Win32
+    /// name it shortens (#583). chkdsk recounts the names and reports the
+    /// same. A file with an `$ATTRIBUTE_LIST`, whose names may live in
+    /// extension records, and a record with no `$FILE_NAME` at all are not
+    /// compared.
+    LinkCountDrift { record: u64, links: u16, names: u16 },
 }
 
 /// What [`check_io`] read, and what it found.
@@ -1137,7 +1145,8 @@ pub fn logfile_state_io<T: FsckIo>(io: &mut T) -> Result<LogfileState, Error> {
 /// (#820), each entry's attribute identity (#821), every extension
 /// attribute's presence in its base record's list (#822), and, on a volume
 /// tracking quotas, each owner's usage in `$Extend\$Quota:$Q` against what
-/// its files are charged (#678).
+/// its files are charged (#678), and each base record's hard-link count
+/// against its `$FILE_NAME` attributes (#583).
 ///
 /// NOT A STRUCTURAL CHECKER. It does not follow indexes; a volume this calls clean is one on
 /// which none of THESE is wrong, and Windows' chkdsk remains the authority.
@@ -1208,6 +1217,7 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
                 }
                 check_list_records(io, &bitmap, record, &rec, &mut findings);
                 check_extension_list(io, record, &rec, &mut findings);
+                check_link_count(record, &rec, &mut findings);
             }
         }
     }
@@ -1262,6 +1272,47 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
         clusters_scanned,
         findings,
     })
+}
+
+/// The hard-link count in base record `record`'s header against the
+/// `$FILE_NAME` attributes it holds, every one but a DOS-namespace name
+/// (#583). `rec` is fixed up and its attributes walk. An extension record,
+/// a file with an `$ATTRIBUTE_LIST`, and a record with no `$FILE_NAME` are
+/// not compared: see [`CheckFinding::LinkCountDrift`].
+fn check_link_count(record: u64, rec: &[u8], findings: &mut Vec<CheckFinding>) {
+    const FILE_NAME_NAMESPACE: usize = 0x41;
+    const NAMESPACE_DOS: u8 = 2;
+    if u64_le(rec, REC_BASE_REFERENCE) != 0 {
+        return;
+    }
+    let mut names = 0u16;
+    let mut any_name = false;
+    for loc in crate::attr_io::iter_attributes(rec) {
+        if loc.type_code == AttrType::AttributeList as u32 {
+            return;
+        }
+        if loc.type_code != AttrType::FileName as u32 {
+            continue;
+        }
+        any_name = true;
+        let namespace = crate::attr_io::resident_value_start(&loc)
+            .and_then(|value| rec.get(value + FILE_NAME_NAMESPACE));
+        match namespace {
+            Some(&NAMESPACE_DOS) => {}
+            Some(_) => names = names.saturating_add(1),
+            // A non-resident or truncated $FILE_NAME is a malformed record,
+            // which the attribute walk reports; its links are not counted.
+            None => return,
+        }
+    }
+    let links = u16::from_le_bytes([rec[REC_LINK_COUNT], rec[REC_LINK_COUNT + 1]]);
+    if any_name && links != names {
+        findings.push(CheckFinding::LinkCountDrift {
+            record,
+            links,
+            names,
+        });
+    }
 }
 
 /// On a volume tracking quotas, each owner's usage in `$Extend\$Quota:$Q`
@@ -1678,6 +1729,7 @@ fn u64_le(bytes: &[u8], at: usize) -> u64 {
 /// Record-header and attribute-header offsets the walk below reads.
 const REC_ATTRS_OFFSET: usize = 0x14;
 const REC_BYTES_IN_USE: usize = 0x18;
+const REC_LINK_COUNT: usize = 0x12;
 const REC_BASE_REFERENCE: usize = 0x20;
 const REC_NEXT_ATTRIBUTE_ID: usize = 0x28;
 const ATTR_END: u32 = 0xFFFF_FFFF;

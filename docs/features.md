@@ -54,6 +54,7 @@ States:
 | `fsck.ntfs` / `fsck::check_io`: dirty flag, `$LogFile`, `$MFTMirr`, the header of every in-use MFT record | Supported | 0.6.0 | | `cli_fsck.rs`, `tests/cli/test-fsck.sh` |
 | `fsck.ntfs` / `fsck::check_io`: each in-use record's attribute chain: lengths, types and their order, names, ids, resident values, run lists against their VCNs and allocated size, the end marker | Supported | 0.10.0 (#515) | | `check_io_reads_attribute_structure.rs` |
 | `fsck.ntfs` / `fsck::check_io`: `$Bitmap` against every run list: leaked, cross-linked and in-use-but-free clusters, runs past the volume | Supported | 0.10.0 (#528) | | `check_io_cluster_accounting.rs`, `tests/cli/test-fsck.sh` |
+| `fsck.ntfs` / `fsck::check_io`: each base record's hard-link count against its `$FILE_NAME` attributes, DOS names not counted; a file with an `$ATTRIBUTE_LIST` is not compared | Supported | Unreleased (#1164) | #583 | `check_io_link_count.rs` |
 | `fsck.ntfs` / `fsck::check_io`: indexes | Not supported | | | |
 | `$LogFile` state, read from every record page | Supported | 0.6.0 | | `logfile_state.rs` |
 | `$LogFile` replay on `fsck` and on a read-write mount that asks for it (`mount_rw_replaying_log`, the `_replaying_log` C ABI mounts), as Windows' restart does, for every operation captured Windows logs hold; open transactions rolled back; wrapped logs; small clusters | Supported | 0.8.0 (#137); only when asked 0.10.0 (#513) | | `windows_interrupted_fixture.rs` |
