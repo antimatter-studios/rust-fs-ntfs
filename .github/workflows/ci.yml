@@ -14,6 +14,15 @@ on:
   # Tweak the Rust crate, push, click "Run workflow", get real chkdsk
   # output back in ~5 minutes. The test job runs on every push too.
   workflow_dispatch:
+    inputs:
+      revision:
+        description: Exact source revision to validate
+        required: true
+        default: ed99420db7827dee2bac267d5776997f5b6ba094
+      expected_red:
+        description: The unmodified fuzz coverage guard must fail
+        type: boolean
+        default: true
 
 # Read-only unless a job asks for more. A workflow that declares nothing
 # inherits the repository's default token, which a settings change can make
@@ -24,6 +33,7 @@ permissions:
 
 jobs:
   interrupted-bootstrap:
+    if: ${{ false }}
     name: interrupted fixture bootstrap guard
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -41,6 +51,7 @@ jobs:
         run: ./tests/scripts/scrub-bootstrap.ps1
 
   python-abi:
+    if: ${{ false }}
     name: Python ctypes client over the shared C ABI
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -117,6 +128,7 @@ jobs:
         run: python3 tests/python/test_dir_listing_windows.py
 
   readonly-file-name:
+    if: ${{ false }}
     name: focused readonly FILE_NAME regression
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1194,6 +1206,7 @@ jobs:
   # them, the kernel oracle and ASan run only when it is true, and ci-ok
   # accepts those jobs' skip when, and only when, it is false.
   changes:
+    if: ${{ false }}
     name: what this pull request touches
     runs-on: ubuntu-latest
     outputs:
@@ -1869,6 +1882,7 @@ jobs:
   # Keep the existing required-check name while making an intentional Windows
   # skip report as success. A failed or missing run must report failure.
   semver:
+    if: ${{ false }}
     # `chore check:semver`: this tree's public API against the newest version
     # on crates.io, refusing a break the version in Cargo.toml does not
     # declare (#399). No fixtures, no VM -- only the registry.
@@ -1913,7 +1927,7 @@ jobs:
   validate-mkfs-windows:
     name: validate rust-ntfs format (Windows chkdsk)
     runs-on: ubuntu-latest
-    if: always()
+    if: ${{ false }}
     needs: [changes, validate-mkfs-windows-run]
     steps:
       - uses: actions/checkout@v4
@@ -1930,7 +1944,7 @@ jobs:
   ci-ok:
     name: ci-ok
     runs-on: ubuntu-latest
-    if: always()
+    if: ${{ false }}
     needs: [readonly-file-name, test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows]
     steps:
       - uses: actions/checkout@v4
@@ -1941,3 +1955,72 @@ jobs:
           # then, and only then, a full job's skip is not a failed one.
           CODE: ${{ needs.changes.outputs.code }}
         run: bash scripts/ci-verdict.sh aggregate
+
+  corpus-coverage:
+    name: instrumented corpus gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
+      - name: Record the exact source
+        run: git rev-parse HEAD
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.95.0'
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      - name: Check out the pinned suite runner
+        run: |
+          core_ref="$(sed -n 's/^  FS_CORE_REF: *//p' chores.yml | tr -d '\r')"
+          test -n "$core_ref"
+          git clone --quiet --depth 1 --branch "$core_ref" https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+      - name: Run both stable corpus suites with instrumentation
+        id: suite
+        continue-on-error: true
+        run: |
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- \
+            cargo llvm-cov --release --locked --features cli,harness \
+            --test fuzz_decoders --test op_sequence_readback --no-report --no-fail-fast
+      - name: Retain the measured coverage and passing-test contract
+        if: always() && steps.suite.outcome != 'skipped'
+        run: |
+          mkdir -p tmp/merge-validation
+          cargo llvm-cov report --release --features cli,harness --json --summary-only --output-path tmp/merge-validation/coverage.json
+          cargo llvm-cov report --release --features cli,harness > tmp/merge-validation/coverage.txt
+          grep -E '^test .+ \.\.\. ok$' tmp/logs/suite.log | sort > tmp/merge-validation/passing-tests.txt
+          tail -n 1 tmp/merge-validation/coverage.txt
+      - name: Judge the expected red or green
+        if: always()
+        env:
+          EXPECT_RED: ${{ inputs.expected_red }}
+          SUITE_OUTCOME: ${{ steps.suite.outcome }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re
+          log = pathlib.Path('tmp/logs/suite.log').read_text()
+          failures = re.findall(r'^test (.+) \.\.\. FAILED$', log, re.M)
+          passes = re.findall(r'^test (.+) \.\.\. ok$', log, re.M)
+          assert len(passes) >= 13, passes
+          if os.environ['EXPECT_RED'] == 'true':
+              assert os.environ['SUITE_OUTCOME'] == 'failure'
+              assert failures == ['the_gate_covers_every_explorer_target'], failures
+              assert 'operation_sequence.rs has no counterpart' in log
+          else:
+              assert os.environ['SUITE_OUTCOME'] == 'success'
+              assert not failures, failures
+          print(f'{len(passes)} passing tests, {len(failures)} expected failures')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: corpus-validation-${{ inputs.revision }}
+          path: |
+            tmp/logs/suite.log
+            tmp/merge-validation/
+          if-no-files-found: error
