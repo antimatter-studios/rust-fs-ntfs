@@ -27,6 +27,10 @@ on:
         description: Run the default-feature commit checks on GitHub
         type: boolean
         default: false
+      rescue_reader:
+        description: Compare the rescue file oracle with ntfscat
+        type: boolean
+        default: false
       native_fixture:
         description: Diagnose the Windows recursive-listing fixture instead
         type: boolean
@@ -1965,7 +1969,7 @@ jobs:
         run: bash scripts/ci-verdict.sh aggregate
 
   corpus-coverage:
-    if: inputs.native_fixture != true && inputs.default_lint != true
+    if: inputs.native_fixture != true && inputs.default_lint != true && inputs.rescue_reader != true
     name: instrumented corpus gates
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -2141,4 +2145,123 @@ jobs:
         with:
           name: default-hook-validation-${{ inputs.revision }}
           path: tmp/logs/clippy.log
+          if-no-files-found: error
+
+  rescue-reader:
+    if: inputs.rescue_reader == true
+    name: rescue file reader compared with Windows and ntfscat
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
+      - name: Record the unchanged exact PR source
+        env:
+          EXPECTED_HEAD: ${{ inputs.revision }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.95.0'
+      - name: Install the independent filesystem reader
+        run: sudo apt-get update && sudo apt-get install -y ntfs-3g
+      - name: Check out the pinned budget runner
+        run: |
+          core_ref="$(sed -n 's/^  FS_CORE_REF: *//p' chores.yml | tr -d '\r')"
+          test -n "$core_ref"
+          git clone --quiet --depth 1 --branch "$core_ref" https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+      - name: Add diagnostic assertions without modifying the regression
+        run: |
+          cat > tests/rescue_reader_diagnostic.rs <<'DIAGNOSTIC_RS'
+          mod common;
+          
+          use sha2::{Digest, Sha256};
+          use std::fs::File;
+          use std::io::{Read, Seek, SeekFrom};
+          use std::process::{Command, Stdio};
+          
+          fn digest(bytes: &[u8]) -> String {
+              Sha256::digest(bytes)
+                  .iter()
+                  .map(|b| format!("{b:02x}"))
+                  .collect()
+          }
+          
+          #[test]
+          fn each_recovered_file_is_graded_by_both_independent_readers() {
+              let mut mismatches = 0;
+              for (snapshot, expected_image) in [
+                  ("1", "16beeb97f2177b8abd02287c8803bf4faa460a7ee701ab842f8ef552ef3bc14a"),
+                  ("6", "c4b18810f6aa6130073583d8343b355c31a9f4f94cf1740cb59b76af10b50308"),
+              ] {
+                  let image = common::temp_image_path(format!("rescue_reader_{snapshot}"));
+                  let status = Command::new("gzip")
+                      .args(["-dc", &format!("test-disks/windows-interrupted-{snapshot}.recovered.img.gz")])
+                      .stdout(Stdio::from(File::create(&image).unwrap()))
+                      .status()
+                      .expect("gzip is required for the recorded Windows image");
+                  assert!(status.success());
+                  let hash = Command::new("sha256sum").arg(&image).output().unwrap();
+                  assert!(hash.status.success());
+                  assert_eq!(String::from_utf8(hash.stdout).unwrap().split_whitespace().next().unwrap(), expected_image);
+                  let manifest = std::fs::read_to_string(format!(
+                      "test-disks/windows-interrupted-{snapshot}.recovered.manifest"
+                  )).unwrap();
+                  let (ntfs, mut reader) = common::open(&image);
+                  let mut count = 0;
+                  for line in manifest.lines().filter(|line| !line.is_empty()) {
+                      let fields: Vec<_> = line.split('\t').collect();
+                      assert_eq!(fields.len(), 3);
+                      let path = format!("/{}", fields[0]);
+                      let size = fields[1].parse::<usize>().unwrap();
+                      let reference = Command::new("ntfscat")
+                          .args(["-f", &image, &path])
+                          .output()
+                          .expect("install ntfs-3g for the independent file reader");
+                      assert!(reference.status.success(), "snapshot {snapshot} {path}: {}", String::from_utf8_lossy(&reference.stderr));
+                      assert_eq!((reference.stdout.len(), digest(&reference.stdout)), (size, fields[2].to_string()), "ntfscat vs Windows: snapshot {snapshot} {path}");
+                      let raw = common::read_file_all(&ntfs, &mut reader, &path);
+                      if (raw.len(), digest(&raw)) != (size, fields[2].to_string()) {
+                          mismatches += 1;
+                          let (resident, position) = {
+                              let file = common::navigate(&ntfs, &mut reader, &path);
+                              let item = file.data(&mut reader, "").unwrap().unwrap();
+                              let attribute = item.to_attribute().unwrap();
+                              (attribute.is_resident(), attribute.position().value().unwrap().get())
+                          };
+                          if mismatches <= 10 {
+                              eprintln!("snapshot={snapshot} path={path} size={size} resident={resident} attribute_position={position} raw_sha256={} Windows_sha256={}", digest(&raw), fields[2]);
+                              if !resident {
+                                  let field_position = position + 56;
+                                  reader.seek(SeekFrom::Start(field_position)).unwrap();
+                                  let mut field = [0; 8];
+                                  reader.read_exact(&mut field).unwrap();
+                                  let initialized = u64::from_le_bytes(field);
+                                  eprintln!("raw_initialized_size={initialized} field_sector_offset={} sector_size={}", field_position % u64::from(ntfs.sector_size()), ntfs.sector_size());
+                                  if let Ok(initialized) = usize::try_from(initialized) {
+                                      if initialized <= raw.len() {
+                                          let mut logical = raw.clone();
+                                          logical[initialized..].fill(0);
+                                          eprintln!("zero_tail_sha256={} matches_Windows={}", digest(&logical), digest(&logical) == fields[2]);
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                      count += 1;
+                  }
+                  assert!(count > 200, "the Windows manifest must remain complete");
+                  eprintln!("snapshot={snapshot}: every one of {count} ntfscat file hashes matches Windows");
+                  std::fs::remove_file(image).unwrap();
+              }
+              assert_eq!(mismatches, 0, "the current ntfs-crate test reader differs from Windows and ntfscat");
+          }
+          DIAGNOSTIC_RS
+      - name: Compare every recorded file with both independent readers
+        run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli,harness --test rescue_reader_diagnostic -- --nocapture
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rescue-reader-${{ inputs.revision }}
+          path: tmp/logs/suite.log
           if-no-files-found: error
