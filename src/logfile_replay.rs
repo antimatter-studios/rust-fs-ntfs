@@ -119,36 +119,36 @@ use crate::error::Error;
 use crate::mft_io::{apply_fixup_on_read_magic, apply_fixup_on_write_magic, BootParams};
 
 /// Log pages are protected with a 512-byte update sequence stride.
-const LFS_STRIDE: u16 = 512;
+pub(crate) const LFS_STRIDE: u16 = 512;
 /// Size of an LFS record header; the client data follows it.
-const RECORD_HEADER: usize = 0x30;
+pub(crate) const RECORD_HEADER: usize = 0x30;
 /// LFS record types.
-const LFS_CLIENT_RECORD: u32 = 1;
-const LFS_CLIENT_RESTART: u32 = 2;
+pub(crate) const LFS_CLIENT_RECORD: u32 = 1;
+pub(crate) const LFS_CLIENT_RESTART: u32 = 2;
 /// Record page flag: a record ends on this page.
-const PAGE_RECORD_END: u32 = 1;
+pub(crate) const PAGE_RECORD_END: u32 = 1;
 /// Record header flag on records whose redo data may be shorter than its
 /// declared length, the rest being zeros.
 const RECORD_REDO_ZEROS: u16 = 0x4;
 /// A restart-table entry in use.
-const ENTRY_ALLOCATED: u32 = 0xFFFF_FFFF;
+pub(crate) const ENTRY_ALLOCATED: u32 = 0xFFFF_FFFF;
 /// Open attribute table entry size Windows 8 and later write, the only
 /// one these tables were checked on.
-const OPEN_ATTRIBUTE_ENTRY: usize = 0x28;
+pub(crate) const OPEN_ATTRIBUTE_ENTRY: usize = 0x28;
 /// Transaction table entry size, and the state of a transaction neither
 /// prepared nor committed.
-const TRANSACTION_ENTRY: usize = 0x28;
+pub(crate) const TRANSACTION_ENTRY: usize = 0x28;
 const TRANSACTION_ACTIVE: u8 = 1;
 
 // NTFS log operations (redo and undo codes share one numbering).
 const NOOP: u16 = 0x00;
-const COMPENSATION: u16 = 0x01;
+pub(crate) const COMPENSATION: u16 = 0x01;
 const INITIALIZE_FILE_RECORD: u16 = 0x02;
 const DEALLOCATE_FILE_RECORD: u16 = 0x03;
 const WRITE_END_OF_FILE_RECORD_SEGMENT: u16 = 0x04;
 const CREATE_ATTRIBUTE: u16 = 0x05;
 const DELETE_ATTRIBUTE: u16 = 0x06;
-const UPDATE_RESIDENT_VALUE: u16 = 0x07;
+pub(crate) const UPDATE_RESIDENT_VALUE: u16 = 0x07;
 const UPDATE_NONRESIDENT_VALUE: u16 = 0x08;
 const UPDATE_MAPPING_PAIRS: u16 = 0x09;
 const DELETE_DIRTY_CLUSTERS: u16 = 0x0A;
@@ -168,10 +168,10 @@ const HOT_FIX: u16 = 0x17;
 const END_TOP_LEVEL_ACTION: u16 = 0x18;
 const PREPARE_TRANSACTION: u16 = 0x19;
 const COMMIT_TRANSACTION: u16 = 0x1A;
-const FORGET_TRANSACTION: u16 = 0x1B;
-const OPEN_NONRESIDENT_ATTRIBUTE: u16 = 0x1C;
-const OPEN_ATTRIBUTE_TABLE_DUMP: u16 = 0x1D;
-const TRANSACTION_TABLE_DUMP: u16 = 0x20;
+pub(crate) const FORGET_TRANSACTION: u16 = 0x1B;
+pub(crate) const OPEN_NONRESIDENT_ATTRIBUTE: u16 = 0x1C;
+pub(crate) const OPEN_ATTRIBUTE_TABLE_DUMP: u16 = 0x1D;
+pub(crate) const TRANSACTION_TABLE_DUMP: u16 = 0x20;
 const UPDATE_RECORD_DATA_ROOT: u16 = 0x21;
 const UPDATE_RECORD_DATA_ALLOCATION: u16 = 0x22;
 const UPDATE_RELATIVE_DATA_IN_INDEX: u16 = 0x23;
@@ -281,17 +281,17 @@ fn unperformed(lsn: u64, op: u16) -> Error {
     )
 }
 
-fn u16_at(b: &[u8], off: usize) -> Result<u16, Error> {
+pub(crate) fn u16_at(b: &[u8], off: usize) -> Result<u16, Error> {
     b.get(off..off + 2)
         .map(|s| u16::from_le_bytes([s[0], s[1]]))
         .ok_or_else(|| refuse(format!("a field at {off:#x} is past its structure")))
 }
-fn u32_at(b: &[u8], off: usize) -> Result<u32, Error> {
+pub(crate) fn u32_at(b: &[u8], off: usize) -> Result<u32, Error> {
     b.get(off..off + 4)
         .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
         .ok_or_else(|| refuse(format!("a field at {off:#x} is past its structure")))
 }
-fn u64_at(b: &[u8], off: usize) -> Result<u64, Error> {
+pub(crate) fn u64_at(b: &[u8], off: usize) -> Result<u64, Error> {
     b.get(off..off + 8)
         .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
         .ok_or_else(|| refuse(format!("a field at {off:#x} is past its structure")))
@@ -355,30 +355,30 @@ fn shift_down(b: &mut [u8], at: usize, n: usize, used: usize) -> Result<(), Erro
 }
 
 /// The log, read whole, with every valid copy of every record page.
-struct Log<'a> {
+pub(crate) struct Log<'a> {
     bytes: &'a [u8],
-    log_page: usize,
+    pub(crate) log_page: usize,
     seq_bits: u32,
-    data_offset: usize,
+    pub(crate) data_offset: usize,
     /// The first page of the record area: where the log continues when it
     /// wraps past its end, its sequence number one higher.
     first_page: usize,
     /// Home page offset -> (last LSN, whether this copy sits at that
     /// offset, page with fixups undone), one per valid copy: the page
     /// itself and any tail copy of it.
-    copies: HashMap<usize, Vec<(u64, bool, Vec<u8>)>>,
+    pub(crate) copies: HashMap<usize, Vec<(u64, bool, Vec<u8>)>>,
     /// The LSN of the last record the log holds.
-    newest: u64,
+    pub(crate) newest: u64,
 }
 
 impl Log<'_> {
-    fn offset(&self, lsn: u64) -> usize {
+    pub(crate) fn offset(&self, lsn: u64) -> usize {
         ((lsn << self.seq_bits) >> (self.seq_bits - 3)) as usize
     }
-    fn lsn(&self, wrap: u64, offset: usize) -> u64 {
+    pub(crate) fn lsn(&self, wrap: u64, offset: usize) -> u64 {
         (wrap << (64 - self.seq_bits)) | (offset as u64 >> 3)
     }
-    fn wrap(&self, lsn: u64) -> u64 {
+    pub(crate) fn wrap(&self, lsn: u64) -> u64 {
         lsn >> (64 - self.seq_bits)
     }
 
@@ -386,7 +386,7 @@ impl Log<'_> {
     ///
     /// The newest copy wins; between copies equally new, the one at its
     /// home. Two tail copies equally new and different are refused.
-    fn page(&self, home: usize, lsn: u64) -> Result<&[u8], Error> {
+    pub(crate) fn page(&self, home: usize, lsn: u64) -> Result<&[u8], Error> {
         let candidates: Vec<_> = self
             .copies
             .get(&home)
@@ -414,7 +414,7 @@ impl Log<'_> {
 
     /// The record at `lsn`: its header and its client data, and the LSN
     /// of the record after it.
-    fn record(&self, lsn: u64) -> Result<([u8; RECORD_HEADER], Vec<u8>, u64), Error> {
+    pub(crate) fn record(&self, lsn: u64) -> Result<([u8; RECORD_HEADER], Vec<u8>, u64), Error> {
         self.record_bounded(lsn, self.bytes.len())
     }
 
@@ -614,7 +614,7 @@ fn undone_lsn(last_lsn: u64) -> u64 {
 }
 
 /// Shared read-only page selection and fixup validation for replay and inspection.
-fn read_log(log: &[u8]) -> Result<(Log<'_>, Option<u64>), Error> {
+pub(crate) fn read_log(log: &[u8]) -> Result<(Log<'_>, Option<u64>), Error> {
     // ---- the restart area ------------------------------------------------
     let sps = u32_at(log, 0x10)? as usize;
     if !(512..=65536).contains(&sps) || !sps.is_power_of_two() {
@@ -1324,7 +1324,7 @@ fn undo_as_redo(
 }
 
 /// The redo data of a client record, with any zeros the log left out.
-fn redo_data(header: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
+pub(crate) fn redo_data(header: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
     let (off, len) = (u16_at(data, 0x04)? as usize, u16_at(data, 0x06)? as usize);
     let have = data.get(off..).map_or(&[][..], |d| &d[..d.len().min(len)]);
     if have.len() < len {
