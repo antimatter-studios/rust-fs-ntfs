@@ -23,6 +23,10 @@ on:
         description: The unmodified fuzz coverage guard must fail
         type: boolean
         default: true
+      native_fixture:
+        description: Diagnose the Windows recursive-listing fixture instead
+        type: boolean
+        default: false
 
 # Read-only unless a job asks for more. A workflow that declares nothing
 # inherits the repository's default token, which a settings change can make
@@ -1957,6 +1961,7 @@ jobs:
         run: bash scripts/ci-verdict.sh aggregate
 
   corpus-coverage:
+    if: inputs.native_fixture != true
     name: instrumented corpus gates
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -2023,4 +2028,50 @@ jobs:
           path: |
             tmp/logs/suite.log
             tmp/merge-validation/
+          if-no-files-found: error
+
+  native-fixture:
+    if: inputs.native_fixture == true
+    name: native fixture access diagnostics
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.95.0'
+      - name: Install the pinned VHD tool
+        shell: pwsh
+        run: |
+          $vhd = (Select-String -Path chores.yml -Pattern '^\s*IMG_VHD_REF:\s*(\S+)').Matches[0].Groups[1].Value
+          git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
+          cargo install --locked --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain native utility output without changing the commands
+        shell: pwsh
+        run: |
+          $path = 'test-disks/build-windows-native-read-fixtures.ps1'
+          $source = Get-Content -Raw -LiteralPath $path
+          foreach ($tool in 'takeown', 'icacls') {
+              $pattern = "(?m)(^[ \t]*& $tool\.exe[^\r\n|]+)\| Out-Null"
+              $matches = [regex]::Matches($source, $pattern)
+              if ($matches.Count -ne 1) { throw "expected one $tool invocation, found $($matches.Count)" }
+              $replacement = $matches[0].Groups[1].Value + '2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/fixture-' + $tool + '.txt"'
+              $source = $source.Replace($matches[0].Value, $replacement)
+          }
+          Set-Content -LiteralPath $path -Value $source -NoNewline
+          git diff --numstat
+      - name: Build the actual Windows-native fixtures
+        shell: pwsh
+        run: pwsh -NoProfile -File test-disks/build-windows-native-read-fixtures.ps1
+      - name: Retain access diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-access-${{ inputs.revision }}
+          path: |
+            ${{ runner.temp }}/fixture-takeown.txt
+            ${{ runner.temp }}/fixture-icacls.txt
           if-no-files-found: error
