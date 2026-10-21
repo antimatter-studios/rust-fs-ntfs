@@ -69,6 +69,9 @@ mod structured {
     include!("../fuzz/shared/structured.rs");
 }
 
+#[path = "op_sequence_model/runner.rs"]
+mod operation_sequence;
+
 /// Distinct starting points for the mutation stream. Fixed, so a
 /// failure reproduces from the message alone.
 const SEEDS: u64 = 6;
@@ -196,6 +199,14 @@ fn targets() -> Vec<Target> {
                     VOLUMES.get_or_init(|| structured::volumes(&corpus_root().join("image")));
                 structured::explore(seeds, recipe);
             },
+        },
+        // A sequence formats a 64 MiB image and reopens it after every
+        // operation. One mutation per seed/stream keeps the existing deadline.
+        Target {
+            corpus: "operation_sequence",
+            name: "operation_sequence",
+            cases: 1,
+            run: operation_sequence::fuzz_input,
         },
     ]
 }

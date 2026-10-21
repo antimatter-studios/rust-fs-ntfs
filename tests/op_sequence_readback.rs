@@ -1,14 +1,10 @@
 //! First deterministic slice of #484: create, offset writes, truncate,
 //! and a refused duplicate create. Every successful operation must execute;
 //! unsupported operations fail rather than disappearing from the workload.
-mod common;
-#[allow(dead_code)]
-#[path = "op_sequence_model/generator.rs"]
-mod generator;
-#[path = "op_sequence_model/harness.rs"]
-mod harness;
-#[path = "op_sequence_model/model.rs"]
-mod model;
+#[path = "op_sequence_model/runner.rs"]
+mod runner;
+
+use runner::{common, generator, harness, reference_tools, SIZE};
 
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::{fsck, mkfs, read, write};
@@ -19,7 +15,6 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 const STEPS: usize = 120;
-const SIZE: u64 = 64 * 1024 * 1024;
 
 struct Rng(u64);
 impl Rng {
@@ -80,33 +75,6 @@ fn verify(image: &str, model: &BTreeMap<String, Vec<u8>>, initialized: &BTreeMap
         "check_io: {:?}",
         report.findings
     );
-}
-
-fn reference_tools(image: &str, model: &BTreeMap<String, Vec<u8>>, artifacts: &Path) {
-    let fixed = std::process::Command::new("ntfsfix")
-        .args(["-n", image])
-        .output()
-        .expect("ntfsfix missing: install ntfs-3g for test:op-sequence-oracle");
-    let mut report = fixed.stdout;
-    report.extend_from_slice(&fixed.stderr);
-    fs::write(artifacts.join("ntfsfix.txt"), &report).expect("save oracle verdict");
-    assert!(
-        fixed.status.success(),
-        "ntfsfix -n: {}",
-        String::from_utf8_lossy(&report)
-    );
-    for (path, expected) in model {
-        let output = std::process::Command::new("ntfscat")
-            .args([image, path])
-            .output()
-            .expect("ntfscat missing: install ntfs-3g for test:op-sequence-oracle");
-        assert!(
-            output.status.success(),
-            "ntfscat {path}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(&output.stdout, expected, "ntfs-3g contents of {path}");
-    }
 }
 
 fn sequence(seed: u64) {
@@ -225,6 +193,39 @@ fn seeded_readback_484() {
 #[test]
 fn seeded_readback_boundary() {
     sequence(u64::MAX);
+}
+
+#[test]
+fn committed_corpus_replays_every_seed() {
+    let corpus = Path::new("fuzz/corpus/operation_sequence");
+    for required in [
+        "basic-write-v1.json",
+        "namespace-v1.json",
+        "refusals-v1.json",
+    ] {
+        assert!(corpus.join(required).is_file(), "missing seed {required}");
+    }
+    let mut seeds: Vec<_> = fs::read_dir(corpus)
+        .expect("restore the committed operation corpus")
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == "json"))
+        .collect();
+    seeds.sort();
+    assert!(!seeds.is_empty(), "no operation sequences selected");
+    for (index, seed) in seeds.iter().enumerate() {
+        let operations = generator::decode_replay(&fs::read(seed).unwrap()).unwrap();
+        assert!(!operations.is_empty(), "empty seed {}", seed.display());
+        let mut h = harness::Harness::new(&format!("corpus-{index}"));
+        for operation in operations {
+            h.step(operation);
+        }
+        h.finish();
+    }
+    fs::write(
+        "tmp/op-sequence-model/corpus-executed.json",
+        serde_json::to_vec(&seeds).unwrap(),
+    )
+    .unwrap();
 }
 
 #[test]
