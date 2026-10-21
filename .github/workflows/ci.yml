@@ -600,9 +600,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
-    # Measured at 2.1 to 2.4 minutes. Without a bound, a step that hangs holds
-    # the runner for GitHub's six hours and prints nothing (#388).
-    timeout-minutes: 15
+    # The expanded producer took 14m46s in run 39483906221 and exceeded the
+    # old 15-minute limit in run 39540070558 (#1156). Allow cold Rust builds
+    # and every native capture while keeping the whole job bounded.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -611,6 +612,14 @@ jobs:
           toolchain: "1.95.0"
       # Full manual, merge-group and tag runs share the dedicated oracle's
       # descriptor/rights/hash contract. ci-ok directly needs this job.
+      - name: Cache the Windows fixture Rust builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-fixtures-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
       - name: Check out rust-fs-core at the sibling pin
         shell: bash
         run: |
