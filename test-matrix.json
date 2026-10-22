@@ -4231,6 +4231,41 @@
       "image": "nfs-cli-windows-interrupted-quota-replay.img",
       "_notes": "A volume Windows was writing to when it was captured with quota tracking on (test-disks/windows-interrupted-quota), whose $LogFile holds UpdateRecordDataRoot redo records: the file owner's $Quota entry charged in place. fsck.ntfs -y replays the log; then Windows grades the result: fsutil dirty query says Clean, every file Windows itself listed after its own recovery of the same image reads back at Windows' size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean."
     },
+    "cli-windows-interrupted-fsck-replay-win-write-lsn-after-windows": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 127,
+        "label": "ORACLE366",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-replay-lsn",
+          "snapshot": "1"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-write-content",
+          "path": "/after-replay-lsn.txt",
+          "content": "written by Windows after fsck.ntfs -y replayed the log",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "cli-lsn-after-windows"
+        }
+      ],
+      "image": "nfs-cli-windows-interrupted-replay-lsn.img",
+      "_notes": "#649 / #761: a volume Windows left mid-write (test-disks/windows-interrupted-1). fsck.ntfs -y replays its log and fills $LogFile with 0xFF, while the replayed MFT records and index blocks keep the old log's LSNs; the highest of them is recorded. Windows mounts the volume and writes a file, and the image comes back. Every restart area Windows wrote must name a current LSN past the highest the replay left, or Windows' redo after its next unclean shutdown would skip its own records for those blocks. Red means #762 is needed."
+    },
     "cli-windows-interrupted-fresh-log-fsck-replay-win-verify-chkdsk": {
       "status": "pending",
       "volume_params": {
