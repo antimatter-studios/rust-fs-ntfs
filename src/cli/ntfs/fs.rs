@@ -211,7 +211,14 @@ fn command() -> Cmd {
         )
         .subcommand(
             Cmd::new("mkdir")
-                .about("Create a directory (its parent must exist)")
+                .about("Create a directory (its parent must exist, or with -p every missing one)")
+                .arg(
+                    Arg::new("parents")
+                        .short('p')
+                        .long("parents")
+                        .action(ArgAction::SetTrue)
+                        .help("Make every missing directory on the way to PATH; one already there is fine"),
+                )
                 .arg(
                     Arg::new("path")
                         .value_name("PATH")
@@ -220,7 +227,17 @@ fn command() -> Cmd {
                 )
                 .after_help(
                     "Examples:\n  fs.ntfs disk.img mkdir /backup\n  \
-                     fs.ntfs disk.img mkdir /backup/2026",
+                     fs.ntfs disk.img mkdir /backup/2026\n  \
+                     fs.ntfs disk.img mkdir -p /backup/2026/october/photos\n\n\
+                     Without -p, PATH's parent must exist and nothing may be at PATH. With \
+                     -p, every missing directory on the way to PATH is made, and a directory \
+                     already at PATH, or at any step, is fine: the report lists only the \
+                     directories made, {\"path\": ..., \"created\": [...]}. Names are found as \
+                     Windows finds them, without regard to case, and . and .. are taken from \
+                     the text of PATH as Windows takes them, so /a/../b makes only /b. A file \
+                     or a symbolic link on the way or at PATH, a name Windows cannot address \
+                     and a dirty volume are refused before the image is opened for writing, so \
+                     a refused mkdir -p makes no part of the chain.",
                 ),
         )
         .subcommand(
@@ -438,6 +455,7 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         }
         "set" => set(target, offset, sub),
         "write" => write(target, offset, path_arg(sub)?),
+        "mkdir" if sub.get_flag("parents") => mkdir_parents(target, offset, path_arg(sub)?),
         "mkdir" => mkdir(target, offset, path_arg(sub)?),
         "rm" => remove(target, offset, path_arg(sub)?, false),
         "rmdir" => remove(target, offset, path_arg(sub)?, true),
@@ -1249,6 +1267,151 @@ fn mkdir(target: &OsString, offset: u64, path: &str) -> Result<Outcome, CliError
     })?;
     let report = Json::object([("path", Json::from(path)), ("record", Json::from(record))]);
     Ok(Outcome::report(report).with_text(format!("created {path}")))
+}
+
+/// `mkdir --parents`: every missing directory on the way to `path`, made
+/// through the library's mkdir in one writable open with one sync. As for
+/// `mv` and `ln`, everything that can be refused is refused on a read-only
+/// open: first what this verb decides itself, then the whole chain
+/// rehearsed, so a refused command makes no part of the chain and leaves
+/// the image byte-identical. A chain already there makes nothing and never
+/// opens the image for writing.
+fn mkdir_parents(target: &OsString, offset: u64, path: &str) -> Result<Outcome, CliError> {
+    let missing = missing_directories(target, offset, path)?;
+    if !missing.is_empty() {
+        edit(target, offset, path, |dev| make_directories(dev, &missing))?;
+    }
+    let text = if missing.is_empty() {
+        format!("{path} exists; nothing created")
+    } else {
+        let lines: Vec<String> = missing.iter().map(|dir| format!("created {dir}")).collect();
+        lines.join("\n")
+    };
+    let created = missing.iter().map(|dir| Json::from(dir.as_str())).collect();
+    let report = Json::object([("path", Json::from(path)), ("created", Json::Arr(created))]);
+    Ok(Outcome::report(report).with_text(text))
+}
+
+/// The names on the way to `path`, `.` and `..` taken from its text as
+/// Windows takes them: `.` stays where it is and `..` drops the name before
+/// it (never past the root) before any name is looked up, so `/a/../b` is
+/// `/b` whatever `/a` is. A path not from the root is a usage error, as it
+/// is for every other verb.
+fn path_names(path: &str) -> Result<Vec<&str>, CliError> {
+    if !path.starts_with('/') {
+        return Err(CliError::usage(format!(
+            "{path}: give the path from the root, as /{path}"
+        )));
+    }
+    let mut names = Vec::new();
+    for name in path.split('/') {
+        match name {
+            "" | "." => {}
+            ".." => {
+                names.pop();
+            }
+            name => names.push(name),
+        }
+    }
+    Ok(names)
+}
+
+/// The directories [`mkdir_parents`] makes, from the root down, named as
+/// `path` spells them, once every refusal has been ruled out. In order:
+///
+/// - a name already there, found as Windows finds names (through
+///   `$UpCase`), that is not a directory to enter: a file, or a symbolic
+///   link, junction or other reparse point, none of which is followed --
+///   "not a directory" on the way to `path`, "already exists" at it;
+/// - a name to make longer than the 255 UTF-16 units NTFS allows;
+/// - whatever the library refuses, the chain rehearsed in full: a name
+///   Windows cannot address, a directory inside a metafile, a volume not
+///   fit to be written, and one with no room for the chain.
+fn missing_directories(
+    target: &OsString,
+    offset: u64,
+    path: &str,
+) -> Result<Vec<String>, CliError> {
+    let names = path_names(path)?;
+    let (mut dev, _) = device::mount(target, offset, false)?;
+    let mut at = String::new();
+    let mut missing = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        at.push('/');
+        at.push_str(name);
+        if missing.is_empty() {
+            match read::resolve_path(&mut dev, &at) {
+                Ok(record) => {
+                    let (item, enterable) =
+                        entry_info(&mut dev, name, record).map_err(|e| ntfs_error(path, e))?;
+                    if enterable {
+                        continue;
+                    }
+                    let reparse = match item.get("type") {
+                        Some(t) if *t == Json::from("symlink") => Some("a symbolic link"),
+                        Some(t) if *t == Json::from("junction") => Some("a junction"),
+                        Some(t) if *t == Json::from("dir") => Some("a reparse point"),
+                        _ => None,
+                    };
+                    return Err(CliError::failed(match (i + 1 == names.len(), reparse) {
+                        (true, Some(what)) => {
+                            format!("{path}: {at} already exists and is {what}, not a directory")
+                        }
+                        (true, None) => {
+                            format!("{path}: {at} already exists and is not a directory")
+                        }
+                        (false, Some(what)) => format!(
+                            "{path}: {at} is {what}, which mkdir --parents does not follow, \
+                             so not a directory"
+                        ),
+                        (false, None) => format!("{path}: {at} is not a directory"),
+                    }));
+                }
+                Err(e) if e.kind() == Kind::NotFound => {}
+                Err(e) => return Err(ntfs_error(path, e)),
+            }
+        }
+        let units = name.encode_utf16().count();
+        if units > 255 {
+            return Err(CliError::failed(format!(
+                "{path}: the name {at} is {units} UTF-16 units, too long: NTFS allows 255"
+            )));
+        }
+        missing.push(at.clone());
+    }
+    if !missing.is_empty() {
+        prepared(&mut device::Rehearsal::over(&mut dev), path, |io| {
+            make_directories(io, &missing)
+        })?;
+    }
+    Ok(missing)
+}
+
+/// Make each of `dirs` in turn, each inside the one before it and the
+/// first in a directory already there. If one is still refused once
+/// writing has begun, those made before it are removed again, last first,
+/// so no part of the chain is left behind.
+fn make_directories<D: BlockIo>(dev: &mut D, dirs: &[String]) -> Result<(), Error> {
+    for (made, dir) in dirs.iter().enumerate() {
+        let (parent, name) = dir
+            .rsplit_once('/')
+            .expect("a chain's paths are from the root");
+        let parent = if parent.is_empty() { "/" } else { parent };
+        if let Err(e) = fs_ntfs::write::mkdir_io(dev, parent, name) {
+            let e = e.map_message(|m| format!("{dir}: {m}"));
+            for undo in dirs[..made].iter().rev() {
+                if let Err(u) = fs_ntfs::write::rmdir_io(dev, undo) {
+                    return Err(
+                        e.map_message(|m| format!("{m}; and removing {undo} again failed: {u}"))
+                    );
+                }
+            }
+            // Over a rehearsal nothing was made, so the error says only
+            // what was refused.
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 /// Remove a file (`rm`) or an empty directory (`rmdir`). Each refuses the
