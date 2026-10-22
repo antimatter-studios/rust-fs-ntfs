@@ -3618,6 +3618,28 @@
       "image": "nfs-cli-mkdir-parents-win-verify-chkdsk.img",
       "_notes": "fs.ntfs mkdir -p makes every missing directory of a chain (#647): three levels, under existing directories reached through names in another case (compared through $UpCase, so no second directory is made), through `.` and `..` read by the text as Windows reads them, twelve levels, Unicode names, and a chain into each of 300 directories filled past one index level. A chain already there writes nothing. A file on the way or at the path, names Windows cannot address and a chain into $Extend are refused with every byte left as it was. Windows grades the result: every directory made is a directory, each parent lists each made name exactly so, the name `..` passed over and the refused chain's first directory are absent, Directory.CreateDirectory refuses the chains blocked by a file as fs.ntfs did, and chkdsk finds the volume clean."
     },
+    "cli-write-at-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": { "size_mib": 256, "label": "CLI WRITE AT", "alloc_unit_size": 4096 },
+      "recipe": [
+        { "op": "cli-mkfs" },
+        { "op": "cli-write-at" },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        { "op": "win-cli-verify", "keep_image": "true" },
+        { "op": "win-chkdsk", "modes": "readonly,/scan", "keep_image": "false", "verdict_shape": "Clean" }
+      ],
+      "image": "nfs-cli-write-at-win-verify-chkdsk.img",
+      "_notes": "Windows independently repeats positioned FileStream.Write calls over Z bytes with Q patches, including resident overwrite and promotion, an in-block and cross-block patch, append, a zero-filled gap, an empty file and a zero-byte write beyond EOF. Every length and SHA-256 must match; chkdsk must be clean (#656)."
+    },
     "cli-truncate-win-verify-chkdsk": {
       "status": "pending",
       "volume_params": { "size_mib": 256, "label": "CLI TRUNCATE", "alloc_unit_size": 4096 },

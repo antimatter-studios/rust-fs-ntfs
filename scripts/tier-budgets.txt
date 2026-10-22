@@ -119,6 +119,17 @@
 # 975 to the measured 1093 adds one byte to the summary (1530 total).
 # No output is suppressed and no test changes.
 # Evidence: https://github.com/antimatter-studios/rust-fs-ntfs/actions/runs/39704704635/job/119587365786
+#
+# THE CLI ROW MOVED for #656, from 45/1540 to 48/1618, with exact caps.
+# Run 39704708480, job 119588831285, passed all 13 files and 1261 checks.
+# Its retained cli.log is 48 lines / 1618 bytes, SHA-256
+# 98e7b4b98ba9aede3132441f08f62263e035ff4990b98ef284d75bdab615b17c.
+# The wrapper exited 65 against the inherited 42/1540 row. The additional
+# positioned-write test contributes three normal verdict lines. Its floor
+# rises from 1143 to the measured 1261, with the same summary byte count.
+# All original output and tests remain; neither cap adds new headroom.
+# Evidence: https://github.com/antimatter-studios/rust-fs-ntfs/actions/runs/39704708480/job/119588831285
+#
 # CLI-ORACLE is the same script over tests/cli-oracle/, the checks against
 # volumes another platform wrote; the same shape, fewer files. On CI's
 # runner doctor adds a line per same-named program later on PATH (ntfs-3g's
@@ -150,6 +161,6 @@ asan         1100   72000
 scripts       135    3500
 semver         40    4000
 matrix       1850  135000
-cli            45    1540
+cli            48    1618
 cli-oracle     21     990
 cli-host       37    2630
