@@ -13,6 +13,7 @@ use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::write;
 use ntfs::indexes::NtfsFileNameIndex;
+use ntfs::structured_values::NtfsFileName;
 use ntfs::{Ntfs, NtfsAttributeType, NtfsReadSeek};
 use std::io::BufReader;
 use std::path::Path;
@@ -126,6 +127,53 @@ fn exists(img: &str, dir_path: &str, name: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+
+#[test]
+fn added_link_namespace_matches_the_native_windows_capture() {
+    // Run 39710860283 observes namespace 0 in both copies of Windows'
+    // added second.txt name. A short original name remains its own link.
+    let img = fresh_vol("native_namespace");
+    write::create_file(Path::new(&img), "/", "first.txt").expect("create");
+    write::write_file_contents(Path::new(&img), "/first.txt", b"shared payload").expect("write");
+    write::link(Path::new(&img), "/first.txt", "/", "second.txt").expect("link");
+
+    with_file(&img, "/second.txt", |file, reader, ntfs| {
+        let mut attrs = file.attributes();
+        let mut names = Vec::new();
+        while let Some(item) = attrs.next(reader) {
+            let item = item.expect("attribute item");
+            let attr = item.to_attribute().expect("attribute");
+            if attr.ty().expect("type") == NtfsAttributeType::FileName {
+                let name = attr
+                    .structured_value::<_, NtfsFileName>(reader)
+                    .expect("FILE_NAME");
+                names.push((name.name().to_string_lossy(), name.namespace() as u8));
+            }
+        }
+        assert_eq!(names.len(), 2, "both links retain their own FILE_NAME");
+        assert!(names.iter().any(|n| n.0 == "first.txt" && n.1 == 3));
+        assert!(names.iter().any(|n| n.0 == "second.txt" && n.1 == 0));
+
+        let root = ntfs.root_directory(reader).expect("root");
+        let index = root.directory_index(reader).expect("root index");
+        let mut entries = index.entries();
+        let mut found = false;
+        while let Some(entry) = entries.next(reader) {
+            let entry = entry.expect("index entry");
+            let key = entry.key().expect("key").expect("FILE_NAME key");
+            if key.name().to_string_lossy() == "second.txt" {
+                assert_eq!(key.namespace() as u8, 0, "directory copy matches Windows");
+                assert_eq!(
+                    entry.file_reference().file_record_number(),
+                    file.file_record_number(),
+                    "the namespace change preserves the linked record identity"
+                );
+                found = true;
+            }
+        }
+        assert!(found, "the added link remains indexed");
+    });
+}
 
 #[test]
 fn link_then_unlink_one_keeps_other_name_and_data() {

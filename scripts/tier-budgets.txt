@@ -118,6 +118,17 @@
 # is one more passing file, and a passing file prints exactly three lines --
 # `== test-mv`, its `test result: ok. 166 passed; 0 failed` and its
 # `test-mv: all checks passed` -- 76 bytes with their newlines.
+#
+# THE CLI ROW MOVED for #646, from 39/1,460 to 42/1,540: tests/cli/test-ln.sh
+# is one more passing file, printing `== test-ln`, `test result: ok. 192
+# passed; 0 failed` and `test-ln: all checks passed`, 76 bytes again.
+#
+# THE CLI-HOST ROW MOVED for #646, from 28/2,100 to 37/2,630, and the new
+# figure is DERIVED: run-host-steps prints one line per scenario and its
+# verdict, which gives the measured 21 lines for 20 scenarios. The link
+# scenario makes 27, so 28 lines and 1,973 bytes (computed from the group,
+# each recipe's host steps and the line format), which met the old row
+# exactly; the new row is that plus a third.
 clippy        260   11500
 unit         1000   64000
 unit-debug   1000   64000
@@ -128,6 +139,6 @@ asan         1100   72000
 scripts       135    3500
 semver         40    4000
 matrix       1850  135000
-cli            39    1460
+cli            42    1540
 cli-oracle     21     990
-cli-host       28    2100
+cli-host       37    2630

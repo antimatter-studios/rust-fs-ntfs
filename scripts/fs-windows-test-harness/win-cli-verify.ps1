@@ -1,6 +1,6 @@
 # win-cli-verify.ps1 -- does WINDOWS read back what fs.ntfs wrote?
 #
-# The oracle for `fs.ntfs write`, `mkdir`, `mv` and `set label`: mounts the .img
+# The oracle for `fs.ntfs write`, `mkdir`, `mv`, `ln` and `set label`: mounts the .img
 # (re-using a prior op's .vhd if `keep_image=true` was set on the prior
 # step) and checks the manifest a scripts/cli-oracle.sh step wrote
 # beside it, line by line, through ntfs.sys:
@@ -12,6 +12,12 @@
 #                                        takes for the last name, and it is spelled
 #                                        exactly so, case included (fs.ntfs mv)
 #   absent<TAB>/path                     nothing is there (fs.ntfs mv's old name)
+#   links<TAB>/path<TAB>/path...         `fsutil hardlink list` on the first lists
+#                                        exactly these names, case included (fs.ntfs ln)
+#   symlink<TAB>/path<TAB>text<TAB>size<TAB>sha256
+#                                        a symbolic link whose target Windows reads
+#                                        as text, `/` given as `\`, and through which
+#                                        it reads size bytes of that SHA-256 (fs.ntfs ln -s)
 #
 # Args:
 #   -ImagePath  Path on the VM to the .img file.
@@ -102,6 +108,46 @@ try {
                     $failures++
                 } else {
                     $report += "ok   absent $($f[1])"
+                }
+            }
+            'links' {
+                # fsutil prints each name from the volume's root, without
+                # the drive letter, one per line.
+                $target = "${letter}:" + ($f[1] -replace '/', '\')
+                $want = @($f[1..($f.Count - 1)] | ForEach-Object { $_ -replace '/', '\' } | Sort-Object)
+                $got = @(& fsutil hardlink list $target | Where-Object { $_.Trim() -ne '' } | ForEach-Object { $_.Trim() } | Sort-Object)
+                if ($LASTEXITCODE -eq 0 -and ($got -join '|') -ceq ($want -join '|')) {
+                    $report += "ok   links $($f[1]) ($($got.Count) names)"
+                } else {
+                    $report += "FAIL links $($f[1]): fsutil (exit $LASTEXITCODE) lists '$($got -join "', '")'; fs.ntfs made '$($want -join "', '")'"
+                    $failures++
+                }
+            }
+            'symlink' {
+                $target = "${letter}:" + ($f[1] -replace '/', '\')
+                $want = $f[2] -replace '/', '\'
+                $item = Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+                $linkTarget = if ($item) { "$($item.Target)" } else { '' }
+                if (-not $item -or $item.LinkType -ne 'SymbolicLink' -or $linkTarget -cne $want) {
+                    $report += "FAIL symlink $($f[1]): Windows reads a '$($item.LinkType)' to '$linkTarget'; fs.ntfs made a symbolic link to '$want'"
+                    $failures++
+                    continue
+                }
+                # Opening the link follows it: these are the target's bytes.
+                try {
+                    $stream = [System.IO.File]::OpenRead($target)
+                    try { $length = $stream.Length } finally { $stream.Dispose() }
+                    $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+                } catch {
+                    $report += "FAIL symlink $($f[1]) -> ${want}: Windows cannot follow it: $($_.Exception.Message)"
+                    $failures++
+                    continue
+                }
+                if ($length -ne [int64]$f[3] -or $hash -ne $f[4]) {
+                    $report += "FAIL symlink $($f[1]) -> ${want}: $length bytes, sha256 $hash; its target holds $($f[3]) bytes, sha256 $($f[4])"
+                    $failures++
+                } else {
+                    $report += "ok   symlink $($f[1]) -> $want ($length bytes)"
                 }
             }
             'label' {
