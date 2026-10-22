@@ -14,6 +14,7 @@ name: logfile oracle
 #   wrapped log:   seconds 240, candidates 16
 #   small cluster: cluster_size 1024 (or 512, 2048)
 #   view indexes, quota updates, truncation: mix views
+#   file record tails (WriteEndOfFileRecordSegment): mix tails
 #
 # On demand only. It builds no code and gates nothing: a fixture is chosen
 # from its artifact by a person and committed, and from then on the tests
@@ -42,7 +43,7 @@ on:
         required: false
         default: "0"
       mix:
-        description: "Workload: files (create, write, rename, delete) or views (adds quota tracking, security descriptors, object ids, junctions, truncation)"
+        description: "Workload: files (create, write, rename, delete), views (adds quota tracking, security descriptors, object ids, junctions, truncation) or tails (small resident files whose data is cut and regrown, and a named stream added and removed)"
         required: false
         default: "files"
 
