@@ -573,9 +573,12 @@ pub fn set_file_attributes_by_record_number_io<T: BlockIo + ?Sized>(
 ///
 /// `offset` is a byte offset within the file's logical data; `data` is
 /// written starting there. Returns the number of bytes written on
-/// success. A zero-length write is a no-op.
+/// success. A zero-length write to a file that exists is a no-op.
 pub fn write_at(image: &Path, file_path: &str, offset: u64, data: &[u8]) -> Result<u64, Error> {
+    // Still a read-only open for a write of nothing (#218), but the file
+    // it names has to be there (#1168).
     if data.is_empty() {
+        resolve_path_to_record_number(image, file_path)?;
         return Ok(0);
     }
     let mut io = open_for_write(image)?;
@@ -588,10 +591,12 @@ pub fn write_at_io<T: BlockIo + ?Sized>(
     offset: u64,
     data: &[u8],
 ) -> Result<u64, Error> {
+    // A write of nothing to a file that is not there is refused, as the
+    // open before any write would be (#1168).
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
     if data.is_empty() {
         return Ok(0);
     }
-    let rec = resolve_path_to_record_number_io(io, file_path)?;
     // Refused before the record's `$DATA` is looked at: a metafile such as
     // `$Extend` has none, and would otherwise fail on that instead.
     refuse_metafile_io(io, rec, "write_at")?;
@@ -8675,6 +8680,15 @@ mod tests {
         let mut dev = fresh_vol();
         let n = write_at_io(&mut dev, "/", 0, &[]).unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn write_at_io_empty_data_to_a_missing_path_is_refused() {
+        // A write of nothing still names a file, and a file that is not
+        // there cannot be written, even with nothing (#1168).
+        let mut dev = fresh_vol();
+        let err = write_at_io(&mut dev, "/missing", 0, &[]).unwrap_err();
+        assert_eq!(err.kind(), crate::error::Kind::NotFound, "{err}");
     }
 
     // --- truncate grow (extend) — C2 ------------------------------------------
