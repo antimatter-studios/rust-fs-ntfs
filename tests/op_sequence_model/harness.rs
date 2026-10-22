@@ -248,6 +248,17 @@ fn full_ea_information(bytes: &[u8]) -> Vec<Ea> {
     }
 }
 
+#[test]
+fn full_ea_information_accepts_the_on_disk_terminal_entry_size() {
+    // Windows writes the aligned size in the final $EA entry's offset field;
+    // query buffers instead use zero for the final entry.
+    let bytes = [12, 0, 0, 0, 0, 1, 1, 0, b'x', 0, 0x42, 0];
+    assert_eq!(
+        full_ea_information(&bytes),
+        vec![(b"x".to_vec(), 0, vec![0x42])]
+    );
+}
+
 /// The EAs of `file`, from the raw `$EA` and `$EA_INFORMATION` values the
 /// upstream `ntfs` parser reads, following `$ATTRIBUTE_LIST`s and runs.
 /// `$EA_INFORMATION` must describe the decoded set, and a file with no EAs
