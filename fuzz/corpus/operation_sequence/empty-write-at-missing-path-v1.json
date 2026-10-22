@@ -1,0 +1,1 @@
+{"version":1,"operations":[{"op":"write_at","path":"/missing","offset":0,"data":[]}],"regression":{"kind":"disk accepted model refusal","step":1,"geometry":{"size":67108864,"cluster":4096,"record":1024,"label":"OPSEQ","serial":682},"original":"tmp/op-sequence-model/explorer/reproducer.json","original_operations":58}}

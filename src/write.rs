@@ -8677,6 +8677,15 @@ mod tests {
         assert_eq!(n, 0);
     }
 
+    #[test]
+    fn write_at_io_empty_data_to_a_missing_path_is_refused() {
+        // A write of nothing still names a file, and a file that is not
+        // there cannot be written, even with nothing (#1168).
+        let mut dev = fresh_vol();
+        let err = write_at_io(&mut dev, "/missing", 0, &[]).unwrap_err();
+        assert_eq!(err.kind(), crate::error::Kind::NotFound, "{err}");
+    }
+
     // --- truncate grow (extend) — C2 ------------------------------------------
 
     #[test]
