@@ -599,9 +599,12 @@ tasks:
     # checks and four generated-doc checks for --at; the derived floor
     # was 1143. Run 39704704635 measured 1093 checks before positioned
     # writes; run 39704708480, CLI job 119588831285, passed all 13 files
-    # and measured 1261 checks. That measured count is the new floor.
+    # and measured 1261 checks. That measured count was the floor.
     # The retained CLI log and output measurement are in tier-budgets.txt.
     # Suites run on GitHub Actions.
+    # #757 adds 35: test-streams.sh's 30 checks, two generated-verb docs
+    # checks and three completion checks. Retaining the measured 1261
+    # checks plus these additions sets the new minimum to 1296.
     cmds:
       - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli -- scripts/test-cli.sh'
 
@@ -623,8 +626,11 @@ tasks:
     # Run 39677780603 measured 275: stat 183, authored reads 35,
     # ntfs-3g 22 and recursive listing 35. The listing asserts at least 15
     # paths, hence at least 33 checks: 240 + 33 sets the floor to 273.
+    # #757 adds 18: five checks for each of three stream-bearing paths,
+    # two immutable-image checks and one exact stream count. Retaining
+    # the existing 273 minimum plus these additions sets it to 291.
     cmds:
-      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=273 scripts/test-cli.sh'
+      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=291 scripts/test-cli.sh'
 
   test:cli:host:
     desc: 'The host half of the cli scenarios in the Windows matrix, without the VM: every step each runs before its first Windows step (scripts/cli-oracle.sh)'
