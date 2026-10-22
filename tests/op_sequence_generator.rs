@@ -5,9 +5,9 @@ mod generator;
 mod model;
 use generator::{
     decode, decode_regression, decode_replay, encode, encode_regression, Generator, Geometry, Op,
-    Regression, MAX_DATA, MAX_PATH, MAX_SIZE, MAX_STEPS,
+    Regression, MAX_DATA, MAX_EA_VALUE, MAX_PATH, MAX_SIZE, MAX_STEPS,
 };
-use model::{Error, Model};
+use model::{Error, Model, NEED_EA};
 
 fn tree() -> Model {
     let mut table: Vec<_> = (0..=u16::MAX).collect();
@@ -262,7 +262,7 @@ fn captured_regressions_keep_their_pin_and_replay_ignores_it() {
 #[test]
 fn stream_operations_are_generated_on_files_bounded_and_replayable() {
     let mut variants = std::collections::HashSet::new();
-    for verb in 0..11 {
+    for verb in 0..generator::OPCODES as u8 {
         let operations = decode(&frame(verb, 2, 2, 0, 0, 0), &tree());
         assert_eq!(operations[0].opcode(), usize::from(verb));
         variants.insert(std::mem::discriminant(&operations[0]));
@@ -353,6 +353,144 @@ fn stream_operations_are_generated_on_files_bounded_and_replayable() {
         serde_json::json!({"op":"write_stream", "path":"/f", "stream":"n".repeat(257), "data":[]}),
         serde_json::json!({"op":"write_stream", "path":"/f", "stream":"s", "data":vec![0; MAX_DATA + 1]}),
         serde_json::json!({"op":"delete_stream", "path":"p".repeat(MAX_PATH + 1), "stream":"s"}),
+    ] {
+        let op: Op = serde_json::from_value(value).unwrap();
+        assert!(encode(std::slice::from_ref(&op)).is_err(), "{op:?}");
+    }
+}
+
+#[test]
+fn ea_operations_are_generated_on_files_bounded_and_replayable() {
+    for verb in [11, 12] {
+        let op = decode(&frame(verb, 2, 2, 0, 0, 0), &tree()).remove(0);
+        assert_eq!(op.opcode(), usize::from(verb), "{op:?}");
+    }
+    let mut m = tree();
+    m.create("/", "f", false).unwrap();
+    m.create("/", "d", true).unwrap();
+    // An EA write consumes its payload, as a write does, and the parent
+    // byte's low bit sets NEED_EA. Name 13 is fresh; name 12 is the
+    // target's first EA in lower case, which matches its stored upper-case
+    // name only case-insensitively.
+    let input = [
+        frame(11, 2, 1, 13, 3, 0),
+        vec![1, 2, 3],
+        frame(12, 2, 0, 12, 0, 0),
+    ]
+    .concat();
+    let operations = decode(&input, &m);
+    assert_eq!(
+        operations,
+        vec![
+            Op::WriteEa {
+                path: "/f".into(),
+                name: "ea1".into(),
+                flags: NEED_EA,
+                value: vec![1, 2, 3],
+            },
+            Op::RemoveEa {
+                path: "/f".into(),
+                name: "ea1".into(),
+            },
+        ]
+    );
+    let mut applied = m.clone();
+    operations[0].apply(&mut applied).unwrap();
+    assert_eq!(
+        applied.eas("/f").unwrap(),
+        vec![(b"EA1".to_vec(), NEED_EA, vec![1, 2, 3])]
+    );
+    operations[1].apply(&mut applied).unwrap();
+    assert!(applied.eas("/f").unwrap().is_empty());
+    let replay = encode(&operations).unwrap();
+    assert_eq!(decode_replay(&replay).unwrap(), operations);
+    let text = String::from_utf8(replay).unwrap();
+    assert!(text.contains(r#""op":"write_ea""#), "{text}");
+    assert!(text.contains(r#""op":"remove_ea""#), "{text}");
+
+    // The offset's low byte picks a size class for the length: under 128,
+    // 2048 and 16384 bytes, or the whole u16. Payload short of the size is
+    // repeated; with none, a fixed pattern fills the value.
+    for (class, size) in [(0, 56), (1, 952), (2, 3000), (3, 3000)] {
+        let op = decode(&frame(11, 2, 0, 0, 3000, class), &m).remove(0);
+        let Op::WriteEa { value, .. } = op else {
+            panic!("EA opcode")
+        };
+        assert_eq!(value.len(), size, "class {class}");
+        assert!(value
+            .iter()
+            .enumerate()
+            .all(|(i, b)| *b == (i % 251) as u8 + 1));
+    }
+    let short = [frame(11, 2, 0, 0, 10, 0), vec![4, 5, 6]].concat();
+    let op = decode(&short, &m).remove(0);
+    assert!(
+        matches!(&op, Op::WriteEa { value, .. } if value == &[4, 5, 6, 4, 5, 6, 4, 5, 6, 4]),
+        "{op:?}"
+    );
+    // The whole u16 is a value no file's EAs can hold beside its name.
+    let op = decode(&frame(11, 2, 0, 0, u16::MAX, 3), &m).remove(0);
+    assert!(matches!(&op, Op::WriteEa { value, .. } if value.len() == MAX_EA_VALUE));
+    let mut probe = m.clone();
+    assert_eq!(op.apply(&mut probe), Err(Error::EaSetTooLarge));
+    assert_eq!(probe, m, "a refused EA write changed the model");
+
+    // Selector 0 is missing and 1 is a file used as a directory; EAs are
+    // never generated on a directory in this slice (#732).
+    for (selector, expected) in [(0, "/missing"), (1, "/f/x"), (2, "/f"), (3, "/f")] {
+        let op = decode(&frame(12, selector, 0, 0, 0, 0), &m).remove(0);
+        assert!(
+            matches!(&op, Op::RemoveEa { path, .. } if path == expected),
+            "{selector}: {op:?}"
+        );
+    }
+    for selector in 0..=u8::MAX {
+        let op = decode(&frame(11, selector, 0, 0, 0, 0), &m).remove(0);
+        let Op::WriteEa { path, .. } = op else {
+            panic!("EA opcode")
+        };
+        assert!(path != "/" && path != "/d", "{selector}: {path}");
+    }
+
+    // The name pool's byte-length boundaries and a case collision.
+    let mut named = m.clone();
+    named.write_ea("/f", b"kept", 0, b"").unwrap();
+    for (index, bytes, result) in [
+        (1, 1, Ok(())),
+        (9, 254, Ok(())),
+        (10, 254, Ok(())),
+        (11, 255, Err(Error::InvalidName)),
+        (8, 0, Err(Error::InvalidName)),
+    ] {
+        let op = decode(&frame(11, 2, 0, index, 0, 0), &named).remove(0);
+        assert!(
+            matches!(&op, Op::WriteEa { name, .. } if name.len() == bytes),
+            "{index}: {op:?}"
+        );
+        let mut probe = named.clone();
+        assert_eq!(op.apply(&mut probe), result, "{op:?}");
+        if result.is_err() {
+            assert_eq!(probe, named, "a refused EA write changed the model");
+        }
+    }
+    let mut collided = named.clone();
+    for index in [9, 10] {
+        decode(&frame(11, 2, 0, index, 0, 0), &named)
+            .remove(0)
+            .apply(&mut collided)
+            .unwrap();
+    }
+    assert_eq!(collided.eas("/f").unwrap().len(), 2, "n and N are one name");
+    let existing = decode(&frame(12, 2, 0, 12, 0, 0), &named).remove(0);
+    assert!(matches!(&existing, Op::RemoveEa { name, .. } if name == "kept"));
+    let fresh = decode(&frame(11, 2, 0, 13, 0, 0), &named).remove(0);
+    assert!(matches!(&fresh, Op::WriteEa { name, .. } if name == "ea1"));
+
+    for value in [
+        serde_json::json!({"op":"write_ea", "path":"/f", "name":"n".repeat(257), "flags":0, "value":[]}),
+        serde_json::json!({"op":"write_ea", "path":"/f", "name":"a", "flags":0, "value":vec![0; MAX_EA_VALUE + 1]}),
+        serde_json::json!({"op":"remove_ea", "path":"/f", "name":"n".repeat(257)}),
+        serde_json::json!({"op":"remove_ea", "path":"p".repeat(MAX_PATH + 1), "name":"a"}),
     ] {
         let op: Op = serde_json::from_value(value).unwrap();
         assert!(encode(std::slice::from_ref(&op)).is_err(), "{op:?}");
