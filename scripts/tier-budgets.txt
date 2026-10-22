@@ -130,6 +130,15 @@
 # All original output and tests remain; neither cap adds new headroom.
 # Evidence: https://github.com/antimatter-studios/rust-fs-ntfs/actions/runs/39704708480/job/119588831285
 #
+# THE CLI ROW MOVED for #757, from 48/1618 to 51/1703, with exact caps.
+# Merge-queue run 39745726428, job 119724263545, passed all 14 files and
+# 1296 checks. Its retained cli.log is 51 lines / 1703 bytes, SHA-256
+# 2d8c1a8151ec763265800f731339333877fa67a2f6a2f58db3925cbbb8a633d9.
+# The wrapper exited 65 against the 48/1618 row: test-streams.sh is one
+# more passing file and prints its three normal verdict lines. No output
+# is suppressed and no test changes.
+# Evidence: https://github.com/antimatter-studios/rust-fs-ntfs/actions/runs/39745726428/job/119724263545
+#
 # CLI-ORACLE is the same script over tests/cli-oracle/, the checks against
 # volumes another platform wrote; the same shape, fewer files. On CI's
 # runner doctor adds a line per same-named program later on PATH (ntfs-3g's
@@ -161,6 +170,6 @@ asan         1100   72000
 scripts       135    3500
 semver         40    4000
 matrix       1850  135000
-cli            48    1618
+cli            51    1703
 cli-oracle     21     990
 cli-host       37    2630
