@@ -796,6 +796,7 @@ jobs:
             test-disks/usn-read-probe.tsv
             test-disks/ntfs-attrlist.img
             test-disks/ntfs-attrlist.streams.tsv
+            test-disks/ntfs-attrlist.streams.tsv.bytes/
             test-disks/ntfs-compressed.img
             test-disks/ntfs-symlink.img
             test-disks/ntfs-symlink.targets.tsv
@@ -815,6 +816,7 @@ jobs:
             test-disks/ntfs-stat.img
             test-disks/ntfs-stat.windows.tsv
             test-disks/ntfs-stat.streams.tsv
+            test-disks/ntfs-stat.streams.tsv.bytes/
             test-disks/ntfs-ls-recursive.img
             test-disks/ntfs-ls-recursive.windows.tsv
             test-disks/ntfs-i30-slack.img
