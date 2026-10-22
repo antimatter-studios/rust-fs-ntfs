@@ -139,6 +139,15 @@
 # is suppressed and no test changes.
 # Evidence: https://github.com/antimatter-studios/rust-fs-ntfs/actions/runs/39745726428/job/119724263545
 #
+# THE CLI-ORACLE ROW MOVED for #757, from 21/990 to 24/1057, with exact
+# caps. Merge-queue run 39780791130, job 119838951488, passed all 5 files
+# and 293 checks. Its retained cli-oracle.log is 24 lines / 1057 bytes,
+# SHA-256 da0e1845c6d93c353ff37cd795de044f89a5f3acd043113885fc7b16b90200a5.
+# The wrapper exited 65 against the 21/990 row: test-streams-windows.sh is
+# one more passing file and prints its three normal verdict lines. No
+# output is suppressed and no test changes.
+# Evidence: https://github.com/antimatter-studios/rust-fs-ntfs/actions/runs/39780791130/job/119838951488
+#
 # CLI-ORACLE is the same script over tests/cli-oracle/, the checks against
 # volumes another platform wrote; the same shape, fewer files. On CI's
 # runner doctor adds a line per same-named program later on PATH (ntfs-3g's
@@ -171,5 +180,5 @@ scripts       135    3500
 semver         40    4000
 matrix       1850  135000
 cli            51    1703
-cli-oracle     21     990
+cli-oracle     24    1057
 cli-host       37    2630
