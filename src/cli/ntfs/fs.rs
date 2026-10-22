@@ -2,10 +2,11 @@
 //! without mounting it.
 //!
 //! The verbs are the shared set: `ls`, `stat`, `read`, `write`, `mkdir`,
-//! `get`/`info`, `set`, `resize`. Metadata is JSON (or `--text`); file
-//! content is raw bytes. A verb the library cannot do yet still exists and
-//! answers `not implemented` with exit status 3, so a script moved between
-//! filesystems fails loudly instead of meaning something else.
+//! `rm`, `rmdir`, `mv`, `get`/`info`, `set`, `resize`. Metadata is JSON
+//! (or `--text`); file content is raw bytes. A verb the library cannot do
+//! yet still exists and answers `not implemented` with exit status 3, so a
+//! script moved between filesystems fails loudly instead of meaning
+//! something else.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -16,6 +17,7 @@ use clap::{value_parser, Arg, ArgAction, ArgMatches, Command as Cmd};
 use super::device::{self, Device};
 use fs_core::cli::{CliError, Format, Json, Outcome, Tool};
 use fs_ntfs::attr_io::{self, AttrType};
+use fs_ntfs::block_io::BlockIo;
 use fs_ntfs::error::{Error, Kind};
 use fs_ntfs::read::{self, VolumeInfo};
 
@@ -249,6 +251,35 @@ fn command() -> Cmd {
                      The directory must be empty.",
                 ),
         )
+        .subcommand(
+            Cmd::new("mv")
+                .about("Give a file or directory a new name in the same directory")
+                .arg(
+                    Arg::new("source")
+                        .value_name("SOURCE")
+                        .required(true)
+                        .value_parser(value_parser!(OsString)),
+                )
+                .arg(
+                    Arg::new("path")
+                        .value_name("PATH")
+                        .required(true)
+                        .value_parser(value_parser!(OsString)),
+                )
+                .after_help(
+                    "Examples:\n  fs.ntfs disk.img mv /notes.txt /notes-2026.txt\n  \
+                     fs.ntfs disk.img mv /backup/old.tar /backup/2025.tar\n  \
+                     fs.ntfs disk.img mv /readme.txt /README.txt\n\n\
+                     PATH is the new name itself, not a directory to move into, and must be \
+                     in SOURCE's directory: a move to another directory answers `not \
+                     implemented` (exit 3). A name already at PATH is refused, never \
+                     replaced, and names are compared as Windows compares them, without \
+                     regard to case; a case-only rename of SOURCE itself is allowed. A \
+                     missing SOURCE, a name Windows cannot address, the root, . and .. and \
+                     the volume's own metafiles are refused before the image is opened for \
+                     writing.",
+                ),
+        )
         .subcommand(key_command(
             "get",
             "Report the filesystem's properties, or one of them",
@@ -372,6 +403,7 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         "mkdir" => mkdir(target, offset, path_arg(sub)?),
         "rm" => remove(target, offset, path_arg(sub)?, false),
         "rmdir" => remove(target, offset, path_arg(sub)?, true),
+        "mv" => rename(target, offset, text_arg(sub, "source")?, path_arg(sub)?),
         "resize" => Err(CliError::not_implemented(
             "resize: this library cannot resize an NTFS volume",
         )),
@@ -382,8 +414,13 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
 /// A path argument. The library takes paths as text, so one that is not
 /// UTF-8 cannot name anything on an NTFS volume (whose names are UTF-16).
 fn path_arg(sub: &ArgMatches) -> Result<&str, CliError> {
+    text_arg(sub, "path")
+}
+
+/// The argument `id` as a path; see [`path_arg`].
+fn text_arg<'a>(sub: &'a ArgMatches, id: &str) -> Result<&'a str, CliError> {
     let path = sub
-        .get_one::<OsString>("path")
+        .get_one::<OsString>(id)
         .expect("clap requires or defaults the path");
     path.to_str().ok_or_else(|| {
         CliError::failed(format!(
@@ -1074,16 +1111,26 @@ fn edit<T>(
     edit: impl FnOnce(&mut Device) -> Result<T, Error>,
 ) -> Result<T, CliError> {
     let (mut dev, _) = device::mount(target, offset, true)?;
-    fs_ntfs::fsck::prepare_rw_mount_io(&mut dev)
-        .map_err(|e| CliError::failed(format!("{what}: {e}")))?;
-    fs_ntfs::fsck::upgrade_volume_version_io(&mut dev)
-        .map_err(|e| CliError::failed(format!("{what}: upgrade the volume version: {e}")))?;
-    fs_ntfs::fsck::retire_usn_journal_io(&mut dev)
-        .map_err(|e| CliError::failed(format!("{what}: retire the change journal: {e}")))?;
-    let done = edit(&mut dev).map_err(|e| CliError::failed(format!("{what}: {e}")))?;
+    let done = prepared(&mut dev, what, edit)?;
     fs_ntfs::block_io::BlockIo::sync(&mut dev)
         .map_err(|e| CliError::failed(format!("{what}: {e}")))?;
     Ok(done)
+}
+
+/// What [`edit`] does to an open volume, before it syncs: the preparation,
+/// then `edit`. Over a [`device::Rehearsal`] it is a rehearsal of the edit.
+fn prepared<D: BlockIo, T>(
+    dev: &mut D,
+    what: &str,
+    edit: impl FnOnce(&mut D) -> Result<T, Error>,
+) -> Result<T, CliError> {
+    fs_ntfs::fsck::prepare_rw_mount_io(dev)
+        .map_err(|e| CliError::failed(format!("{what}: {e}")))?;
+    fs_ntfs::fsck::upgrade_volume_version_io(dev)
+        .map_err(|e| CliError::failed(format!("{what}: upgrade the volume version: {e}")))?;
+    fs_ntfs::fsck::retire_usn_journal_io(dev)
+        .map_err(|e| CliError::failed(format!("{what}: retire the change journal: {e}")))?;
+    edit(dev).map_err(|e| CliError::failed(format!("{what}: {e}")))
 }
 
 /// Create or replace a regular file with everything on stdin. The whole
@@ -1178,6 +1225,133 @@ fn remove(
     })?;
     let report = Json::object([("path", Json::from(path))]);
     Ok(Outcome::report(report).with_text(format!("removed {path}")))
+}
+
+/// `path` split for a rename: the directory part ("/" for a name in the
+/// root), the last name with any trailing `/` taken off (empty for the
+/// root), and whether there was a trailing `/`. A path not from the root is
+/// a usage error, as it is for every other verb.
+fn last_name(path: &str) -> Result<(&str, &str, bool), CliError> {
+    if !path.starts_with('/') {
+        return Err(CliError::usage(format!(
+            "{path}: give the path from the root, as /{path}"
+        )));
+    }
+    let trimmed = path.trim_end_matches('/');
+    let (parent, name) = trimmed.rsplit_once('/').unwrap_or(("", ""));
+    let parent = if parent.is_empty() { "/" } else { parent };
+    Ok((parent, name, trimmed.len() < path.len()))
+}
+
+/// The directory record at `path`.
+fn directory(dev: &mut Device, path: &str) -> Result<u64, Error> {
+    let record = read::resolve_path(dev, path)?;
+    if !read::read_stat(dev, record)?.is_dir {
+        return Err(Error::not_directory(format!("{path} is not a directory")));
+    }
+    Ok(record)
+}
+
+/// Give `source` the name `path`, in the same directory, through the
+/// library's rename. Everything that can be refused is refused on a
+/// read-only open, so a refused command never opens the image for writing
+/// and leaves it byte-identical: first what this verb decides itself, then
+/// the rename rehearsed in full, so the library refuses whatever it would
+/// refuse on the real volume, in the same words. A rename that would change
+/// nothing succeeds without opening the image for writing either.
+fn rename(target: &OsString, offset: u64, source: &str, path: &str) -> Result<Outcome, CliError> {
+    if let Some((from, name)) = renamable(target, offset, source, path)? {
+        edit(target, offset, source, |dev| {
+            fs_ntfs::write::rename_io(dev, &from, name)
+        })?;
+    }
+    let report = Json::object([("path", Json::from(path)), ("moved", Json::from(true))]);
+    Ok(Outcome::report(report).with_text(format!("moved {source} to {path}")))
+}
+
+/// The rename of `source` to `path` -- `source` without a trailing `/`, and
+/// the new name -- or `None` when it would change nothing, once every
+/// refusal has been ruled out. In order:
+///
+/// - `.`, `..` or the root as either path;
+/// - a directory part of either path that does not resolve, or is not a
+///   directory, `source`'s first;
+/// - a directory part that is not `source`'s directory: the move this
+///   driver cannot make, exit 3;
+/// - a missing `source`; a trailing `/` on either path when `source` is not
+///   a directory; a new name too long for NTFS;
+/// - whatever the library refuses: a name Windows cannot address, a name
+///   already there as Windows compares names (through `$UpCase`), a
+///   metafile, and a volume not fit to be written.
+fn renamable<'p>(
+    target: &OsString,
+    offset: u64,
+    source: &'p str,
+    path: &'p str,
+) -> Result<Option<(String, &'p str)>, CliError> {
+    let (from_parent, from_name, from_slash) = last_name(source)?;
+    let (to_parent, to_name, to_slash) = last_name(path)?;
+    for (p, name) in [(source, from_name), (path, to_name)] {
+        if name.is_empty() || name == "." || name == ".." {
+            return Err(CliError::failed(format!(
+                "{p}: ., .. and the root cannot be renamed"
+            )));
+        }
+    }
+    let (mut dev, _) = device::mount(target, offset, false)?;
+    let from_dir = directory(&mut dev, from_parent).map_err(|e| ntfs_error(source, e))?;
+    let to_dir = directory(&mut dev, to_parent).map_err(|e| ntfs_error(path, e))?;
+    if from_dir != to_dir {
+        return Err(CliError::not_implemented(format!(
+            "mv across directories: {source} is in {from_parent} and {path} in {to_parent}; \
+             this driver renames a name only within its own directory"
+        )));
+    }
+    let from = source.trim_end_matches('/').to_string();
+    let record = read::resolve_path(&mut dev, &from).map_err(|e| ntfs_error(source, e))?;
+    let is_dir = read::read_stat(&mut dev, record)
+        .map_err(|e| ntfs_error(source, e))?
+        .is_dir;
+    if !is_dir && (from_slash || to_slash) {
+        let p = if from_slash { source } else { path };
+        return Err(CliError::failed(format!("{p}: not a directory")));
+    }
+    let units = to_name.encode_utf16().count();
+    if units > 255 {
+        return Err(CliError::failed(format!(
+            "{path}: the name is {units} UTF-16 units, too long: NTFS allows 255"
+        )));
+    }
+    if stored_name(&mut dev, from_dir, record, from_name)
+        .map_err(|e| ntfs_error(source, e))?
+        .is_some_and(|stored| stored == to_name)
+    {
+        return Ok(None);
+    }
+    prepared(&mut device::Rehearsal::over(&mut dev), source, |io| {
+        fs_ntfs::write::rename_io(io, &from, to_name)
+    })?;
+    Ok(Some((from, to_name)))
+}
+
+/// The name directory `dir` lists `record` under that Windows takes for
+/// `name`: the same name but perhaps in another case.
+fn stored_name(
+    dev: &mut Device,
+    dir: u64,
+    record: u64,
+    name: &str,
+) -> Result<Option<String>, Error> {
+    let upcase = fs_ntfs::upcase::UpcaseTable::load_io(dev)?;
+    let wanted: Vec<u16> = name.encode_utf16().collect();
+    Ok(read::read_dir_entries(dev, dir)?
+        .into_iter()
+        .filter(|e| e.record_number == record)
+        .map(|e| e.name)
+        .find(|n| {
+            let n: Vec<u16> = n.encode_utf16().collect();
+            upcase.cmp_names(&n, &wanted).is_eq()
+        }))
 }
 
 /// Whether `$Volume` carries the dirty flag: the volume was not cleanly
