@@ -1702,6 +1702,115 @@ pub fn record_at_lsn(log: &[u8], lsn: u64, max_record_bytes: usize) -> Result<Re
     RecordView::parse(&header, &data)
 }
 
+/// One record a [`walk_records`] read, and where it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkedRecord {
+    pub view: RecordView,
+    /// Byte offset of the record's header in `$LogFile`, at its home page.
+    pub offset: u64,
+    /// The LSN the log puts the next record at.
+    pub next_lsn: u64,
+}
+
+/// What a [`walk_records`] read: the records, in LSN order; whether it
+/// reached the log's newest record; and, when a record could not be read,
+/// why, with everything read before it kept.
+#[derive(Debug)]
+pub struct RecordWalk {
+    pub records: Vec<WalkedRecord>,
+    pub complete: bool,
+    pub stopped: Option<Error>,
+}
+
+/// The records from `from` forward in LSN order, read-only, up to `limit`
+/// records and the log's newest (#607). By default the walk starts where
+/// replay's analysis does: the in-use client's checkpoint start, or the
+/// checkpoint itself when that is zero.
+///
+/// It reads through replay's own page model, so the geometry, fixups,
+/// tail-copy choice and continuation pages are the ones replay trusts, and
+/// a record whose client data exceeds `max_record_bytes` is refused before
+/// it is assembled. A record that cannot be read ends the walk with the
+/// reason in [`RecordWalk::stopped`]; reaching `limit` ends it incomplete
+/// with no error. Opening the log is the only error returned: a log that is
+/// not LFS 2.x is refused as [`record_at_lsn`] refuses it. Nothing here is
+/// replay authority.
+pub fn walk_records(
+    log: &[u8],
+    from: Option<u64>,
+    limit: usize,
+    max_record_bytes: usize,
+) -> Result<RecordWalk, Error> {
+    let (l, checkpoint) = read_log(log)?;
+    let mut walk = RecordWalk {
+        records: Vec::new(),
+        complete: false,
+        stopped: None,
+    };
+    let start = match from {
+        Some(lsn) => lsn,
+        None => {
+            let checkpoint = checkpoint.ok_or_else(|| refuse("no client has the log open"))?;
+            match l.record_bounded(checkpoint, max_record_bytes) {
+                Ok((header, body, _))
+                    if u32_at(&header, 0x20)? == LFS_CLIENT_RESTART && body.len() >= 0x10 =>
+                {
+                    match u64_at(&body, 0x08)? {
+                        0 => checkpoint,
+                        start => start,
+                    }
+                }
+                Ok(_) => checkpoint,
+                Err(e) => {
+                    walk.stopped = Some(e);
+                    return Ok(walk);
+                }
+            }
+        }
+    };
+    let mut lsn = start;
+    while walk.records.len() < limit {
+        let (header, data, next) = match l.record_bounded(lsn, max_record_bytes) {
+            Ok(record) => record,
+            Err(e) => {
+                walk.stopped = Some(e);
+                return Ok(walk);
+            }
+        };
+        let view = match RecordView::parse(&header, &data) {
+            Ok(view) => view,
+            Err(e) => {
+                walk.stopped = Some(e);
+                return Ok(walk);
+            }
+        };
+        walk.records.push(WalkedRecord {
+            view,
+            offset: l.offset(lsn) as u64,
+            next_lsn: next,
+        });
+        if lsn == l.newest {
+            walk.complete = true;
+            return Ok(walk);
+        }
+        if lsn > l.newest {
+            walk.stopped = Some(refuse(format!(
+                "the record at LSN {lsn:#x} is past the newest, {:#x}",
+                l.newest
+            )));
+            return Ok(walk);
+        }
+        if next <= lsn {
+            walk.stopped = Some(refuse(format!(
+                "the record after LSN {lsn:#x} goes backwards"
+            )));
+            return Ok(walk);
+        }
+        lsn = next;
+    }
+    Ok(walk)
+}
+
 impl RecordView {
     /// Decodes a record header (`0x30` bytes) and its client data. Refuses
     /// a header or client data too short to hold the fields.
