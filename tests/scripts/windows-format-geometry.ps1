@@ -192,6 +192,7 @@ $chkdskL = @('The type of the file system is NTFS.', 'The current log file size 
 Assert-Geometry ((ConvertFrom-ChkdskLogSize $chkdskL) -eq 2097152) 'chkdsk /L reports the current log size in KB'
 Assert-GeometryFailure { ConvertFrom-ChkdskLogSize @($chkdskL[0], $chkdskL[2]) } 'a report without the current size fails'
 Assert-Geometry ((Get-NtfsInfoField @('Total Clusters :                  0x0000000000000800') 'Total Clusters') -eq 2048) 'fsutil total clusters in hex'
+Assert-Geometry ((Get-NtfsInfoField @('Total Clusters    :                    1,535  (  6.0 MB)') 'Total Clusters') -eq 1535) 'fsutil total clusters with separators and a decimal size'
 function New-SmallRow([int]$Mib, [bool]$Accepted) {
     [pscustomobject][ordered]@{ size_mib = $Mib; accepted = $Accepted; log_bytes = $(if ($Accepted) { 1048576 });
         mft_lcn = $(if ($Accepted) { 4 }); mftmirr_lcn = $(if ($Accepted) { 255 }); total_clusters = $(if ($Accepted) { 511 }) }
@@ -204,5 +205,5 @@ $unmeasured = New-SmallRow 4 $true
 $unmeasured.log_bytes = $null
 Assert-GeometryFailure { Assert-SmallVolumeRows @((New-SmallRow 1 $false), $unmeasured) } 'an accepted size without its $LogFile size fails'
 Assert-GeometryFailure { Assert-SmallVolumeRows @() } 'no rows fail'
-if ($checks -ne 74) { throw "only $checks geometry contracts executed, expected 74" }
-Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 74)"
+if ($checks -ne 75) { throw "only $checks geometry contracts executed, expected 75" }
+Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 75)"
