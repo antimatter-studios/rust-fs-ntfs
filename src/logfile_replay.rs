@@ -1702,6 +1702,115 @@ pub fn record_at_lsn(log: &[u8], lsn: u64, max_record_bytes: usize) -> Result<Re
     RecordView::parse(&header, &data)
 }
 
+/// One record a [`walk_records`] read, and where it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkedRecord {
+    pub view: RecordView,
+    /// Byte offset of the record's header in `$LogFile`, at its home page.
+    pub offset: u64,
+    /// The LSN the log puts the next record at.
+    pub next_lsn: u64,
+}
+
+/// What a [`walk_records`] read: the records, in LSN order; whether it
+/// reached the log's newest record; and, when a record could not be read,
+/// why, with everything read before it kept.
+#[derive(Debug)]
+pub struct RecordWalk {
+    pub records: Vec<WalkedRecord>,
+    pub complete: bool,
+    pub stopped: Option<Error>,
+}
+
+/// The records from `from` forward in LSN order, read-only, up to `limit`
+/// records and the log's newest (#607). By default the walk starts where
+/// replay's analysis does: the in-use client's checkpoint start, or the
+/// checkpoint itself when that is zero.
+///
+/// It reads through replay's own page model, so the geometry, fixups,
+/// tail-copy choice and continuation pages are the ones replay trusts, and
+/// a record whose client data exceeds `max_record_bytes` is refused before
+/// it is assembled. A record that cannot be read ends the walk with the
+/// reason in [`RecordWalk::stopped`]; reaching `limit` ends it incomplete
+/// with no error. Opening the log is the only error returned: a log that is
+/// not LFS 2.x is refused as [`record_at_lsn`] refuses it. Nothing here is
+/// replay authority.
+pub fn walk_records(
+    log: &[u8],
+    from: Option<u64>,
+    limit: usize,
+    max_record_bytes: usize,
+) -> Result<RecordWalk, Error> {
+    let (l, checkpoint) = read_log(log)?;
+    let mut walk = RecordWalk {
+        records: Vec::new(),
+        complete: false,
+        stopped: None,
+    };
+    let start = match from {
+        Some(lsn) => lsn,
+        None => {
+            let checkpoint = checkpoint.ok_or_else(|| refuse("no client has the log open"))?;
+            match l.record_bounded(checkpoint, max_record_bytes) {
+                Ok((header, body, _))
+                    if u32_at(&header, 0x20)? == LFS_CLIENT_RESTART && body.len() >= 0x10 =>
+                {
+                    match u64_at(&body, 0x08)? {
+                        0 => checkpoint,
+                        start => start,
+                    }
+                }
+                Ok(_) => checkpoint,
+                Err(e) => {
+                    walk.stopped = Some(e);
+                    return Ok(walk);
+                }
+            }
+        }
+    };
+    let mut lsn = start;
+    while walk.records.len() < limit {
+        let (header, data, next) = match l.record_bounded(lsn, max_record_bytes) {
+            Ok(record) => record,
+            Err(e) => {
+                walk.stopped = Some(e);
+                return Ok(walk);
+            }
+        };
+        let view = match RecordView::parse(&header, &data) {
+            Ok(view) => view,
+            Err(e) => {
+                walk.stopped = Some(e);
+                return Ok(walk);
+            }
+        };
+        walk.records.push(WalkedRecord {
+            view,
+            offset: l.offset(lsn) as u64,
+            next_lsn: next,
+        });
+        if lsn == l.newest {
+            walk.complete = true;
+            return Ok(walk);
+        }
+        if lsn > l.newest {
+            walk.stopped = Some(refuse(format!(
+                "the record at LSN {lsn:#x} is past the newest, {:#x}",
+                l.newest
+            )));
+            return Ok(walk);
+        }
+        if next <= lsn {
+            walk.stopped = Some(refuse(format!(
+                "the record after LSN {lsn:#x} goes backwards"
+            )));
+            return Ok(walk);
+        }
+        lsn = next;
+    }
+    Ok(walk)
+}
+
 impl RecordView {
     /// Decodes a record header (`0x30` bytes) and its client data. Refuses
     /// a header or client data too short to hold the fields.
@@ -1779,6 +1888,89 @@ mod record_view_tests {
         let error = record_at_lsn(&out.stdout, 0x184415, out.stdout.len()).unwrap_err();
         assert!(error.to_string().contains("LFS version 1"), "{error}");
         assert_eq!(out.stdout, before);
+    }
+
+    /// The LFS 2.0 Windows capture the checkpoint test reads, verified.
+    fn interrupted_capture() -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        let out = std::process::Command::new("gzip")
+            .args(["-dc", "test-disks/windows-interrupted-logfile-1.bin.gz"])
+            .output()
+            .expect("install gzip to read the Windows capture");
+        assert!(out.status.success(), "gzip: {:?}", out.stderr);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&out.stdout)),
+            "e6a36b92ace6fa15378af53d9239b1df0aacdf931e4c721d10ce287259d638eb"
+        );
+        out.stdout
+    }
+
+    /// A walk from the in-use client's checkpoint start reads every record
+    /// to the log's newest, in LSN order, each where its predecessor said
+    /// the next one starts, each the record strict lookup reads at its LSN,
+    /// and passes the checkpoint at the restart LSN Windows wrote (#607).
+    #[test]
+    fn a_walk_from_the_checkpoint_start_reads_every_record_in_order() {
+        let log = interrupted_capture();
+        let before = log.clone();
+        let walk = walk_records(&log, None, 100_000, log.len()).expect("the capture opens");
+        assert!(walk.stopped.is_none(), "{:?}", walk.stopped);
+        assert!(walk.complete, "the walk reached the newest record");
+        let lsns: Vec<u64> = walk.records.iter().map(|r| r.view.lsn).collect();
+        assert!(lsns.len() > 1, "{lsns:x?}");
+        assert!(lsns.windows(2).all(|w| w[0] < w[1]), "LSNs rise: {lsns:x?}");
+        for pair in walk.records.windows(2) {
+            assert_eq!(pair[0].next_lsn, pair[1].view.lsn, "{:x?}", pair[0].view);
+        }
+        let checkpoint = walk
+            .records
+            .iter()
+            .find(|r| r.view.lsn == 0x33e791)
+            .expect("the walk passes the checkpoint Windows wrote");
+        assert_eq!(checkpoint.view.record_type, 2);
+        for r in &walk.records {
+            assert!((r.offset as usize) < log.len(), "{r:x?}");
+            assert_eq!(
+                r.view,
+                record_at_lsn(&log, r.view.lsn, log.len()).unwrap(),
+                "the walk and strict lookup agree at {:#x}",
+                r.view.lsn
+            );
+        }
+        assert_eq!(log, before, "a walk changes nothing");
+    }
+
+    /// A walk ends at its record limit, incomplete with no error, or at the
+    /// first record it cannot read, with what it read before kept and the
+    /// reason named. A record past the byte budget is refused before it is
+    /// assembled.
+    #[test]
+    fn a_walk_stops_at_its_limit_or_its_first_bad_record_and_says_which() {
+        let log = interrupted_capture();
+        let limited = walk_records(&log, None, 2, log.len()).unwrap();
+        assert_eq!(limited.records.len(), 2);
+        assert!(!limited.complete && limited.stopped.is_none());
+        let from = walk_records(&log, Some(0x33e791), 1, log.len()).unwrap();
+        assert_eq!(from.records[0].view.lsn, 0x33e791);
+        let bad = walk_records(&log, Some(0x33e791 + 1), 10, log.len()).unwrap();
+        assert!(bad.records.is_empty() && !bad.complete);
+        assert!(bad.stopped.is_some(), "an LSN no record sits at is named");
+        let tight = walk_records(&log, Some(0x33e791), 10, 8).unwrap();
+        assert!(tight.records.is_empty() && !tight.complete);
+        let why = tight.stopped.expect("the budget refuses the checkpoint");
+        assert!(why.to_string().contains("budget"), "{why}");
+    }
+
+    /// An LFS 1.x log is refused by the walk as strict lookup refuses it.
+    #[test]
+    fn a_walk_refuses_an_lfs1_log_as_lookup_does() {
+        let out = std::process::Command::new("gzip")
+            .args(["-dc", "test-disks/windows-clean-logfile.bin.gz"])
+            .output()
+            .expect("install gzip to read the Windows capture");
+        assert!(out.status.success(), "gzip: {:?}", out.stderr);
+        let error = walk_records(&out.stdout, None, 10, out.stdout.len()).unwrap_err();
+        assert!(error.to_string().contains("LFS version 1"), "{error}");
     }
 
     #[test]
