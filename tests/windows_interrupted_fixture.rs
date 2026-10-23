@@ -4377,6 +4377,17 @@ fn a_plan_for_an_in_place_apply_opens_by_setting_the_dirty_flag() {
 }
 
 /// Run the binary's `fsck` verb; the exit status, and stdout with stderr.
+/// Make `path` read-only, or writable again, on every platform the suite
+/// runs on: a capture is made read-only to prove nothing writes to it.
+#[cfg(feature = "cli")]
+fn set_read_only(path: impl AsRef<std::path::Path>, read_only: bool) {
+    let path = path.as_ref();
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(read_only);
+    std::fs::set_permissions(path, permissions).unwrap();
+}
+
 #[cfg(feature = "cli")]
 fn fsck_cli(args: &[&str]) -> (i32, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_rust-fs-ntfs"))
@@ -4403,7 +4414,6 @@ fn fsck_apply_copy_repairs_a_read_only_capture_into_a_new_target() {
     // non-zero, and create nothing. The plan is saved through the library
     // (#905) until `--dry-run --plan FILE` (#906) writes it from the CLI.
     use fs_ntfs::repair_plan::{plan_fsck_io, save_plan};
-    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     for (k, _) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
@@ -4420,7 +4430,7 @@ fn fsck_apply_copy_repairs_a_read_only_capture_into_a_new_target() {
         drop(pristine);
         let plan_file = format!("{src}.plan");
         std::fs::write(&plan_file, &saved).unwrap();
-        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o444)).unwrap();
+        set_read_only(&src, true);
         let unchanged = |what: &str| {
             assert_eq!(
                 hex_sha256(&std::fs::read(&src).unwrap()),
@@ -4507,10 +4517,13 @@ fn fsck_apply_copy_repairs_a_read_only_capture_into_a_new_target() {
             "{k}: a refused --apply changed the existing target"
         );
 
+        // Writable again before the hard link to it goes: the read-only
+        // attribute belongs to the file, and Windows refuses to remove any
+        // name of a read-only file.
+        set_read_only(&src, false);
         std::fs::remove_file(&link).unwrap();
         std::fs::remove_file(&target).unwrap();
         std::fs::remove_file(&plan_file).unwrap();
-        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
         std::fs::remove_file(&src).unwrap();
     }
 }
