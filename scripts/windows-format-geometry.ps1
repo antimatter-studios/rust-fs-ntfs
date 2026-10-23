@@ -405,12 +405,15 @@ function ConvertFrom-ChkdskLogSize([string[]]$Lines) {
     return $values[0] * 1024
 }
 # One numeric field of `fsutil fsinfo ntfsinfo`, hexadecimal or decimal.
+# Current fsutil prints a count with thousands separators and its size in
+# padded decimal units, e.g. `Total Clusters :  1,535  (  6.0 MB)`; the
+# annotation is display only, and the separators are dropped.
 function Get-NtfsInfoField([string[]]$Lines, [string]$Name) {
-    $pattern = '^\s*' + [regex]::Escape($Name) + '\s*:\s*(0x[0-9a-fA-F]+|[0-9]+)(?:\s+\([0-9]+\s*[A-Za-z]+\))?\s*$'
+    $pattern = '^\s*' + [regex]::Escape($Name) + '\s*:\s*(0x[0-9a-fA-F]+|[0-9][0-9,]*)(?:\s+\(\s*[0-9][0-9.,]*\s*[A-Za-z]+\))?\s*$'
     $values = @($Lines | ForEach-Object { if ($_ -match $pattern) { $Matches[1] } })
-    if ($values.Count -ne 1) { throw "fsutil must report exactly one $Name field" }
+    if ($values.Count -ne 1) { throw "fsutil must report exactly one $Name field, not $($values.Count)" }
     if ($values[0].StartsWith('0x')) { return [Convert]::ToUInt64($values[0].Substring(2), 16) }
-    return [Convert]::ToUInt64($values[0], 10)
+    return [Convert]::ToUInt64($values[0].Replace(',', ''), 10)
 }
 # The small-volume rows ascend by size, Windows accepts at least one, and
 # every accepted size carries what was measured. Returns the smallest
