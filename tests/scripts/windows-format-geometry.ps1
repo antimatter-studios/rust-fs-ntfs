@@ -184,5 +184,25 @@ Assert-GeometryFailure { Measure-IndexVcnUnit @($vcnBlocks[0], $vcnBlocks[1]) } 
 Assert-GeometryFailure { Measure-IndexVcnUnit @($vcnBlocks[1], $vcnBlocks[2]) } 'no block at offset 0 fails'
 Assert-GeometryFailure { Measure-IndexVcnUnit @($vcnBlocks[0], [pscustomobject]@{ offset = 4096; vcn = 3 },
     [pscustomobject]@{ offset = 8192; vcn = 6 }) } 'a VCN that does not divide its offset fails'
-if ($checks -ne 65) { throw "only $checks geometry contracts executed, expected 65" }
-Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 65)"
+# The smallest volume Windows formats (#961): the sizes asked for, chkdsk's
+# report of the live $LogFile, fsutil's cluster count, and the rows' shape.
+Assert-Geometry (((Get-SmallVolumeRequests) -join ',') -eq '1,2,3,4,5,6,7,8,12,16') 'small volumes from 1 to 16 MiB, ascending'
+$chkdskL = @('The type of the file system is NTFS.', 'The current log file size is 2048 KB.',
+    'The default log file size for this volume is 2048 KB.')
+Assert-Geometry ((ConvertFrom-ChkdskLogSize $chkdskL) -eq 2097152) 'chkdsk /L reports the current log size in KB'
+Assert-GeometryFailure { ConvertFrom-ChkdskLogSize @($chkdskL[0], $chkdskL[2]) } 'a report without the current size fails'
+Assert-Geometry ((Get-NtfsInfoField @('Total Clusters :                  0x0000000000000800') 'Total Clusters') -eq 2048) 'fsutil total clusters in hex'
+function New-SmallRow([int]$Mib, [bool]$Accepted) {
+    [pscustomobject][ordered]@{ size_mib = $Mib; accepted = $Accepted; log_bytes = $(if ($Accepted) { 1048576 });
+        mft_lcn = $(if ($Accepted) { 4 }); mftmirr_lcn = $(if ($Accepted) { 255 }); total_clusters = $(if ($Accepted) { 511 }) }
+}
+$smallRows = @((New-SmallRow 1 $false), (New-SmallRow 2 $true), (New-SmallRow 3 $true))
+Assert-Geometry ((Assert-SmallVolumeRows $smallRows) -eq 2) 'the smallest accepted size is reported'
+Assert-GeometryFailure { Assert-SmallVolumeRows @((New-SmallRow 1 $false), (New-SmallRow 2 $false)) } 'no accepted size fails'
+Assert-GeometryFailure { Assert-SmallVolumeRows @((New-SmallRow 2 $true), (New-SmallRow 1 $false)) } 'rows out of order fail'
+$unmeasured = New-SmallRow 4 $true
+$unmeasured.log_bytes = $null
+Assert-GeometryFailure { Assert-SmallVolumeRows @((New-SmallRow 1 $false), $unmeasured) } 'an accepted size without its $LogFile size fails'
+Assert-GeometryFailure { Assert-SmallVolumeRows @() } 'no rows fail'
+if ($checks -ne 74) { throw "only $checks geometry contracts executed, expected 74" }
+Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 74)"
