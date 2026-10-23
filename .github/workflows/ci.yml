@@ -679,6 +679,12 @@ jobs:
       - name: Build Windows-authored fixtures
         shell: pwsh
         run: pwsh -File test-disks/build-windows-native-read-fixtures.ps1
+      # ntfs-4kn-read.img, Windows' own NTFS format of a disk presenting
+      # 4096-byte logical sectors, against what fsutil reported for the
+      # mounted volume and the file set of ntfs-cli-read.img (#1150).
+      - name: The 4096-byte sector fixture is the volume Windows formatted
+        shell: pwsh
+        run: cargo test --locked --test fixture_4kn_windows
       - name: Attribute-list entry mismatches agree with Windows chkdsk
         shell: pwsh
         env:
