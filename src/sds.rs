@@ -149,6 +149,278 @@ pub fn build_sds(entries: &[SdEntry<'_>]) -> Vec<u8> {
     out
 }
 
+/// Which half of a 256 KiB region pair a copy sits in: `$SDS` alternates
+/// a primary region with the mirror region that copies it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SdsCopy {
+    Primary,
+    Mirror,
+}
+
+/// One copy of one `$SDS` entry, as stored: where it is, what its header
+/// claims, and what the claim was checked against. Nothing in it is
+/// repaired; a copy that fails a check is still reported, so a caller can
+/// see it rather than be handed the other copy silently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CatalogEntry<'a> {
+    /// Byte offset of this copy in the `$SDS` stream.
+    pub physical: u64,
+    /// The offset its header claims: a primary's own, and for a mirror its
+    /// primary's, since a mirror is a byte-for-byte copy.
+    pub logical: u64,
+    pub security_id: u32,
+    /// The unpadded size the header declares: header plus descriptor.
+    pub declared_len: u32,
+    /// The hash the header stores.
+    pub stored_hash: u32,
+    /// [`sdh_hash`] of the descriptor bytes as found.
+    pub computed_hash: u32,
+    pub copy: SdsCopy,
+    /// The descriptor bytes as stored, which may be malformed: parse them
+    /// with [`crate::security_descriptor::SecurityDescriptor`].
+    pub descriptor: &'a [u8],
+}
+
+impl CatalogEntry<'_> {
+    /// The stored hash is the one the descriptor bytes give.
+    pub fn hash_verified(&self) -> bool {
+        self.stored_hash == self.computed_hash
+    }
+
+    /// The offset field names this copy's primary position.
+    pub fn offset_verified(&self) -> bool {
+        match self.copy {
+            SdsCopy::Primary => self.logical == self.physical,
+            SdsCopy::Mirror => self.logical.checked_add(SDS_MIRROR_GAP) == Some(self.physical),
+        }
+    }
+}
+
+/// Why a catalog walk stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CatalogErrorKind {
+    /// The stream ends inside an entry.
+    Truncated,
+    /// The declared size is below the 20-byte header.
+    LengthBelowHeader,
+    /// The entry would run past its 256 KiB region into the next one.
+    CrossesRegion,
+    /// After a region's last entry, bytes that are not zero padding.
+    NotPadding,
+    /// Neither the primary copy of the asked-for entry nor its mirror
+    /// verifies (from [`find_descriptor`] only).
+    Unverified,
+}
+
+/// A catalog error at a byte offset in the `$SDS` stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CatalogError {
+    pub kind: CatalogErrorKind,
+    pub at: u64,
+}
+
+impl std::fmt::Display for CatalogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = match self.kind {
+            CatalogErrorKind::Truncated => "the stream ends inside an entry",
+            CatalogErrorKind::LengthBelowHeader => "an entry declares less than its header",
+            CatalogErrorKind::CrossesRegion => "an entry runs past its 256 KiB region",
+            CatalogErrorKind::NotPadding => "bytes after a region's last entry are not padding",
+            CatalogErrorKind::Unverified => "neither copy of the entry verifies",
+        };
+        write!(f, "$SDS: {what} at offset {:#x}", self.at)
+    }
+}
+
+impl std::error::Error for CatalogError {}
+
+/// Every entry copy in a `$SDS` stream, in stream order: each region's
+/// entries from its start, 16-byte aligned, until a zero header, whose
+/// region must then hold only zero padding; then the next region, primary
+/// and mirror alike. A malformed entry is a located error, after which the
+/// walk ends; the end of the stream ends it once.
+///
+/// Nothing is allocated, and no on-disk length is used before it is
+/// bounded by the stream and the region.
+pub fn catalog(stream: &[u8]) -> Catalog<'_> {
+    Catalog {
+        stream,
+        at: 0,
+        done: false,
+    }
+}
+
+/// The iterator [`catalog`] returns.
+#[derive(Clone, Debug)]
+pub struct Catalog<'a> {
+    stream: &'a [u8],
+    at: usize,
+    done: bool,
+}
+
+impl<'a> Catalog<'a> {
+    fn fail(
+        &mut self,
+        kind: CatalogErrorKind,
+        at: usize,
+    ) -> Option<Result<CatalogEntry<'a>, CatalogError>> {
+        self.done = true;
+        Some(Err(CatalogError {
+            kind,
+            at: at as u64,
+        }))
+    }
+}
+
+impl<'a> Iterator for Catalog<'a> {
+    type Item = Result<CatalogEntry<'a>, CatalogError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let gap = SDS_MIRROR_GAP as usize;
+        while !self.done {
+            let s = self.stream;
+            let at = self.at;
+            if at >= s.len() {
+                self.done = true;
+                return None;
+            }
+            let region = at / gap;
+            let region_end = region
+                .checked_add(1)
+                .and_then(|r| r.checked_mul(gap))
+                .unwrap_or(usize::MAX);
+            let header_end = at.saturating_add(SDS_HEADER_LEN as usize);
+            let header = &s[at..header_end.min(s.len())];
+            if header.iter().all(|&b| b == 0) {
+                // The region's last entry was the one before: the rest of
+                // the region is padding, and the walk goes on at the next.
+                let tail = &s[at..region_end.min(s.len())];
+                if let Some(i) = tail.iter().position(|&b| b != 0) {
+                    return self.fail(CatalogErrorKind::NotPadding, (at + i) & !15);
+                }
+                self.at = region_end;
+                continue;
+            }
+            if header_end > region_end {
+                return self.fail(CatalogErrorKind::CrossesRegion, at);
+            }
+            if header_end > s.len() {
+                return self.fail(CatalogErrorKind::Truncated, at);
+            }
+            let u32_at = |o: usize| u32::from_le_bytes(s[at + o..at + o + 4].try_into().unwrap());
+            let declared_len = u32_at(SDS_HDR_ENTRY_SIZE_OFF);
+            let len = declared_len as usize;
+            if len < SDS_HEADER_LEN as usize {
+                return self.fail(CatalogErrorKind::LengthBelowHeader, at);
+            }
+            let end = at.saturating_add(len);
+            if end > region_end {
+                return self.fail(CatalogErrorKind::CrossesRegion, at);
+            }
+            if end > s.len() {
+                return self.fail(CatalogErrorKind::Truncated, at);
+            }
+            let descriptor = &s[at + SDS_HDR_SD_DATA_OFF..end];
+            let logical = u64::from_le_bytes(
+                s[at + SDS_HDR_ENTRY_OFFSET_OFF..at + SDS_HDR_ENTRY_OFFSET_OFF + 8]
+                    .try_into()
+                    .unwrap(),
+            );
+            self.at = align_to_16(end);
+            return Some(Ok(CatalogEntry {
+                physical: at as u64,
+                logical,
+                security_id: u32_at(SDS_HDR_SECURITY_ID_OFF),
+                declared_len,
+                stored_hash: u32_at(SDS_HDR_HASH_OFF),
+                computed_hash: sdh_hash(descriptor),
+                copy: if region % 2 == 0 {
+                    SdsCopy::Primary
+                } else {
+                    SdsCopy::Mirror
+                },
+                descriptor,
+            }));
+        }
+        None
+    }
+}
+
+/// How a primary copy's mirror, 256 KiB on, compares with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MirrorState {
+    /// Byte for byte the primary's entry.
+    Same,
+    /// Present, and not the primary's bytes.
+    Different,
+    /// The stream ends before the mirror would.
+    Missing,
+}
+
+/// Compare `primary`'s bytes in `stream` with the copy one mirror gap on.
+pub fn mirror_state(stream: &[u8], primary: &CatalogEntry<'_>) -> MirrorState {
+    let len = primary.declared_len as usize;
+    let at = primary.physical as usize;
+    let Some(mirror) = at.checked_add(SDS_MIRROR_GAP as usize) else {
+        return MirrorState::Missing;
+    };
+    match (
+        stream.get(at..at + len),
+        stream.get(mirror..mirror.saturating_add(len)),
+    ) {
+        (Some(p), Some(m)) if mirror.checked_add(len).is_some() => {
+            if p == m {
+                MirrorState::Same
+            } else {
+                MirrorState::Different
+            }
+        }
+        _ => MirrorState::Missing,
+    }
+}
+
+/// The descriptor bytes security id `id` names: its primary copy when that
+/// verifies (hash and offset), else its mirror when that one does. `None`
+/// when no copy carries the id; [`CatalogErrorKind::Unverified`] when the
+/// id's copies all fail, since choosing one would hand the caller bytes
+/// nothing vouches for; any walk error before the id is found.
+pub fn find_descriptor(stream: &[u8], id: u32) -> Result<Option<&[u8]>, CatalogError> {
+    let mut unverified = None;
+    let mut mirror_only = None;
+    for entry in catalog(stream) {
+        let entry = entry?;
+        if entry.security_id != id {
+            continue;
+        }
+        let verified = entry.hash_verified() && entry.offset_verified();
+        match entry.copy {
+            SdsCopy::Primary if verified => return Ok(Some(entry.descriptor)),
+            SdsCopy::Primary => {
+                if unverified.is_none() {
+                    unverified = Some(entry.physical);
+                }
+            }
+            SdsCopy::Mirror if verified => {
+                if unverified.is_some_and(|p| p.checked_add(SDS_MIRROR_GAP) == Some(entry.physical))
+                {
+                    return Ok(Some(entry.descriptor));
+                }
+                if mirror_only.is_none() {
+                    mirror_only = Some(entry.descriptor);
+                }
+            }
+            SdsCopy::Mirror => {}
+        }
+    }
+    if let Some(at) = unverified {
+        return Err(CatalogError {
+            kind: CatalogErrorKind::Unverified,
+            at,
+        });
+    }
+    Ok(mirror_only)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
