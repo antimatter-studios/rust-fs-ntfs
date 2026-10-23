@@ -306,22 +306,26 @@ fn stream_operations_are_generated_on_files_bounded_and_replayable() {
     assert!(text.contains(r#""op":"write_stream""#), "{text}");
     assert!(text.contains(r#""op":"delete_stream""#), "{text}");
 
-    // Selector 0 is missing and 1 is a file used as a directory; streams
-    // are never generated on a directory in this slice (#731).
-    for (selector, expected) in [(0, "/missing"), (1, "/f/x"), (2, "/f"), (3, "/f")] {
+    // Selector 0 is missing and 1 is a file used as a directory; 2 picks a
+    // file and 3 a directory, which holds streams too (#735), never the
+    // root.
+    for (selector, expected) in [(0, "/missing"), (1, "/f/x"), (2, "/f"), (3, "/d")] {
         let op = decode(&frame(10, selector, 0, 0, 0, 0), &m).remove(0);
         assert!(
             matches!(&op, Op::DeleteStream { path, .. } if path == expected),
             "{selector}: {op:?}"
         );
     }
+    let mut on_directory = false;
     for selector in 0..=u8::MAX {
         let op = decode(&frame(9, selector, 0, 0, 0, 0), &m).remove(0);
         let Op::WriteStream { path, .. } = op else {
             panic!("stream opcode")
         };
-        assert!(path != "/" && path != "/d", "{selector}: {path}");
+        assert!(path != "/", "{selector}: {path}");
+        on_directory |= path == "/d";
     }
+    assert!(on_directory, "some selector writes a stream on a directory");
 
     // The name pool's UTF-16 boundaries, an existing name and a fresh one.
     let mut named = m.clone();
