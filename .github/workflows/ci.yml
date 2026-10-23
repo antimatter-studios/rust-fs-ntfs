@@ -1651,6 +1651,16 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      # What Windows writes to $Quota's $O and $Q for an owner SID new to
+      # the volume, read by the raw reader and kept with the diagnostics
+      # (#1085): the measurement #849's later slices assert against.
+      - name: Measure the owner id Windows gives a new owner SID
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh win-format-win-quota-new-owner-mac-quota-dump-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       # A file whose named streams Windows charged with quota tracking on,
       # rewritten and deleted here, and new named streams on another file:
       # chkdsk grades the volume, and Windows' own recount of each owner's

@@ -832,6 +832,26 @@ host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-quota-enforce.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -HeadroomBytes '{step.headroom_bytes}' -WriteBytes '{step.write_bytes}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
+[ops.win-quota-new-owner]
+# Write /known.bin, owned by the account Windows runs as, and /stranger.bin,
+# whose owner icacls sets to NETWORK SERVICE (S-1-5-20), a SID the volume's
+# $Extend\$Quota:$O does not hold, on a volume tracking quotas: Windows has
+# to give that owner an owner id, an $O entry and a $Q record (#1085).
+#
+# Step fields:
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-quota-new-owner.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
+[ops.mac-quota-dump]
+# The raw reader's account of $Extend\$Quota: every $O entry, every $Q
+# record, and the owner id and charge of each file named, printed and kept
+# in test-diagnostics/matrix/<scenario>.quota.tsv (#1085). It writes nothing.
+host = "host"
+command = "bash scripts/quota-dump.sh {image_dir}/{run_id}/{scenario.image} {scenario_name} /known.bin /stranger.bin"
+expect_exit = 0
+
 [ops.win-quota-verify]
 # Read each owner's quota usage as the volume holds it, then have Windows
 # count every file again (tracking off and on) and read it again: the two
