@@ -334,7 +334,7 @@ impl<'a> Iterator for Catalog<'a> {
                 declared_len,
                 stored_hash: u32_at(SDS_HDR_HASH_OFF),
                 computed_hash: sdh_hash(descriptor),
-                copy: if region % 2 == 0 {
+                copy: if region.is_multiple_of(2) {
                     SdsCopy::Primary
                 } else {
                     SdsCopy::Mirror
