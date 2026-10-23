@@ -642,11 +642,12 @@ case "$step" in
         HARNESS="${RUST_NTFS:-$REPO/target/release/rust-ntfs}"
         [ -x "$HARNESS" ] || [ -x "$HARNESS.exe" ] ||
             die "no $HARNESS: build it with \`cargo build --release --locked --features harness --bin rust-ntfs\`"
-        # Twelve 120-byte resident streams, each a 0x18-byte header, a name
-        # of two or three UTF-16 letters aligned to 8 and the value, outgrow the
-        # record before the EA or the unnamed stream is counted, so each
-        # file's base record fills and it gains an $ATTRIBUTE_LIST (#663).
-        streams=12
+        # 120-byte resident streams, each a 0x18-byte header, a name of two
+        # or three UTF-16 letters aligned to 8 and the value: two more than
+        # the record holds outgrow it before the EA or the unnamed stream is
+        # counted, so each file's base record fills and it gains an
+        # $ATTRIBUTE_LIST (#663), whatever record size mkfs chose.
+        streams=$(($(record_size "$image") / (0x18 + 8 + 120) + 2))
         [ $((streams * (0x18 + 8 + 120))) -gt "$(record_size "$image")" ] ||
             die "$streams streams fit in one $(record_size "$image")-byte record: the file would need no list"
         listed() {
@@ -659,9 +660,9 @@ case "$step" in
             [ "$status" -eq 0 ] || die "rust-ntfs ea $1 USER.TAG exited $status: $(cat "$image.cli-err")"
             for i in $(seq 1 "$streams"); do
                 { printf 's%02d of %s ' "$i" "$1"; head -c 120 /dev/zero | tr '\000' "$(printf '%x' $((i % 16)))"; } |
-                    head -c 120 >"$work/s$i"
+                    head -c 120 >"$work/${1#/}.s$i"
                 set +e
-                MSYS_NO_PATHCONV=1 "$HARNESS" stream "$image" "$1" "s$i" --content "$(cat "$work/s$i")" \
+                MSYS_NO_PATHCONV=1 "$HARNESS" stream "$image" "$1" "s$i" --content "$(cat "$work/${1#/}.s$i")" \
                     >/dev/null 2>"$image.cli-err"
                 status=$?
                 set -e
@@ -674,7 +675,7 @@ case "$step" in
             for i in $(seq 1 "$streams"); do
                 run fs "$image" read --stream "s$i" "$1"
                 [ "$status" -eq 0 ] || die "fs.ntfs read --stream s$i $1 exited $status: $(cat "$image.cli-err")"
-                [ "$out" = "$(cat "$work/s$i")" ] || die "$1:s$i changed under the unnamed stream's writes: $out"
+                [ "$out" = "$(cat "$work/${1#/}.s$i")" ] || die "$1:s$i changed under the unnamed stream's writes: $out"
             done
         }
         # same FILE: the unnamed stream reads back as the host's model of it.
