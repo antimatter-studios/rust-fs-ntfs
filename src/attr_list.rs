@@ -25,11 +25,13 @@
 //! # What this does
 //!
 //! The same, with one difference. The attributes this moves are the named
-//! `$DATA` streams, and only those: this driver's other write paths --
-//! rename, link, the unnamed `$DATA` writes, reparse points, object ids --
-//! edit the base record, so `$FILE_NAME`, the unnamed `$DATA` and the rest
-//! stay there, where those paths find them. Windows' own layout allows
-//! either; chkdsk grades both. EAs are written through the list too
+//! `$DATA` streams and, once the list has no room even in clusters, the
+//! `$FILE_NAME`s, which a file's hard links can fill its base record with
+//! (#779). This driver's other write paths -- the unnamed `$DATA` writes,
+//! reparse points, object ids -- edit the base record, so the unnamed
+//! `$DATA` and the rest stay there, where those paths find them; names are
+//! added and removed through the list. Windows' own layout allows either;
+//! chkdsk grades both. EAs are written through the list too
 //! (#660): `$EA` and `$EA_INFORMATION` are added and replaced like a
 //! stream, but never moved to make room for one.
 //!
@@ -41,7 +43,8 @@
 //! - When the list no longer fits the base record, the named streams in
 //!   the base record move out to extension records; when that is not
 //!   enough, the list goes non-resident, and moves to a larger run of
-//!   clusters when it outgrows the one it has.
+//!   clusters when it outgrows the one it has; when the base record has
+//!   no room even for the list's non-resident header, its names move out.
 //! - An attribute that no longer fits its record moves, and an extension
 //!   record left with no attributes is freed.
 //!
@@ -738,7 +741,6 @@ impl ListedFile {
     /// records, as Windows moves a batch of streams out when the base
     /// record fills. Returns how many moved.
     fn evict_named_data<T: BlockIo + ?Sized>(&mut self, io: &mut T) -> Result<usize, Error> {
-        let base = self.segments[0].number;
         let record = &self.segments[0].bytes;
         let victims: Vec<(Vec<u8>, u16)> = attr_io::iter_attributes(record)
             .filter(|l| l.type_code == AttrType::Data as u32 && l.name_length > 0)
@@ -756,9 +758,51 @@ impl ListedFile {
                 )
             })
             .collect();
+        self.evict(io, AttrType::Data, victims)
+    }
+
+    /// Move every `$FILE_NAME` in the base record to extension records,
+    /// once moving the streams out and putting the list in clusters leave
+    /// no room for the list (#779): a file's names can fill its base
+    /// record, and Windows keeps only `$STANDARD_INFORMATION` and the list
+    /// there when it fills (`test-disks/ntfs-attrlist.img`). A name is
+    /// matched to its entry by attribute id, as names carry no attribute
+    /// name. Returns how many moved.
+    fn evict_file_names<T: BlockIo + ?Sized>(&mut self, io: &mut T) -> Result<usize, Error> {
+        let base = self.segments[0].number;
+        let record = &self.segments[0].bytes;
+        let victims: Vec<(Vec<u8>, u16)> = attr_io::iter_attributes(record)
+            .filter(|l| l.type_code == AttrType::FileName as u32 && l.is_resident)
+            .filter(|l| {
+                self.entries.iter().any(|e| {
+                    e.record_number() == base
+                        && e.type_code == l.type_code
+                        && e.attribute_id == l.attribute_id
+                })
+            })
+            .map(|l| {
+                (
+                    record[l.attr_offset..l.attr_offset + l.attr_length].to_vec(),
+                    l.attribute_id,
+                )
+            })
+            .collect();
+        self.evict(io, AttrType::FileName, victims)
+    }
+
+    /// Move `victims`, attributes of `kind` in the base record given with
+    /// their ids there, each to an extension record with room, and point
+    /// their list entries at where they now are.
+    fn evict<T: BlockIo + ?Sized>(
+        &mut self,
+        io: &mut T,
+        kind: AttrType,
+        victims: Vec<(Vec<u8>, u16)>,
+    ) -> Result<usize, Error> {
+        let base = self.segments[0].number;
         for (mut attr, old_id) in victims.iter().cloned() {
-            let loc = find_by_id(&self.segments[0].bytes, AttrType::Data as u32, old_id)
-                .ok_or(Error::io("a stream to move is not in the base record"))?;
+            let loc = find_by_id(&self.segments[0].bytes, kind as u32, old_id)
+                .ok_or(Error::io("an attribute to move is not in the base record"))?;
             crate::write::remove_listed_attribute_at(
                 &mut self.segments[0].bytes,
                 loc.attr_offset,
@@ -782,10 +826,10 @@ impl ListedFile {
                 .iter_mut()
                 .find(|e| {
                     e.record_number() == base
-                        && e.type_code == AttrType::Data as u32
+                        && e.type_code == kind as u32
                         && e.attribute_id == old_id
                 })
-                .ok_or(Error::io("a stream to move has no entry in the list"))?;
+                .ok_or(Error::io("an attribute to move has no entry in the list"))?;
             entry.reference = reference;
             entry.attribute_id = id;
         }
@@ -860,7 +904,7 @@ impl ListedFile {
                     }
                 }
             }
-            if self.evict_named_data(io)? == 0 {
+            if self.evict_named_data(io)? == 0 && self.evict_file_names(io)? == 0 {
                 return Err(Error::refused(format!(
                     "record {}: its $ATTRIBUTE_LIST does not fit, and nothing left in the record \
                      is an attribute this driver moves",
