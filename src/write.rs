@@ -5773,8 +5773,13 @@ fn place_listed_extents<T: BlockIo + ?Sized>(
     } else {
         file.add(io, first)?;
     }
-    for extent in extents {
-        file.add_extent(io, extent)?;
+    let rest: Vec<Vec<u8>> = extents.collect();
+    if rest.is_empty() {
+        return Ok(());
+    }
+    let id = file.split_instance(ty, name)?;
+    for extent in rest {
+        file.add_extent(io, extent, id)?;
     }
     Ok(())
 }
