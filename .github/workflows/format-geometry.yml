@@ -13,10 +13,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Fixture-free decoding and coverage contracts (59 checks)
+      - name: Fixture-free decoding and coverage contracts (66 checks)
         shell: pwsh
         run: ./tests/scripts/windows-format-geometry.ps1
-      - name: Capture all 26 Windows format requests and six large-cluster layouts
+      - name: Capture all 26 Windows format requests, six large-cluster layouts and their index VCN units
         shell: pwsh
         run: ./test-disks/capture-format-geometry.ps1
       - name: Capture Windows' own NTFS format of a 4096-byte-sector disk
