@@ -778,7 +778,7 @@ case "$step" in
         unpack_interrupted "$1"
         run fsck -y "$image"
         [ "$status" -eq 1 ] || die "fsck.ntfs -y exited $status, not 1 (corrected): $out"
-        has '"logfile": "empty"' || die "fsck.ntfs -y did not leave the log empty: $out"
+        has '"logfile": "clean"' || die "fsck.ntfs -y did not leave the log clean: $out"
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the replay exited $status: $out"
         windows_listing "$1"
@@ -806,11 +806,12 @@ case "$step" in
         unpack_interrupted "$1"
         run fsck -y "$image"
         [ "$status" -eq 1 ] || die "fsck.ntfs -y exited $status, not 1 (corrected): $out"
-        has '"logfile": "empty"' || die "fsck.ntfs -y did not leave the log empty: $out"
+        has '"logfile": "clean"' || die "fsck.ntfs -y did not leave the log clean: $out"
         # The LSNs the replay left on the volume (#649): its MFT records and
-        # index blocks keep those of the old log, which the replay filled
-        # with 0xFF. Read from the raw bytes, for lsn-after-windows to
-        # compare with what Windows logs once it has written.
+        # index blocks keep those of the old log, and the clean log the
+        # replay leaves names a current LSN past them (#762). Read from the
+        # raw bytes, for lsn-after-windows to compare with what Windows logs
+        # once it has written.
         lsns "$image" >"$image.lsns"
         grep -q '^block-max ' "$image.lsns" || die "no FILE or INDX block carries an LSN: $(cat "$image.lsns")"
         echo "replay-lsn: the replay left: $(tr '\n' ' ' <"$image.lsns")"
@@ -875,7 +876,7 @@ case "$step" in
         done
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the writes exited $status: $out"
-        has '"logfile": "empty"' || die "the log is not empty after the writes: $out"
+        has '"logfile": "clean"' || die "the log is not clean after the writes: $out"
         ;;
     grow-mft)
         [ $# -eq 1 ] || die "grow-mft IMAGE SNAPSHOT"

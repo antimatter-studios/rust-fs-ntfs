@@ -146,7 +146,7 @@ check "the file written after the replay reads back" cmp -s "$SANDBOX/after" <(f
 fsck.ntfs "$mid" >"$SANDBOX/mid-fsck.json" 2>/dev/null
 status=$?
 check "fsck.ntfs finds nothing after the write (exit $status)" test "$status" -eq 0
-jq_check "fsck.ntfs calls the log empty" '.logfile == "empty"' "$SANDBOX/mid-fsck.json"
+jq_check "fsck.ntfs calls the log clean" '.logfile == "clean"' "$SANDBOX/mid-fsck.json"
 listed=0
 differ=""
 while IFS=$'\t' read -r path size sum; do

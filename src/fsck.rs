@@ -342,7 +342,7 @@ pub fn fsck_with(path: impl AsRef<Path>, options: FsckOptions) -> Result<FsckRep
 /// Summary of what [`fsck`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsckReport {
-    /// What `$LogFile` holds now: [`LogfileState::Empty`] after a replay,
+    /// What `$LogFile` holds now: the clean log a replay leaves (#762),
     /// or the empty or clean log fsck found and kept (#376).
     pub logfile: LogfileState,
     /// Whether this fsck cleared the dirty flag, which it does only when
@@ -617,9 +617,38 @@ pub fn fsck_io_with<'cb, T: FsckIo>(
 /// be written. So the restart pages are marked clean first, the one
 /// [`logfile_state_io`] reads first ahead of the other: from then on the
 /// log reads as holding nothing to replay, whatever its records hold. Then
-/// the records are erased, and the restart pages last, the second before
-/// the first, whose header names the page size, each in a write of its own.
-fn empty_replayed_log_io<T: FsckIo>(io: &mut T, log: &[u8], log_offset: u64) -> Result<(), Error> {
+/// the records are erased.
+///
+/// What is left is the log Windows leaves on a clean dismount (#762): its
+/// checkpoint page and that page's two tail copies, then the restart pages,
+/// the second before the first, each in a write of its own, naming a
+/// current LSN past every LSN the log held ([`crate::logfile::clean_log_past`]).
+/// An all-`0xFF` log let Windows start its own LSNs at or below those the
+/// replay left in MFT records and index blocks (#649), and redo trusts a
+/// block's LSN. A log whose geometry that cannot be built over is emptied
+/// to `0xFF`, as before.
+fn empty_replayed_log_io<T: FsckIo>(
+    io: &mut T,
+    log: &[u8],
+    log_offset: u64,
+    last_lsn: u64,
+    bytes_per_cluster: u64,
+) -> Result<(), Error> {
+    let past = last_lsn.max(crate::logfile::highest_lsn(log));
+    let clean = crate::logfile::clean_log_past(
+        &mut |off, len| {
+            let start = usize::try_from(off).ok()?;
+            log.get(start..start.checked_add(len)?).map(<[u8]>::to_vec)
+        },
+        past,
+        bytes_per_cluster,
+    );
+    if let Err(e) = &clean {
+        log::warn!(
+            target: "fs_ntfs::fsck",
+            "$LogFile is emptied to 0xFF: a clean log cannot be built over its geometry: {e}"
+        );
+    }
     let sync = |io: &mut T| {
         io.sync()
             .map_err(|e| Error::io(format!("replay $LogFile: sync: {e}")))
@@ -642,11 +671,29 @@ fn empty_replayed_log_io<T: FsckIo>(io: &mut T, log: &[u8], log_offset: u64) -> 
         at += n;
     }
     sync(io)?;
-    for off in [sps, 0] {
-        io.write_all_at(log_offset + off as u64, &fill[..sps])
-            .map_err(|e| format!("replay $LogFile: empty the log: {e}"))?;
+    let Ok(clean) = clean else {
+        for off in [sps, 0] {
+            io.write_all_at(log_offset + off as u64, &fill[..sps])
+                .map_err(|e| format!("replay $LogFile: empty the log: {e}"))?;
+            sync(io)?;
+        }
+        return Ok(());
+    };
+    for (off, page) in &clean.records {
+        io.write_all_at(log_offset + off, page)
+            .map_err(|e| format!("replay $LogFile: write the checkpoint: {e}"))?;
+    }
+    sync(io)?;
+    for (off, page) in &clean.restart {
+        io.write_all_at(log_offset + off, page)
+            .map_err(|e| format!("replay $LogFile: write the restart area: {e}"))?;
         sync(io)?;
     }
+    log::info!(
+        target: "fs_ntfs::fsck",
+        "$LogFile left clean at current LSN {:#x}, past {past:#x}",
+        clean.current_lsn
+    );
     Ok(())
 }
 
@@ -781,7 +828,7 @@ pub fn replay_logfile_io<T: FsckIo>(io: &mut T) -> Result<ReplayReport, Error> {
     }
     io.sync()
         .map_err(|e| format!("replay $LogFile: sync: {e}"))?;
-    empty_replayed_log_io(io, &log, log_offset)?;
+    empty_replayed_log_io(io, &log, log_offset, plan.last_lsn, params.cluster_size)?;
     log::info!(
         target: "fs_ntfs::fsck",
         "$LogFile replayed: {} records, {} redo operations, {} blocks written",
