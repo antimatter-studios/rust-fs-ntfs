@@ -1,6 +1,6 @@
 //! rust-ntfs — unified NTFS CLI (format, list, write, delete).
 //!
-//! Subcommand dispatcher for the fifteen operations the matrix runner and
+//! Subcommand dispatcher for the operations the matrix runner and
 //! one-off NTFS work both need. (It said "the four operations" and then
 //! listed ten, for a binary that dispatched twelve -- #186.)
 //!
@@ -17,7 +17,8 @@
 //!   remove     POSIX-style remove (dispatches file/dir by type).
 //!   set-dirty  Mark a volume dirty (test-scenario helper).
 //!   symlink    Create a symbolic link (a reparse point).
-//!   objid      Give a file an object id.
+//!   reparse    Give an existing file a symbolic-link reparse point, or remove it.
+//!   objid      Give a file an object id, or remove it.
 //!   layout     Print how a file's `$DATA` is stored (flags, sizes, runs).
 //!   stream     Write or delete one of a file's named streams.
 //!   ea         Set or remove one of a file's extended attributes.
@@ -40,6 +41,7 @@ mod mkdir;
 mod objid;
 mod remove;
 mod rename;
+mod reparse;
 mod rm;
 mod rmdir;
 mod set_dirty;
@@ -68,7 +70,8 @@ Subcommands:
   sparse  Write a file's $DATA as a SPARSE stream (holes, no clusters).
   set-dirty  Mark an NTFS volume as dirty (test-scenario helper).
   symlink    Create a symbolic link (a reparse point).
-  objid      Give a file an object id.
+  reparse    Give an existing file a symbolic-link reparse point, or remove it.
+  objid      Give a file an object id, or remove it.
   layout     Print how a file's $DATA is stored (flags, sizes, runs).
   directory-layout  Assert a listed directory's resident or spilled index shape.
   stream     Write or delete one of a file's named streams.
@@ -103,6 +106,7 @@ fn main() -> ExitCode {
         "remove" => remove::run(rest),
         "set-dirty" => set_dirty::run(rest),
         "symlink" => symlink::run(rest),
+        "reparse" => reparse::run(rest),
         "objid" => objid::run(rest),
         "layout" => layout::run(rest),
         "directory-layout" => directory_layout::run(rest),
