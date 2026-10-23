@@ -741,6 +741,28 @@ jobs:
       - name: Ctrl-C interrupts the inventory CLI process
         shell: pwsh
         run: cargo test --locked --features cli,harness --test cli_inventory_ctrl_c
+      # A file Windows gave a long name and a generated 8.3 name, renamed by
+      # fs.ntfs mv to another long name and to one that fits 8.3: chkdsk, the
+      # listing and the bytes grade it, and both reports of the short name
+      # are kept (#739). The features match the test above, so the CLI is
+      # already built.
+      - name: Windows grades fs.ntfs mv of a file with a DOS 8.3 name
+        shell: pwsh
+        run: |
+          cargo build --locked --features cli,harness --bin rust-fs-ntfs
+          if ($LASTEXITCODE -ne 0) { throw 'the CLI did not build' }
+          ./tests/scripts/mv-short-name-windows-oracle.ps1 `
+            -Cli target/debug/rust-fs-ntfs.exe -OutDir tmp/mv-short-name
+          if (Test-Path -LiteralPath tmp/mv-short-name/mv-short-name.vhd) { throw 'the oracle image survived' }
+      - name: Retain the short-name rename verdicts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mv-short-name-windows-${{ github.sha }}
+          path: |
+            tmp/mv-short-name/*.json
+            tmp/mv-short-name/chkdsk.txt
+          if-no-files-found: warn
       - name: Measure which names Win32 can create as files
         shell: pwsh
         run: pwsh -File test-disks/measure-win32-names.ps1
