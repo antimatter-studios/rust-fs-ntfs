@@ -4585,6 +4585,77 @@ mod capi_read_tests {
         h
     }
 
+    /// `fs_ntfs_read_security_descriptor` hands back the descriptor a file
+    /// resolves to, as stored (#606). Probed with no buffer it reports the
+    /// length; a buffer one byte short gets nothing written; one large
+    /// enough receives bytes the bounded decoder accepts, owner present,
+    /// the same bytes the library's own lookup reads. A path that is not
+    /// there, and a null image, are errors.
+    #[test]
+    fn capi_security_descriptor_probes_then_copies_the_stored_bytes() {
+        use super::fs_ntfs_read_security_descriptor;
+        let img = fresh_image("secdesc");
+        let image = CString::new(&*img).unwrap();
+        let path = CString::new("/hello.txt").unwrap();
+        let read = |buf: &mut [u8], len: &mut usize| {
+            fs_ntfs_read_security_descriptor(
+                image.as_ptr(),
+                path.as_ptr(),
+                if buf.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    buf.as_mut_ptr() as *mut c_void
+                },
+                buf.len(),
+                len,
+            )
+        };
+        let mut len = 0usize;
+        assert_eq!(read(&mut [], &mut len), 2, "a size query");
+        assert!(len > 20, "a descriptor is longer than its header: {len}");
+        let mut short = vec![0xAAu8; len - 1];
+        assert_eq!(read(&mut short, &mut len), 2, "one byte short");
+        assert!(
+            short.iter().all(|&b| b == 0xAA),
+            "nothing is written into a short buffer"
+        );
+        let mut buf = vec![0u8; len];
+        assert_eq!(read(&mut buf, &mut len), 1);
+        assert_eq!(len, buf.len());
+        let sd = crate::security_descriptor::SecurityDescriptor::parse(&buf)
+            .expect("the bounded decoder accepts it");
+        assert!(
+            sd.owner.is_some(),
+            "the formatter's descriptor names an owner"
+        );
+        assert_eq!(
+            buf,
+            crate::sds::file_descriptor(Path::new(&*img), "/hello.txt").unwrap()
+        );
+        let missing = CString::new("/absent.txt").unwrap();
+        let mut n = 0usize;
+        assert_eq!(
+            fs_ntfs_read_security_descriptor(
+                image.as_ptr(),
+                missing.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                &mut n,
+            ),
+            -1
+        );
+        assert_eq!(
+            fs_ntfs_read_security_descriptor(
+                std::ptr::null(),
+                path.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                &mut n,
+            ),
+            -1
+        );
+    }
+
     #[test]
     fn capi_read_file_roundtrip() {
         let img = fresh_image("readfile");
