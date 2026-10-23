@@ -317,15 +317,29 @@ fn name(model: &Model, parent: &str, selector: u8, step: usize) -> String {
     }
 }
 
-/// Streams stay on files in this slice (#731): a directory's are modeled,
-/// but rmdir does not yet give back a stream's clusters unless the
-/// directory has index blocks (#735). Wrong type is a file used as a
-/// directory, which no stream operation can open.
+/// Streams go on files and on directories other than the root (#735):
+/// rmdir gives a directory's stream clusters back with it. Wrong type is a
+/// file used as a directory, which no stream operation can open.
 fn stream_path(model: &Model, selector: u8) -> String {
     match selector % 4 {
         0 => select(model, 0, false, false),
         1 => join(&select(model, selector | 2, false, false), "x"),
-        _ => select(model, selector, false, false),
+        2 => select(model, selector, false, false),
+        _ => {
+            let mut entries = Vec::new();
+            paths(model, "/", 0, &mut entries);
+            entries.sort(); // Explicit UTF-8 byte ordering, as select's.
+            let directories: Vec<_> = entries
+                .into_iter()
+                .filter(|(p, d)| *d && p != "/")
+                .map(|(p, _)| p)
+                .collect();
+            if directories.is_empty() {
+                select(model, selector, false, false)
+            } else {
+                directories[(selector as usize / 4) % directories.len()].clone()
+            }
+        }
     }
 }
 /// The file-name pool's cases, for stream names (#731).
