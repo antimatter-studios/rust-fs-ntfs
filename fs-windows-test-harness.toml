@@ -62,6 +62,7 @@ cli = [
   "cli-mkdir-parents-win-verify-chkdsk",
   "cli-truncate-win-verify-chkdsk",
   "cli-write-at-win-verify-chkdsk",
+  "cli-import-win-verify-chkdsk",
   "cli-windows-interrupted-1-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-6-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-1-write-after-replay-win-verify-chkdsk",
@@ -430,6 +431,17 @@ expect_exit = 0
 # name's exact case and each old name gone, for win-cli-verify.
 host = "host"
 command = "bash scripts/cli-oracle.sh rename {image_dir}/{run_id}/{scenario.image}"
+expect_exit = 0
+
+[ops.cli-import]
+# fs.ntfs import copies host files onto the volume -- one byte, a resident
+# size, a cluster plus one, a Unicode name through stdin and 64 MiB -- each
+# published by a same-directory rename and its reported SHA-256 checked; a
+# destination already there is refused with every byte left as it was; then
+# a clean fsck.ntfs. Writes <image>.manifest: each file's size and SHA-256,
+# read in place and copied off the volume, for win-cli-verify (#1079).
+host = "host"
+command = "bash scripts/cli-oracle.sh import {image_dir}/{run_id}/{scenario.image}"
 expect_exit = 0
 
 [ops.cli-link]
