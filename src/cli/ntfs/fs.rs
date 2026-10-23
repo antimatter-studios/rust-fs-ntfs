@@ -100,9 +100,39 @@ fn command() -> Cmd {
                              fs.ntfs disk.img acl show --text /",
                         ),
                 )
+                .subcommand(
+                    Cmd::new("catalog")
+                        .about("Every copy in $Secure:$SDS, its offsets, id, hashes and mirror")
+                        .arg(
+                            Arg::new("id")
+                                .long("id")
+                                .value_name("ID")
+                                .value_parser(value_parser!(u32))
+                                .help("Only the copies of this security id"),
+                        )
+                        .arg(
+                            Arg::new("jsonl")
+                                .long("jsonl")
+                                .action(ArgAction::SetTrue)
+                                .help("One compact JSON object per copy, a line each"),
+                        )
+                        .after_help(
+                            "Examples:\n  fs.ntfs disk.img acl catalog\n  \
+                             fs.ntfs disk.img acl catalog --id 256\n  \
+                             fs.ntfs disk.img acl catalog --jsonl | jq -c 'select(.hash_verified | not)'\n\n\
+                             Read-only. Every primary and mirror copy, in stream order: its \
+                             physical offset, the logical offset its header claims, its security \
+                             id and size, its stored and computed hash and whether each verifies, \
+                             for a primary whether its mirror 256 KiB on is the same, different or \
+                             missing, and its descriptor decoded as acl show decodes one. A \
+                             malformed entry ends the walk: the copies before it are printed and \
+                             the command exits 1 naming its offset.",
+                        ),
+                )
                 .after_help(
                     "Examples:\n  fs.ntfs disk.img acl show /Users\n  \
-                     fs.ntfs disk.img acl show /notes.txt | jq '.dacl'",
+                     fs.ntfs disk.img acl show /notes.txt | jq '.dacl'\n  \
+                     fs.ntfs disk.img acl catalog --id 256",
                 ),
         )
         .subcommand(
@@ -562,7 +592,12 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         .unwrap_or(0);
     match verb {
         "acl" => {
-            let (_, show) = sub.subcommand().expect("clap requires an acl verb");
+            let (acl_verb, show) = sub.subcommand().expect("clap requires an acl verb");
+            if acl_verb == "catalog" {
+                let (mut dev, _) = device::mount(target, offset, false)?;
+                let format = Format::of(matches, &std::env::args_os().collect::<Vec<_>>());
+                return acl_catalog(&mut dev, show, format);
+            }
             let path = path_arg(show)?;
             let (mut dev, _) = device::mount(target, offset, false)?;
             let bytes =
@@ -905,6 +940,41 @@ fn ls_recursive(
         Err(error) => {
             // The shared outcome carries a report or an error, so render
             // the complete partial report before returning the error.
+            let partial = fs_core::cli::output::render(TOOL.name, format, Ok(report));
+            let mut out = std::io::stdout().lock();
+            out.write_all(partial.stdout.as_bytes())
+                .and_then(|()| out.flush())
+                .map_err(|e| CliError::failed(format!("write: {e}")))?;
+            Err(error)
+        }
+    }
+}
+
+/// `acl catalog`: the $SDS copies as one JSON array, or one compact object
+/// a line with `--jsonl`. A walk stopped by a malformed entry prints what
+/// it read before the error, as `ls --recursive` does for a stopped walk.
+fn acl_catalog(dev: &mut Device, sub: &ArgMatches, format: Format) -> Result<Outcome, CliError> {
+    let id = sub.get_one::<u32>("id").copied();
+    let (rows, stopped) =
+        super::acl::catalog(dev, id).map_err(|e| ntfs_error("$Secure:$SDS", e))?;
+    let stopped = stopped.map(|e| CliError::failed(e.to_string()));
+    if sub.get_flag("jsonl") {
+        let mut out = std::io::stdout().lock();
+        for row in &rows {
+            writeln!(out, "{}", row.to_compact())
+                .map_err(|e| CliError::failed(format!("write: {e}")))?;
+        }
+        out.flush()
+            .map_err(|e| CliError::failed(format!("write: {e}")))?;
+        return match stopped {
+            Some(error) => Err(error),
+            None => Ok(Outcome::done()),
+        };
+    }
+    let report = Outcome::report(Json::Arr(rows));
+    match stopped {
+        None => Ok(report),
+        Some(error) => {
             let partial = fs_core::cli::output::render(TOOL.name, format, Ok(report));
             let mut out = std::io::stdout().lock();
             out.write_all(partial.stdout.as_bytes())
