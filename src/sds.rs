@@ -421,6 +421,62 @@ pub fn find_descriptor(stream: &[u8], id: u32) -> Result<Option<&[u8]>, CatalogE
     Ok(mirror_only)
 }
 
+/// `$Secure` is MFT record 9 on every NTFS 3.x volume.
+const SECURE_RECORD: u64 = 9;
+
+/// The security descriptor `file_path` resolves to on the volume at
+/// `image`, as stored. See [`file_descriptor_io`].
+pub fn file_descriptor(
+    image: &std::path::Path,
+    file_path: &str,
+) -> Result<Vec<u8>, crate::error::Error> {
+    let mut io = crate::block_io::PathIo::open_ro(image)?;
+    file_descriptor_io(&mut io, file_path)
+}
+
+/// The security descriptor `file_path` resolves to, as stored: its own
+/// `$SECURITY_DESCRIPTOR` attribute when it carries one, else the `$SDS`
+/// copy its `$STANDARD_INFORMATION` security id names, read through
+/// [`find_descriptor`]: a verified primary, else its verified mirror, and
+/// an error rather than a copy nothing vouches for (#606).
+pub fn file_descriptor_io<T: crate::block_io::BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+) -> Result<Vec<u8>, crate::error::Error> {
+    use crate::attr_io::AttrType;
+    use crate::error::{Error, Kind};
+    let record = crate::read::resolve_path(io, file_path)?;
+    if let Some(own) = crate::read::read_attribute_value_if_present(
+        io,
+        record,
+        AttrType::SecurityDescriptor,
+        None,
+    )? {
+        return Ok(own);
+    }
+    let Some(id) = crate::write::read_security_id_io(io, file_path)? else {
+        return Err(Error::new(
+            Kind::NotFound,
+            format!("{file_path}: no $SECURITY_DESCRIPTOR and no security id"),
+        ));
+    };
+    let sds = crate::read::read_attribute_value_if_present(
+        io,
+        SECURE_RECORD,
+        AttrType::Data,
+        Some("$SDS"),
+    )?
+    .ok_or_else(|| Error::new(Kind::NotFound, "$Secure has no $SDS stream"))?;
+    match find_descriptor(&sds, id) {
+        Ok(Some(descriptor)) => Ok(descriptor.to_vec()),
+        Ok(None) => Err(Error::new(
+            Kind::NotFound,
+            format!("security id {id} not in $SDS"),
+        )),
+        Err(e) => Err(Error::new(Kind::Io, format!("security id {id}: {e}"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
