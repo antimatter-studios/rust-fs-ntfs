@@ -2961,6 +2961,71 @@ pub extern "C" fn fs_ntfs_read_security_id(
     })
 }
 
+/// The security descriptor `path` resolves to, as stored: its own
+/// `$SECURITY_DESCRIPTOR` attribute, else the `$Secure:$SDS` copy its
+/// security id names, a verified primary or else its verified mirror
+/// (`sds::file_descriptor`, #606). The bytes are self-relative and
+/// undecoded.
+///
+/// `*out_len` gets the descriptor's length whenever it is found, so a
+/// caller can size-query with `out_buf = NULL, out_buf_len = 0`.
+/// Returns:
+///    1  — the descriptor was copied into `out_buf[0..*out_len]`
+///    2  — `out_buf_len` is too small; nothing was written
+///   -1  — error (see `fs_ntfs_last_error`)
+///
+/// `out_len` must be non-NULL. `out_buf` may be NULL only when
+/// `out_buf_len == 0`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_read_security_descriptor(
+    image: *const c_char,
+    path: *const c_char,
+    out_buf: *mut c_void,
+    out_buf_len: usize,
+    out_len: *mut usize,
+) -> c_int {
+    ffi_guard("fs_ntfs_read_security_descriptor", -1, move || {
+        let Some(img) = cstr_to_path(image) else {
+            set_einval("fs_ntfs_read_security_descriptor: null or non-UTF-8 image");
+            return -1;
+        };
+        let Some(p) = cstr_to_path(path) else {
+            set_einval("fs_ntfs_read_security_descriptor: null or non-UTF-8 path");
+            return -1;
+        };
+        if out_len.is_null() {
+            set_einval("fs_ntfs_read_security_descriptor: null out_len");
+            return -1;
+        }
+        if out_buf.is_null() && out_buf_len != 0 {
+            set_einval("fs_ntfs_read_security_descriptor: null out_buf with non-zero out_buf_len");
+            return -1;
+        }
+        match sds::file_descriptor(std::path::Path::new(img), p) {
+            Ok(descriptor) => {
+                unsafe { *out_len = descriptor.len() };
+                if descriptor.len() > out_buf_len {
+                    return 2;
+                }
+                if !descriptor.is_empty() {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            descriptor.as_ptr(),
+                            out_buf.cast::<u8>(),
+                            descriptor.len(),
+                        );
+                    }
+                }
+                1
+            }
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
+        }
+    })
+}
+
 /// Full `$STANDARD_INFORMATION` value (Linux-NTFS documentation). The four
 /// timestamps are NT 100-nanosecond intervals since 1601-01-01 UTC.
 /// `file_attributes` is the FILE_ATTRIBUTE_* bitmask. The trailing
