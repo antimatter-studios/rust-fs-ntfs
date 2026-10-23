@@ -64,7 +64,7 @@ refused() {
 }
 refused 1 /dir 0
 refused 3 /link 0
-refused 1 /missing 0
+refused 4 /missing 0
 refused 1 "/\$MFT" 0
 refused 1 /resident/ 0
 refused 1 /nonresident 18446744073709551615

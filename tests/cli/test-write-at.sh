@@ -64,7 +64,7 @@ refused() {
     jq_check "refused write has a structured error" ".code == $code and (.error|type) == \"string\"" "$SANDBOX/err"
     check "refused write leaves every image byte unchanged" cmp -s "$img" "$SANDBOX/before.img"
 }
-refused 1 /missing 0
+refused 4 /missing 0
 refused 1 /dir 0
 refused 3 /link 0
 refused 1 '/$MFT' 0
