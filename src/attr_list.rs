@@ -27,15 +27,15 @@
 //! The same, with one difference. The attributes this moves are the named
 //! `$DATA` streams and, once the list has no room even in clusters, the
 //! `$FILE_NAME`s, which a file's hard links can fill its base record with
-//! (#779). This driver's other write paths -- the partial unnamed `$DATA`
-//! writes, reparse points, object ids -- edit the base record, so the
-//! unnamed `$DATA` and the rest stay there, where those paths find them;
-//! names are added and removed through the list. Windows' own layout
+//! (#779). This driver's other write paths -- reparse points, object ids --
+//! edit the base record, so the rest stay there, where those paths find
+//! them; names are added and removed through the list. Windows' own layout
 //! allows either; chkdsk grades both. EAs are written through the list too
 //! (#660): `$EA` and `$EA_INFORMATION` are added and replaced like a
-//! stream, but never moved to make room for one. So is a whole rewrite of
-//! the unnamed `$DATA` (#788), which is written where the list keeps it
-//! and moves only when its record cannot hold it.
+//! stream, but never moved to make room for one. So is the unnamed
+//! `$DATA`, rewritten whole (#788) or written in part by `write_at` (#789):
+//! it is written where the list keeps it and moves only when its record
+//! cannot hold it.
 //!
 //! - A file with no list whose base record has no room for a stream or
 //!   an EA gets one: an entry for every attribute, and the named streams
