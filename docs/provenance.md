@@ -101,7 +101,13 @@ with `0xFF` as an empty log. Neither the Linux-NTFS documentation nor
 Microsoft's describes that convention. A log Windows dismounts cleanly keeps
 two restart pages and its checkpoint page, and only the rest is `0xFF`
 (`test-disks/windows-clean-logfile.bin.gz`). #137 tracks replaying the log
-rather than discarding it.
+rather than discarding it. A replay (`fsck::replay_logfile`) leaves that
+clean log rather than `0xFF` (#762): format.com's checkpoint with empty
+tables at the page Windows and format.com both use, its two tail copies,
+and LFS 1.1 restart pages flagged clean, naming a current LSN one wrap past
+the highest the replayed log held. Windows had started its own log at LSNs
+below those a `0xFF`-filled log left on the volume (#649, merge-queue run
+39852914842).
 
 ## What verifies each layout
 
