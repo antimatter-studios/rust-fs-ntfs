@@ -4,7 +4,9 @@
 //! shared pump's fixed chunks at increasing offsets, synced, optionally read
 //! back through a fresh open, and only then renamed to its final name. The
 //! driver's rename refuses a name already there, so `--replace` is refused
-//! with exit 3 rather than deleting the old file first.
+//! with exit 3 rather than deleting the old file first. The staging name is
+//! one per destination, so what an import killed before its rename leaves
+//! is removed by the next import of the same PATH (#1078).
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -15,6 +17,7 @@ use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::block_io::BlockIo;
 use fs_ntfs::error::Kind;
 use fs_ntfs::read;
+use sha2::{Digest, Sha256};
 
 use super::device::{self, Device};
 use super::fs::{ntfs_error, prepared, split_path};
@@ -149,28 +152,48 @@ impl Stage {
                 format!("{parent}/{name}")
             }
         };
-        let mut chosen = None;
-        for n in 0..1000 {
-            let name = format!(".dj-import-{}-{n}.partial", std::process::id());
-            match read::resolve_path(&mut dev, &join(&name)) {
-                Err(e) if e.kind() == Kind::NotFound => {
-                    chosen = Some(name);
-                    break;
+        // One staging name per destination name: an import killed after the
+        // staged sync and before the rename leaves a file there, which the
+        // next import of the same PATH finds and removes before staging
+        // again (#1078). A name tied to a process id would never be found.
+        let digest = Sha256::digest(destination.as_bytes());
+        let name = format!(
+            ".dj-import-{}.partial",
+            digest[..8]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        let staged = join(&name);
+        let leftover = match read::resolve_path(&mut dev, &staged) {
+            Ok(record) => {
+                if read::read_stat(&mut dev, record)
+                    .map_err(|e| ntfs_error(&staged, e))?
+                    .is_dir
+                {
+                    return Err(error(format!(
+                        "{staged}: a directory holds this import's staging name"
+                    )));
                 }
-                Ok(_) => continue,
-                Err(e) => return Err(ntfs_error(path, e)),
+                true
             }
-        }
-        let name = chosen.ok_or_else(|| error("no free import staging name"))?;
+            Err(e) if e.kind() == Kind::NotFound => false,
+            Err(e) => return Err(ntfs_error(path, e)),
+        };
         drop(dev);
         let (mut dev, _) = device::mount(&target, offset, true)?;
+        if leftover {
+            prepared(&mut dev, &staged, |dev| {
+                fs_ntfs::write::unlink_io(dev, &staged)
+            })?;
+        }
         prepared(&mut dev, path, |dev| {
             fs_ntfs::write::create_file_io(dev, &parent, &name)
         })?;
         Ok(Self {
             target,
             offset,
-            staged: join(&name),
+            staged,
             destination: destination.to_string(),
             dev: Some(dev),
             written: 0,
@@ -335,6 +358,13 @@ pub(super) fn run(
         let copied = stage.copy(source.as_mut().expect("opened source"))?;
         if verify {
             stage.verify(&copied)?;
+        }
+        // A test kills the import here, after the staged file's sync and
+        // before its rename, with no destructor run, as a SIGKILL or a
+        // power cut would (#1078).
+        #[cfg(feature = "harness")]
+        if std::env::var_os("FS_NTFS_IMPORT_KILL_BEFORE_PUBLISH").is_some() {
+            std::process::abort();
         }
         stage.publish()?;
         let text = format!(
