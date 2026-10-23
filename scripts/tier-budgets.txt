@@ -157,6 +157,23 @@
 # is suppressed and no test changes.
 # Evidence: https://github.com/antimatter-studios/rust-fs-ntfs/actions/runs/39852914842/job/120090406130
 #
+# THE CLI ROW MOVED for #658, from 51/1703 to 54/1784, with exact caps.
+# Merge-queue run 39883142419, job 120189356148, passed all 15 files and
+# 1405 checks. Its retained cli.log is 54 lines / 1784 bytes, SHA-256
+# 45d45eb07a58938cc72d0a9acb2e61acc50d808854c0b226ae88694b4d42edde.
+# tests/cli/test-xattr.sh is one more passing file and prints its three
+# verdict lines, 81 bytes with "41 passed". No output is suppressed.
+# Evidence: https://github.com/antimatter-studios/rust-fs-ntfs/actions/runs/39883142419/job/120189356148
+#
+# THE CLI-ORACLE ROW MOVED for #658, from 24/1058 to 27/1156, and the new
+# figure is DERIVED: that run stopped at the cli tier, so cli-oracle did
+# not run. tests/cli-oracle/test-xattr-windows.sh is one more file, whose
+# three verdict lines are 98 bytes for the 144 checks chores.yml counts
+# for it ("== test-xattr-windows", "test result: ok. 144 passed; 0
+# failed", "test-xattr-windows: all checks passed"), and the summary's
+# counts keep their widths (6 files, 845 checks, floor 843). Replace it
+# with the first passing run's measurement.
+#
 # CLI-ORACLE is the same script over tests/cli-oracle/, the checks against
 # volumes another platform wrote; the same shape, fewer files. On CI's
 # runner doctor adds a line per same-named program later on PATH (ntfs-3g's
@@ -188,6 +205,6 @@ asan         1100   72000
 scripts       135    3500
 semver         40    4000
 matrix       1850  135000
-cli            51    1703
-cli-oracle     24    1058
+cli            54    1784
+cli-oracle     27    1156
 cli-host       37    2630
