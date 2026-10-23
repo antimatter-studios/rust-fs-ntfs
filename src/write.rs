@@ -4987,7 +4987,11 @@ pub fn read_object_id_io<T: BlockIo + ?Sized>(
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
     let Some(loc) = attr_io::find_attribute(&record, AttrType::ObjectId, None) else {
-        return Ok(None);
+        return Ok(listed_object_id_value(io, rec)?.map(|value| {
+            let mut out = [0u8; 16];
+            out.copy_from_slice(&value[..16]);
+            out
+        }));
     };
     if !loc.is_resident {
         return Err(Error::io("$OBJECT_ID is non-resident (unexpected)"));
@@ -5015,6 +5019,28 @@ pub fn read_object_id_io<T: BlockIo + ?Sized>(
     let mut out = [0u8; 16];
     out.copy_from_slice(&record[val_off..val_off + 16]);
     Ok(Some(out))
+}
+
+/// The `$OBJECT_ID` value of record `rec` when its base record does not
+/// hold one: on a file with an `$ATTRIBUTE_LIST` the object id may live in
+/// an extension record the list names (#809). `None` when the file has no
+/// object id at all.
+fn listed_object_id_value<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+) -> Result<Option<Vec<u8>>, Error> {
+    let Some(value) =
+        crate::read::read_attribute_value_if_present(io, rec, AttrType::ObjectId, None)?
+    else {
+        return Ok(None);
+    };
+    if value.len() != 16 && value.len() != 64 {
+        return Err(Error::io(format!(
+            "unexpected $OBJECT_ID length: {} (expected 16 or 64)",
+            value.len()
+        )));
+    }
+    Ok(Some(value))
 }
 
 /// Result of [`read_object_id_extended`]: the file's `$OBJECT_ID`
@@ -5048,7 +5074,21 @@ pub fn read_object_id_extended_io<T: BlockIo + ?Sized>(
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
     let Some(loc) = attr_io::find_attribute(&record, AttrType::ObjectId, None) else {
-        return Ok(None);
+        return Ok(listed_object_id_value(io, rec)?.map(|value| {
+            let mut object_id = [0u8; 16];
+            object_id.copy_from_slice(&value[..16]);
+            let birth_ids = (value.len() == 64).then(|| {
+                let mut ids = [[0u8; 16]; 3];
+                for (i, id) in ids.iter_mut().enumerate() {
+                    id.copy_from_slice(&value[16 * (i + 1)..16 * (i + 2)]);
+                }
+                (ids[0], ids[1], ids[2])
+            });
+            ObjectIdExtended {
+                object_id,
+                birth_ids,
+            }
+        }));
     };
     if !loc.is_resident {
         return Err(Error::io("$OBJECT_ID is non-resident (unexpected)"));
