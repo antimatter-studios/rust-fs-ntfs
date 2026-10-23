@@ -6,6 +6,10 @@
 # beside it, line by line, through ntfs.sys:
 #
 #   file<TAB>/path<TAB>size<TAB>sha256   Get-FileHash -Algorithm SHA256, and the length
+#   copy-out<TAB>/path<TAB>size<TAB>sha256
+#                                        Windows copies the file off the volume with
+#                                        Copy-Item, and the copy has the length and
+#                                        SHA-256 (fs.ntfs import, #1079)
 #   truncate<TAB>/path<TAB>old<TAB>size<TAB>intermediate
 #                                        Windows creates old bytes of Z, repeats the
 #                                        SetLength sequence and compares every byte
@@ -85,6 +89,26 @@ try {
                     $failures++
                 } else {
                     $report += "ok   file $($f[1]) ($length bytes)"
+                }
+            }
+            'copy-out' {
+                $target = "${letter}:" + ($f[1] -replace '/', '\')
+                $copy = Join-Path $Diag 'copy-out.bin'
+                try {
+                    Copy-Item -LiteralPath $target -Destination $copy -Force
+                    $length = (Get-Item -LiteralPath $copy).Length
+                    $hash = (Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash.ToLowerInvariant()
+                    if ($length -ne [int64]$f[2] -or $hash -ne $f[3]) {
+                        $report += "FAIL copy-out $($f[1]): the copy is $length bytes, sha256 $hash; fs.ntfs wrote $($f[2]) bytes, sha256 $($f[3])"
+                        $failures++
+                    } else {
+                        $report += "ok   copy-out $($f[1]) ($length bytes)"
+                    }
+                } catch {
+                    $report += "FAIL copy-out $($f[1]): Windows could not copy it off the volume: $($_.Exception.Message)"
+                    $failures++
+                } finally {
+                    if (Test-Path -LiteralPath $copy) { Remove-Item -LiteralPath $copy -Force }
                 }
             }
             'write-at' {
