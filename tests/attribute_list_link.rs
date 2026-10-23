@@ -226,3 +226,31 @@ fn links_that_fill_the_base_record_give_the_file_a_list() {
     every_name_reads(&img, LINKS);
     clean(&img);
 }
+
+/// Names enough that the list itself outgrows the base record, which
+/// `$FILE_NAME`s already fill: the names move out to extension records, as
+/// Windows moves every attribute but `$STANDARD_INFORMATION` and the list
+/// (`test-disks/ntfs-attrlist.img`), and the list goes on growing. Merge-queue
+/// run 39915810586 stopped at the 31st name of `tests/cli/test-ln.sh` and
+/// the 33rd of the Windows scenario `cli-link-win-verify-chkdsk`: "its
+/// $ATTRIBUTE_LIST does not fit, and nothing left in the record is an
+/// attribute this driver moves".
+#[test]
+fn links_past_the_lists_room_move_the_base_records_names_out() {
+    const MANY: usize = 120;
+    let (img, rec) = volume_with_a_file("many", 0);
+    add_links(&img, MANY);
+    assert!(
+        has_list(&img, rec),
+        "/f's names never filled its base record"
+    );
+    list_is_true(&img, rec);
+    assert!(
+        names_in_extensions(&img, rec) > MANY / 2,
+        "most of /f's names should be in extension records"
+    );
+    assert_eq!(ntfs_names(&img, rec), expected_names(MANY));
+    assert_eq!(hard_link_count(&img, rec) as usize, MANY + 1);
+    every_name_reads(&img, MANY);
+    clean(&img);
+}
