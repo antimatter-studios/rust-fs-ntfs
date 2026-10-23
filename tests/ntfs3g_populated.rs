@@ -307,12 +307,9 @@ fn written_on(cluster: u32) {
         .unwrap()
         .clone();
     // The sixty names fill an $ATTRIBUTE_LIST too, and one name is one
-    // $FILE_NAME attribute, so dropping it is refused for the same reason.
-    refused_for_the_list(
-        cluster,
-        &format!("unlink {gone_link}"),
-        fs.unlink(&gone_link),
-    );
+    // $FILE_NAME attribute: dropping it goes through the list (#778).
+    fs.unlink(&gone_link)
+        .unwrap_or_else(|e| panic!("{cluster}: unlink {gone_link}: {e}"));
     let gone_wide = m
         .files
         .keys()
@@ -362,13 +359,15 @@ fn written_on(cluster: u32) {
         Some(&grown[..]),
         "{cluster}: ntfs-3g's /grüße.txt"
     );
-    for name in ["/links/target", gone_link.as_str()] {
-        assert_eq!(
-            ntfscat(&img, name, None).map(|d| sha(&d)),
-            m.files.get("/links/target").map(|(_, d)| d.clone()),
-            "{cluster}: ntfs-3g's {name}, every name kept by the refused unlink"
-        );
-    }
+    assert_eq!(
+        ntfscat(&img, "/links/target", None).map(|d| sha(&d)),
+        m.files.get("/links/target").map(|(_, d)| d.clone()),
+        "{cluster}: ntfs-3g's /links/target, a name the unlink kept"
+    );
+    assert!(
+        ntfscat(&img, &gone_link, None).is_none(),
+        "{cluster}: ntfs-3g still finds the unlinked {gone_link}"
+    );
     assert_eq!(
         ntfscat(&img, &gone_wide, None).map(|d| sha(&d)),
         m.files.get(&gone_wide).map(|(_, d)| d.clone()),
