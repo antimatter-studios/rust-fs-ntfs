@@ -29,11 +29,17 @@ fs.ntfs "$img" rm /d >"$SANDBOX/x.out" 2>"$SANDBOX/x.err"
 check "rm of a directory exits 1" test $? -eq 1
 check "rm of a directory prints nothing on stdout" test ! -s "$SANDBOX/x.out"
 jq_check "rm of a directory points at rmdir" '.code == 1 and (.error | test("rmdir"))' "$SANDBOX/x.err"
-fs.ntfs "$img" rmdir /d >/dev/null 2>"$SANDBOX/x.err"
-check "rmdir of a directory with files in it exits 1" test $? -eq 1
-jq_check "rmdir of a directory with files in it says so" '.code == 1 and (.error | test("not empty"))' "$SANDBOX/x.err"
+# A refusal the volume's state gives is exit 4, `refused`, in the CLI
+# contract (diskjockey#413): a directory that is not empty, a missing name.
+cp "$img" "$SANDBOX/before.img"
+fs.ntfs "$img" rmdir /d >"$SANDBOX/x.out" 2>"$SANDBOX/x.err"
+check "rmdir of a directory with files in it exits 4" test $? -eq 4
+check "rmdir of a directory with files in it prints nothing on stdout" test ! -s "$SANDBOX/x.out"
+jq_check "rmdir of a directory with files in it says so" '.code == 4 and (.error | test("not empty"))' "$SANDBOX/x.err"
+check "rmdir of a directory with files in it left the image byte-identical" cmp -s "$img" "$SANDBOX/before.img"
 fs.ntfs "$img" rm /d/missing >/dev/null 2>"$SANDBOX/x.err"
-check "rm of a missing path exits 1" test $? -eq 1
+check "rm of a missing path exits 4" test $? -eq 4
+jq_check "rm of a missing path says so" '.code == 4 and (.error | test("not found"))' "$SANDBOX/x.err"
 
 # Every file, in an order fixed by a seed and by nothing about the index.
 awk 'BEGIN { srand(495) } { print rand() "\t" $0 }' "$names" | sort | cut -f2 >"$SANDBOX/order"

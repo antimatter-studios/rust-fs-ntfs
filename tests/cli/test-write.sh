@@ -79,12 +79,13 @@ fs.ntfs "$img" set label "" >/dev/null 2>&1
 jq_check "set label \"\" removes it" '.label == null' <(fs.ntfs "$img" get label)
 fs.ntfs "$img" set label "Backup Volume" >/dev/null 2>&1
 
-# Refusals: status 1, a structured error, nothing on stdout, image unchanged.
+# Refusals: a structured error, nothing on stdout, image unchanged; status 4
+# where the volume's state refuses a namespace verb (diskjockey#413), 1 for write.
 cp "$img" "$SANDBOX/before.img"
 fs.ntfs "$img" mkdir /d >"$SANDBOX/x.out" 2>"$SANDBOX/x.err"
-check "mkdir of an existing path exits 1" test $? -eq 1
+check "mkdir of an existing path exits 4" test $? -eq 4
 check "mkdir of an existing path prints nothing on stdout" test ! -s "$SANDBOX/x.out"
-jq_check "mkdir of an existing path says so" '.code == 1 and (.error | test("already exists"))' "$SANDBOX/x.err"
+jq_check "mkdir of an existing path says so" '.code == 4 and (.error | test("already exists"))' "$SANDBOX/x.err"
 echo x | fs.ntfs "$img" write /missing/f >"$SANDBOX/y.out" 2>"$SANDBOX/y.err"
 check "write under a missing parent exits 1" test $? -eq 1
 check "write under a missing parent prints nothing on stdout" test ! -s "$SANDBOX/y.out"
@@ -260,12 +261,12 @@ check "the volume is not dirty after the chains" test "$(fs.ntfs "$pimg" get dir
 # not followed.
 fs.ntfs "$pimg" ln -s /a /lnk >/dev/null 2>&1
 check "ln -s /a /lnk exits 0" test $? -eq 0
-refused 1 'not a directory' /f.txt/x/y
-refused 1 'not a directory' /new/../f.txt/x
-refused 1 'already exists' /f.txt
-refused 1 'already exists' /F.TXT
-refused 1 'symbolic link' /lnk/x
-refused 1 'already exists' /lnk
+refused 4 'not a directory' /f.txt/x/y
+refused 4 'not a directory' /new/../f.txt/x
+refused 4 'already exists' /f.txt
+refused 4 'already exists' /F.TXT
+refused 4 'symbolic link' /lnk/x
+refused 4 'already exists' /lnk
 # A name Windows cannot address, past a directory that would be made first.
 refused 1 'cannot address' '/n1/a:b/c'
 refused 1 'cannot address' '/n1/a*b'
@@ -283,8 +284,8 @@ check "mkdir -p of a path not from the root prints nothing on stdout" test ! -s 
 
 # Plain mkdir is unchanged: its parent must exist.
 fs.ntfs "$pimg" mkdir /m1/m2 >"$SANDBOX/p.out" 2>"$SANDBOX/p.err"
-check "plain mkdir under a missing parent exits 1" test $? -eq 1
-jq_check "plain mkdir under a missing parent says so" '.code == 1 and (.error | test("not found"))' "$SANDBOX/p.err"
+check "plain mkdir under a missing parent exits 4" test $? -eq 4
+jq_check "plain mkdir under a missing parent says so" '.code == 4 and (.error | test("not found"))' "$SANDBOX/p.err"
 
 # --offset: the same volume 1 MiB into a whole-disk image, the first MiB
 # left alone.
