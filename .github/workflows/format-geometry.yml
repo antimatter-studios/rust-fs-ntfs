@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Fixture-free decoding and coverage contracts (66 checks)
+      - name: Fixture-free decoding and coverage contracts (75 checks)
         shell: pwsh
         run: ./tests/scripts/windows-format-geometry.ps1
       - name: Capture all 26 Windows format requests, six large-cluster layouts and their index VCN units
