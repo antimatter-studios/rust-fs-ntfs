@@ -1770,8 +1770,12 @@ pub fn format_with_plan(dev: &mut dyn BlockIo, plan: &FormatPlan) -> Result<(), 
     // Records the mirror covers past the sixteen above are free records,
     // formatted rather than zeroed, so the mirror's copy of each is a
     // record a repair can read (#481): Windows' mirror of a 64 KiB
-    // cluster holds 64 `FILE` records.
+    // cluster holds 64 `FILE` records. $Extend's children are already
+    // in 16..18, in use, and stay.
     for slot in 16..mftmirr_record_count.min(mft_records_capacity) as u32 {
+        if [rec::OBJID, rec::REPARSE, rec::QUOTA].contains(&slot) {
+            continue;
+        }
         let rec_bytes = build_free_record(&mft_record_layout, slot)?;
         place_record(&mut mft_buf, rs, slot, rec_bytes)?;
     }
