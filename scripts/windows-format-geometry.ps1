@@ -230,6 +230,52 @@ function Get-LargeClusterLayout([string]$Letter, [int]$Size) {
     }
     $layout
 }
+# The unit of an index VCN, from INDX blocks Windows wrote (#704): each
+# block's own VCN field (at 0x10) against its byte offset in the directory's
+# $INDEX_ALLOCATION. Every block past the first must agree on one unit that
+# divides its offset exactly, and at least two must, or nothing was measured.
+function Measure-IndexVcnUnit([object[]]$Blocks) {
+    $first = @($Blocks | Where-Object { $_.offset -eq 0 })
+    if ($first.Count -ne 1 -or $first[0].vcn -ne 0) { throw 'the block at offset 0 does not carry VCN 0' }
+    $later = @($Blocks | Where-Object { $_.offset -gt 0 })
+    if ($later.Count -lt 2) { throw "only $($later.Count) index blocks past the first; the unit is not measured" }
+    $units = @($later | ForEach-Object {
+        if ($_.vcn -le 0 -or $_.offset % $_.vcn -ne 0) {
+            throw "the block at offset $($_.offset) carries VCN $($_.vcn), which no unit maps there"
+        }
+        [long]($_.offset / $_.vcn)
+    } | Sort-Object -Unique)
+    if ($units.Count -ne 1) { throw "index blocks disagree on the VCN unit: $($units -join ', ')" }
+    [long]$units[0]
+}
+# A directory Windows grows past several index blocks, and every INDX block
+# of its $INDEX_ALLOCATION read raw through the disk at the extents Windows
+# reports: each block's byte offset in the stream and its own VCN field.
+function Get-IndexVcnBlocks([string]$Letter, [int]$DiskNumber, [long]$PartitionOffset,
+        [long]$ClusterBytes, [long]$IndexBlockBytes) {
+    $dir = "${Letter}:\vcn-measure"
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    $stem = 'x' * 120
+    for ($i = 0; $i -lt 400; $i++) {
+        [IO.File]::WriteAllBytes((Join-Path $dir ('{0}-{1:d4}' -f $stem, $i)), [byte[]]::new(0))
+    }
+    Write-VolumeCache -DriveLetter $Letter
+    $run = ConvertFrom-RetrievalExtents (Get-NtfsStreamExtents ($dir + ':$I30:$INDEX_ALLOCATION'))
+    $blocks = [Collections.Generic.List[object]]::new()
+    foreach ($extent in $run.extents) {
+        for ($vcn = [long]$extent.vcn; $vcn -lt $extent.next_vcn; $vcn++) {
+            $lcn = [long]$extent.lcn + ($vcn - [long]$extent.vcn)
+            for ($within = 0L; $within -lt $ClusterBytes; $within += $IndexBlockBytes) {
+                $offset = $vcn * $ClusterBytes + $within
+                $bytes = Read-GeometryDisk $DiskNumber ($PartitionOffset + $lcn * $ClusterBytes + $within) $IndexBlockBytes
+                if ([Text.Encoding]::ASCII.GetString($bytes, 0, 4) -ne 'INDX') { continue }
+                $blocks.Add([pscustomobject][ordered]@{ offset = $offset;
+                    vcn = [BitConverter]::ToInt64($bytes, 0x10) })
+            }
+        }
+    }
+    , $blocks.ToArray()
+}
 function Invoke-WindowsFormatGeometryCapture([string]$OutDir) {
     $ErrorActionPreference = 'Stop'
     if (-not $IsWindows) { throw 'the capture requires an elevated hosted Windows runner' }
@@ -317,6 +363,10 @@ function Invoke-WindowsFormatGeometryCapture([string]$OutDir) {
                 if ($row.accepted) {
                     $measured = Get-LargeClusterLayout $letter $request.allocation_unit_bytes
                     foreach ($file in $measured.Keys) { $layout[$file] = $measured[$file] }
+                    $blocks = Get-IndexVcnBlocks $letter $disk.Number $partition.Offset `
+                        $request.allocation_unit_bytes $row.boot.index_block_bytes
+                    $layout.index_vcn = [ordered]@{ index_block_bytes = $row.boot.index_block_bytes;
+                        unit_bytes = Measure-IndexVcnUnit $blocks; blocks = $blocks }
                 }
                 $layoutRows.Add([pscustomobject]$layout)
                 ConvertTo-Json -InputObject @($layoutRows.ToArray()) -Depth 8 |
@@ -329,7 +379,13 @@ function Invoke-WindowsFormatGeometryCapture([string]$OutDir) {
         }
         Assert-FormatGeometryRows @($rows.ToArray())
         Assert-LargeClusterLayoutRows @($layoutRows.ToArray())
-        Write-Host 'format-geometry: 26 requests captured; both 4 KiB controls passed; 6 large-cluster layouts measured'
+        foreach ($layout in $layoutRows) {
+            if ($null -eq $layout.index_vcn -or -not $layout.index_vcn.unit_bytes) {
+                throw "no index VCN unit was measured at $($layout.allocation_unit_bytes)-byte clusters"
+            }
+            Write-Host "format-geometry: index VCN unit $($layout.index_vcn.unit_bytes) bytes at $($layout.allocation_unit_bytes)-byte clusters, $(@($layout.index_vcn.blocks).Count) blocks"
+        }
+        Write-Host 'format-geometry: 26 requests captured; both 4 KiB controls passed; 6 large-cluster layouts and index VCN units measured'
     } finally {
         if ($attached) {
             $image = Get-DiskImage -ImagePath $vhd -ErrorAction Stop
