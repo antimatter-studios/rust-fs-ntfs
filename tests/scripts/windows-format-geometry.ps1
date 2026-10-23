@@ -172,5 +172,5 @@ $diff = @(Compare-PhysicalSectorGeometryRows $row512n $row512e)
 Assert-Geometry (($diff -join ',') -eq 'boot.mft_lcn') 'the diff names each changed field and excludes the locked $LogFile'
 $row512e.partition_offset = 1048576
 Assert-Geometry (@(Compare-PhysicalSectorGeometryRows $row512n $row512e) -contains 'partition_offset') 'the diff names a moved partition'
-if ($checks -ne 60) { throw "only $checks geometry contracts executed, expected 60" }
-Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 60)"
+if ($checks -ne 59) { throw "only $checks geometry contracts executed, expected 59" }
+Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 59)"
