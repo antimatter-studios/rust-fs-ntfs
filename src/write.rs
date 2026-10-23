@@ -6447,17 +6447,102 @@ fn write_file_contents_unrefreshed_io<T: BlockIo + ?Sized>(
     // non-resident `$DATA`.
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
+    // A FILE WITH AN $ATTRIBUTE_LIST IS WRITTEN THROUGH IT.
+    //
+    // Windows keeps the unnamed `$DATA` in an extension record too, where
+    // the base record's walk called it missing, and the base record of a
+    // listed file may have no room for it to grow (#788, part of #663).
+    // A directory keeps the base-record path, as `ListedFile` does not
+    // move a directory's attributes.
+    let is_directory =
+        crate::mft_io::record_flags(&record) & crate::mft_io::MFT_FLAG_DIRECTORY != 0;
+    if !is_directory && attr_io::find_attribute(&record, AttrType::AttributeList, None).is_some() {
+        refuse_metafile_io(io, rec, &format!("write {file_path}"))?;
+        return write_listed_unnamed_data_io(io, rec, new_data);
+    }
     if attr_io::find_attribute(&record, AttrType::Data, None).is_some_and(|loc| !loc.is_resident) {
         return replace_file_contents_io(io, file_path, new_data);
     }
     match write_resident_contents_attempt_io(io, file_path, new_data) {
         Ok(n) => Ok(n),
+        // A base record too full to hold even the stream's non-resident
+        // form gains a list, which moves the named streams out (#788).
+        Err(ResidentWriteError::NeedsPromotion(_))
+            if !is_directory && !holds_nonresident_data(&record) =>
+        {
+            refuse_metafile_io(io, rec, &format!("write {file_path}"))?;
+            write_listed_unnamed_data_io(io, rec, new_data)
+        }
         Err(ResidentWriteError::NeedsPromotion(_)) => {
             promote_resident_data_to_nonresident_io(io, file_path, new_data)?;
             Ok(new_data.len() as u64)
         }
         Err(ResidentWriteError::Other(error)) => Err(error),
     }
+}
+
+/// The most bytes an unnamed non-resident `$DATA` of one run takes: its
+/// 0x40-byte header and mapping pairs of at most 18 bytes (a header byte,
+/// eight of length, eight of offset, the terminator), aligned to 8.
+const ONE_RUN_NONRESIDENT_DATA_MAX: usize = 0x58;
+
+/// Whether `record` has room for its unnamed `$DATA` to be replaced by a
+/// non-resident one of one run.
+fn holds_nonresident_data(record: &[u8]) -> bool {
+    let used = u32::from_le_bytes(record[0x18..0x1C].try_into().expect("4 bytes")) as usize;
+    let allocated = u32::from_le_bytes(record[0x1C..0x20].try_into().expect("4 bytes")) as usize;
+    let held = attr_io::find_attribute(record, AttrType::Data, None).map_or(0, |l| l.attr_length);
+    allocated.saturating_sub(used) + held >= ONE_RUN_NONRESIDENT_DATA_MAX
+}
+
+/// Write `data` as the whole unnamed `$DATA` of the file whose base record
+/// is `rec`, through the file's `$ATTRIBUTE_LIST`, which is made when the
+/// file has none (#788); see [`crate::attr_list`].
+///
+/// As a named stream does ([`write_listed_named_stream_io`]): the stream
+/// stays where it is while its record holds it, resident while it fits an
+/// empty record and was not already in clusters, and otherwise goes into
+/// newly allocated clusters, the old ones freed only once the records no
+/// longer name them. A compressed, encrypted or sparse stream is refused
+/// before anything is written, as rewriting it plain would drop what makes
+/// it so.
+fn write_listed_unnamed_data_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    data: &[u8],
+) -> Result<u64, Error> {
+    let mut file = crate::attr_list::ListedFile::open(io, rec)?;
+    let found = file
+        .find(AttrType::Data, "")?
+        .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
+    let attr = file.attribute_bytes(&found);
+    let at = attr_io::attr_off::FLAGS;
+    let flags = u16::from_le_bytes([attr[at], attr[at + 1]]);
+    if flags & attr_io::attr_flags::TRANSFORMED != 0 {
+        return Err(Error::refused(format!(
+            "record {rec}: its unnamed $DATA is {}, and a rewrite through the \
+             $ATTRIBUTE_LIST writes it plain",
+            attr_io::describe_transform_flags(flags)
+        )));
+    }
+    let old_runs = file.runs(&found)?;
+    let was_nonresident = !found.loc.is_resident;
+    let resident =
+        crate::record_build::build_resident_unnamed_attribute(AttrType::Data as u32, 0, data)?;
+    let attr = if !was_nonresident && resident.len() <= file.max_attribute_len() {
+        resident
+    } else {
+        match listed_nonresident_attribute_io(io, &mut file, AttrType::Data, None, data) {
+            Ok(attr) => attr,
+            Err(e) => return Err(file.abandon(io, e)),
+        }
+    };
+    if let Err(e) = file.replace(io, AttrType::Data, "", attr) {
+        return Err(file.abandon(io, e));
+    }
+    file.commit(io)?;
+    free_old_runs_io(io, "the unnamed $DATA", "rewritten", old_runs)?;
+    Ok(data.len() as u64)
 }
 
 /// Generalized non-resident promotion for any attribute type + optional
