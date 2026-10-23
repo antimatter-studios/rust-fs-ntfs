@@ -1781,6 +1781,89 @@ mod record_view_tests {
         assert_eq!(out.stdout, before);
     }
 
+    /// The LFS 2.0 Windows capture the checkpoint test reads, verified.
+    fn interrupted_capture() -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        let out = std::process::Command::new("gzip")
+            .args(["-dc", "test-disks/windows-interrupted-logfile-1.bin.gz"])
+            .output()
+            .expect("install gzip to read the Windows capture");
+        assert!(out.status.success(), "gzip: {:?}", out.stderr);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&out.stdout)),
+            "e6a36b92ace6fa15378af53d9239b1df0aacdf931e4c721d10ce287259d638eb"
+        );
+        out.stdout
+    }
+
+    /// A walk from the in-use client's checkpoint start reads every record
+    /// to the log's newest, in LSN order, each where its predecessor said
+    /// the next one starts, each the record strict lookup reads at its LSN,
+    /// and passes the checkpoint at the restart LSN Windows wrote (#607).
+    #[test]
+    fn a_walk_from_the_checkpoint_start_reads_every_record_in_order() {
+        let log = interrupted_capture();
+        let before = log.clone();
+        let walk = walk_records(&log, None, 100_000, log.len()).expect("the capture opens");
+        assert!(walk.stopped.is_none(), "{:?}", walk.stopped);
+        assert!(walk.complete, "the walk reached the newest record");
+        let lsns: Vec<u64> = walk.records.iter().map(|r| r.view.lsn).collect();
+        assert!(lsns.len() > 1, "{lsns:x?}");
+        assert!(lsns.windows(2).all(|w| w[0] < w[1]), "LSNs rise: {lsns:x?}");
+        for pair in walk.records.windows(2) {
+            assert_eq!(pair[0].next_lsn, pair[1].view.lsn, "{:x?}", pair[0].view);
+        }
+        let checkpoint = walk
+            .records
+            .iter()
+            .find(|r| r.view.lsn == 0x33e791)
+            .expect("the walk passes the checkpoint Windows wrote");
+        assert_eq!(checkpoint.view.record_type, 2);
+        for r in &walk.records {
+            assert!((r.offset as usize) < log.len(), "{r:x?}");
+            assert_eq!(
+                r.view,
+                record_at_lsn(&log, r.view.lsn, log.len()).unwrap(),
+                "the walk and strict lookup agree at {:#x}",
+                r.view.lsn
+            );
+        }
+        assert_eq!(log, before, "a walk changes nothing");
+    }
+
+    /// A walk ends at its record limit, incomplete with no error, or at the
+    /// first record it cannot read, with what it read before kept and the
+    /// reason named. A record past the byte budget is refused before it is
+    /// assembled.
+    #[test]
+    fn a_walk_stops_at_its_limit_or_its_first_bad_record_and_says_which() {
+        let log = interrupted_capture();
+        let limited = walk_records(&log, None, 2, log.len()).unwrap();
+        assert_eq!(limited.records.len(), 2);
+        assert!(!limited.complete && limited.stopped.is_none());
+        let from = walk_records(&log, Some(0x33e791), 1, log.len()).unwrap();
+        assert_eq!(from.records[0].view.lsn, 0x33e791);
+        let bad = walk_records(&log, Some(0x33e791 + 1), 10, log.len()).unwrap();
+        assert!(bad.records.is_empty() && !bad.complete);
+        assert!(bad.stopped.is_some(), "an LSN no record sits at is named");
+        let tight = walk_records(&log, Some(0x33e791), 10, 8).unwrap();
+        assert!(tight.records.is_empty() && !tight.complete);
+        let why = tight.stopped.expect("the budget refuses the checkpoint");
+        assert!(why.to_string().contains("budget"), "{why}");
+    }
+
+    /// An LFS 1.x log is refused by the walk as strict lookup refuses it.
+    #[test]
+    fn a_walk_refuses_an_lfs1_log_as_lookup_does() {
+        let out = std::process::Command::new("gzip")
+            .args(["-dc", "test-disks/windows-clean-logfile.bin.gz"])
+            .output()
+            .expect("install gzip to read the Windows capture");
+        assert!(out.status.success(), "gzip: {:?}", out.stderr);
+        let error = walk_records(&out.stdout, None, 10, out.stdout.len()).unwrap_err();
+        assert!(error.to_string().contains("LFS version 1"), "{error}");
+    }
+
     #[test]
     fn record_view_reads_header_and_operation_fields() {
         let mut h = [0u8; RECORD_HEADER];
