@@ -30,7 +30,7 @@ check "rm of a directory exits 1" test $? -eq 1
 check "rm of a directory prints nothing on stdout" test ! -s "$SANDBOX/x.out"
 jq_check "rm of a directory points at rmdir" '.code == 1 and (.error | test("rmdir"))' "$SANDBOX/x.err"
 # A refusal the volume's state gives is exit 4, `refused`, in the CLI
-# contract (diskjockey#413): a directory that is not empty, a missing name.
+# contract (EXIT_REFUSED): a directory that is not empty, a missing name.
 cp "$img" "$SANDBOX/before.img"
 fs.ntfs "$img" rmdir /d >"$SANDBOX/x.out" 2>"$SANDBOX/x.err"
 check "rmdir of a directory with files in it exits 4" test $? -eq 4

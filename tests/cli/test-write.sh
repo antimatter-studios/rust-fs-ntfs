@@ -80,7 +80,7 @@ jq_check "set label \"\" removes it" '.label == null' <(fs.ntfs "$img" get label
 fs.ntfs "$img" set label "Backup Volume" >/dev/null 2>&1
 
 # Refusals: a structured error, nothing on stdout, image unchanged; status 4
-# where the volume's state refuses a namespace verb (diskjockey#413), 1 for write.
+# where the volume's state refuses a namespace verb (EXIT_REFUSED), 1 for write.
 cp "$img" "$SANDBOX/before.img"
 fs.ntfs "$img" mkdir /d >"$SANDBOX/x.out" 2>"$SANDBOX/x.err"
 check "mkdir of an existing path exits 4" test $? -eq 4

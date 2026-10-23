@@ -728,7 +728,7 @@ pub(super) fn ntfs_error(path: &str, e: Error) -> CliError {
 /// A namespace verb's error: a refusal the volume's current state gives it
 /// -- a name that is not there, a name already taken, a part of the path
 /// that is not a directory, a directory that is not empty -- is the CLI
-/// contract's exit 4, `refused` (diskjockey#413); every other error is
+/// contract's exit 4, `refused` (EXIT_REFUSED); every other error is
 /// [`ntfs_error`]'s exit 1.
 fn state_error(path: &str, e: Error) -> CliError {
     match e.kind() {
