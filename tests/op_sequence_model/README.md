@@ -182,13 +182,12 @@ a file's size.
 
 Opcode 9 is write_stream, which consumes its payload as a write does, and
 10 is delete_stream. Their target selector chooses a missing path (0), a
-file used as a directory (1) or an existing file (2/3); their name selector
-indexes a stream-name pool of `$UpCase` collisions, reserved characters, a
-trailing period and space, a control character, the 255/256-unit
-boundaries, an existing stream of the target (19) and a fresh name (20).
-The model accepts streams on directories, but the generator does not aim at
-them yet: `rmdir` gives back a directory's stream clusters only when the
-directory has index blocks (#735).
+file used as a directory (1), an existing file (2) or an existing directory
+other than the root (3), falling back to a file when there is none; their
+name selector indexes a stream-name pool of `$UpCase` collisions, reserved
+characters, a trailing period and space, a control character, the
+255/256-unit boundaries, an existing stream of the target (19) and a fresh
+name (20). `rmdir` gives a directory's stream clusters back with it (#735).
 
 Every step compares each modeled path's streams, names and complete bytes,
 on the synced writer and through fresh read-only descriptors, and again
