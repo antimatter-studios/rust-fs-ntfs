@@ -244,7 +244,10 @@ fn the_unnamed_stream_in_an_extension_record_is_rewritten_there() {
     let (ntfs, mut reader) = common::open(&img);
     assert_eq!(common::read_file_all(&ntfs, &mut reader, "/f"), b"contents");
     drop(reader);
-    rewrite_and_check(&img, rec, &pattern(300));
+    // The extension record keeps 88 bytes free, and the 32-byte stream it
+    // holds frees 32 more: a 64-byte value, 88 bytes resident, fits there.
+    // 300 bytes would not, and would rightly move out.
+    rewrite_and_check(&img, rec, &pattern(64));
     let mut io = PathIo::open_ro(Path::new(&img)).expect("open_ro");
     let (_, base) = mft_io::read_mft_record_io(&mut io, rec).expect("read /f");
     assert!(
