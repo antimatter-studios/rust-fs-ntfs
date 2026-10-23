@@ -120,7 +120,9 @@ const LEFT_FOR_CHKDSK: &str = "left set: the dirty flag asks for a check of the 
                                pass --clear-dirty with -y to clear it on a volume known to be \
                                consistent";
 
-/// Why an in-place repair's audit finds the dirty flag set (#941).
+/// Why an in-place repair's audit finds the dirty flag set (#941). Only
+/// the in-place apply, which is unix-only, reports it.
+#[cfg(unix)]
 const IN_PLACE_DIRTY: &str = "left set: an in-place repair leaves the dirty flag for Windows' \
                               chkdsk, which checks the whole volume at the next mount";
 
