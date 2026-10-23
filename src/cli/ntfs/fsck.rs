@@ -62,14 +62,15 @@ use std::path::Path;
 use clap::{value_parser, Arg, ArgAction, ArgGroup, ArgMatches, Command as Cmd};
 
 use fs_core::cli::{CliError, Json, Outcome, Tool};
+#[cfg(unix)]
 use fs_ntfs::block_io::PathIo;
 use fs_ntfs::fsck::{
     check_io, repair_dirty_io, replay_logfile_io, CheckFinding, CheckReport, FsckOptions,
     LogfileState,
 };
-use fs_ntfs::repair_plan::{
-    check_plan_source, copy_repair, load_plan, plan_fsck_io, CopyRepairError, RepairPlan,
-};
+#[cfg(unix)]
+use fs_ntfs::repair_plan::check_plan_source;
+use fs_ntfs::repair_plan::{copy_repair, load_plan, plan_fsck_io, CopyRepairError, RepairPlan};
 use sha2::{Digest, Sha256};
 
 /// fsck(8): no errors.
