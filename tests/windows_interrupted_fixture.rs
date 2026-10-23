@@ -4539,13 +4539,12 @@ fn fsck_dry_run_plan_writes_the_plan_to_an_external_file_never_its_target() {
     // or hard link, naming a file that exists, or without `--dry-run`, is
     // refused naming its reason, and nothing is written.
     use fs_ntfs::repair_plan::load_plan;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     type Writes = Vec<Vec<(u64, u64, String, String)>>;
     for (k, _) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
         let pristine_sha = hex_sha256(&std::fs::read(&src).unwrap());
-        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o444)).unwrap();
+        set_read_only(&src, true);
         let unchanged = |what: &str| {
             assert_eq!(
                 hex_sha256(&std::fs::read(&src).unwrap()),
@@ -4673,9 +4672,9 @@ fn fsck_dry_run_plan_writes_the_plan_to_an_external_file_never_its_target() {
             "{k}: a refused --plan changed the existing plan file"
         );
 
+        set_read_only(&src, false);
         std::fs::remove_file(&link).unwrap();
         std::fs::remove_file(&plan_file).unwrap();
-        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
         std::fs::remove_file(&src).unwrap();
     }
 }
