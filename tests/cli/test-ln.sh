@@ -1,17 +1,17 @@
 # fs.ntfs ln, as installed: a hard link -- in the same directory, in
-# another, to a file whose data is not resident, under a Unicode name --
-# through which the file's bytes read the same and after which every name
-# counts one more link; a name removed leaving the others; symbolic links
-# whose targets are relative, from the root, a drive path and a name not
-# there, each read back as given; --text and --offset; and every refusal,
-# each leaving the image byte-identical: a name already there as Windows
+# another, to a file whose data is not resident, under a Unicode name, and
+# to one file past the names its base record holds -- through which the
+# file's bytes read the same and after which every name counts one more
+# link; a name removed leaving the others; symbolic links whose targets
+# are relative, from the root, a drive path and a name not there, each
+# read back as given; --text and --offset; and every refusal, each
+# leaving the image byte-identical: a name already there as Windows
 # compares names, a missing target or directory, a hard link to a
-# directory, a file whose record has no room for another name and one
-# already at Windows' 1024 links, the names Windows cannot address, the
-# root, `.`, `..`, a metafile, an empty or oversized symbolic link target,
-# a trailing `/`, a dirty volume and the usage errors. What Windows makes
-# of the links is the cli-link-win-verify-chkdsk scenario in
-# test-matrix.json.
+# directory, a file already at Windows' 1024 links, the names Windows
+# cannot address, the root, `.`, `..`, a metafile, an empty or oversized
+# symbolic link target, a trailing `/`, a dirty volume and the usage
+# errors. What Windows makes of the links is the
+# cli-link-win-verify-chkdsk scenario in test-matrix.json.
 source "$(dirname "$0")/lib.sh"
 source "$(dirname "$0")/lib-ntfs.sh"
 
@@ -92,14 +92,22 @@ symlinked /d/f.txt /e/abs.txt                    # from the volume's root
 symlinked 'C:\data\report.txt' /drive.txt        # a drive path
 symlinked missing.txt /dangling.txt              # a target not there, as Windows allows
 
-# A file takes names until its record has no room for another, and the
-# first one it cannot hold is refused, writing nothing.
+# A file takes names past what its base record holds, as Windows lets it:
+# up to the 1024 links checked below, the names its base record has no
+# room for go through an $ATTRIBUTE_LIST. Forty is several base records'
+# worth of names.
 n=0
-while [ "$n" -lt 100 ] && fs.ntfs "$img" ln /full.txt "/d/many-$n.txt" >/dev/null 2>&1; do
+while [ "$n" -lt 40 ] && fs.ntfs "$img" ln /full.txt "/d/many-$n.txt" >/dev/null 2>"$SANDBOX/many.err"; do
     n=$((n + 1))
 done
-check "/full.txt took names until its record was full ($n more)" test "$n" -gt 0 -a "$n" -lt 100
+check "/full.txt took 40 more names, past its base record (stopped at $n: $(cat "$SANDBOX/many.err"))" test "$n" -eq 40
 check "/full.txt counts every name it took" test "$(nlink /full.txt)" = $((n + 1))
+# Its first name, in the base record, and its last, past it.
+for many in /d/many-0.txt "/d/many-$((n - 1)).txt"; do
+    check "$many is /full.txt's record" test "$(record "$many")" = "$(record /full.txt)"
+    fs.ntfs "$img" read "$many" >"$SANDBOX/read" 2>/dev/null
+    check "read $many gives the bytes written to /full.txt" cmp -s "$SANDBOX/read" "$SANDBOX/small"
+done
 
 fsck.ntfs "$img" >"$SANDBOX/fsck.json" 2>/dev/null
 check "fsck.ntfs finds the volume clean after the links" test $? -eq 0
@@ -134,8 +142,6 @@ refused() {
     check "ln $* leaves the image byte-identical" cmp -s "$img" "$SANDBOX/before.img"
 }
 
-# The name the record had no room for, asked again.
-refused 1 'no room' /full.txt "/d/many-$n.txt"
 # A name already there, as Windows compares names: through $UpCase, so
 # case does not tell two names apart.
 refused 1 'already exists' /a2.txt /d/a3.txt

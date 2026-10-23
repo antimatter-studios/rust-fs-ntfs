@@ -69,12 +69,12 @@
 #                                    new name and each old name now absent
 #   link IMAGE                       fs.ntfs ln adds hard links -- in the same
 #                                    directory, in others, to data that is not
-#                                    resident, and to one file until its record
-#                                    is full -- and removes an original name; ln -s
-#                                    makes symbolic links, relative and from the
-#                                    root. A hard link to a directory, a name
-#                                    already there and one name too many are
-#                                    refused with every byte left as it was.
+#                                    resident, and to one file past the names its
+#                                    base record holds -- and removes an original
+#                                    name; ln -s makes symbolic links, relative and
+#                                    from the root. A hard link to a directory and
+#                                    a name already there are refused with every
+#                                    byte left as it was.
 #                                    IMAGE.manifest lists every name's SHA-256,
 #                                    each file's full set of names and each
 #                                    symbolic link's target and the bytes it reaches
@@ -487,16 +487,14 @@ case "$step" in
         linked /a.txt /d/sub/A-DEEP.TXT   # deeper down, in capitals
         linked /big.bin /e/big-link.bin   # data that is not resident
         linked /d/f.txt /f-up.txt         # up to the root
-        # /many.txt takes names until its record has no room for another.
+        # /many.txt takes names past what its base record holds, as Windows
+        # lets a file have up to 1024: those the base record has no room for
+        # go through an $ATTRIBUTE_LIST. Forty is several records' worth.
         n=0
-        while [ "$n" -lt 100 ]; do
-            run fs "$image" ln /many.txt "/e/many-$n.txt"
-            [ "$status" -eq 0 ] || break
+        while [ "$n" -lt 40 ]; do
+            linked /many.txt "/e/many-$n.txt"
             n=$((n + 1))
         done
-        [ "$status" -eq 1 ] && grep -q 'no room' "$image.cli-err" ||
-            die "fs.ntfs ln /many.txt stopped after $n more names with exit $status: $(cat "$image.cli-err")"
-        [ "$n" -gt 1 ] || die "/many.txt took only $n more names before its record was full"
         # The first name goes, and the file stays under its others.
         run fs "$image" rm /a.txt
         [ "$status" -eq 0 ] || die "fs.ntfs rm /a.txt exited $status: $(cat "$image.cli-err")"
@@ -507,11 +505,10 @@ case "$step" in
         symlinked /d/f.txt /e/abs.txt f                # from the volume's root
 
         # Refusals, each leaving every byte as it was: a directory, a name
-        # already there as Windows compares names, a name more than the
-        # record holds, and a directory that is not there.
+        # already there as Windows compares names, and a directory that is
+        # not there.
         refused 1 /d /d-link
         refused 1 /f-up.txt /A-ALSO.TXT
-        refused 1 /many.txt "/e/many-$n.txt"
         refused 1 /a-also.txt /nowhere/x.txt
 
         printf 'dir\t%s\n' /d /d/sub /e >>"$manifest"
