@@ -123,7 +123,7 @@ fn windows_formats_the_4kn_fixture_in_4096_byte_sectors() {
         "fsutil's Bytes Per Sector for the volume Windows formatted"
     );
     assert!(
-        !image.is_empty() && image.len() as u64 % SECTOR == 0,
+        !image.is_empty() && (image.len() as u64).is_multiple_of(SECTOR),
         "{IMAGE} is {} bytes, not a whole number of 4096-byte sectors",
         image.len()
     );
