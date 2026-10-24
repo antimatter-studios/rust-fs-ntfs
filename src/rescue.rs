@@ -986,6 +986,11 @@ pub struct ExportReport {
     /// offset: written as zeros and listed in the error manifest at
     /// [`export_manifest_path`]. Empty for a complete image.
     pub missing: Vec<(u64, u64)>,
+    /// For each span of [`missing`](Self::missing), the MFT record numbers
+    /// whose bytes it covers, ascending. Empty for a span outside every
+    /// `$MFT` run, and for every span when the image's `$MFT` record is
+    /// itself missing or unreadable: no owner is guessed.
+    pub mft_records: Vec<Vec<u64>>,
     /// For an incomplete image, whether its `$Volume` dirty flag was set,
     /// so Windows checks the volume before trusting it: `Err` names why it
     /// could not be (the `$Volume` record missing or not NTFS), and the
@@ -1094,8 +1099,9 @@ pub fn export_with(
         .open(&temp)
         .map_err(|e| format!("create '{}': {e}", temp.display()))?;
     let written =
-        write_image(&input, &held, &gaps, &mut out, contents.source_size).and_then(|report| {
+        write_image(&input, &held, &gaps, &mut out, contents.source_size).and_then(|mut report| {
             drop(out);
+            report.mft_records = mft_records_of(&temp, &report.missing);
             if destination.symlink_metadata().is_ok() {
                 return Err(format!(
                     "the destination '{}' appeared during the export",
@@ -1140,6 +1146,68 @@ pub fn export_with(
     }
 }
 
+/// For each of `gaps`, the MFT records whose bytes it covers in the image
+/// at `image`, placed through the runs of the image's own `$MFT` record.
+/// Every list is empty when that record lies in a gap or cannot be read:
+/// an owner is never guessed.
+fn mft_records_of(image: &Path, gaps: &[(u64, u64)]) -> Vec<Vec<u64>> {
+    let mut owners = vec![Vec::new(); gaps.len()];
+    let layout = FileSource::open(image)
+        .ok()
+        .and_then(|mut source| mft_layout(&mut source, gaps));
+    let Some((runs, cluster, record)) = layout else {
+        return owners;
+    };
+    for (owned, &(offset, len)) in owners.iter_mut().zip(gaps) {
+        for run in &runs {
+            let Some(lcn) = run.lcn else { continue };
+            let start = lcn * cluster;
+            let (a, b) = (
+                offset.max(start),
+                (offset + len).min(start + run.length * cluster),
+            );
+            if a >= b {
+                continue;
+            }
+            let base = run.starting_vcn * cluster;
+            owned.extend((base + (a - start)) / record..=(base + (b - 1 - start)) / record);
+        }
+        owned.sort_unstable();
+        owned.dedup();
+    }
+    owners
+}
+
+/// The `$MFT` runs, cluster size and record size of the NTFS volume in
+/// `source`, read from its boot sector and `$MFT` record. `None` when it is
+/// not NTFS, or when any byte of the `$MFT` record lies in one of `gaps`,
+/// whose zeros would place records wrongly.
+fn mft_layout<S: RescueSource + ?Sized>(
+    source: &mut S,
+    gaps: &[(u64, u64)],
+) -> Option<(Vec<DataRun>, u64, u64)> {
+    let mut boot = [0u8; 512];
+    if source.size() < boot.len() as u64 {
+        return None;
+    }
+    source.read_at(0, &mut boot).ok()?;
+    if &boot[3..11] != b"NTFS    " {
+        return None;
+    }
+    let params = crate::mft_io::parse_boot_params_from_bytes(&boot).ok()?;
+    let cluster = params.cluster_size;
+    let record = params.file_record_size;
+    let clusters = params.volume_bytes().min(source.size()) / cluster;
+    let at = params.mft_lcn.checked_mul(cluster)?;
+    if record == 0 || gaps.iter().any(|&(o, l)| o < at + record && at < o + l) {
+        return None;
+    }
+    let mut mft = vec![0u8; usize::try_from(record).ok()?];
+    source.read_at(at, &mut mft).ok()?;
+    let runs = unnamed_data_runs(&mut mft, params.bytes_per_sector, clusters)?;
+    Some((runs, cluster, record))
+}
+
 /// A hook [`set_before_export_rename`] installs.
 #[doc(hidden)]
 pub type ExportRenameHook = Box<dyn FnMut(&Path)>;
@@ -1163,7 +1231,7 @@ pub fn set_before_export_rename(hook: Option<ExportRenameHook>) {
 fn write_manifest(path: &Path, report: &ExportReport) -> Result<(), String> {
     let total: u64 = report.missing.iter().map(|&(_, len)| len).sum();
     let mut text = format!(
-        "# rescue export error manifest: {} spans, {total} of {} image bytes held by no data record, written as zeros\n# offset length\n",
+        "# rescue export error manifest: {} spans, {total} of {} image bytes held by no data record, written as zeros\n# offset length [records=N,...: the MFT records the span covers, absent when none can be named]\n",
         report.missing.len(),
         report.bytes
     );
@@ -1177,8 +1245,13 @@ fn write_manifest(path: &Path, report: &ExportReport) -> Result<(), String> {
         )),
         None => {}
     }
-    for &(offset, len) in &report.missing {
-        text.push_str(&format!("{offset} {len}\n"));
+    for (i, &(offset, len)) in report.missing.iter().enumerate() {
+        text.push_str(&format!("{offset} {len}"));
+        if let Some(records) = report.mft_records.get(i).filter(|r| !r.is_empty()) {
+            let names: Vec<String> = records.iter().map(u64::to_string).collect();
+            text.push_str(&format!(" records={}", names.join(",")));
+        }
+        text.push('\n');
     }
     let temp = export_temp_path(path);
     let written = OpenOptions::new()
@@ -1338,6 +1411,7 @@ fn write_image(
         bytes: size,
         sha256: hash.finalize().into(),
         missing: gaps.to_vec(),
+        mft_records: vec![Vec::new(); gaps.len()],
         dirty_flag,
     })
 }

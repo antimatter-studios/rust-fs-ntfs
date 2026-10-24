@@ -14,7 +14,10 @@
 
 mod common;
 
-use fs_ntfs::rescue::{export_to_path, scan_to_path, ScanOptions};
+use fs_ntfs::rescue::{
+    export_manifest_path, export_to_path, export_with, scan, scan_to_path, ExportOptions,
+    ReadFailure, RescueSource, ScanOptions,
+};
 use std::path::Path;
 
 const IMAGE: &str = "test-disks/ntfs-cli-read.img";
@@ -60,4 +63,86 @@ fn the_windows_volume_is_rescued_and_exported_for_windows_to_grade() {
     );
 
     std::fs::write(MANIFEST, manifest).expect("write the manifest");
+}
+
+/// The Windows image's bytes, its sectors at `bad` byte offsets unreadable.
+struct Damaged {
+    bytes: Vec<u8>,
+    bad: u64,
+    sector: u64,
+}
+
+impl RescueSource for Damaged {
+    fn size(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), ReadFailure> {
+        let end = offset + buf.len() as u64;
+        if offset < self.bad + self.sector && self.bad < end {
+            return Err(ReadFailure::Unreadable(format!(
+                "injected bad sector at byte {}",
+                self.bad
+            )));
+        }
+        buf.copy_from_slice(&self.bytes[offset as usize..end as usize]);
+        Ok(())
+    }
+}
+
+#[test]
+fn a_missing_span_inside_a_windows_mft_record_names_that_record() {
+    let bytes =
+        std::fs::read(IMAGE).unwrap_or_else(|e| panic!("{IMAGE}: {e}; run {PROVIDER} to make it"));
+    // Record 3 ($Volume) placed from the boot sector Windows wrote: the
+    // $MFT cluster and the record size, never this crate's MFT reader.
+    let le = |at: usize, n: usize| {
+        bytes[at..at + n]
+            .iter()
+            .rev()
+            .fold(0u64, |v, &b| (v << 8) | u64::from(b))
+    };
+    let sector = le(0x0B, 2);
+    let cluster = sector * le(0x0D, 1);
+    let per = bytes[0x40] as i8;
+    let record = if per > 0 {
+        per as u64 * cluster
+    } else {
+        1u64 << -per
+    };
+    let bad = le(0x30, 8) * cluster + 3 * record;
+    let mut source = Damaged { bytes, bad, sector };
+
+    let archive = common::temp_image_path("rescue_export_windows_owner");
+    let mut out = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&archive)
+        .expect("create the archive");
+    scan(&mut source, &mut out, ScanOptions::default()).expect("scan the damaged image");
+    drop(out);
+    let image = common::temp_image_path("rescue_export_windows_owner_image");
+    let report = export_with(
+        archive.as_ref(),
+        image.as_ref(),
+        ExportOptions {
+            allow_incomplete: true,
+        },
+    )
+    .expect("an incomplete archive exports when asked to");
+    std::fs::remove_file(&archive).ok();
+
+    assert_eq!(report.missing, vec![(bad, sector)]);
+    assert_eq!(report.mft_records, vec![vec![3]], "the span's MFT records");
+    let manifest = std::fs::read_to_string(export_manifest_path(image.as_ref()))
+        .expect("read the error manifest");
+    assert!(
+        manifest
+            .lines()
+            .any(|l| l == format!("{bad} {sector} records=3")),
+        "the manifest names record 3 for its span: {manifest}"
+    );
+    std::fs::remove_file(export_manifest_path(image.as_ref())).ok();
+    std::fs::remove_file(&image).ok();
 }
