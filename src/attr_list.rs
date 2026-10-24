@@ -573,7 +573,7 @@ impl ListedFile {
     ) -> Result<(), Error> {
         if attr.len() > self.max_attribute_len() {
             return Err(Error::no_space(format!(
-                "an attribute of {} bytes does not fit in an MFT record of {}",
+                "no room for an attribute of {} bytes in an MFT record of {}",
                 attr.len(),
                 self.params.file_record_size
             )));
@@ -612,7 +612,7 @@ impl ListedFile {
     ) -> Result<(), Error> {
         if attr.len() > self.max_attribute_len() {
             return Err(Error::no_space(format!(
-                "an attribute extent of {} bytes does not fit in an MFT record of {}",
+                "no room for an attribute extent of {} bytes in an MFT record of {}",
                 attr.len(),
                 self.params.file_record_size
             )));
