@@ -96,7 +96,7 @@ fn set_initialized_size(img: &str, record: u64, length: usize, attribute: usize,
     assert_eq!(&rec[0..4], b"FILE", "not an MFT record");
     let (usa, count) = (le16(&rec, 4), le16(&rec, 6));
     assert!(
-        count >= 2 && length % (count - 1) == 0,
+        count >= 2 && length.is_multiple_of(count - 1),
         "update sequence count {count}"
     );
     let stride = length / (count - 1);
