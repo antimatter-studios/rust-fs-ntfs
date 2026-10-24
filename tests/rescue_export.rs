@@ -11,8 +11,8 @@ use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::fsck;
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::rescue::{
-    export_manifest_path, export_temp_path, export_to_path, export_with, scan, ExportOptions,
-    ReadFailure, RescueSource, ScanOptions,
+    export_manifest_path, export_temp_path, export_to_path, export_with, scan,
+    set_before_export_rename, ExportOptions, ReadFailure, RescueSource, ScanOptions,
 };
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
@@ -178,6 +178,37 @@ fn an_existing_destination_is_refused_and_left_unchanged() {
     assert!(
         !export_temp_path(&image).exists(),
         "a temporary file was created beside it"
+    );
+}
+
+#[test]
+fn a_destination_created_after_the_last_check_is_never_replaced() {
+    let mut source = Memory::new(None);
+    let archive = archive_of(&mut source, "rescue_export_raced");
+    let image = PathBuf::from(common::temp_image_path("rescue_export_raced_image"));
+    let _ = fs::remove_file(&image);
+    let _ = fs::remove_file(export_temp_path(&image));
+    // The file another writer creates there between the export's last
+    // check and its move into place.
+    let raced = image.clone();
+    set_before_export_rename(Some(Box::new(move |destination: &Path| {
+        assert_eq!(destination, raced, "the hook names the destination");
+        fs::write(destination, b"created during the export").expect("create the destination");
+    })));
+
+    let result = export_to_path(&archive, &image);
+    set_before_export_rename(None);
+
+    let err = result.expect_err("a destination created before the move is refused");
+    assert!(err.contains(&image.display().to_string()), "{err}");
+    assert_eq!(
+        fs::read(&image).expect("read the destination"),
+        b"created during the export",
+        "the file created at the destination was replaced"
+    );
+    assert!(
+        !export_temp_path(&image).exists(),
+        "the temporary file was left beside it"
     );
 }
 
