@@ -209,14 +209,19 @@ pub const GEOMETRY_HEADER: usize = 3;
 /// The image raw input bytes run on (#1024), and the bytes left for
 /// operations. Zero-padded header: volume size in MiB above 64 (to 256),
 /// then the cluster and MFT record sizes, each from the powers of two
-/// `format_filesystem` accepts. A zero header is the default image.
+/// `format_filesystem` accepts. A zero header is the default image. A
+/// cluster byte of 255 asks for 128 KiB, which the formatter refuses: the
+/// model expects that refusal and the explorer counts it (#1025).
 pub fn decode_geometry(bytes: &[u8]) -> (Geometry, &[u8]) {
     let mut h = [0; GEOMETRY_HEADER];
     let n = bytes.len().min(h.len());
     h[..n].copy_from_slice(&bytes[..n]);
     let geometry = Geometry {
         size: (64 + u64::from(h[0]) % 193) * 1024 * 1024,
-        cluster: 512 << ((u32::from(h[1]) + 3) % 8),
+        cluster: match h[1] {
+            255 => 128 * 1024,
+            b => 512 << ((u32::from(b) + 3) % 8),
+        },
         record: 512 << ((u32::from(h[2]) + 1) % 6),
         label: "OPSEQ".into(),
         serial: 682,
