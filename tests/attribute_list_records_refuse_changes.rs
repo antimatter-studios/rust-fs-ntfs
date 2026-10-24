@@ -7,9 +7,10 @@
 //! went into the base record with no list entry, so ntfs-3g could not find
 //! it and the file was internally inconsistent, while `Ok` was returned.
 //! Named streams are now written through the list, which gains or loses
-//! each one's entry, and so are its EAs (#660). Every other attribute added
-//! to or removed from such a record -- an object id here -- is still
-//! refused with `Kind::Refused`, before anything is written. Rewriting an
+//! each one's entry, and so are its EAs (#660) and its object id (#809). A
+//! change the list's writer would leave stale -- a plain rewrite of a
+//! sparse unnamed stream here -- is still refused with `Kind::Refused`,
+//! before anything is written. Rewriting an
 //! attribute in place, which leaves the list as true as it was, still
 //! works.
 
@@ -95,16 +96,22 @@ fn volume_with_a_listed_file(tag: &str) -> (String, u64) {
     (img, rec)
 }
 
-/// An attribute the list does not follow -- an object id -- is refused,
-/// and the image is byte-for-byte what it was.
+/// A change the list does not follow is refused, and the image is
+/// byte-for-byte what it was. Object ids now go through the list (#809),
+/// so the change refused here is a plain rewrite of a sparse unnamed
+/// stream, which the list's writer would leave stale.
 #[test]
 fn adding_an_attribute_the_list_does_not_follow_is_refused() {
     let (img, _) = volume_with_a_listed_file("refused");
     let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
+    let mut sparse = vec![0u8; 256 * 1024];
+    sparse[..8].copy_from_slice(b"sparse!!");
+    write::write_sparse_file_io(&mut io, "/f", &sparse).expect("make /f's unnamed stream sparse");
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
     let before = std::fs::read(&img).expect("read image");
     refused(
-        "write an object id",
-        write::write_object_id_io(&mut io, "/f", &[0x5A; 16]),
+        "rewrite a sparse unnamed stream plain",
+        write::write_file_contents_io(&mut io, "/f", b"plain"),
     );
     <PathIo as BlockIo>::sync(&mut io).expect("sync");
     unchanged(&img, &before);
