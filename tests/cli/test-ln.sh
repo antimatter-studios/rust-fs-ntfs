@@ -144,18 +144,18 @@ refused() {
 
 # A name already there, as Windows compares names: through $UpCase, so
 # case does not tell two names apart.
-refused 1 'already exists' /a2.txt /d/a3.txt
-refused 1 'already exists' /a2.txt /D/A3.TXT
-refused 1 'already exists' -s x.txt /REL.TXT
-refused 1 'already exists' -s x.txt /d
+refused 4 'already exists' /a2.txt /d/a3.txt
+refused 4 'already exists' /a2.txt /D/A3.TXT
+refused 4 'already exists' -s x.txt /REL.TXT
+refused 4 'already exists' -s x.txt /d
 # NTFS gives a directory no second name.
 refused 1 'hardlink directory' /d /d-link
 refused 1 'hardlink directory' / /root-link
 # What is not there, and a directory that is a file.
-refused 1 'not found' /missing.txt /m.txt
-refused 1 'not found' /a2.txt /nowhere/x.txt
-refused 1 'not found' -s a2.txt /nowhere/x.txt
-refused 1 'not a directory' /a2.txt /a2.txt/x
+refused 4 'not found' /missing.txt /m.txt
+refused 4 'not found' /a2.txt /nowhere/x.txt
+refused 4 'not found' -s a2.txt /nowhere/x.txt
+refused 4 'not a directory' /a2.txt /a2.txt/x
 # Names Windows cannot address.
 refused 1 'cannot address' /a2.txt '/a:b'
 refused 1 'cannot address' -s x.txt '/a?b'
@@ -175,9 +175,9 @@ refused 1 'metafile' /a2.txt '/$Extend/x'
 refused 1 'empty' -s '' /empty.txt
 refused 1 'no room' -s "$(printf '%01000d' 0)" /long.txt
 # A trailing `/` says the name is a directory, and a link never is one.
-refused 1 'not a directory' /a2.txt/ /x
-refused 1 'not a directory' /a2.txt /x/
-refused 1 'not a directory' -s a2.txt /x/
+refused 4 'not a directory' /a2.txt/ /x
+refused 4 'not a directory' /a2.txt /x/
+refused 4 'not a directory' -s a2.txt /x/
 
 # A file at the 1024 links Windows allows takes no more. The count is set
 # in /max.txt's record header (+0x12) by the on-disk layout.
