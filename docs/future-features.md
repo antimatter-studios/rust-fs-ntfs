@@ -67,15 +67,10 @@ cannot hold gives the file an `$ATTRIBUTE_LIST` and moves its named
 streams to extension records (`src/attr_list.rs`), with the list going
 non-resident when it no longer fits.
 
-**Still outstanding**: the same for every other attribute -- the
-`$ATTRIBUTE_LIST` extension-record
-mechanism — i.e. the constructive answer to "OK, the attributes
-don't fit, so spill some to a satellite record." Not yet exercised
-in practice (4096-byte records have ~3700 bytes capacity which is
-hard to exhaust with the attributes we currently emit). Suggested
-next step when this becomes needed: a negative test creating a file
-with a 255-character UTF-16 name + several hard links, plus the
-`$ATTRIBUTE_LIST` extension-record builder.
+**Every other attribute**: the decision to grow into extension records
+rather than refuse, the method, the slices (#660-#667) and how each is
+graded with chkdsk are in
+[attribute-list-writes.md](attribute-list-writes.md).
 
 ### W2.6 — MFT self-growth
 
