@@ -77,6 +77,12 @@ pub fn list_names(ntfs: &Ntfs, reader: &mut Reader, path: &str) -> Vec<String> {
     names
 }
 
+/// The unnamed `$DATA` attribute's bytes as the low-level `ntfs` crate
+/// reads them: everything up to the data size, from the allocated clusters,
+/// including the range past the initialized size, which Windows and
+/// `ntfscat` read as zeros (#1162). A raw attribute read, for files this
+/// crate wrote, not a logical-file oracle: compare with Windows through
+/// [`read_file_logical`].
 pub fn read_file_all(ntfs: &Ntfs, reader: &mut Reader, path: &str) -> Vec<u8> {
     let file = navigate(ntfs, reader, path);
     let data_item = file
@@ -95,6 +101,25 @@ pub fn read_file_all(ntfs: &Ntfs, reader: &mut Reader, path: &str) -> Vec<u8> {
         buf.extend_from_slice(&chunk[..n]);
     }
     buf
+}
+
+/// A file's logical contents as Windows reads them, zeros past its
+/// initialized size included: ntfs-3g's `ntfscat`, run at arm's length on
+/// `image` (#1162). Use this, not [`read_file_all`], wherever the bytes are
+/// compared with what Windows recorded.
+pub fn read_file_logical(image: &str, path: &str) -> Vec<u8> {
+    let out = std::process::Command::new("ntfscat")
+        .args([image, path])
+        .output()
+        .unwrap_or_else(|e| {
+            panic!("ntfscat could not be run ({e}): install ntfs-3g (`apt-get install ntfs-3g`)")
+        });
+    assert!(
+        out.status.success(),
+        "ntfscat {image} {path}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
 }
 
 // ---------------------------------------------------------------------------
