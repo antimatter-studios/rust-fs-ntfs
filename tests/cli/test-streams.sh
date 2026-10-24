@@ -31,7 +31,7 @@ for item in /missing /plain:Zone.Identifier; do
     fs.ntfs "$img" streams "$item" >"$SANDBOX/out" 2>"$SANDBOX/err"
     check "streams $item fails without interpreting a stream suffix" test $? -eq 1
     check "streams $item failure has no stdout" test ! -s "$SANDBOX/out"
-    jq_check "streams $item uses the shared error contract" '.code == 1 and (.error | test("not found"))' "$SANDBOX/err"
+    jq_check "streams $item is the not_found kind" '.code == 1 and .kind == "not_found"' "$SANDBOX/err"
 done
 fs.ntfs "$img" streams >"$SANDBOX/out" 2>"$SANDBOX/err"
 check "streams requires a path" test $? -eq 2
