@@ -3906,6 +3906,14 @@ pub fn write_reparse_point_io<T: BlockIo + ?Sized>(
         set_si_file_attributes_bit(record, FILE_ATTRIBUTE_REPARSE_POINT, true)?;
         Ok(())
     };
+    // A file with an $ATTRIBUTE_LIST, or whose base record has no room
+    // for the attribute, takes it through the list (#808).
+    let is_directory =
+        crate::mft_io::record_flags(&before) & crate::mft_io::MFT_FLAG_DIRECTORY != 0;
+    let listed = attr_io::find_attribute(&before, AttrType::AttributeList, None).is_some();
+    if !is_directory && (listed || set_attribute(&mut before.clone()).is_err()) {
+        return write_listed_reparse_point_io(io, rec, file_ref, reparse_tag, data);
+    }
     // $Extend\$Reparse:$R gains the entry for the new tag and loses the
     // old one's (#478), in its root or its INDX blocks (#571). The record's
     // change is tried on a copy and the index's worked out first, so a
@@ -3930,6 +3938,149 @@ pub fn write_reparse_point_io<T: BlockIo + ?Sized>(
                 view_index::REPARSE_INDEX,
                 new_entry,
                 old_entry,
+            ) {
+                Ok(()) => e,
+                Err(u) => e.context(format!("and putting $Reparse:$R back failed: {u}")),
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Set the `$REPARSE_POINT` of the file whose base record is `rec`, whose
+/// file reference is `file_ref`, through the file's `$ATTRIBUTE_LIST`,
+/// which is made when the file has none (#808); see
+/// [`crate::attr_list`]. The attribute stays where it is while its record
+/// holds it, and goes wherever [`crate::attr_list::ListedFile::add`] puts
+/// it when it does not. `$Extend\$Reparse:$R` is rekeyed as for a file
+/// without a list, and put back when the records cannot be written.
+fn write_listed_reparse_point_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    file_ref: u64,
+    reparse_tag: u32,
+    data: &[u8],
+) -> Result<(), Error> {
+    let mut file = crate::attr_list::ListedFile::open(io, rec)?;
+    let old_tag = match file.find(AttrType::ReparsePoint, "")? {
+        Some(found) => Some(listed_reparse_tag(&file, &found, rec)?),
+        None => None,
+    };
+    let attr = crate::record_build::build_resident_reparse_point_attribute(0, reparse_tag, data)?;
+    if let Err(e) = place_listed_reparse_point(io, &mut file, old_tag.is_some(), attr) {
+        return Err(file.abandon(io, e));
+    }
+    let new_key = view_index::reparse_key(reparse_tag, file_ref);
+    let old_key = old_tag.map(|old| view_index::reparse_key(old, file_ref));
+    let new_entry = Some((new_key.as_slice(), &[][..]));
+    let old_entry = old_key.as_deref().map(|k| (k, &[][..]));
+    if let Err(e) = rekey_view_entry_io(
+        io,
+        view_index::REPARSE_PATH,
+        view_index::REPARSE_INDEX,
+        old_entry,
+        new_entry,
+    ) {
+        return Err(file.abandon(io, e));
+    }
+    if let Err(e) = file.commit(io) {
+        return Err(
+            match rekey_view_entry_io(
+                io,
+                view_index::REPARSE_PATH,
+                view_index::REPARSE_INDEX,
+                new_entry,
+                old_entry,
+            ) {
+                Ok(()) => e,
+                Err(u) => e.context(format!("and putting $Reparse:$R back failed: {u}")),
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Put `attr`, a whole `$REPARSE_POINT`, in `file`, replacing the one it
+/// has when `exists`, and set the reparse bit in its
+/// `$STANDARD_INFORMATION`.
+fn place_listed_reparse_point<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file: &mut crate::attr_list::ListedFile,
+    exists: bool,
+    attr: Vec<u8>,
+) -> Result<(), Error> {
+    if exists {
+        file.replace(io, AttrType::ReparsePoint, "", attr)?;
+    } else {
+        file.add(io, attr)?;
+    }
+    file.change_base(|record| {
+        set_si_file_attributes_bit(record, FILE_ATTRIBUTE_REPARSE_POINT, true)
+    })
+}
+
+/// The tag of the `$REPARSE_POINT` `found` in `file`, whose base record is
+/// `rec`. One in clusters is refused: this driver writes them resident.
+fn listed_reparse_tag(
+    file: &crate::attr_list::ListedFile,
+    found: &crate::attr_list::Found,
+    rec: u64,
+) -> Result<u32, Error> {
+    if !found.loc.is_resident {
+        return Err(Error::refused(format!(
+            "record {rec}: its $REPARSE_POINT is non-resident, which this driver does not rewrite"
+        )));
+    }
+    let attr = file.attribute_bytes(found);
+    let off = found.loc.resident_value_offset.unwrap_or(0) as usize;
+    attr.get(off..off + 4)
+        .map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")))
+        .ok_or_else(|| {
+            Error::io(format!(
+                "record {rec}: its $REPARSE_POINT is too short to hold a tag"
+            ))
+        })
+}
+
+/// Take the `$REPARSE_POINT` out of the file whose base record is `rec`,
+/// whose file reference is `file_ref`, through the file's
+/// `$ATTRIBUTE_LIST` (#808), with its entry in the list and in
+/// `$Extend\$Reparse:$R`, and clear the reparse bit.
+fn remove_listed_reparse_point_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    file_ref: u64,
+) -> Result<(), Error> {
+    let mut file = crate::attr_list::ListedFile::open(io, rec)?;
+    let found = file
+        .find(AttrType::ReparsePoint, "")?
+        .ok_or_else(|| Error::io("no $REPARSE_POINT to remove"))?;
+    let tag = listed_reparse_tag(&file, &found, rec)?;
+    let planned = file.remove(AttrType::ReparsePoint, "").and_then(|_| {
+        file.change_base(|record| {
+            set_si_file_attributes_bit(record, FILE_ATTRIBUTE_REPARSE_POINT, false)
+        })
+    });
+    if let Err(e) = planned {
+        return Err(file.abandon(io, e));
+    }
+    let key = view_index::reparse_key(tag, file_ref);
+    if let Err(e) = remove_view_entry_io(
+        io,
+        view_index::REPARSE_PATH,
+        view_index::REPARSE_INDEX,
+        &key,
+    ) {
+        return Err(file.abandon(io, e));
+    }
+    if let Err(e) = file.commit(io) {
+        return Err(
+            match rekey_view_entry_io(
+                io,
+                view_index::REPARSE_PATH,
+                view_index::REPARSE_INDEX,
+                None,
+                Some((&key, &[])),
             ) {
                 Ok(()) => e,
                 Err(u) => e.context(format!("and putting $Reparse:$R back failed: {u}")),
@@ -4194,6 +4345,11 @@ pub fn remove_reparse_point_io<T: BlockIo + ?Sized>(
     refuse_metafile_io(io, rec, &format!("remove_reparse_point {file_path}"))?;
     let (_, before) = read_mft_record_io(io, rec)?;
     let file_ref = file_reference_of(rec, &before);
+    let is_directory =
+        crate::mft_io::record_flags(&before) & crate::mft_io::MFT_FLAG_DIRECTORY != 0;
+    if !is_directory && attr_io::find_attribute(&before, AttrType::AttributeList, None).is_some() {
+        return remove_listed_reparse_point_io(io, rec, file_ref);
+    }
     let tag = reparse_tag_of(&before).ok_or_else(|| Error::io("no $REPARSE_POINT to remove"))?;
     let key = view_index::reparse_key(tag, file_ref);
     let clear = |record: &mut [u8]| -> Result<(), Error> {
