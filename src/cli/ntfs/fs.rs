@@ -603,6 +603,9 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
             }
             let path = path_arg(show)?;
             let (mut dev, _) = device::mount(target, offset, false)?;
+            // Resolved first, so a missing path is `not_found` and a
+            // descriptor $SDS lacks stays an ordinary failure.
+            read::resolve_path(&mut dev, path).map_err(|e| read_error(path, e))?;
             let bytes =
                 super::acl::file_descriptor(&mut dev, path).map_err(|e| ntfs_error(path, e))?;
             let json = super::acl::descriptor_json(&bytes)
@@ -659,7 +662,8 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         "streams" => {
             let (mut dev, _) = device::mount(target, offset, false)?;
             let path = path_arg(sub)?;
-            streams(&mut dev, path).map_err(|e| ntfs_error(path, e))
+            let record = read::resolve_path(&mut dev, path).map_err(|e| read_error(path, e))?;
+            streams(&mut dev, record).map_err(|e| ntfs_error(path, e))
         }
         "get" | "info" => {
             let (mut dev, info) = device::mount(target, offset, false)?;
@@ -1222,8 +1226,7 @@ struct NamedStream {
     report: Json,
 }
 
-fn streams(dev: &mut Device, path: &str) -> Result<Outcome, Error> {
-    let record = read::resolve_path(dev, path)?;
+fn streams(dev: &mut Device, record: u64) -> Result<Outcome, Error> {
     Ok(Outcome::report(Json::Arr(
         named_streams(dev, record)?
             .into_iter()
@@ -1426,6 +1429,9 @@ fn xattr(
     name: Option<&OsString>,
     output: Option<&OsString>,
 ) -> Result<Outcome, CliError> {
+    // Resolved first, so a missing path is `not_found` and a missing EA
+    // keeps its own error below.
+    read::resolve_path(dev, path).map_err(|e| read_error(path, e))?;
     let eas = fs_ntfs::write::list_eas_io(dev, path).map_err(|e| ntfs_error(path, e))?;
     let Some(name) = name else {
         let rows: Vec<_> = eas.iter().map(xattr_entry).collect();

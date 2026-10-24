@@ -23,7 +23,12 @@ for item in /plain /missing; do
     fs.ntfs "$img" xattr "$item" user.absent -o "$SANDBOX/dest" >"$SANDBOX/out" 2>"$SANDBOX/err"
     check "missing EA or path fails" test $? -eq 1
     check "refusal emits no stdout" test ! -s "$SANDBOX/out"
-    jq_check "missing EA or path has a structured error" '.code == 1 and (.error|contains("not found"))' "$SANDBOX/err"
+    if [ "$item" = /missing ]; then
+        jq_check "a missing path is the not_found kind" '.code == 1 and .kind == "not_found"' "$SANDBOX/err"
+    else
+        jq_check "a missing EA keeps its own error, with no kind" \
+            '.code == 1 and .kind == null and (.error|contains("not found"))' "$SANDBOX/err"
+    fi
     check "refusal preserves the destination" test "$(cat "$SANDBOX/dest")" = kept
     check "refusal leaves no partial file" test ! -e "$SANDBOX/dest.partial"
 done
@@ -33,6 +38,7 @@ jq_check "missing name is named in the error" '.error|contains("user.absent")' "
 fs.ntfs "$img" xattr /missing >"$SANDBOX/out" 2>"$SANDBOX/err"
 check "missing listing path fails" test $? -eq 1
 check "missing listing path has no stdout" test ! -s "$SANDBOX/out"
+jq_check "missing listing path is the not_found kind" '.code == 1 and .kind == "not_found"' "$SANDBOX/err"
 for args in '' '/plain -o dest' '/plain user.a extra'; do
     # Intentional word splitting supplies each wrong command line.
     fs.ntfs "$img" xattr $args >"$SANDBOX/out" 2>"$SANDBOX/err"
