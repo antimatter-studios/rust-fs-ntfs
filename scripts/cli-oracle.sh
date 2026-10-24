@@ -782,9 +782,12 @@ case "$step" in
             die "$cluster-byte clusters: a one-cluster file would stay resident and leave no hole"
         # One-cluster holes the free space is cut into, and the stream's
         # length in clusters: one run per hole, many more mapping pairs than
-        # one MFT record holds, fewer than there are holes (#799).
-        holes=900
-        clusters=800
+        # one MFT record holds, fewer than there are holes (#799). They
+        # follow the record size, so the run list outgrows this volume's
+        # record however large it is (#1190).
+        plan="$(bash "$REPO/scripts/split-extents-plan.sh" "$(record_size "$image")" "$cluster" \
+            "$(wc -c <"$image" | tr -d ' ')")" || die "no split-extents plan fits $image"
+        read -r holes clusters <<<"$plan"
         # A one-cluster run two clusters from the last takes at least three
         # bytes of mapping pairs, so the run list outgrows the record.
         [ $((clusters * 3)) -gt "$(record_size "$image")" ] ||
