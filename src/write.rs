@@ -6490,9 +6490,23 @@ fn listed_nonresident_attribute_io<T: BlockIo + ?Sized>(
     name: Option<&str>,
     data: &[u8],
 ) -> Result<Vec<Vec<u8>>, Error> {
+    // AN EMPTY STREAM HOLDS NO CLUSTERS.
+    //
+    // A stream in clusters truncated to zero kept one cluster allocated
+    // for no bytes, where Windows frees them all (#795). It stays
+    // non-resident with no runs, the form a truncate to zero leaves on a
+    // file without a list: allocated length zero, highest VCN -1, and
+    // mapping pairs that are only the terminator.
+    if data.is_empty() {
+        let mapping = data_runs::encode_runs(&[])?;
+        let attr = crate::record_build::build_nonresident_attribute(
+            ty as u32, name, 0, 0, 0, 0, -1, &mapping,
+        )?;
+        return Ok(vec![attr]);
+    }
     let params = *file.params();
     let size = data.len() as u64;
-    let clusters = size.div_ceil(params.cluster_size).max(1);
+    let clusters = size.div_ceil(params.cluster_size);
     let bm = bitmap::locate_bitmap_io(io)?;
     // ONE RUN WHEN ONE FREE RUN HOLDS THE STREAM, ELSE AS MANY AS IT TAKES.
     //
