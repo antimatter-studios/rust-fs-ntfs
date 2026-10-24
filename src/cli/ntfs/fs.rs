@@ -2,7 +2,8 @@
 //! without mounting it.
 //!
 //! The verbs include `ls`, `stat`, `streams`, `xattr`, `read`, `write`, `mkdir`,
-//! `export`, `import`, `truncate`, `rm`, `rmdir`, `mv`, `ln`, `get`/`info`, `set`, `resize`. Metadata is JSON
+//! `export`, `import`, `truncate`, `rm`, `rmdir`, `mv`, `ln`, `get`/`info`, `set`, `resize`,
+//! `rescue`. Metadata is JSON
 //! (or `--text`); file content is raw bytes. A verb the library cannot do
 //! yet still exists and answers `not implemented` with exit status 3, so a
 //! script moved between filesystems fails loudly instead of meaning
@@ -527,6 +528,7 @@ fn command() -> Cmd {
                 ),
         )
         .subcommand(super::inventory::command())
+        .subcommand(super::rescue::command())
         .after_help(
             "Examples:\n  fs.ntfs disk.img ls /\n  \
              fs.ntfs disk.img read /notes.txt > notes.txt\n  \
@@ -634,6 +636,7 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
             let (mut dev, _) = device::mount(target, offset, false)?;
             super::inventory::run(&mut dev, sub)
         }
+        "rescue" => super::rescue::run(target, offset, sub),
         "set" => set(target, offset, sub),
         "write" => match sub.get_one::<u64>("at") {
             Some(at) => write_at(target, offset, path_arg(sub)?, *at),
