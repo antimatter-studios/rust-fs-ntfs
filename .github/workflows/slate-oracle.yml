@@ -22,6 +22,8 @@ on:
       - tests/scripts/slate-write-grading.sh
       - scripts/slate-read-compare.py
       - tests/scripts/slate-read-compare.sh
+      - scripts/reader-write-compare.py
+      - tests/scripts/reader-write-compare.sh
       - tests/scripts/slate-writer-capture.sh
       - tests/scripts/slate-namespace-capture.sh
       - tests/scripts/slate-stream-metadata-capture.sh
