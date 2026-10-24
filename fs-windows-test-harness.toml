@@ -509,6 +509,16 @@ host = "host"
 command = "bash scripts/cli-oracle.sh replay-stopped {image_dir}/{run_id}/{scenario.image} {step.snapshot}"
 expect_exit = 0
 
+[ops.cli-undo-index-compare]
+# The image Windows' restart left over a stopped replay (#755), shipped back
+# to the host: every index block the replay's undo writes must match the
+# same block after an uninterrupted replay of the untouched capture, fixups
+# undone, update sequence number blanked, LSN ignored (#756). Prints the
+# offsets and entries of each block that differs.
+host = "host"
+command = "bash scripts/cli-oracle.sh undo-index-compare {image_dir}/{run_id}/{scenario.image} {step.snapshot}"
+expect_exit = 0
+
 [ops.cli-write-after-replay]
 # The same volume: fs.ntfs mkdir must be refused with nothing written while
 # its $LogFile holds work (#137), then fsck.ntfs -y replays it, and fs.ntfs
