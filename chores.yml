@@ -660,10 +660,10 @@ tasks:
     # 25 with the three format-plan scenarios (#698); 26 with the rename
     # scenario (#645); 27 with the link scenario (#646); 28 with the
     # mkdir --parents scenario (#647); 29 with truncate (#655);
-    # 30 with positioned writes (#656).
+    # 30 with positioned writes (#656); 31 with import (#1079).
     deps: [cli:install]
     cmds:
-      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-host -- python3 scripts/fs-windows-test-harness/run-host-steps --group cli --floor 30'
+      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-host -- python3 scripts/fs-windows-test-harness/run-host-steps --group cli --floor 31'
 
   test:ignored:
     desc: 'The #[ignore]d tests: known defects, run so a fix cannot go unnoticed'
