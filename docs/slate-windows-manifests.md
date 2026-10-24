@@ -75,3 +75,30 @@ requires fourteen contracts to execute. Get-Volume's free bytes, another
 Windows API, must lie between the free and the unreserved free clusters. No
 NTFS reader from this crate or Slate supplies expected values. Comparing
 Slate's allocation with these records is #877.
+
+## Security descriptor manifests
+
+On the same disposable mount, the builder also writes
+`windows-acl/<case>.json` (#876, part of #692). Schema 1 has `case`,
+`image_sha256`, `oracle`, `capabilities` and `entries`, bound to `cases.tsv`
+exactly as the read manifest is.
+
+Each entry has the read manifest's `path` and `kind`, then Windows' account of
+its security descriptor through `Get-Acl`: `owner` and `group` as SIDs,
+`sddl` (owner, group and DACL), `dacl_sddl`, `dacl_protected`, and `aces`,
+every DACL ACE in order as Windows' own SDDL parser splits it: `type`,
+`flags`, `inherited`, `sid` and `access_mask`. A null `aces` is a null DACL.
+Account names are never recorded, because they depend on the machine that
+reads the SID. The SACL needs `SeSecurityPrivilege` and is outside this
+manifest. A descriptor Windows refuses to return, and a reparse point, fail by
+path.
+
+`tests/scripts/slate-windows-acl.ps1` formats a scratch volume with Windows,
+gives one file an explicit owner, a directory an inheritable explicit ACE, a
+child an inherited DACL, another child an explicit deny ACE beside the
+inherited ones, and a file a protected DACL, and requires sixteen contracts to
+execute: each SDDL is the one `Get-Acl` reads back for its path and
+round-trips through Windows' descriptor parser, inherited and explicit ACEs
+are distinguished, and a descriptor whose `OWNER RIGHTS` ACE withholds
+`READ_CONTROL` fails by path. No NTFS reader from this crate or Slate supplies
+expected values.
