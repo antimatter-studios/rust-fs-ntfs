@@ -100,6 +100,45 @@ function Assert-SectorGeometryRow($Row, [int]$SectorBytes = 4096) {
     if ($Row.boot.bytes_per_sector -ne $SectorBytes) { throw "the boot sector declares $($Row.boot.bytes_per_sector)-byte sectors" }
     Assert-FormatGeometryMatch $Row.boot $Row.fsutil $Row.boot.cluster_bytes
 }
+# 512e beside 512n: the row comes from a disk reporting 512-byte logical
+# sectors and the physical size asked for. Windows keeps the live $LogFile
+# metadata file locked against extent queries, so the comparison uses the
+# partition and other filesystem geometry that Windows exposes.
+function Assert-PhysicalSectorGeometryRow($Row, [int]$PhysicalBytes) {
+    foreach ($field in 'partition_offset') {
+        if ($null -eq $Row.$field) { throw "the $PhysicalBytes-byte physical sector row lacks $field" }
+    }
+    Assert-SectorGeometryRow $Row 512
+    if ($Row.physical_sector_bytes -ne $PhysicalBytes) {
+        throw "the scratch disk reports $($Row.physical_sector_bytes)-byte physical sectors, not $PhysicalBytes"
+    }
+    if ($Row.fsutil.bytes_per_physical_sector -ne $PhysicalBytes) {
+        throw "fsutil reports $($Row.fsutil.bytes_per_physical_sector)-byte physical sectors, not $PhysicalBytes"
+    }
+}
+# Every field of a 512-byte logical sector row except the physical sector size
+# itself, which is the variable under test and differs by construction.
+function Get-PhysicalSectorComparedFields {
+    'partition_offset', 'backup_boot_offsets',
+    'boot.bytes_per_sector', 'boot.sectors_per_cluster_byte', 'boot.cluster_bytes', 'boot.clusters_per_record_byte',
+    'boot.record_bytes', 'boot.clusters_per_index_block_byte', 'boot.index_block_bytes', 'boot.mft_lcn',
+    'boot.mftmirr_lcn', 'boot.number_sectors',
+    'fsutil.bytes_per_sector', 'fsutil.cluster_bytes', 'fsutil.record_bytes', 'fsutil.mft_lcn', 'fsutil.mftmirr_lcn',
+    'mft_usa.usa_offset', 'mft_usa.usa_count', 'mft_usa.stride_bytes',
+    'root_index_usa.usa_offset', 'root_index_usa.usa_count', 'root_index_usa.stride_bytes'
+}
+function Get-GeometryField($Row, [string]$Field) {
+    $value = $Row
+    foreach ($part in $Field.Split('.')) { if ($null -ne $value) { $value = $value.$part } }
+    if ($value -is [array]) { return (@($value) -join ',') }
+    "$value"
+}
+# The names of the fields where Windows' 512e format differs from its 512n one.
+function Compare-PhysicalSectorGeometryRows($Native, $Emulated) {
+    foreach ($field in Get-PhysicalSectorComparedFields) {
+        if ((Get-GeometryField $Native $field) -cne (Get-GeometryField $Emulated $field)) { $field }
+    }
+}
 function Get-LargeClusterLayoutRequests { 65536, 131072, 262144, 524288, 1048576, 2097152 }
 function ConvertFrom-RetrievalExtents([object[]]$Extents) {
     if (-not $Extents -or $Extents.Count -eq 0) { throw 'Windows reported no extents' }
@@ -313,8 +352,8 @@ function Read-GeometryDisk([int]$DiskNumber, [long]$Offset, [int]$Length) {
 # Fallback disk maker: a diskpart VHDX with its sector size metadata items set.
 # The metadata region carries no checksum (only the headers and region table
 # do), and Get-Disk on the attached image is what proves the result.
-function Set-VhdxSectorSize([string]$Path, [int]$Bytes) {
-    $items = @([guid]'8141BF1D-A96F-4709-BA47-F233A8FAAB5F', [guid]'CDA348C7-445D-4471-9CC9-E9885251C556')
+function Set-VhdxSectorSize([string]$Path, [int]$Bytes, [int]$PhysicalBytes = $Bytes) {
+    $items = @{ ([guid]'8141BF1D-A96F-4709-BA47-F233A8FAAB5F') = $Bytes; ([guid]'CDA348C7-445D-4471-9CC9-E9885251C556') = $PhysicalBytes }
     $metadataRegion = [guid]'8B7CA206-4790-4B9A-B8FE-575F050F886E'
     $stream = [IO.File]::Open($Path, 'Open', 'ReadWrite', 'None')
     try {
@@ -335,9 +374,10 @@ function Set-VhdxSectorSize([string]$Path, [int]$Bytes) {
         $patched = 0
         for ($i = 0; $i -lt [BitConverter]::ToUInt16($meta, 10); $i++) {
             $at = 32 + 32 * $i
-            if ($items -contains [guid]::new([byte[]]$meta[$at..($at + 15)])) {
+            $item = [guid]::new([byte[]]$meta[$at..($at + 15)])
+            if ($items.ContainsKey($item)) {
                 $null = $stream.Seek($metadataOffset + [BitConverter]::ToUInt32($meta, $at + 16), 'Begin')
-                $stream.Write([BitConverter]::GetBytes([uint32]$Bytes), 0, 4)
+                $stream.Write([BitConverter]::GetBytes([uint32]$items[$item]), 0, 4)
                 $patched++
             }
         }
@@ -346,13 +386,13 @@ function Set-VhdxSectorSize([string]$Path, [int]$Bytes) {
 }
 # Tries each way of making a disk with the requested logical sector size and
 # records every attempt; the last attempt is the tool that made the disk.
-function New-SectorGeometryDisk([string]$Out, [int]$SectorBytes) {
+function New-SectorGeometryDisk([string]$Out, [int]$SectorBytes, [int]$PhysicalBytes = $SectorBytes) {
     $attempts = [Collections.Generic.List[object]]::new()
     $vhdx = Join-Path $Out ("sector-geometry-" + [guid]::NewGuid() + '.vhdx')
-    $tool = "New-VHD -SizeBytes 1GB -Dynamic -LogicalSectorSizeBytes $SectorBytes -PhysicalSectorSizeBytes $SectorBytes"
+    $tool = "New-VHD -SizeBytes 1GB -Dynamic -LogicalSectorSizeBytes $SectorBytes -PhysicalSectorSizeBytes $PhysicalBytes"
     if (Get-Command New-VHD -ErrorAction SilentlyContinue) {
         try {
-            New-VHD -Path $vhdx -SizeBytes 1GB -Dynamic -LogicalSectorSizeBytes $SectorBytes -PhysicalSectorSizeBytes $SectorBytes | Out-Null
+            New-VHD -Path $vhdx -SizeBytes 1GB -Dynamic -LogicalSectorSizeBytes $SectorBytes -PhysicalSectorSizeBytes $PhysicalBytes | Out-Null
             $attempts.Add([pscustomobject]@{ tool = $tool; diagnostic = $null })
             return [pscustomobject]@{ path = $vhdx; attempts = $attempts.ToArray() }
         } catch {
@@ -360,7 +400,7 @@ function New-SectorGeometryDisk([string]$Out, [int]$SectorBytes) {
             if (Test-Path -LiteralPath $vhdx) { Remove-Item -LiteralPath $vhdx -Force }
         }
     } else { $attempts.Add([pscustomobject]@{ tool = $tool; diagnostic = 'New-VHD is not available on this runner' }) }
-    $tool = "diskpart create vdisk maximum=1024 type=expandable (VHDX), then its logical and physical sector size metadata set to $SectorBytes"
+    $tool = "diskpart create vdisk maximum=1024 type=expandable (VHDX), then its logical sector size metadata set to $SectorBytes and its physical sector size to $PhysicalBytes"
     $script = Join-Path $Out 'sector-create-disk.txt'
     Set-Content -LiteralPath $script -Encoding ascii -Value @("create vdisk file=`"$vhdx`" maximum=1024 type=expandable", 'exit')
     try {
@@ -370,18 +410,18 @@ function New-SectorGeometryDisk([string]$Out, [int]$SectorBytes) {
         if (-not $process.WaitForExit(60000)) { $process.Kill(); $process.WaitForExit(); throw 'diskpart creation timed out' }
         $process.WaitForExit()
         if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $vhdx)) { throw 'diskpart failed to create the scratch VHDX' }
-        Set-VhdxSectorSize $vhdx $SectorBytes
+        Set-VhdxSectorSize $vhdx $SectorBytes $PhysicalBytes
         $attempts.Add([pscustomobject]@{ tool = $tool; diagnostic = $null })
     } catch {
         $attempts.Add([pscustomobject]@{ tool = $tool; diagnostic = $_.Exception.Message })
         if (Test-Path -LiteralPath $vhdx) { Remove-Item -LiteralPath $vhdx -Force }
         ConvertTo-Json -InputObject @($attempts.ToArray()) -Depth 4 |
-            Set-Content (Join-Path $Out "sector-$SectorBytes-attempts.json") -Encoding utf8
-        throw "no tool on this runner made a disk with $SectorBytes-byte logical sectors"
+            Set-Content (Join-Path $Out "sector-$SectorBytes-$PhysicalBytes-attempts.json") -Encoding utf8
+        throw "no tool on this runner made a disk with $SectorBytes-byte logical and $PhysicalBytes-byte physical sectors"
     }
     [pscustomobject]@{ path = $vhdx; attempts = $attempts.ToArray() }
 }
-function Invoke-WindowsSectorGeometryCapture([string]$OutDir, [int]$SectorBytes = 4096) {
+function Invoke-WindowsSectorGeometryCapture([string]$OutDir, [int]$SectorBytes = 4096, [int]$PhysicalBytes = $SectorBytes) {
     $ErrorActionPreference = 'Stop'
     if (-not $IsWindows) { throw 'the capture requires an elevated hosted Windows runner' }
     $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -390,12 +430,13 @@ function Invoke-WindowsSectorGeometryCapture([string]$OutDir, [int]$SectorBytes 
     }
     $out = [IO.Path]::GetFullPath($OutDir)
     New-Item -ItemType Directory -Force -Path $out | Out-Null
-    $made = New-SectorGeometryDisk $out $SectorBytes
+    $made = New-SectorGeometryDisk $out $SectorBytes $PhysicalBytes
     $vhdx = $made.path
-    $rowPath = Join-Path $out "sector-$SectorBytes.json"
+    $name = if ($PhysicalBytes -eq $SectorBytes) { "sector-$SectorBytes" } else { "sector-$SectorBytes-$PhysicalBytes" }
+    $rowPath = Join-Path $out "$name.json"
     $row = [ordered]@{ disk_tool = $made.attempts[-1].tool; disk_attempts = $made.attempts;
-        logical_sector_bytes = $null; physical_sector_bytes = $null; fsutil = $null; boot = $null;
-        backup_boot_offsets = $null; mft_usa = $null; root_index_usa = $null;
+        logical_sector_bytes = $null; physical_sector_bytes = $null; partition_offset = $null; fsutil = $null; boot = $null;
+        backup_boot_offsets = $null; mft_usa = $null; root_index_usa = $null; logfile = $null;
         formatter = 'Format-Volume -DriveLetter <scratch-drive> -FileSystem NTFS -NewFileSystemLabel SECTORS -Force -Confirm:$false' }
     $attached = $false
     try {
@@ -407,10 +448,14 @@ function Invoke-WindowsSectorGeometryCapture([string]$OutDir, [int]$SectorBytes 
         if ($disk.LogicalSectorSize -ne $SectorBytes) {
             throw "the scratch disk exposes $($disk.LogicalSectorSize)-byte logical sectors, not $SectorBytes"
         }
+        if ($SectorBytes -eq 512 -and $disk.PhysicalSectorSize -ne $PhysicalBytes) {
+            throw "the scratch disk exposes $($disk.PhysicalSectorSize)-byte physical sectors, not $PhysicalBytes"
+        }
         Initialize-Disk -Number $disk.Number -PartitionStyle GPT | Out-Null
         $partition = New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter
         if (-not $partition.DriveLetter) { throw 'scratch partition has no drive letter' }
         $letter = $partition.DriveLetter
+        $row.partition_offset = $partition.Offset
         $head = (& git rev-parse HEAD).Trim()
         if ($LASTEXITCODE -ne 0 -or $head -notmatch '^[0-9a-f]{40}$') { throw 'cannot record source revision' }
         $os = Get-CimInstance Win32_OperatingSystem
@@ -424,12 +469,13 @@ function Invoke-WindowsSectorGeometryCapture([string]$OutDir, [int]$SectorBytes 
             disk_info = 'Get-Disk LogicalSectorSize and PhysicalSectorSize of the attached image';
             boot_read = "$SectorBytes bytes at the scratch partition offset through PhysicalDrive";
             backup_boot_read = "$SectorBytes bytes at NumberSectors x $SectorBytes and at the partition's last sector, kept when the first 512 bytes equal the boot sector's";
+            logfile_read = 'not captured: Windows denies opening the live NTFS $LogFile metadata file for extent queries';
             usa_read = "the boot sector's record size at Mft Start Lcn, and its index block size at the first LCN FSCTL_GET_RETRIEVAL_POINTERS reports for <scratch-drive>:\:`$I30:`$INDEX_ALLOCATION, both through PhysicalDrive" } |
-            ConvertTo-Json -Depth 5 | Set-Content (Join-Path $out "sector-$SectorBytes-provenance.json") -Encoding utf8
+            ConvertTo-Json -Depth 5 | Set-Content (Join-Path $out "$name-provenance.json") -Encoding utf8
         Format-Volume -DriveLetter $letter -FileSystem NTFS -NewFileSystemLabel SECTORS -Force -Confirm:$false | Out-Null
         $info = @(& fsutil fsinfo ntfsinfo "${letter}:")
         if ($LASTEXITCODE -ne 0) { throw "fsutil failed for the $SectorBytes-byte sector volume" }
-        $info | Set-Content (Join-Path $out "sector-$SectorBytes-ntfsinfo.txt") -Encoding utf8
+        $info | Set-Content (Join-Path $out "$name-ntfsinfo.txt") -Encoding utf8
         $row.fsutil = ConvertFrom-GeometryNtfsInfo $info -Physical
         $base = [long]$partition.Offset
         $span = [long]$partition.Size
@@ -448,8 +494,9 @@ function Invoke-WindowsSectorGeometryCapture([string]$OutDir, [int]$SectorBytes 
         $index = $base + $root.lcn * $row.boot.cluster_bytes
         $row.root_index_usa = ConvertFrom-UpdateSequenceHeader (Read-GeometryDisk $disk.Number $index $row.boot.index_block_bytes) 'INDX'
         ConvertTo-Json -InputObject ([pscustomobject]$row) -Depth 8 | Set-Content $rowPath -Encoding utf8
-        Assert-SectorGeometryRow ([pscustomobject]$row) $SectorBytes
-        Write-Host "sector-geometry: Windows' own NTFS format of a $SectorBytes-byte-sector disk captured with $($row.disk_tool)"
+        if ($SectorBytes -eq 512) { Assert-PhysicalSectorGeometryRow ([pscustomobject]$row) $PhysicalBytes }
+        else { Assert-SectorGeometryRow ([pscustomobject]$row) $SectorBytes }
+        Write-Host "sector-geometry: Windows' own NTFS format of a $SectorBytes-byte logical, $PhysicalBytes-byte physical sector disk captured with $($row.disk_tool)"
     } finally {
         if ($attached) {
             $image = Get-DiskImage -ImagePath $vhdx -ErrorAction Stop
@@ -458,4 +505,22 @@ function Invoke-WindowsSectorGeometryCapture([string]$OutDir, [int]$SectorBytes 
         }
         if (Test-Path -LiteralPath $vhdx) { Remove-Item -LiteralPath $vhdx -Force -ErrorAction Stop }
     }
+}
+# Windows formats a 512n and a 512e disk of the same size and the capture keeps
+# the names of the fields that differ; an empty list is a measured result.
+function Invoke-WindowsPhysicalSectorGeometryCapture([string]$OutDir) {
+    $ErrorActionPreference = 'Stop'
+    Invoke-WindowsSectorGeometryCapture -OutDir $OutDir -SectorBytes 512 -PhysicalBytes 512
+    Invoke-WindowsSectorGeometryCapture -OutDir $OutDir -SectorBytes 512 -PhysicalBytes 4096
+    $out = [IO.Path]::GetFullPath($OutDir)
+    $native = Get-Content -Raw (Join-Path $out 'sector-512.json') | ConvertFrom-Json
+    $emulated = Get-Content -Raw (Join-Path $out 'sector-512-4096.json') | ConvertFrom-Json
+    Assert-PhysicalSectorGeometryRow $native 512
+    Assert-PhysicalSectorGeometryRow $emulated 4096
+    $differing = @(Compare-PhysicalSectorGeometryRows $native $emulated)
+    [ordered]@{ native_512n = 'sector-512.json'; emulated_512e = 'sector-512-4096.json';
+        compared_fields = @(Get-PhysicalSectorComparedFields); differing_fields = $differing;
+        not_compared = 'physical_sector_bytes and fsutil.bytes_per_physical_sector: the variable under test' } |
+        ConvertTo-Json -Depth 4 | Set-Content (Join-Path $out 'sector-512e-diff.json') -Encoding utf8
+    Write-Host "sector-geometry: Windows' 512e format differs from its 512n format in $($differing.Count) field(s): $($differing -join ', ')"
 }
