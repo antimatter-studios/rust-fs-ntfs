@@ -1,13 +1,16 @@
-//! `rust-ntfs objid` — give a file an object id: its `$OBJECT_ID`.
+//! `rust-ntfs objid` — give a file an object id, its `$OBJECT_ID`, or
+//! take it away.
 
 use std::path::Path;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
 Usage: rust-ntfs objid <image> <path> <object-id>
+       rust-ntfs objid <image> <path> --remove
 
 Gives `<path>` the 16-byte object id `<object-id>`, written as 32
-hexadecimal digits, in its `$OBJECT_ID` attribute.
+hexadecimal digits, in its `$OBJECT_ID` attribute, or with --remove takes
+it away. Removing an object id from a file that has none fails.
 ";
 
 pub fn run(args: Vec<String>) -> ExitCode {
@@ -16,6 +19,16 @@ pub fn run(args: Vec<String>) -> ExitCode {
 
 fn run_inner(args: Vec<String>) -> Result<(), crate::cli::CliError> {
     if crate::cli::asked_for_help(&args, USAGE) {
+        return Ok(());
+    }
+    if args.len() == 3 && args[2] == "--remove" {
+        let (image, path) = (&args[0], &args[1]);
+        let removed = fs_ntfs::write::remove_object_id(Path::new(image), path)
+            .map_err(|e| format!("objid {path} --remove: {e}"))?;
+        if !removed {
+            return Err(format!("objid {path} --remove: {path} has no object id").into());
+        }
+        println!("removed the object id of {path}");
         return Ok(());
     }
     let args = crate::cli::positionals(&args, 3, USAGE)?;

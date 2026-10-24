@@ -1523,6 +1523,17 @@ jobs:
               --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
               --vm-workdir=C:/rust-fs-ntfs-matrix
           done
+      # A symbolic link and an object id set through a file's
+      # $ATTRIBUTE_LIST, and taken back out of another's: chkdsk grades the
+      # list and the view indexes, and Windows follows the link, reads the
+      # id, and finds neither where they were removed (#810).
+      - name: Validate a reparse point and an object id written through an attribute list
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh mac-format-mac-write-streams-mac-reparse-mac-objid-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       # EAs a file's base record cannot hold, or written to a file that has
       # an $ATTRIBUTE_LIST, go through the list. chkdsk grades them and
       # Windows reads every EA back through NtQueryEaFile (#660).

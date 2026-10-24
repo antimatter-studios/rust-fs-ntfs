@@ -292,6 +292,29 @@ host = "host"
 command = "{binary} objid {image_dir}/{run_id}/{scenario.image} {step.path} {step.object_id}"
 expect_exit = 0
 
+[ops.mac-objid-remove]
+# rust-ntfs objid --remove takes the file's $OBJECT_ID away, and its entry
+# in $Extend\$ObjId:$O with it; a file with none fails (#810).
+host = "host"
+command = "{binary} objid {image_dir}/{run_id}/{scenario.image} {step.path} --remove"
+expect_exit = 0
+
+[ops.mac-reparse]
+# rust-ntfs reparse takes (image, path, target) and gives the existing file
+# at `path` an IO_REPARSE_TAG_SYMLINK reparse point to `target`, relative
+# to its directory. A file with an $ATTRIBUTE_LIST takes it through the
+# list (#808, #810).
+host = "host"
+command = "{binary} reparse {image_dir}/{run_id}/{scenario.image} {step.path} {step.target}"
+expect_exit = 0
+
+[ops.mac-reparse-remove]
+# rust-ntfs reparse --remove takes the file's $REPARSE_POINT away, and its
+# entry in $Extend\$Reparse:$R with it; a file with none fails (#810).
+host = "host"
+command = "{binary} reparse {image_dir}/{run_id}/{scenario.image} {step.path} --remove"
+expect_exit = 0
+
 [ops.mac-write-streams]
 # Give the file at `path` the named streams s1..s<count>, stream i holding
 # "stream <i> " repeated to `size_bytes`, then delete every
@@ -701,6 +724,27 @@ expect_exit = 0
 #   keep_image?   — `true` keeps .img + .vhd for a follow-on op (default `false`)
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-verify-streams.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -Count '{step.count}' -SizeBytes '{step.size_bytes}' -DeleteEvery '{step.delete_every}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
+[ops.win-verify-reparse-objid]
+# Have Windows read back what mac-reparse and mac-objid gave the file at
+# `path`, and what mac-reparse-remove and mac-objid-remove took from the
+# file at `cleared` (#810). FSCTL_GET_REPARSE_POINT on `path` must return
+# a relative IO_REPARSE_TAG_SYMLINK whose substitute and print names are
+# `target`, and opening `path` must follow it to bytes equal to
+# `target_content`. FSCTL_GET_OBJECT_ID must return `object_id`. `cleared`
+# must have neither, and read back as `cleared_content`.
+#
+# Step fields:
+#   path             — the linked file inside the volume (e.g. "/listed.bin")
+#   target           — the link target as mac-reparse was given it
+#   target_content   — what reading `path` through the link returns
+#   object_id        — 32 hexadecimal digits
+#   cleared          — the file whose link and object id were removed
+#   cleared_content  — that file's own contents
+#   keep_image?      — `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-verify-reparse-objid.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Path '{step.path}' -Target '{step.target}' -TargetContent '{step.target_content}' -ObjectId '{step.object_id}' -Cleared '{step.cleared}' -ClearedContent '{step.cleared_content}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-verify-eas]
