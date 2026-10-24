@@ -17,8 +17,10 @@ Nothing here is an NTFS structure, and an archive is never a repair plan.
   with a media error (`EIO`; on Windows `ERROR_CRC`, `ERROR_SECTOR_NOT_FOUND`,
   `ERROR_READ_FAULT` or `ERROR_IO_DEVICE`), the chunk is read again one
   sector at a time. One bad sector costs that sector, not the chunk.
-- Records are written in source order. Adjacent unreadable sectors become one
-  unreadable record, across chunk boundaries too.
+- Records are written in class order on an NTFS source whose layout reads,
+  and in source order otherwise (see the record classes below). Adjacent
+  unreadable sectors of one class become one unreadable record, across chunk
+  boundaries too.
 - Any other read failure stops the scan, with what was archived so far kept:
   recording healthy bytes as lost would be worse than stopping.
 - The header is flushed before the first record, and each record is flushed
@@ -69,8 +71,13 @@ bytes per class (`ScanReport::class`).
 | `3` | Clusters `$Bitmap` marks free |
 | `4` | The tail past the volume's last whole cluster |
 
-A linear scan writes every record as class `0`. Reading the volume's layout
-to order the scan by class is #969.
+When the boot sector parses as NTFS and `$MFT` records 0, 1 and 6 and all of
+`$Bitmap` read, the scan archives the source in class order: the boot sector
+(cluster 0) and its backup, `$MFT` and `$MFTMirr` first, then every cluster
+`$Bitmap` marks allocated, then every free cluster, then the bytes past the
+last whole cluster. So the records are not in source order, and a reader
+places each by its offset. Otherwise the scan is linear, in source order, and
+writes every record as class `0`: it never guesses a layout.
 
 Version `1`, the layout before classes, had a 24-byte record header with no
 class field. A version-2 reader refuses it rather than misreading its records.
@@ -82,9 +89,10 @@ class field. A version-2 reader refuses it rather than misreading its records.
 - A record of any other kind or class, or with a zero length.
 - A record whose CRC-32 does not match. A complete record with a bad checksum
   is damage, not an interruption.
-- Records that do not tile the source in order: each starts where the one
-  before it ended, and none runs past the source length. The records of a
-  finished scan end exactly at the source length.
+- Records that, taken in offset order, do not tile the source: two that
+  overlap, or one that runs past the source length. The records of a
+  finished scan, taken in offset order, leave no gap and end exactly at the
+  source length.
 
 A file that ends partway through a record header or payload was interrupted
 while that record was being written. Everything before that record stands.
