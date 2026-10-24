@@ -172,8 +172,10 @@ refused 1 'metafile' '/$MFT' /x
 # shellcheck disable=SC2016
 refused 1 'metafile' /a2.txt '/$Extend/x'
 # A symbolic link names something, in no more than its record can hold.
+# A reparse point too big for any record says so whether the base record
+# refuses it or the $ATTRIBUTE_LIST would, which names the record size.
 refused 1 'empty' -s '' /empty.txt
-refused 1 'no room' -s "$(printf '%01000d' 0)" /long.txt
+refused 1 'no room|does not fit' -s "$(printf '%01000d' 0)" /long.txt
 # A trailing `/` says the name is a directory, and a link never is one.
 refused 1 'not a directory' /a2.txt/ /x
 refused 1 'not a directory' /a2.txt /x/
