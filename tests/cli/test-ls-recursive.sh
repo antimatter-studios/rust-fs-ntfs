@@ -100,7 +100,7 @@ done
 fs.ntfs "$img" ls -R /missing >"$SANDBOX/missing.out" 2>"$SANDBOX/missing.err"
 check "ls -R of a missing path exits 1" test $? -eq 1
 check "ls -R of a missing path prints nothing on stdout" test ! -s "$SANDBOX/missing.out"
-jq_check "ls -R of a missing path says not found" '.code == 1 and (.error | test("not found"))' "$SANDBOX/missing.err"
+jq_check "ls -R of a missing path reports the not_found kind" '.code == 1 and .kind == "not_found"' "$SANDBOX/missing.err"
 
 { head -c 1048576 /dev/zero; cat "$img"; } >"$SANDBOX/whole-disk.img"
 fs.ntfs --offset 1048576 "$SANDBOX/whole-disk.img" ls -R / >"$SANDBOX/offset.json" 2>/dev/null
