@@ -20,6 +20,12 @@
 //! `win-format-win-quota-mac-delete-win-chkdsk` has chkdsk and Windows' own
 //! recount of its quota usage grade the same deletes on a volume Windows
 //! made.
+//!
+//! Rewriting, truncating or extending a charged file changes its
+//! allocation, and has to move its charge and its owner's usage by the
+//! difference, as Windows does (#675). The Windows matrix scenario
+//! `win-format-win-quota-mac-write-win-chkdsk` grades the same kinds of
+//! write on a volume Windows made.
 
 mod common;
 
@@ -293,6 +299,28 @@ fn charged_files(img: &str, name: &str) -> Vec<String> {
         .collect()
 }
 
+/// `path` is charged its record and the allocation of its data, and every
+/// owner's usage is what its files are charged.
+fn assert_in_step(img: &str, path: &str, what: &str) {
+    let vol = Vol::read(img);
+    let rec = vol.record(record_of(img, path)).unwrap();
+    let (owner, qc) = charge(&rec);
+    assert_ne!(owner, 0, "{what}: {path} lost its owner");
+    assert_eq!(
+        qc,
+        vol.record + data_allocated(&rec),
+        "{what}: {path} is charged {qc}, not its {}-byte record and the {} bytes its data \
+         has allocated",
+        vol.record,
+        data_allocated(&rec)
+    );
+    assert_eq!(
+        usage(&vol).0,
+        charged(&vol),
+        "{what}: an owner's usage in $Q is not what its files are charged"
+    );
+}
+
 #[test]
 fn windows_charges_each_owner_the_record_and_data_allocation_of_its_files() {
     let img = unpack(TRACKED, "measure");
@@ -431,4 +459,29 @@ fn unlinking_one_of_two_names_leaves_the_charge_where_it_is() {
         "unlinking one of {path}'s two names changed what its owner is charged"
     );
     assert_eq!(usage(&vol).0, charged(&vol));
+}
+
+#[test]
+fn rewriting_a_charged_file_charges_its_owner_what_its_allocation_gains_or_loses() {
+    let img = unpack(TRACKED, "rewrite");
+    let path = charged_files(&img, TRACKED).swap_remove(1);
+    for size in [200_000usize, 5_000, 100] {
+        fs_ntfs::write::write_file_contents(Path::new(&img), &path, &vec![0x5A; size])
+            .unwrap_or_else(|e| panic!("write {size} bytes to {path}: {e}"));
+        assert_in_step(&img, &path, &format!("rewritten to {size} bytes"));
+    }
+}
+
+#[test]
+fn truncating_and_extending_a_charged_file_moves_its_charge() {
+    let img = unpack(TRACKED, "truncate");
+    let path = charged_files(&img, TRACKED).swap_remove(2);
+
+    fs_ntfs::write::truncate(Path::new(&img), &path, 1)
+        .unwrap_or_else(|e| panic!("truncate {path}: {e}"));
+    assert_in_step(&img, &path, "truncated to 1 byte");
+
+    fs_ntfs::write::write_at(Path::new(&img), &path, 300_000, b"past the end")
+        .unwrap_or_else(|e| panic!("write past the end of {path}: {e}"));
+    assert_in_step(&img, &path, "extended past 300000 bytes");
 }
