@@ -69,7 +69,8 @@ while IFS="$(printf '\t')" read -r item size hash; do
     compressed_rows=$((compressed_rows + 1))
     dest="$SANDBOX/compressed-$compressed_rows"
     fs.ntfs "$compressed" export "$item" "$dest" >"$SANDBOX/out" 2>"$SANDBOX/err"
-    check "compressed export $item succeeds ($(cat "$SANDBOX/err"))" test $? -eq 0
+    status=$?
+    check "compressed export $item succeeds ($(cat "$SANDBOX/err"))" test "$status" -eq 0
     check "compressed export $item publishes Windows' size" test "$(wc -c <"$dest")" -eq "$size"
     check "compressed export $item matches Windows SHA-256" test "$(sha256 <"$dest")" = "$hash"
     jq_check "compressed export reports Windows' byte count and digest" \
