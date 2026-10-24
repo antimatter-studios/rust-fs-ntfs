@@ -3300,6 +3300,75 @@ fn applying_a_plan_rechecks_each_unit_on_the_target_and_stops_with_earlier_units
 
 #[cfg(feature = "plan-file")]
 #[test]
+fn applying_a_plan_refuses_a_target_of_another_size_or_serial_before_the_first_unit() {
+    // The device about to be written is checked against the plan's source
+    // identity before the first unit (#915), not only the source before
+    // the copy. A copy one sector short, and a copy whose boot-sector
+    // serial at bytes 0x48..0x50 changed after the copy, must each be
+    // refused naming size or serial, with no write of any unit reaching
+    // the target, and the source keeping its SHA-256.
+    use fs_ntfs::repair_plan::{apply_plan_units, load_plan, plan_fsck_io, save_plan};
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let pristine_sha = hex_sha256(&pristine);
+        let mut v = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        assert!(
+            !loaded.units.is_empty(),
+            "{k}: a log holding work planned nothing"
+        );
+
+        let sector = u16::from_le_bytes([pristine[0x0b], pristine[0x0c]]) as usize;
+        let short = pristine[..pristine.len() - sector].to_vec();
+        let mut reserialled = pristine.clone();
+        reserialled[0x48] ^= 0xff;
+        let serial = u64::from_le_bytes(reserialled[0x48..0x50].try_into().unwrap());
+        for (what, copy, named) in [
+            ("size", short, format!("{}", pristine.len() - sector)),
+            ("serial", reserialled, format!("{serial:#018x}")),
+        ] {
+            let mut target = CountingTarget {
+                bytes: copy.clone(),
+                events: Vec::new(),
+            };
+            match apply_plan_units(&loaded, &mut target) {
+                Ok(()) => panic!("{k}: a target of another {what} was applied to"),
+                Err(e) => {
+                    let e = e.to_string();
+                    assert!(
+                        e.contains(what) && e.contains(&named),
+                        "{k}: a target of another {what} refused as {e}, not naming its {what} \
+                         {named}"
+                    );
+                }
+            }
+            assert!(
+                target.events.is_empty() && target.bytes == copy,
+                "{k}: a target of another {what} was refused after {} writes and syncs reached \
+                 it",
+                target.events.len()
+            );
+        }
+        assert_eq!(
+            hex_sha256(&std::fs::read(&src).unwrap()),
+            pristine_sha,
+            "{k}: the source changed"
+        );
+
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
 fn a_repair_journal_reads_back_to_its_last_whole_record_and_refuses_the_rest() {
     // A repair journal is an append-only external file of checksummed
     // records (#918). Written for a plan from each Windows capture, it
