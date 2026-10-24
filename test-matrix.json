@@ -4183,7 +4183,7 @@
     "cli-attrlist-split-extents-win-verify-chkdsk": {
       "status": "pending",
       "volume_params": {
-        "size_mib": 64,
+        "size_mib": 128,
         "label": "CLI SPLIT",
         "alloc_unit_size": 4096
       },
@@ -4209,7 +4209,7 @@
         }
       ],
       "image": "nfs-cli-attrlist-split-extents-win-verify-chkdsk.img",
-      "_notes": "rust-ntfs ea and stream fill /split.dat's base record, so it gains an $ATTRIBUTE_LIST. fs.ntfs then cuts the volume's free space into one-cluster holes: 1800 one-cluster files, one filler over what else is free, and every second one-cluster file removed. fs.ntfs write --at grows /split.dat's unnamed stream to 800 clusters over the holes, a run per hole, more mapping pairs than one MFT record holds, so its run list is split into extents in extension records, each named in the list with its starting VCN (#799); a patch inside it, a whole rewrite and two truncates then move those extents (#800); after every write fs.ntfs reads the stream back as the host's model of it and every named stream unchanged, the list names more than one unnamed $DATA extent, and fsck.ntfs finds the volume clean. Windows grades the result: /split.dat reads back with the size and SHA-256 written (Get-FileHash), and chkdsk finds the volume clean. Not yet run: it runs in CI's Windows `cli` group, and its first outcome is recorded here (#801, part of #664)."
+      "_notes": "rust-ntfs ea and stream fill /split.dat's base record, so it gains an $ATTRIBUTE_LIST. fs.ntfs then cuts the volume's free space into one-cluster holes: 7200 one-cluster files, one filler over what else is free, and every second one-cluster file removed. fs.ntfs write --at grows /split.dat's unnamed stream to 3200 clusters over the holes, a run per hole, more mapping pairs than one MFT record holds, so its run list is split into extents in extension records, each named in the list with its starting VCN (#799); a patch inside it, a whole rewrite and two truncates then move those extents (#800); after every write fs.ntfs reads the stream back as the host's model of it and every named stream unchanged, the list names more than one unnamed $DATA extent, and fsck.ntfs finds the volume clean. Windows grades the result: /split.dat reads back with the size and SHA-256 written (Get-FileHash), and chkdsk finds the volume clean. The counts follow the volume's 4096-byte MFT records (scripts/split-extents-plan.sh: 800 runs over 900 holes per 1024 bytes of record), so the run list still needs two records once cut to half, and the volume is 128 MiB to hold the one-cluster files; 800 runs fit in one 4096-byte record, and the step refused its own image at 64 MiB (#1190). Not yet run: it runs in CI's Windows `cli` group, and its first outcome is recorded here (#801, part of #664)."
     },
     "cli-mkdir-parents-win-verify-chkdsk": {
       "status": "pending",
