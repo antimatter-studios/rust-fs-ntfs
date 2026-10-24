@@ -48,7 +48,8 @@ check "ntfscat /stdin.txt has the piped bytes" test "$(ntfscat "$img" /stdin.txt
 # that readback spans many bounded transfer buffers, not one short write.
 hash="$(sha256 <"$SANDBOX/big")"
 fs.ntfs "$img" import "$SANDBOX/big" /d/verified --verify >"$SANDBOX/out" 2>"$SANDBOX/err"
-check "64 MiB import with --verify exits 0 ($(cat "$SANDBOX/err"))" test $? -eq 0
+status=$?
+check "64 MiB import with --verify exits 0 ($(cat "$SANDBOX/err"))" test "$status" -eq 0
 jq_check "--verify on the 64 MiB file is reported" \
     ".verified == true and .bytes == 67108864 and .sha256 == \"$hash\"" "$SANDBOX/out"
 check "ntfscat /d/verified has the source's SHA-256" \
