@@ -32,13 +32,25 @@
 # the run. A case Windows grades and does not accept is recorded as
 # `not-clean` and left for the comparison to report.
 #
+# With -SlateWrites and -SlateWriteImages it formats nothing and grades the
+# copies Slate's copy-only writer left (#864): the writer's slate-writes.tsv
+# and its images/<case>.img. Each copy is graded read-only by chkdsk first,
+# and only a copy Windows accepts has its read manifest captured, so a
+# volume Windows rejects is never mounted. -OutDir/slate-writes-graded.tsv
+# holds one row per writer row: `accepted`, `slate-defect` (chkdsk rejected
+# the copy: a Slate writer defect, kept with its chkdsk log, named in the
+# job summary and never used to grade our reader; it does not fail the run)
+# or `not-written` (the writer left no copy; its own step already failed).
+#
 # Run from the repository root on an elevated Windows host with rust-img-vhd
 # on PATH; CI installs the pinned rust-img-vhd before invoking this.
 param(
-    [Parameter(Mandatory=$true)] [string]$Cli,
+    [string]$Cli,
     [string]$OutDir = 'tmp/slate-oracle',
     [string]$WriterCases,
-    [string]$WriterImages
+    [string]$WriterImages,
+    [string]$SlateWrites,
+    [string]$SlateWriteImages
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,7 +60,14 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\capture-slate-windows-manifest.ps1"
 . "$PSScriptRoot\capture-slate-windows-allocation.ps1"
 
-$cli = (Resolve-Path -LiteralPath $Cli).Path
+if ([bool]$SlateWrites -ne [bool]$SlateWriteImages) {
+    throw 'SlateWrites and SlateWriteImages must be supplied together'
+}
+if ($SlateWrites -and ($Cli -or $WriterCases)) {
+    throw 'SlateWrites grades Slate-written copies only; it formats no cases'
+}
+if (-not $SlateWrites -and -not $Cli) { throw 'Cli is required to format the cases' }
+$cli = if ($Cli) { (Resolve-Path -LiteralPath $Cli).Path }
 $winChkdsk = (Resolve-Path "$PSScriptRoot\..\scripts\fs-windows-test-harness\win-chkdsk.ps1").Path
 $out = [System.IO.Path]::GetFullPath($OutDir)
 $images = Join-Path $out 'images'
@@ -82,6 +101,7 @@ $cases = @(
     @{ Name = 'ours-4k';  Origin = 'ours';    Cluster = 4096 },
     @{ Name = 'ours-64k'; Origin = 'ours';    Cluster = 65536 }
 )
+if ($SlateWrites) { $cases = @() }
 
 foreach ($case in $cases) {
     $image = Join-Path $images "$($case.Name).img"
@@ -136,55 +156,42 @@ if ($WriterCases) {
     Copy-Item -LiteralPath $WriterCases -Destination (Join-Path $out 'writer-captures.tsv') -Force
 }
 
+# The copies Slate's copy-only writer left (#864). Each is checked against
+# the SHA-256 the writer recorded before Windows sees it. A writer row that
+# left no copy is still a row, so none disappears from the graded table.
+$slateRows = @("case`timage`tsha256`twindows_verdict`twindows_exit")
+$defects = @()
+if ($SlateWrites) {
+    $written = @(Import-Csv -LiteralPath $SlateWrites -Delimiter "`t")
+    if ($written.Count -eq 0) { throw 'SlateWrites contains no Slate-written images' }
+    $seen = @{}
+    foreach ($write in $written) {
+        if ($write.case -notmatch '^[A-Za-z0-9_-]+$' -or $seen.ContainsKey($write.case)) {
+            throw "Malformed or duplicate Slate write: $($write.case)"
+        }
+        $seen[$write.case] = $true
+        if ($write.result -ne 'written') {
+            Write-Host "slate-write $($write.case) not-written result=$($write.result)"
+            $slateRows += "$($write.case)`t-`t-`tnot-written`t-"
+            continue
+        }
+        if ($write.written_sha256 -notmatch '^[0-9a-f]{64}$') { throw "Malformed Slate write: $($write.case)" }
+        $source = Join-Path $SlateWriteImages "$($write.case).img"
+        if (-not (Test-Path -LiteralPath $source)) { throw "Slate write $($write.case) left no copy at $source" }
+        if ((Get-Sha256 $source) -ne $write.written_sha256) {
+            throw "Slate write $($write.case) is not the SHA-256 its writer recorded"
+        }
+        $image = Join-Path $images "$($write.case).img"
+        Copy-Item -LiteralPath $source -Destination $image -Force
+        if ((Get-Sha256 $image) -ne $write.written_sha256) { throw "Copy changed Slate write $($write.case)" }
+        $cases += @{ Name = $write.case; Origin = "slate:$($write.source)"; Slate = $true }
+    }
+}
+
 $rows = @("case`torigin`timage`tsha256`twindows_verdict`twindows_exit")
 foreach ($case in $cases) {
     $image = Join-Path $images "$($case.Name).img"
     $digest = Get-Sha256 $image
-    # Windows reads a separate wrapper. Never sync its mount-time changes
-    # into the original image that Slate will inspect (#856).
-    $readCopy = Join-Path $scratch "$($case.Name)-read.img"
-    $readVhd = [IO.Path]::ChangeExtension($readCopy, '.vhd')
-    $manifestPath = Join-Path $manifests "$($case.Name).json"
-    $allocationPath = Join-Path $allocations "$($case.Name).json"
-    if ((Test-Path -LiteralPath $manifestPath) -or (Test-Path -LiteralPath $allocationPath) -or
-        (Test-Path -LiteralPath $readVhd)) {
-        throw "Stale Windows read capture for $($case.Name); use a fresh OutDir"
-    }
-    Copy-Item -LiteralPath $image -Destination $readCopy -Force
-    if ((Get-Sha256 $readCopy) -ne $digest) { throw "Read copy differs for $($case.Name)" }
-    try {
-        $capture = Invoke-FixturePhase "$($case.Name)-windows-read" -PhaseTimeoutSeconds 600 {
-            $readDiag = Join-Path $out "windows-read-diag\$($case.Name)"
-            New-Item -ItemType Directory -Force -Path $readDiag | Out-Null
-            $state = Initialize-VhdFromImg -ImagePath $readCopy -Diag $readDiag
-            $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
-            # One mount, so the names and the clusters are the same state (#875).
-            @{
-                Read = Get-SlateWindowsManifest -Root "${letter}:\" -Case $case.Name -ImageSha256 $digest
-                Allocation = Get-SlateWindowsAllocation -Root "${letter}:\" -Case $case.Name -ImageSha256 $digest
-            }
-        }
-    } finally {
-        # Bound and verify cleanup; a leaked mount is a failure, including
-        # when enumeration or hashing failed. The helper never syncs back.
-        Invoke-FixturePhase "$($case.Name)-read-cleanup" -PhaseTimeoutSeconds 180 {
-            if (Test-Path -LiteralPath $readVhd) {
-                if (@(Get-DiskImage -ImagePath $readVhd -ErrorAction Stop | Where-Object Attached).Count) {
-                    Dismount-ScratchVhd -Vhd $readVhd -TimeoutSeconds 120
-                }
-                if (@(Get-DiskImage -ImagePath $readVhd -ErrorAction Stop | Where-Object Attached).Count) {
-                    throw "Windows read wrapper remains mounted: $readVhd"
-                }
-                Remove-Item -LiteralPath $readVhd -Force -ErrorAction Stop
-            }
-            Remove-Item -LiteralPath $readCopy -Force -ErrorAction Stop
-        }
-    }
-    if ((Get-Sha256 $image) -ne $digest) { throw "$($case.Name) changed during Windows read capture" }
-    [IO.File]::WriteAllText($allocationPath, ($capture.Allocation | ConvertTo-Json -Depth 10),
-        [Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText($manifestPath, ($capture.Read | ConvertTo-Json -Depth 10),
-        [Text.UTF8Encoding]::new($false))
     $copy = Join-Path $scratch "$($case.Name).img"
     Copy-Item -LiteralPath $image -Destination $copy -Force
     $diag = Join-Path $out "chkdsk\$($case.Name)"
@@ -200,12 +207,84 @@ foreach ($case in $cases) {
     $chkdskExit = (Get-Content -LiteralPath $exitFile -Raw).Trim()
     if ((Get-Sha256 $image) -ne $digest) { throw "$($case.Name) changed while Windows graded its copy" }
 
+    # A Slate-written copy Windows rejected is never mounted.
+    if (-not $case.Slate -or $passed) {
+        # Windows reads a separate wrapper. Never sync its mount-time changes
+        # into the original image that Slate will inspect (#856).
+        $readCopy = Join-Path $scratch "$($case.Name)-read.img"
+        $readVhd = [IO.Path]::ChangeExtension($readCopy, '.vhd')
+        $manifestPath = Join-Path $manifests "$($case.Name).json"
+        $allocationPath = Join-Path $allocations "$($case.Name).json"
+        if ((Test-Path -LiteralPath $manifestPath) -or (Test-Path -LiteralPath $allocationPath) -or
+            (Test-Path -LiteralPath $readVhd)) {
+            throw "Stale Windows read capture for $($case.Name); use a fresh OutDir"
+        }
+        Copy-Item -LiteralPath $image -Destination $readCopy -Force
+        if ((Get-Sha256 $readCopy) -ne $digest) { throw "Read copy differs for $($case.Name)" }
+        try {
+            $capture = Invoke-FixturePhase "$($case.Name)-windows-read" -PhaseTimeoutSeconds 600 {
+                $readDiag = Join-Path $out "windows-read-diag\$($case.Name)"
+                New-Item -ItemType Directory -Force -Path $readDiag | Out-Null
+                $state = Initialize-VhdFromImg -ImagePath $readCopy -Diag $readDiag
+                $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
+                # One mount, so the names and the clusters are the same state (#875).
+                @{
+                    Read = Get-SlateWindowsManifest -Root "${letter}:\" -Case $case.Name -ImageSha256 $digest
+                    Allocation = Get-SlateWindowsAllocation -Root "${letter}:\" -Case $case.Name -ImageSha256 $digest
+                }
+            }
+        } finally {
+            # Bound and verify cleanup; a leaked mount is a failure, including
+            # when enumeration or hashing failed. The helper never syncs back.
+            Invoke-FixturePhase "$($case.Name)-read-cleanup" -PhaseTimeoutSeconds 180 {
+                if (Test-Path -LiteralPath $readVhd) {
+                    if (@(Get-DiskImage -ImagePath $readVhd -ErrorAction Stop | Where-Object Attached).Count) {
+                        Dismount-ScratchVhd -Vhd $readVhd -TimeoutSeconds 120
+                    }
+                    if (@(Get-DiskImage -ImagePath $readVhd -ErrorAction Stop | Where-Object Attached).Count) {
+                        throw "Windows read wrapper remains mounted: $readVhd"
+                    }
+                    Remove-Item -LiteralPath $readVhd -Force -ErrorAction Stop
+                }
+                Remove-Item -LiteralPath $readCopy -Force -ErrorAction Stop
+            }
+        }
+        if ((Get-Sha256 $image) -ne $digest) { throw "$($case.Name) changed during Windows read capture" }
+        [IO.File]::WriteAllText($allocationPath, ($capture.Allocation | ConvertTo-Json -Depth 10),
+            [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($manifestPath, ($capture.Read | ConvertTo-Json -Depth 10),
+            [Text.UTF8Encoding]::new($false))
+    }
+
+    if ($case.Slate) {
+        $verdict = if ($passed) { 'accepted' } else { 'slate-defect' }
+        if (-not $passed) { $defects += $case.Name }
+        Write-Host "slate-write $($case.Name) $digest chkdsk=$verdict exit=$chkdskExit"
+        $slateRows += "$($case.Name)`t$($case.Name).img`t$digest`t$verdict`t$chkdskExit"
+        continue
+    }
     $verdict = if ($passed) { 'clean' } else { 'not-clean' }
     Write-Host "slate-oracle-case $($case.Name) $($case.Origin) $digest chkdsk=$verdict exit=$chkdskExit"
     $rows += "$($case.Name)`t$($case.Origin)`t$($case.Name).img`t$digest`t$verdict`t$chkdskExit"
 }
 
-# LF line ends: the table is read by bash on Linux.
-[System.IO.File]::WriteAllText((Join-Path $out 'cases.tsv'), (($rows -join "`n") + "`n"),
-    (New-Object System.Text.UTF8Encoding($false)))
+# LF line ends: the tables are read by bash on Linux.
+if ($SlateWrites) {
+    if ($slateRows.Count - 1 -ne $written.Count) {
+        throw "Graded $($slateRows.Count - 1) Slate-written images, but the writer table has $($written.Count) rows"
+    }
+    [System.IO.File]::WriteAllText((Join-Path $out 'slate-writes-graded.tsv'), (($slateRows -join "`n") + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+    # A rejected copy is the writer's defect, not a failure of this run.
+    $summary = @('### Windows grades of Slate-written copies', '',
+        "$($written.Count) writer rows, $($defects.Count) Slate writer defect(s); table in slate-writes-graded.tsv.")
+    foreach ($name in $defects) {
+        $summary += "- Slate writer defect: ``$name`` was rejected by read-only chkdsk; its image and chkdsk log are kept in the artifact."
+    }
+    $summary | ForEach-Object { Write-Host $_ }
+    if ($env:GITHUB_STEP_SUMMARY) { Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary }
+} else {
+    [System.IO.File]::WriteAllText((Join-Path $out 'cases.tsv'), (($rows -join "`n") + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+}
 Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
