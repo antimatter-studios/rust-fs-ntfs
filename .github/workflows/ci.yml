@@ -887,6 +887,38 @@ jobs:
             tmp/rescue-export/*/*.txt
             tmp/rescue-export/*/verdict.json
           if-no-files-found: warn
+      # The same image exported incomplete, two sectors inside /random.bin's
+      # data unreadable, then handed back to Windows: fsutil must call the
+      # volume dirty, and Get-FileHash of every other file must match the
+      # hash Windows recorded before the rescue (#1003). The test itself
+      # holds the export's missing spans to the injected sectors.
+      - name: Windows reads an incomplete rescued export as dirty and every undamaged file intact
+        shell: pwsh
+        run: |
+          cargo test --locked --test rescue_export_windows an_incomplete_windows_export_is_written_for_windows_to_grade
+          if ($LASTEXITCODE -ne 0) { throw 'the incomplete export of ntfs-cli-read.img is not the injected sectors, dirty' }
+          $image = Join-Path $PWD 'tmp/rescue-export-incomplete/ntfs-cli-read.img'
+          # The dirty query attaches the export first; KeepImage holds it for
+          # the hashes, whose cleanup removes it.
+          pwsh -File scripts/fs-windows-test-harness/win-dirty-query.ps1 `
+            -ImagePath $image -Expect Dirty -Diag 'tmp/rescue-export-incomplete/dirty' -KeepImage true
+          if ($LASTEXITCODE -ne 0) { throw 'Windows does not call the incomplete export dirty; see tmp/rescue-export-incomplete/dirty/dirty-query.txt' }
+          pwsh -File scripts/fs-windows-test-harness/win-cli-verify.ps1 `
+            -ImagePath $image `
+            -Manifest (Join-Path $PWD 'tmp/rescue-export-incomplete/ntfs-cli-read.manifest.tsv') `
+            -Diag 'tmp/rescue-export-incomplete/verify'
+          if ($LASTEXITCODE -ne 0) { throw 'an undamaged file on the incomplete export is not the one Windows recorded; see tmp/rescue-export-incomplete/verify/cli-verify.txt' }
+      - name: Retain the incomplete export's Windows verdicts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rescue-export-incomplete-windows-verdicts
+          path: |
+            tmp/rescue-export-incomplete/*.tsv
+            tmp/rescue-export-incomplete/*.missing.txt
+            tmp/rescue-export-incomplete/*/*.txt
+            tmp/rescue-export-incomplete/*/verdict.json
+          if-no-files-found: warn
       - name: Ctrl-C interrupts the inventory CLI process
         shell: pwsh
         run: cargo test --locked --features cli,harness --test cli_inventory_ctrl_c
