@@ -707,6 +707,36 @@ jobs:
       - name: Rescue scan totals agree with fsutil fsinfo ntfsinfo
         shell: pwsh
         run: cargo test --locked --test rescue_scan_windows
+      # ntfs-cli-read.img rescued and exported, then handed back to Windows:
+      # every file's Get-FileHash against the hash Windows recorded before the
+      # rescue, and read-only chkdsk over the volume (#995).
+      - name: Windows reads a rescued and exported image, and chkdsk finds it clean
+        shell: pwsh
+        run: |
+          cargo test --locked --test rescue_export_windows
+          if ($LASTEXITCODE -ne 0) { throw 'the rescue could not export ntfs-cli-read.img' }
+          # chkdsk grades the export before Windows has mounted it for the
+          # hashes; KeepImage holds it for that second op, whose cleanup
+          # removes it.
+          pwsh -File scripts/fs-windows-test-harness/win-chkdsk.ps1 `
+            -ImagePath (Join-Path $PWD 'tmp/rescue-export/ntfs-cli-read.img') `
+            -Diag 'tmp/rescue-export/chkdsk' -Modes readonly -VerdictShape Clean -KeepImage true
+          if ($LASTEXITCODE -ne 0) { throw 'chkdsk found problems on the exported image' }
+          pwsh -File scripts/fs-windows-test-harness/win-cli-verify.ps1 `
+            -ImagePath (Join-Path $PWD 'tmp/rescue-export/ntfs-cli-read.img') `
+            -Manifest (Join-Path $PWD 'tmp/rescue-export/ntfs-cli-read.manifest.tsv') `
+            -Diag 'tmp/rescue-export/verify'
+          if ($LASTEXITCODE -ne 0) { throw 'a file on the exported image is not the one Windows recorded; see tmp/rescue-export/verify/cli-verify.txt' }
+      - name: Retain the rescued export's Windows verdicts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rescue-export-windows-verdicts
+          path: |
+            tmp/rescue-export/*.tsv
+            tmp/rescue-export/*/*.txt
+            tmp/rescue-export/*/verdict.json
+          if-no-files-found: warn
       - name: Ctrl-C interrupts the inventory CLI process
         shell: pwsh
         run: cargo test --locked --features cli,harness --test cli_inventory_ctrl_c
