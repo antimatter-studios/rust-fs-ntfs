@@ -342,6 +342,16 @@ fn stream_path(model: &Model, selector: u8) -> String {
         }
     }
 }
+/// EAs stay on files (#732): directories gained streams (#735), not EAs.
+/// Wrong type is a file used as a directory, which no EA operation can
+/// open.
+fn ea_path(model: &Model, selector: u8) -> String {
+    match selector % 4 {
+        0 => select(model, 0, false, false),
+        1 => join(&select(model, selector | 2, false, false), "x"),
+        _ => select(model, selector, false, false),
+    }
+}
 /// The file-name pool's cases, for stream names (#731).
 fn stream_name(model: &Model, path: &str, selector: u8, step: usize) -> String {
     const NAMES: &[&str] = &[
@@ -407,10 +417,10 @@ impl<'a> Generator<'a> {
         self.remaining = &self.remaining[n..];
         self.steps += 1;
         let verb = h[0] % 13;
-        let path = if verb >= 9 {
-            stream_path(model, h[1])
-        } else {
-            select(model, h[1], verb == 7, false)
+        let path = match verb {
+            9 | 10 => stream_path(model, h[1]),
+            11 | 12 => ea_path(model, h[1]),
+            _ => select(model, h[1], verb == 7, false),
         };
         let parent = select(model, h[2], true, true);
         let rename_parent = path
