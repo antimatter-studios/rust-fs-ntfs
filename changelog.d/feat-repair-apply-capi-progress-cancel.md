@@ -1,0 +1,3 @@
+### Added
+
+- **The C ABI repairs a volume in place, with progress and cancellation callbacks (#957).** `fs_ntfs_repair_apply_in_place` applies a saved plan file to a device through a new external journal, as `fsck.ntfs --apply PLAN --in-place --journal FILE` does, and `fs_ntfs_repair_resume_in_place` continues one from the journal it left. Both take an `fs_ntfs_repair_progress_fn`, told the units and bytes applied of the plan's total, and an `fs_ntfs_repair_cancel_fn`, asked before each unit begins whether to stop, over the library's `ApplyObserver`. A cancelled repair returns `FS_NTFS_REPAIR_CANCELLED` with every unit it began applied and its journal resumable. They are Unix only and behind the `plan-file` feature.
