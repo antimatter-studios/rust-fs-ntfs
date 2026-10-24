@@ -621,7 +621,8 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         "stat" => {
             let (mut dev, _) = device::mount(target, offset, false)?;
             let path = path_arg(sub)?;
-            stat(&mut dev, path).map_err(|e| ntfs_error(path, e))
+            let record = read::resolve_path(&mut dev, path).map_err(|e| read_error(path, e))?;
+            stat(&mut dev, path, record).map_err(|e| ntfs_error(path, e))
         }
         "export" => {
             let request = ExportRequest::from_matches(sub)?;
@@ -725,6 +726,18 @@ pub(super) fn ntfs_error(path: &str, e: Error) -> CliError {
     CliError::failed(format!("{path}: {e}"))
 }
 
+/// A reading verb's error resolving its path: a path that is not there is
+/// the CLI contract's `not_found` kind, still exit 1, which a script
+/// matches whatever the message says; every other error is
+/// [`ntfs_error`]'s. Only path resolution maps this way, so metadata that
+/// turns out missing part-way through a read is not taken for a missing path.
+fn read_error(path: &str, e: Error) -> CliError {
+    match e.kind() {
+        Kind::NotFound => CliError::not_found(format!("{path}: {e}")),
+        _ => ntfs_error(path, e),
+    }
+}
+
 /// A namespace verb's error: a refusal the volume's current state gives it
 /// -- a name that is not there, a name already taken, a part of the path
 /// that is not a directory, a directory that is not empty -- is the CLI
@@ -825,7 +838,7 @@ fn entry_text(e: &Json) -> String {
 }
 
 fn ls(dev: &mut Device, path: &str, all: bool) -> Result<Outcome, CliError> {
-    let record = read::resolve_path(dev, path).map_err(|e| ntfs_error(path, e))?;
+    let record = read::resolve_path(dev, path).map_err(|e| read_error(path, e))?;
     let st = read::read_stat(dev, record).map_err(|e| ntfs_error(path, e))?;
     let entries = if st.is_dir {
         let mut listed = Vec::new();
@@ -891,7 +904,7 @@ fn ls_recursive(
     sub: &ArgMatches,
     format: Format,
 ) -> Result<Outcome, CliError> {
-    let record = read::resolve_path(dev, path).map_err(|e| ntfs_error(path, e))?;
+    let record = read::resolve_path(dev, path).map_err(|e| read_error(path, e))?;
     let start = format!(
         "/{}",
         path.split('/')
@@ -1288,8 +1301,7 @@ fn named_streams(dev: &mut Device, record: u64) -> Result<Vec<NamedStream>, Erro
 /// file's names, a DOS 8.3 alias not being a link of its own. The times
 /// are `$STANDARD_INFORMATION`'s, `ctime` its MFT change and `btime` its
 /// creation; each `$FILE_NAME` keeps its own four under `ntfs.file_names`.
-fn stat(dev: &mut Device, path: &str) -> Result<Outcome, Error> {
-    let record = read::resolve_path(dev, path)?;
+fn stat(dev: &mut Device, path: &str, record: u64) -> Result<Outcome, Error> {
     let st = read::read_stat(dev, record)?;
     let (_, base) = fs_ntfs::mft_io::read_mft_record_io(dev, record)?;
     let reparse = read::read_attribute_value_if_present(dev, record, AttrType::ReparsePoint, None)?;
@@ -1495,7 +1507,7 @@ fn export(dev: &mut Device, request: &ExportRequest) -> Result<Outcome, CliError
         .path
         .to_str()
         .ok_or_else(|| CliError::usage("PATH must be UTF-8 to name an NTFS file"))?;
-    let record = read::resolve_path(dev, path).map_err(|e| ntfs_error(path, e))?;
+    let record = read::resolve_path(dev, path).map_err(|e| read_error(path, e))?;
     let st = read::read_stat(dev, record).map_err(|e| ntfs_error(path, e))?;
     if st.is_dir {
         return Err(CliError::failed(format!("{path}: is a directory")));
@@ -1551,7 +1563,7 @@ fn read(
     stream: Option<&str>,
     output: Option<&OsString>,
 ) -> Result<Outcome, CliError> {
-    let record = read::resolve_path(dev, path).map_err(|e| ntfs_error(path, e))?;
+    let record = read::resolve_path(dev, path).map_err(|e| read_error(path, e))?;
     let st = read::read_stat(dev, record).map_err(|e| ntfs_error(path, e))?;
     if st.is_dir {
         return Err(CliError::failed(format!("{path}: is a directory")));
