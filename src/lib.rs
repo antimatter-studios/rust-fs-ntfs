@@ -70,6 +70,8 @@ pub mod mft_io;
 pub mod mkfs;
 pub mod read;
 pub mod record_build;
+#[cfg(feature = "plan-file")]
+pub mod repair_journal;
 pub mod repair_plan;
 pub mod rescue;
 pub mod sds;
