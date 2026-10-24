@@ -776,6 +776,23 @@ host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write-sparse.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Files '{step.files}' -Mode '{step.mode}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
+[ops.win-write-compressed]
+# Mode `write`: Windows writes each file of `files` -- space-separated
+# `/name@bytes` entries of compressible content -- whole and compresses it
+# with `compact /c`, so how it is stored and what a tracked volume charges
+# for it is Windows' own answer. Mode `verify`: each file must read back
+# through ntfs.sys as exactly that content and be marked compressed. Either
+# way, `compact /q` and `fsutil file layout` for every file are kept as
+# evidence (#1097).
+#
+# Step fields:
+#   files        — space-separated `/name@bytes` entries
+#   mode         — `write` or `verify`
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write-compressed.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Files '{step.files}' -Mode '{step.mode}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
 [ops.win-quota-track]
 # Turn quota tracking on, as `fsutil quota track` does, and wait until
 # Windows' scan has charged every file to its owner in $Extend\$Quota (#510).
