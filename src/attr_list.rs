@@ -67,6 +67,7 @@ use crate::upcase::UpcaseTable;
 const REC_BYTES_USED: usize = 0x18;
 const REC_BYTES_ALLOCATED: usize = 0x1C;
 const REC_BASE_REFERENCE: usize = 0x20;
+const REC_NEXT_ATTRIBUTE_ID: usize = 0x28;
 /// Where a record's update sequence array starts, in every record this
 /// crate writes and every one Windows does.
 const REC_USA_OFFSET: usize = 0x30;
@@ -227,6 +228,19 @@ fn find_by_id(record: &[u8], type_code: u32, id: u16) -> Option<AttrLocation> {
 
 fn set_attribute_id(attr: &mut [u8], id: u16) {
     attr[attr_off::ATTRIBUTE_ID..attr_off::ATTRIBUTE_ID + 2].copy_from_slice(&id.to_le_bytes());
+}
+
+/// Keep the record's next attribute id past `id`, an id given to an
+/// attribute here rather than taken from that counter.
+fn reserve_attribute_id(record: &mut [u8], id: u16) -> Result<(), Error> {
+    let next = id
+        .checked_add(1)
+        .ok_or(Error::io("an attribute instance past the last one"))?;
+    if u16_at(record, REC_NEXT_ATTRIBUTE_ID) < next {
+        record[REC_NEXT_ATTRIBUTE_ID..REC_NEXT_ATTRIBUTE_ID + 2]
+            .copy_from_slice(&next.to_le_bytes());
+    }
+    Ok(())
 }
 
 /// One MFT record of the file, as it will be written.
@@ -512,6 +526,106 @@ impl ListedFile {
         self.place(target, &mut attr, true)
     }
 
+    /// Add `attr`, a continuation extent of an attribute split across
+    /// records, in an extension record, as Windows keeps them out of the
+    /// base record. Its entry carries the extent's starting VCN.
+    ///
+    /// The extent keeps `id`, the instance of the attribute's first
+    /// extent, so it goes to a record where no attribute has that id. A
+    /// split attribute's list entries are joined by the instance they
+    /// share: the `ntfs` crate follows the entries after the first only
+    /// while they carry its instance. An instance need only be unique
+    /// within its record.
+    pub(crate) fn add_extent<T: BlockIo + ?Sized>(
+        &mut self,
+        io: &mut T,
+        mut attr: Vec<u8>,
+        id: u16,
+    ) -> Result<(), Error> {
+        if attr.len() > self.max_attribute_len() {
+            return Err(Error::no_space(format!(
+                "an attribute extent of {} bytes does not fit in an MFT record of {}",
+                attr.len(),
+                self.params.file_record_size
+            )));
+        }
+        if self.list == List::Absent {
+            self.convert(io)?;
+        }
+        let target = match (1..self.segments.len()).find(|&i| {
+            let record = &self.segments[i].bytes;
+            free_space(record) >= attr.len()
+                && !attr_io::iter_attributes(record).any(|l| l.attribute_id == id)
+        }) {
+            Some(i) => i,
+            None => self.new_extension(io)?,
+        };
+        reserve_attribute_id(&mut self.segments[target].bytes, id)?;
+        self.insert(target, &mut attr, id, true)
+    }
+
+    /// Give the first extent of the attribute `ty` named `name`, the one
+    /// starting at VCN 0, an instance no other list entry carries, and
+    /// return it for the extents that continue it. The `ntfs` crate joins
+    /// to an attribute every entry after it of its type and instance,
+    /// whatever its name, so the entry after the last extent must not
+    /// share it.
+    pub(crate) fn split_instance(&mut self, ty: AttrType, name: &str) -> Result<u16, Error> {
+        let units: Vec<u16> = name.encode_utf16().collect();
+        let at = self
+            .entries
+            .iter()
+            .position(|e| e.type_code == ty as u32 && e.name == units && e.starting_vcn == 0)
+            .ok_or(Error::io(
+                "a split attribute's first extent has no list entry",
+            ))?;
+        let old = self.entries[at].attribute_id;
+        let shared = |id: u16| {
+            self.entries
+                .iter()
+                .enumerate()
+                .any(|(i, e)| i != at && e.attribute_id == id)
+        };
+        if !shared(old) {
+            return Ok(old);
+        }
+        let number = self.entries[at].record_number();
+        let segment = self
+            .segments
+            .iter()
+            .position(|s| s.number == number)
+            .ok_or(Error::io(
+                "a split attribute's first extent is in no record of the file",
+            ))?;
+        let record = &self.segments[segment].bytes;
+        let mut id = self
+            .entries
+            .iter()
+            .map(|e| e.attribute_id)
+            .max()
+            .unwrap_or(0);
+        loop {
+            id = id
+                .checked_add(1)
+                .ok_or(Error::io("an attribute instance past the last one"))?;
+            if !attr_io::iter_attributes(record).any(|l| l.attribute_id == id) {
+                break;
+            }
+        }
+        let loc = find_by_id(record, ty as u32, old).ok_or(Error::io(
+            "a split attribute's first extent is not in its record",
+        ))?;
+        let record = &mut self.segments[segment].bytes;
+        set_attribute_id(
+            &mut record[loc.attr_offset..loc.attr_offset + loc.attr_length],
+            id,
+        );
+        reserve_attribute_id(record, id)?;
+        self.segments[segment].dirty = true;
+        self.entries[at].attribute_id = id;
+        Ok(id)
+    }
+
     /// Replace the attribute `ty` named `name` with `attr`: where it is,
     /// keeping its id, when its record has the room, else wherever
     /// [`Self::add`] puts it.
@@ -768,8 +882,20 @@ impl ListedFile {
     /// Put `attr` in segment `target` with that record's next id, where
     /// attribute order puts it, and enter it in the list when `listed`.
     fn place(&mut self, target: usize, attr: &mut [u8], listed: bool) -> Result<(), Error> {
+        let id = crate::attr_resize::allocate_attribute_id(&mut self.segments[target].bytes);
+        self.insert(target, attr, id, listed)
+    }
+
+    /// Put `attr` in segment `target` with the id `id`, where attribute
+    /// order puts it, and enter it in the list when `listed`.
+    fn insert(
+        &mut self,
+        target: usize,
+        attr: &mut [u8],
+        id: u16,
+        listed: bool,
+    ) -> Result<(), Error> {
         let segment = &mut self.segments[target];
-        let id = crate::attr_resize::allocate_attribute_id(&mut segment.bytes);
         set_attribute_id(attr, id);
         crate::attr_resize::insert_attribute_listed_typed(
             &mut segment.bytes,
