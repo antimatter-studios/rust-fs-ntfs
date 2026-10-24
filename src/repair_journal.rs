@@ -919,6 +919,12 @@ pub enum JournalLocationError {
     /// The target is a device, and the journal's directory is on a
     /// filesystem that device holds.
     OnTargetDevice,
+    /// The target is a whole disk, and the journal's directory is on a
+    /// filesystem one of its partitions holds (#948).
+    OnTargetPartition,
+    /// The target is a partition, and the journal's directory is on a
+    /// filesystem the whole disk holding it holds (#948).
+    OnTargetWholeDisk,
     /// Something already exists at the journal path. A new journal is
     /// never written over an existing file.
     Exists,
@@ -938,6 +944,14 @@ impl std::fmt::Display for JournalLocationError {
             Self::OnTargetDevice => write!(
                 f,
                 "the journal's directory is on a filesystem the device being repaired holds"
+            ),
+            Self::OnTargetPartition => write!(
+                f,
+                "the journal's directory is on a partition of the disk being repaired"
+            ),
+            Self::OnTargetWholeDisk => write!(
+                f,
+                "the journal's directory is on the disk that holds the partition being repaired"
             ),
             Self::Exists => write!(f, "a file already exists at the journal path"),
             Self::Io(e) => write!(f, "{e}"),
@@ -986,6 +1000,138 @@ pub fn directory_on_target(directory: &LocationStat, target: &LocationStat) -> b
     target.is_device && directory.dev == target.rdev
 }
 
+/// A block device a journal location is compared by: its name, and the
+/// name of the whole disk that holds it, its own name when it is a whole
+/// disk (#948).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceRecord {
+    /// The device: `disk2s1` on macOS, `sda1` on Linux.
+    pub name: String,
+    /// The whole disk holding the device: `disk2`, `sda`.
+    pub whole_disk: String,
+}
+
+/// How the device a journal's directory is on relates to the device
+/// being repaired (#948).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceRelation {
+    /// The same device.
+    Same,
+    /// The journal's device is a partition of the whole disk being
+    /// repaired.
+    PartitionOfTarget,
+    /// The device being repaired is a partition of the whole disk the
+    /// journal's directory is on.
+    TargetOnJournalDisk,
+    /// Neither holds the other: different disks, or two partitions of
+    /// one disk.
+    Unrelated,
+}
+
+impl DeviceRelation {
+    /// The refusal a journal on a device so related to the target gets,
+    /// or `None` when it is accepted.
+    pub fn refusal(self) -> Option<JournalLocationError> {
+        match self {
+            Self::Same => Some(JournalLocationError::OnTargetDevice),
+            Self::PartitionOfTarget => Some(JournalLocationError::OnTargetPartition),
+            Self::TargetOnJournalDisk => Some(JournalLocationError::OnTargetWholeDisk),
+            Self::Unrelated => None,
+        }
+    }
+}
+
+/// How `journal`, the device the journal's directory is on, relates to
+/// `target`, the device being repaired.
+pub fn device_relation(journal: &DeviceRecord, target: &DeviceRecord) -> DeviceRelation {
+    if journal.name == target.name {
+        DeviceRelation::Same
+    } else if journal.whole_disk == target.name {
+        DeviceRelation::PartitionOfTarget
+    } else if target.whole_disk == journal.name {
+        DeviceRelation::TargetOnJournalDisk
+    } else {
+        DeviceRelation::Unrelated
+    }
+}
+
+/// The record of a macOS BSD device name: `disk2s1` is on `disk2`, and
+/// the raw `rdisk2s1` is the same device as `disk2s1`. A name that is not
+/// a disk is its own whole disk.
+pub fn bsd_device_record(name: &str) -> DeviceRecord {
+    let name = match name.strip_prefix('r') {
+        Some(block) if block.starts_with("disk") => block,
+        _ => name,
+    };
+    let whole_disk = match name.strip_prefix("disk") {
+        Some(rest) => {
+            let unit = rest.bytes().take_while(u8::is_ascii_digit).count();
+            if unit == 0 {
+                name
+            } else {
+                &name[.."disk".len() + unit]
+            }
+        }
+        None => name,
+    };
+    DeviceRecord {
+        name: name.into(),
+        whole_disk: whole_disk.into(),
+    }
+}
+
+/// The record of block device `major:minor` in the sysfs tree at `sys`
+/// (`/sys` on Linux): `dev/block/<major>:<minor>` links to the device's
+/// directory, and a partition's directory holds a `partition` file and
+/// sits inside its disk's. `None` when sysfs lists no such block device,
+/// as for tmpfs or NFS.
+pub fn sysfs_device_record(sys: &std::path::Path, major: u32, minor: u32) -> Option<DeviceRecord> {
+    let dir = std::fs::canonicalize(sys.join(format!("dev/block/{major}:{minor}"))).ok()?;
+    let name = dir.file_name()?.to_string_lossy().into_owned();
+    let whole_disk = if dir.join("partition").exists() {
+        dir.parent()?.file_name()?.to_string_lossy().into_owned()
+    } else {
+        name.clone()
+    };
+    Some(DeviceRecord { name, whole_disk })
+}
+
+/// The record of device number `dev`, a character device when `raw`, or
+/// `None` when it names no disk this platform can describe.
+#[cfg(target_os = "macos")]
+fn device_record(dev: u64, raw: bool) -> Option<DeviceRecord> {
+    let mode = if raw { libc::S_IFCHR } else { libc::S_IFBLK };
+    // SAFETY: devname returns NULL or a pointer to a NUL-terminated name
+    // in static storage, read before any other devname call.
+    let name = unsafe { libc::devname(dev as libc::dev_t, mode) };
+    if name.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy();
+    if name.starts_with('?') {
+        return None;
+    }
+    Some(bsd_device_record(&name))
+}
+
+/// The record of device number `dev`, or `None` when it names no block
+/// device sysfs lists.
+#[cfg(target_os = "linux")]
+fn device_record(dev: u64, raw: bool) -> Option<DeviceRecord> {
+    if raw {
+        return None;
+    }
+    // glibc's dev_t encoding: 12 + 20 bits of major, 8 + 24 bits of minor.
+    let major = ((dev >> 32) & 0xffff_f000) | ((dev >> 8) & 0x0fff);
+    let minor = ((dev >> 12) & 0xffff_ff00) | (dev & 0xff);
+    sysfs_device_record(std::path::Path::new("/sys"), major as u32, minor as u32)
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn device_record(_dev: u64, _raw: bool) -> Option<DeviceRecord> {
+    None
+}
+
 /// Check `journal` as the place an in-place repair of `target` keeps its
 /// journal, before anything is created or written (#921). It is refused,
 /// naming the reason, when:
@@ -994,7 +1140,9 @@ pub fn directory_on_target(directory: &LocationStat, target: &LocationStat) -> b
 /// - it is the target, by path or as another name for the same file (a
 ///   hard link, or a symlink to it);
 /// - the target is a device and the journal's directory is on a
-///   filesystem that device holds;
+///   filesystem that device holds, a partition of it holds, or the whole
+///   disk holding it holds (#948), the disks named through their BSD
+///   names on macOS and through sysfs on Linux;
 /// - something already exists at it, a dangling symlink included.
 ///
 /// Nothing is created at `journal` and nothing is written to `target`,
@@ -1024,8 +1172,21 @@ pub fn check_journal_location(
             _ => Err(JournalLocationError::Exists),
         };
     }
-    if directory_on_target(&LocationStat::of(&directory_meta), &target_stat) {
+    let directory_stat = LocationStat::of(&directory_meta);
+    if directory_on_target(&directory_stat, &target_stat) {
         return Err(JournalLocationError::OnTargetDevice);
+    }
+    if target_stat.is_device {
+        use std::os::unix::fs::FileTypeExt;
+        let raw = target_meta.file_type().is_char_device();
+        if let (Some(journal_device), Some(target_device)) = (
+            device_record(directory_stat.dev, false),
+            device_record(target_stat.rdev, raw),
+        ) {
+            if let Some(refusal) = device_relation(&journal_device, &target_device).refusal() {
+                return Err(refusal);
+            }
+        }
     }
     Ok(())
 }
