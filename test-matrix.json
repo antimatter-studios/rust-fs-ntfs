@@ -2573,6 +2573,49 @@
       "image": "nfs-win-format-win-write-objids-mac-delete-win-chkdsk.img",
       "_notes": "Windows writes sixty files and gives each an object id, which grows $Extend\\$ObjId:$O past its root into INDX blocks. This crate unlinks nine of them spread across the index, so their entries come out of leaves and of interior nodes, and chkdsk grades the index (#571)."
     },
+    "win-format-win-quota-enforce-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "QUOTA",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-quota-enforce",
+          "path": "/limited.bin",
+          "headroom_bytes": "65536",
+          "write_bytes": "1048576",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-win-format-win-quota-enforce-win-chkdsk.img",
+      "_notes": "Windows turns quota tracking and enforcement on, gives a file's owner a hard limit 64 KiB above what it is charged, and writes 1 MiB to the file. The diagnostics record what Windows does with a write past the limit: the error it returns, the file's length afterwards, and the owner's $Q usage and flags before and after. The step fails when the write is not refused. The image Windows leaves is kept as the fixture an enforcing write here is checked against (#867, part of #679)."
+    },
     "win-format-win-quota-mac-delete-win-chkdsk": {
       "status": "pending",
       "volume_params": {
