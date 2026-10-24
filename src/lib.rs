@@ -3925,7 +3925,7 @@ fn repair_in_place(
         apply_in_place_observed(&saved, sha, &mut io, &mut journal_io, observer)
     };
     match done {
-        Ok(()) => {
+        Ok(_audit) => {
             report(u32::try_from(saved.units.len()).expect("a plan holds at most u32::MAX units"));
             0
         }
