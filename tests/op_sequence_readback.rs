@@ -77,6 +77,25 @@ fn verify(image: &str, model: &BTreeMap<String, Vec<u8>>, initialized: &BTreeMap
     );
 }
 
+/// A geometry the formatter refuses (#1025) runs nothing: the explorer
+/// records the formatter's reason and counts it in its histogram.
+#[test]
+fn the_explorer_counts_a_refused_geometry_with_its_reason() {
+    runner::fuzz_input(&[0, 255, 0, 1, 2, 3]);
+    let artifacts = Path::new("tmp/op-sequence-model/explorer");
+    let geometry = fs::read_to_string(artifacts.join("geometry.txt")).unwrap();
+    assert!(geometry.contains("\t131072\t"), "{geometry}");
+    let refusals = fs::read_to_string(artifacts.join("refusals.tsv")).unwrap();
+    assert!(
+        refusals.starts_with("format\t") && refusals.contains("invalid cluster_size 131072"),
+        "{refusals}"
+    );
+    let histogram: (Vec<usize>, Vec<usize>, usize) =
+        serde_json::from_slice(&fs::read(artifacts.join("refusal-histogram.json")).unwrap())
+            .expect("accepted and refused operations, then refused geometries");
+    assert!(histogram.2 >= 1, "{histogram:?}");
+}
+
 fn sequence(seed: u64) {
     let started = Instant::now();
     let artifacts = std::path::PathBuf::from(format!("tmp/op-sequence-model/{seed:016x}"));

@@ -478,8 +478,9 @@ jobs:
             cargo test --release --locked --test op_sequence_generator
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/op-sequence-generator.log | awk '{s+=$4} END{print s+0}')
           # Eight declared fixture-free contracts in #681, #684's pin format,
-          # #731's stream opcodes and #732's EA opcodes, on every host leg.
-          test "$n" -ge 11 || { echo "::error::generator contracts: $n executed, floor 11"; exit 1; }
+          # #731's stream opcodes and #732's EA opcodes, on every host leg,
+          # #1024's input geometry and #1025's refused geometry.
+          test "$n" -ge 13 || { echo "::error::generator contracts: $n executed, floor 13"; exit 1; }
 
       - name: Generated operations and fresh-reopen comparisons
         run: |
@@ -490,8 +491,9 @@ jobs:
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/op-sequence-readback.log | awk '{s+=$4} END{print s+0}')
           # Four original seeds, four declared #682 image-harness contracts,
           # #683's corpus replay, #684's three shrink and capture contracts,
-          # #731's named-stream case and #732's EA case.
-          test "$n" -ge 14 || { echo "::error::readback contracts: $n executed, floor 14"; exit 1; }
+          # #731's named-stream case, #732's EA case and #1025's refused
+          # geometry.
+          test "$n" -ge 15 || { echo "::error::readback contracts: $n executed, floor 15"; exit 1; }
 
       - name: Every explorer has a stable corpus gate
         run: |
