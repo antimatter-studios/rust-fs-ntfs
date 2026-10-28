@@ -60,7 +60,10 @@ fn command() -> Cmd {
              it is dirty), not a place to do real filesystem work: for that, mount it.\n\n\
              Metadata is JSON on stdout (--text for people); `read` writes the file's raw \
              bytes. A failure is {\"error\": \"...\", \"code\": N} on stderr, N being the \
-             exit status: 1 failed, 2 wrong command line, 3 not implemented.",
+             exit status: 1 failed, 2 wrong command line, 3 not implemented, 4 refused by \
+             the volume's state (rm, rmdir, mv, ln, mkdir, truncate or write --at meeting a \
+             directory that is not empty, a name already there, a missing target or a part \
+             of the path that is not a directory).",
         )
         .arg(
             Arg::new("target")
@@ -720,6 +723,20 @@ fn text_arg<'a>(sub: &'a ArgMatches, id: &str) -> Result<&'a str, CliError> {
 
 pub(super) fn ntfs_error(path: &str, e: Error) -> CliError {
     CliError::failed(format!("{path}: {e}"))
+}
+
+/// A namespace verb's error: a refusal the volume's current state gives it
+/// -- a name that is not there, a name already taken, a part of the path
+/// that is not a directory, a directory that is not empty -- is the CLI
+/// contract's exit 4, `refused` (EXIT_REFUSED); every other error is
+/// [`ntfs_error`]'s exit 1.
+fn state_error(path: &str, e: Error) -> CliError {
+    match e.kind() {
+        Kind::NotFound | Kind::Exists | Kind::NotDirectory | Kind::NotEmpty => {
+            CliError::refused_by_state(format!("{path}: {e}"))
+        }
+        _ => ntfs_error(path, e),
+    }
 }
 
 /// What an entry is, from its directory flag and its reparse tag.
@@ -1702,8 +1719,29 @@ fn edit<T>(
     what: &str,
     edit: impl FnOnce(&mut Device) -> Result<T, Error>,
 ) -> Result<T, CliError> {
+    edit_reporting(target, offset, what, ntfs_error, edit)
+}
+
+/// [`edit`] for a namespace verb: a refusal the volume's state gives the
+/// edit is exit 4 ([`state_error`]), as the verb's own checks are.
+fn edit_namespace<T>(
+    target: &OsString,
+    offset: u64,
+    what: &str,
+    edit: impl FnOnce(&mut Device) -> Result<T, Error>,
+) -> Result<T, CliError> {
+    edit_reporting(target, offset, what, state_error, edit)
+}
+
+fn edit_reporting<T>(
+    target: &OsString,
+    offset: u64,
+    what: &str,
+    report: fn(&str, Error) -> CliError,
+    edit: impl FnOnce(&mut Device) -> Result<T, Error>,
+) -> Result<T, CliError> {
     let (mut dev, _) = device::mount(target, offset, true)?;
-    let done = prepared(&mut dev, what, edit)?;
+    let done = prepared_reporting(&mut dev, what, report, edit)?;
     fs_ntfs::block_io::BlockIo::sync(&mut dev)
         .map_err(|e| CliError::failed(format!("{what}: {e}")))?;
     Ok(done)
@@ -1716,13 +1754,33 @@ pub(super) fn prepared<D: BlockIo, T>(
     what: &str,
     edit: impl FnOnce(&mut D) -> Result<T, Error>,
 ) -> Result<T, CliError> {
+    prepared_reporting(dev, what, ntfs_error, edit)
+}
+
+/// [`prepared`] for a namespace verb: a refusal the volume's state gives
+/// the edit is exit 4 ([`state_error`]); the preparation's own refusals
+/// (a dirty or hibernated volume, a log holding work) keep exit 1.
+fn prepared_namespace<D: BlockIo, T>(
+    dev: &mut D,
+    what: &str,
+    edit: impl FnOnce(&mut D) -> Result<T, Error>,
+) -> Result<T, CliError> {
+    prepared_reporting(dev, what, state_error, edit)
+}
+
+fn prepared_reporting<D: BlockIo, T>(
+    dev: &mut D,
+    what: &str,
+    report: fn(&str, Error) -> CliError,
+    edit: impl FnOnce(&mut D) -> Result<T, Error>,
+) -> Result<T, CliError> {
     fs_ntfs::fsck::prepare_rw_mount_io(dev)
         .map_err(|e| CliError::failed(format!("{what}: {e}")))?;
     fs_ntfs::fsck::upgrade_volume_version_io(dev)
         .map_err(|e| CliError::failed(format!("{what}: upgrade the volume version: {e}")))?;
     fs_ntfs::fsck::retire_usn_journal_io(dev)
         .map_err(|e| CliError::failed(format!("{what}: retire the change journal: {e}")))?;
-    edit(dev).map_err(|e| CliError::failed(format!("{what}: {e}")))
+    edit(dev).map_err(|e| report(what, e))
 }
 
 /// Create or replace a regular file with everything on stdin. The whole
@@ -1794,11 +1852,11 @@ fn write_at(target: &OsString, offset: u64, path: &str, at: u64) -> Result<Outco
     std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut data)
         .map_err(|e| CliError::failed(format!("read stdin: {e}")))?;
     let (mut dev, info) = device::mount(target, offset, false)?;
-    let record = read::resolve_path(&mut dev, path).map_err(|e| ntfs_error(path, e))?;
-    let st = read::read_stat(&mut dev, record).map_err(|e| ntfs_error(path, e))?;
+    let record = read::resolve_path(&mut dev, path).map_err(|e| state_error(path, e))?;
+    let st = read::read_stat(&mut dev, record).map_err(|e| state_error(path, e))?;
     if st.file_attributes & 0x400 != 0
         || read::read_attribute_value_if_present(&mut dev, record, AttrType::ReparsePoint, None)
-            .map_err(|e| ntfs_error(path, e))?
+            .map_err(|e| state_error(path, e))?
             .is_some()
     {
         return Err(CliError::not_implemented(format!(
@@ -1812,7 +1870,7 @@ fn write_at(target: &OsString, offset: u64, path: &str, at: u64) -> Result<Outco
         return Err(CliError::failed(format!("{path}: file is read-only")));
     }
     let (_, record_bytes) =
-        fs_ntfs::mft_io::read_mft_record_io(&mut dev, record).map_err(|e| ntfs_error(path, e))?;
+        fs_ntfs::mft_io::read_mft_record_io(&mut dev, record).map_err(|e| state_error(path, e))?;
     let attr = attr_io::find_attribute(&record_bytes, AttrType::Data, None).ok_or_else(|| {
         CliError::not_implemented(format!(
             "{path}: no unnamed $DATA in the base record to patch"
@@ -1840,21 +1898,21 @@ fn write_at(target: &OsString, offset: u64, path: &str, at: u64) -> Result<Outco
         )));
     }
     let mut rehearsal = device::Rehearsal::over(&mut dev);
-    prepared(&mut rehearsal, path, |_| Ok(()))?;
+    prepared_namespace(&mut rehearsal, path, |_| Ok(()))?;
     if data.is_empty() {
         // write_at_io's empty fast path bypasses its metafile guard. A
         // same-size truncate rehearses that policy without touching disk.
         fs_ntfs::write::truncate_io(&mut rehearsal, path, st.size)
-            .map_err(|e| ntfs_error(path, e))?;
+            .map_err(|e| state_error(path, e))?;
     } else {
         fs_ntfs::write::write_at_io(&mut rehearsal, path, at, &data).map_err(|e| {
             if e.contains("exceed attr capacity") {
                 CliError::not_implemented(format!("{path}: {e}"))
             } else {
-                ntfs_error(path, e)
+                state_error(path, e)
             }
         })?;
-        edit(target, offset, path, |io| {
+        edit_namespace(target, offset, path, |io| {
             fs_ntfs::write::write_at_io(io, path, at, &data)
         })?;
     }
@@ -1875,11 +1933,11 @@ fn write_at(target: &OsString, offset: u64, path: &str, at: u64) -> Result<Outco
 fn truncate(target: &OsString, offset: u64, path: &str, size: u64) -> Result<Outcome, CliError> {
     last_name(path)?;
     let (mut dev, info) = device::mount(target, offset, false)?;
-    let record = read::resolve_path(&mut dev, path).map_err(|e| ntfs_error(path, e))?;
-    let st = read::read_stat(&mut dev, record).map_err(|e| ntfs_error(path, e))?;
+    let record = read::resolve_path(&mut dev, path).map_err(|e| state_error(path, e))?;
+    let st = read::read_stat(&mut dev, record).map_err(|e| state_error(path, e))?;
     if st.file_attributes & 0x400 != 0
         || read::read_attribute_value_if_present(&mut dev, record, AttrType::ReparsePoint, None)
-            .map_err(|e| ntfs_error(path, e))?
+            .map_err(|e| state_error(path, e))?
             .is_some()
     {
         return Err(CliError::not_implemented(format!(
@@ -1890,7 +1948,7 @@ fn truncate(target: &OsString, offset: u64, path: &str, size: u64) -> Result<Out
         return Err(CliError::failed(format!("{path}: not a regular file")));
     }
     let (_, bytes) =
-        fs_ntfs::mft_io::read_mft_record_io(&mut dev, record).map_err(|e| ntfs_error(path, e))?;
+        fs_ntfs::mft_io::read_mft_record_io(&mut dev, record).map_err(|e| state_error(path, e))?;
     let data = attr_io::find_attribute(&bytes, AttrType::Data, None).ok_or_else(|| {
         CliError::not_implemented(format!(
             "{path}: no unnamed $DATA in the base record to resize"
@@ -1913,17 +1971,18 @@ fn truncate(target: &OsString, offset: u64, path: &str, size: u64) -> Result<Out
     // but makes no writable open and changes no timestamps or volume metadata.
     let mut rehearsal = device::Rehearsal::over(&mut dev);
     if size == st.size {
-        fs_ntfs::write::truncate_io(&mut rehearsal, path, size).map_err(|e| ntfs_error(path, e))?;
+        fs_ntfs::write::truncate_io(&mut rehearsal, path, size)
+            .map_err(|e| state_error(path, e))?;
     } else {
-        prepared(&mut rehearsal, path, |_| Ok(()))?;
+        prepared_namespace(&mut rehearsal, path, |_| Ok(()))?;
         fs_ntfs::write::truncate_io(&mut rehearsal, path, size).map_err(|e| {
             if e.contains("exceed attr capacity") {
                 CliError::not_implemented(format!("{path}: {e}"))
             } else {
-                ntfs_error(path, e)
+                state_error(path, e)
             }
         })?;
-        edit(target, offset, path, |io| {
+        edit_namespace(target, offset, path, |io| {
             fs_ntfs::write::truncate_io(io, path, size)
         })?;
     }
@@ -1935,7 +1994,7 @@ fn truncate(target: &OsString, offset: u64, path: &str, size: u64) -> Result<Out
 /// path already.
 fn mkdir(target: &OsString, offset: u64, path: &str) -> Result<Outcome, CliError> {
     let (parent, name) = split_path(path)?;
-    let record = edit(target, offset, path, |dev| {
+    let record = edit_namespace(target, offset, path, |dev| {
         if read::resolve_path(dev, path).is_ok() {
             return Err(Error::exists("already exists"));
         }
@@ -1955,7 +2014,7 @@ fn mkdir(target: &OsString, offset: u64, path: &str) -> Result<Outcome, CliError
 fn mkdir_parents(target: &OsString, offset: u64, path: &str) -> Result<Outcome, CliError> {
     let missing = missing_directories(target, offset, path)?;
     if !missing.is_empty() {
-        edit(target, offset, path, |dev| make_directories(dev, &missing))?;
+        edit_namespace(target, offset, path, |dev| make_directories(dev, &missing))?;
     }
     let text = if missing.is_empty() {
         format!("{path} exists; nothing created")
@@ -2019,7 +2078,7 @@ fn missing_directories(
             match read::resolve_path(&mut dev, &at) {
                 Ok(record) => {
                     let (item, enterable) =
-                        entry_info(&mut dev, name, record).map_err(|e| ntfs_error(path, e))?;
+                        entry_info(&mut dev, name, record).map_err(|e| state_error(path, e))?;
                     if enterable {
                         continue;
                     }
@@ -2029,22 +2088,26 @@ fn missing_directories(
                         Some(t) if *t == Json::from("dir") => Some("a reparse point"),
                         _ => None,
                     };
-                    return Err(CliError::failed(match (i + 1 == names.len(), reparse) {
-                        (true, Some(what)) => {
-                            format!("{path}: {at} already exists and is {what}, not a directory")
-                        }
-                        (true, None) => {
-                            format!("{path}: {at} already exists and is not a directory")
-                        }
-                        (false, Some(what)) => format!(
-                            "{path}: {at} is {what}, which mkdir --parents does not follow, \
+                    return Err(CliError::refused_by_state(
+                        match (i + 1 == names.len(), reparse) {
+                            (true, Some(what)) => {
+                                format!(
+                                    "{path}: {at} already exists and is {what}, not a directory"
+                                )
+                            }
+                            (true, None) => {
+                                format!("{path}: {at} already exists and is not a directory")
+                            }
+                            (false, Some(what)) => format!(
+                                "{path}: {at} is {what}, which mkdir --parents does not follow, \
                              so not a directory"
-                        ),
-                        (false, None) => format!("{path}: {at} is not a directory"),
-                    }));
+                            ),
+                            (false, None) => format!("{path}: {at} is not a directory"),
+                        },
+                    ));
                 }
                 Err(e) if e.kind() == Kind::NotFound => {}
-                Err(e) => return Err(ntfs_error(path, e)),
+                Err(e) => return Err(state_error(path, e)),
             }
         }
         let units = name.encode_utf16().count();
@@ -2056,7 +2119,7 @@ fn missing_directories(
         missing.push(at.clone());
     }
     if !missing.is_empty() {
-        prepared(&mut device::Rehearsal::over(&mut dev), path, |io| {
+        prepared_namespace(&mut device::Rehearsal::over(&mut dev), path, |io| {
             make_directories(io, &missing)
         })?;
     }
@@ -2100,7 +2163,7 @@ fn remove(
     directory: bool,
 ) -> Result<Outcome, CliError> {
     split_path(path)?;
-    edit(target, offset, path, |dev| {
+    edit_namespace(target, offset, path, |dev| {
         if directory {
             fs_ntfs::write::rmdir_io(dev, path)
         } else {
@@ -2145,7 +2208,7 @@ fn directory(dev: &mut Device, path: &str) -> Result<u64, Error> {
 /// nothing succeeds without opening the image for writing either.
 fn rename(target: &OsString, offset: u64, source: &str, path: &str) -> Result<Outcome, CliError> {
     if let Some((from, name)) = renamable(target, offset, source, path)? {
-        edit(target, offset, source, |dev| {
+        edit_namespace(target, offset, source, |dev| {
             fs_ntfs::write::rename_io(dev, &from, name)
         })?;
     }
@@ -2183,8 +2246,8 @@ fn renamable<'p>(
         }
     }
     let (mut dev, _) = device::mount(target, offset, false)?;
-    let from_dir = directory(&mut dev, from_parent).map_err(|e| ntfs_error(source, e))?;
-    let to_dir = directory(&mut dev, to_parent).map_err(|e| ntfs_error(path, e))?;
+    let from_dir = directory(&mut dev, from_parent).map_err(|e| state_error(source, e))?;
+    let to_dir = directory(&mut dev, to_parent).map_err(|e| state_error(path, e))?;
     if from_dir != to_dir {
         return Err(CliError::not_implemented(format!(
             "mv across directories: {source} is in {from_parent} and {path} in {to_parent}; \
@@ -2192,13 +2255,13 @@ fn renamable<'p>(
         )));
     }
     let from = source.trim_end_matches('/').to_string();
-    let record = read::resolve_path(&mut dev, &from).map_err(|e| ntfs_error(source, e))?;
+    let record = read::resolve_path(&mut dev, &from).map_err(|e| state_error(source, e))?;
     let is_dir = read::read_stat(&mut dev, record)
-        .map_err(|e| ntfs_error(source, e))?
+        .map_err(|e| state_error(source, e))?
         .is_dir;
     if !is_dir && (from_slash || to_slash) {
         let p = if from_slash { source } else { path };
-        return Err(CliError::failed(format!("{p}: not a directory")));
+        return Err(CliError::refused_by_state(format!("{p}: not a directory")));
     }
     let units = to_name.encode_utf16().count();
     if units > 255 {
@@ -2207,12 +2270,12 @@ fn renamable<'p>(
         )));
     }
     if stored_name(&mut dev, from_dir, record, from_name)
-        .map_err(|e| ntfs_error(source, e))?
+        .map_err(|e| state_error(source, e))?
         .is_some_and(|stored| stored == to_name)
     {
         return Ok(None);
     }
-    prepared(&mut device::Rehearsal::over(&mut dev), source, |io| {
+    prepared_namespace(&mut device::Rehearsal::over(&mut dev), source, |io| {
         fs_ntfs::write::rename_io(io, &from, to_name)
     })?;
     Ok(Some((from, to_name)))
@@ -2254,7 +2317,7 @@ fn link(
     symbolic: bool,
 ) -> Result<Outcome, CliError> {
     let (parent, name) = linkable(target, offset, to, path, symbolic)?;
-    let record = edit(target, offset, path, |dev| {
+    let record = edit_namespace(target, offset, path, |dev| {
         make_link(dev, to, parent, name, symbolic)
     })?;
     let report = Json::object([
@@ -2318,7 +2381,7 @@ fn linkable<'p>(
         )));
     }
     if slash {
-        return Err(CliError::failed(format!(
+        return Err(CliError::refused_by_state(format!(
             "{path}: not a directory; a link is never one"
         )));
     }
@@ -2328,15 +2391,15 @@ fn linkable<'p>(
     let (mut dev, _) = device::mount(target, offset, false)?;
     if !symbolic {
         let file = hard_link_target(to);
-        let record = read::resolve_path(&mut dev, file).map_err(|e| ntfs_error(to, e))?;
+        let record = read::resolve_path(&mut dev, file).map_err(|e| state_error(to, e))?;
         let is_dir = read::read_stat(&mut dev, record)
-            .map_err(|e| ntfs_error(to, e))?
+            .map_err(|e| state_error(to, e))?
             .is_dir;
         if !is_dir && file.len() < to.len() {
-            return Err(CliError::failed(format!("{to}: not a directory")));
+            return Err(CliError::refused_by_state(format!("{to}: not a directory")));
         }
     }
-    prepared(&mut device::Rehearsal::over(&mut dev), path, |io| {
+    prepared_namespace(&mut device::Rehearsal::over(&mut dev), path, |io| {
         make_link(io, to, parent, name, symbolic)
     })?;
     Ok((parent, name))
