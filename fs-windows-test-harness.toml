@@ -62,6 +62,7 @@ cli = [
   "cli-mkdir-parents-win-verify-chkdsk",
   "cli-truncate-win-verify-chkdsk",
   "cli-write-at-win-verify-chkdsk",
+  "cli-attrlist-split-extents-win-verify-chkdsk",
   "cli-windows-interrupted-1-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-6-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-1-write-after-replay-win-verify-chkdsk",
@@ -447,6 +448,18 @@ expect_exit = 0
 # <image>.manifest: each file's final size and SHA-256, for win-cli-verify.
 host = "host"
 command = "bash scripts/cli-oracle.sh attrlist-data {image_dir}/{run_id}/{scenario.image}"
+expect_exit = 0
+
+[ops.cli-attrlist-split-extents]
+# rust-ntfs stream and ea fill /split.dat's base record so it gains an
+# $ATTRIBUTE_LIST; fs.ntfs cuts the free space into one-cluster holes and
+# grows, patches, rewrites and truncates /split.dat's unnamed stream over
+# them, so its run list is split into extents the list names (#799, #800),
+# the list read back after every write by examples/listed_data_extents.rs;
+# then a clean fsck.ntfs. Writes <image>.manifest: the file's final size and
+# SHA-256, for win-cli-verify (#801).
+host = "host"
+command = "bash scripts/cli-oracle.sh attrlist-split-extents {image_dir}/{run_id}/{scenario.image}"
 expect_exit = 0
 
 [ops.cli-mkdir-parents]
