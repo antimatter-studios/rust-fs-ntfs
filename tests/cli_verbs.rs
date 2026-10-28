@@ -82,6 +82,7 @@ fn every_verb_documents_itself_on_stdout() {
         "set-dirty",
         "sparse",
         "symlink",
+        "reparse",
         "objid",
         "layout",
         "directory-layout",
@@ -182,6 +183,61 @@ fn the_verbs_that_change_a_volume_report_success() {
         "ls prints the volume's files on stdout: {}",
         stdout(&listing)
     );
+}
+
+/// `reparse` gives an existing file a relative symbolic link and takes it
+/// away, and `objid --remove` takes an object id away: what the Windows
+/// matrix drives on a file with an `$ATTRIBUTE_LIST` (#810). Taking away
+/// what a file does not have fails, so a scenario cannot pass on a removal
+/// that did nothing.
+#[test]
+fn reparse_and_objid_remove_set_and_take_away() {
+    use fs_ntfs::record_build::{build_symlink_reparse_data, reparse_tag};
+    use fs_ntfs::write::{read_object_id, read_reparse_point};
+    let img = volume("reparse");
+    let image = Path::new(&img);
+
+    let set = run(&["reparse", &img, "/f.txt", "d/target.txt"]);
+    assert_eq!(code(&set), 0, "reparse: {}", stderr(&set));
+    assert_eq!(
+        stdout(&set),
+        "gave /f.txt a symbolic link to d/target.txt\n"
+    );
+    let point = read_reparse_point(image, "/f.txt")
+        .expect("read the reparse point")
+        .expect("/f.txt has a reparse point");
+    assert_eq!(point.reparse_tag, reparse_tag::SYMLINK);
+    assert_eq!(
+        point.data,
+        build_symlink_reparse_data("d\\target.txt", None, true),
+        "a relative link to d\\target.txt, as Windows spells it"
+    );
+
+    let removed = run(&["reparse", &img, "/f.txt", "--remove"]);
+    assert_eq!(code(&removed), 0, "reparse --remove: {}", stderr(&removed));
+    assert_eq!(stdout(&removed), "removed the reparse point of /f.txt\n");
+    assert!(read_reparse_point(image, "/f.txt").unwrap().is_none());
+    let again = run(&["reparse", &img, "/f.txt", "--remove"]);
+    assert_eq!(code(&again), 1, "no reparse point to remove");
+    assert!(!stderr(&again).is_empty());
+
+    let id = "00112233445566778899aabbccddeeff";
+    assert_eq!(code(&run(&["objid", &img, "/f.txt", id])), 0);
+    let removed = run(&["objid", &img, "/f.txt", "--remove"]);
+    assert_eq!(code(&removed), 0, "objid --remove: {}", stderr(&removed));
+    assert_eq!(stdout(&removed), "removed the object id of /f.txt\n");
+    assert_eq!(read_object_id(image, "/f.txt").unwrap(), None);
+    let again = run(&["objid", &img, "/f.txt", "--remove"]);
+    assert_eq!(code(&again), 1, "no object id to remove");
+    assert!(!stderr(&again).is_empty());
+
+    for args in [
+        vec!["reparse", &img, "/f.txt"],
+        vec!["reparse", &img, "/f.txt", "t", "--remove"],
+        vec!["objid", &img, "/f.txt", "--remove", "x"],
+    ] {
+        assert_eq!(code(&run(&args)), 2, "{args:?} is a usage error");
+    }
 }
 
 /// A VERB THAT CANNOT DO WHAT IT WAS ASKED FAILS, and says why on
@@ -363,6 +419,7 @@ fn the_help_lists_every_verb_that_exists() {
         "rename",
         "remove",
         "set-dirty",
+        "reparse",
         "layout",
         "directory-layout",
     ] {
