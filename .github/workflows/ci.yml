@@ -514,6 +514,12 @@ jobs:
           sudo apt-get install -y ntfs-3g
           chore test:op-sequence-oracle
 
+      # #1034: the boundary geometries, streams and EAs each leave their
+      # image beside geometry.txt and ntfsfix.txt for chkdsk to grade (#1035).
+      - name: Retained operation samples are complete
+        if: matrix.os == 'ubuntu-latest'
+        run: bash scripts/check-op-sequence-samples.sh
+
       - name: Keep operation sequence reproducers and refusal statistics
         if: always() && matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
