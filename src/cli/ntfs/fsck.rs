@@ -87,7 +87,7 @@ use fs_ntfs::fsck::{
 #[cfg(unix)]
 use fs_ntfs::repair_plan::check_plan_source;
 use fs_ntfs::repair_plan::{
-    copy_repair, load_plan, plan_fsck_io, save_plan, CopyRepairError, RepairPlan,
+    copy_repair, load_plan, plan_fsck_io, save_plan, CopyRepairError, PlanSourceError, RepairPlan,
 };
 use sha2::{Digest, Sha256};
 
@@ -625,6 +625,11 @@ fn apply(source: &Path, plan: &Path, target: &Path) -> Result<Outcome, CliError>
         CopyRepairError::TargetExists(_) => usage(format!("{e}: nothing is overwritten")),
         CopyRepairError::Source(_) => failed(format!(
             "{name}: refused for plan '{plan_name}', no target created: {e}"
+        )),
+        CopyRepairError::Target(
+            PlanSourceError::DeviceSize { .. } | PlanSourceError::DeviceSerial { .. },
+        ) => failed(format!(
+            "{name}: copy-repair into '{to}' refused before the first unit: {e}"
         )),
         CopyRepairError::Target(_) => failed(format!(
             "{name}: copy-repair into '{to}' stopped, the earlier units written: {e}"
