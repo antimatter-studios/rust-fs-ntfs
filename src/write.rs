@@ -8322,6 +8322,29 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
     stamp_changed_io(io, file)
 }
 
+/// Move the regular file at `old_path` to `new_parent_path/new_basename`,
+/// which may be in another directory.
+pub fn move_to(
+    image: &Path,
+    old_path: &str,
+    new_parent_path: &str,
+    new_basename: &str,
+) -> Result<(), Error> {
+    let mut io = open_for_write(image)?;
+    move_to_io(&mut io, old_path, new_parent_path, new_basename)
+}
+
+pub fn move_to_io<T: BlockIo + ?Sized>(
+    _io: &mut T,
+    old_path: &str,
+    new_parent_path: &str,
+    new_basename: &str,
+) -> Result<(), Error> {
+    Err(Error::refused(format!(
+        "move {old_path} to {new_parent_path}/{new_basename}: not yet supported"
+    )))
+}
+
 /// [`rename_replace_io`] without advancing the times of what it changed; see
 /// [`stamp_written_io`].
 fn rename_replace_unstamped_io<T: BlockIo + ?Sized>(
@@ -11842,6 +11865,239 @@ mod tests {
         delete_named_stream(img.path(), "/ads.txt", "tag").unwrap();
         let after = list_named_streams(img.path(), "/ads.txt").unwrap();
         assert!(!after.contains(&"tag".to_string()));
+    }
+
+    // --- move_to_io: a name moved into another directory (#600) -------------
+
+    mod move_to {
+        use super::*;
+        use ntfs::structured_values::NtfsFileName;
+        use ntfs::{Ntfs, NtfsAttributeType, NtfsReadSeek};
+        use std::io::Cursor;
+
+        /// The names directory `dir` indexes, read by the independent `ntfs`
+        /// crate over a fresh view of the bytes.
+        fn indexed_names(dev: &MemDev, dir: u64) -> Vec<String> {
+            let mut reader = Cursor::new(&dev.buf);
+            let mut fs = Ntfs::new(&mut reader).unwrap();
+            fs.read_upcase_table(&mut reader).unwrap();
+            let file = fs.file(&mut reader, dir).unwrap();
+            let index = file.directory_index(&mut reader).unwrap();
+            let mut entries = index.entries();
+            let mut names = Vec::new();
+            while let Some(entry) = entries.next(&mut reader) {
+                let key = entry.unwrap().key().unwrap().unwrap();
+                names.push(key.name().to_string_lossy());
+            }
+            names
+        }
+
+        /// Every `$FILE_NAME` record `rec` holds, as (parent record, name,
+        /// namespace), read by the `ntfs` crate.
+        fn own_names(dev: &MemDev, rec: u64) -> Vec<(u64, String, u8)> {
+            let mut reader = Cursor::new(&dev.buf);
+            let mut fs = Ntfs::new(&mut reader).unwrap();
+            fs.read_upcase_table(&mut reader).unwrap();
+            let file = fs.file(&mut reader, rec).unwrap();
+            let mut attrs = file.attributes();
+            let mut out = Vec::new();
+            while let Some(item) = attrs.next(&mut reader) {
+                let item = item.unwrap();
+                let attr = item.to_attribute().unwrap();
+                if attr.ty().unwrap() == NtfsAttributeType::FileName {
+                    let name = attr
+                        .structured_value::<_, NtfsFileName>(&mut reader)
+                        .unwrap();
+                    out.push((
+                        name.parent_directory_reference().file_record_number(),
+                        name.name().to_string_lossy(),
+                        name.namespace() as u8,
+                    ));
+                }
+            }
+            out.sort();
+            out
+        }
+
+        /// The unnamed stream of `rec`, read by the `ntfs` crate.
+        fn contents(dev: &MemDev, rec: u64) -> Vec<u8> {
+            let mut reader = Cursor::new(&dev.buf);
+            let mut fs = Ntfs::new(&mut reader).unwrap();
+            fs.read_upcase_table(&mut reader).unwrap();
+            let file = fs.file(&mut reader, rec).unwrap();
+            let item = file.data(&mut reader, "").unwrap().unwrap();
+            let attr = item.to_attribute().unwrap();
+            let mut value = attr.value(&mut reader).unwrap();
+            let mut out = Vec::new();
+            let mut chunk = [0; 4096];
+            loop {
+                let n = value.read(&mut reader, &mut chunk).unwrap();
+                if n == 0 {
+                    break;
+                }
+                out.extend_from_slice(&chunk[..n]);
+            }
+            out
+        }
+
+        fn link_count(dev: &mut MemDev, rec: u64) -> u16 {
+            crate::read::read_stat(dev, rec).unwrap().link_count
+        }
+
+        fn assert_clean(dev: &mut MemDev) {
+            let report = crate::fsck::check_io(dev).unwrap();
+            assert!(report.findings.is_empty(), "{:?}", report.findings);
+        }
+
+        /// `/a/f`, holding `body`, with `/a` and `/b` beside it.
+        fn two_directories(body: &[u8]) -> (MemDev, u64, u64, u64) {
+            let mut dev = fresh_vol();
+            let a = mkdir_io(&mut dev, "/", "a").unwrap();
+            let b = mkdir_io(&mut dev, "/", "b").unwrap();
+            let f = create_file_io(&mut dev, "/a", "f").unwrap();
+            write_file_contents_io(&mut dev, "/a/f", body).unwrap();
+            assert_clean(&mut dev);
+            (dev, a, b, f)
+        }
+
+        #[test]
+        fn a_file_moves_into_another_directory_under_a_new_name() {
+            let body = b"moved across directories".repeat(400);
+            let (mut dev, a, b, f) = two_directories(&body);
+            move_to_io(&mut dev, "/a/f", "/b", "g").unwrap();
+
+            assert_eq!(
+                resolve_path_to_record_number_io(&mut dev, "/b/g").unwrap(),
+                f
+            );
+            let gone = resolve_path_to_record_number_io(&mut dev, "/a/f").unwrap_err();
+            assert_eq!(gone.kind(), crate::error::Kind::NotFound, "{gone}");
+            assert!(!indexed_names(&dev, a).contains(&"f".to_string()));
+            assert_eq!(indexed_names(&dev, b), ["g"]);
+            assert_eq!(own_names(&dev, f), [(b, "g".to_string(), 0)]);
+            assert_eq!(link_count(&mut dev, f), 1);
+            assert_eq!(contents(&dev, f), body);
+            assert_clean(&mut dev);
+        }
+
+        #[test]
+        fn a_file_keeps_its_name_when_it_moves_to_the_root() {
+            let (mut dev, a, _, f) = two_directories(b"to the root");
+            move_to_io(&mut dev, "/a/f", "/", "f").unwrap();
+
+            assert_eq!(resolve_path_to_record_number_io(&mut dev, "/f").unwrap(), f);
+            assert!(indexed_names(&dev, a).is_empty());
+            assert!(indexed_names(&dev, 5).contains(&"f".to_string()));
+            assert_eq!(own_names(&dev, f), [(5, "f".to_string(), 0)]);
+            assert_eq!(link_count(&mut dev, f), 1);
+            assert_clean(&mut dev);
+        }
+
+        /// Into and out of a directory big enough to hold its index in INDX
+        /// blocks, the shape every busy directory has.
+        #[test]
+        fn a_file_moves_into_and_out_of_a_directory_with_index_blocks() {
+            let mut dev = fresh_vol();
+            let big = mkdir_io(&mut dev, "/", "big").unwrap();
+            for i in 0..80 {
+                create_file_io(&mut dev, "/big", &format!("file-{i:03}.txt")).unwrap();
+            }
+            let (_, record) = read_mft_record_io(&mut dev, big).unwrap();
+            let flags = index_io::index_root_flags(&record).unwrap();
+            assert_ne!(
+                flags & index_io::IH_FLAG_HAS_SUBNODES,
+                0,
+                "the fixture has INDX blocks"
+            );
+            let out = resolve_path_to_record_number_io(&mut dev, "/big/file-040.txt").unwrap();
+            let into = create_file_io(&mut dev, "/", "incoming.txt").unwrap();
+
+            move_to_io(&mut dev, "/big/file-040.txt", "/", "outgoing.txt").unwrap();
+            move_to_io(&mut dev, "/incoming.txt", "/big", "file-040.txt").unwrap();
+
+            assert_eq!(
+                resolve_path_to_record_number_io(&mut dev, "/outgoing.txt").unwrap(),
+                out
+            );
+            assert_eq!(
+                resolve_path_to_record_number_io(&mut dev, "/big/file-040.txt").unwrap(),
+                into
+            );
+            let names = indexed_names(&dev, big);
+            assert_eq!(names.len(), 80);
+            assert_eq!(names.iter().filter(|n| *n == "file-040.txt").count(), 1);
+            assert!(!indexed_names(&dev, 5).contains(&"incoming.txt".to_string()));
+            assert_eq!(own_names(&dev, out), [(5, "outgoing.txt".to_string(), 0)]);
+            assert_eq!(
+                own_names(&dev, into),
+                [(big, "file-040.txt".to_string(), 0)]
+            );
+            assert_clean(&mut dev);
+        }
+
+        /// One name of a file with two moves; the other stays, and the
+        /// count still says two.
+        #[test]
+        fn one_name_of_a_hard_linked_file_moves_and_the_other_stays() {
+            let (mut dev, a, b, f) = two_directories(b"linked");
+            let c = mkdir_io(&mut dev, "/", "c").unwrap();
+            link_io(&mut dev, "/a/f", "/c", "h").unwrap();
+            move_to_io(&mut dev, "/a/f", "/b", "f").unwrap();
+
+            assert!(indexed_names(&dev, a).is_empty());
+            assert_eq!(indexed_names(&dev, b), ["f"]);
+            assert_eq!(indexed_names(&dev, c), ["h"]);
+            assert_eq!(
+                own_names(&dev, f),
+                [(b, "f".to_string(), 0), (c, "h".to_string(), 0)]
+            );
+            assert_eq!(link_count(&mut dev, f), 2);
+            assert_clean(&mut dev);
+        }
+
+        /// A name in the same directory is the rename it always was.
+        #[test]
+        fn a_move_within_one_directory_is_a_rename() {
+            let (mut dev, a, _, f) = two_directories(b"same directory");
+            move_to_io(&mut dev, "/a/f", "/a", "longer-name").unwrap();
+            assert_eq!(indexed_names(&dev, a), ["longer-name"]);
+            assert_eq!(own_names(&dev, f), [(a, "longer-name".to_string(), 0)]);
+            assert_clean(&mut dev);
+        }
+
+        /// A name onto another of the same file's names changes nothing, as
+        /// rename(2) does.
+        #[test]
+        fn a_move_onto_another_name_of_the_same_file_changes_nothing() {
+            let (mut dev, _, _, _) = two_directories(b"same file");
+            link_io(&mut dev, "/a/f", "/b", "f").unwrap();
+            let before = dev.buf.clone();
+            move_to_io(&mut dev, "/a/f", "/b", "F").unwrap();
+            assert!(dev.buf == before, "the volume changed");
+        }
+
+        /// Each refusal is made before anything is written.
+        #[test]
+        fn a_refused_move_writes_nothing() {
+            let (mut dev, _, _, _) = two_directories(b"refused");
+            mkdir_io(&mut dev, "/a", "d").unwrap();
+            create_file_io(&mut dev, "/b", "taken").unwrap();
+            let before = dev.buf.clone();
+            for (old, parent, name, kind) in [
+                ("/a/f", "/b", "TAKEN", crate::error::Kind::Exists),
+                ("/a/missing", "/b", "g", crate::error::Kind::NotFound),
+                ("/a/f", "/nowhere", "g", crate::error::Kind::NotFound),
+                ("/a/f", "/a/f", "g", crate::error::Kind::NotDirectory),
+                ("/a/f", "/b", "bad:name", crate::error::Kind::Invalid),
+                ("/a/d", "/b", "d", crate::error::Kind::Refused),
+                ("/$MFT", "/b", "m", crate::error::Kind::Refused),
+                ("/a/f", "/$Extend", "g", crate::error::Kind::Refused),
+            ] {
+                let err = move_to_io(&mut dev, old, parent, name).unwrap_err();
+                assert_eq!(err.kind(), kind, "{old} -> {parent}/{name}: {err}");
+                assert!(dev.buf == before, "{old} -> {parent}/{name} wrote");
+            }
+        }
     }
 }
 

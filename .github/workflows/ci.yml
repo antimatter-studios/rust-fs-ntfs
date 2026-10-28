@@ -922,6 +922,28 @@ jobs:
       - name: Ctrl-C interrupts the inventory CLI process
         shell: pwsh
         run: cargo test --locked --features cli,harness --test cli_inventory_ctrl_c
+      # Files Windows wrote, moved by fs.ntfs mv into other directories --
+      # under the same name and a new one, into and out of a directory with
+      # INDX blocks, and one name of a hard-linked file: chkdsk, the
+      # listings, the bytes and the link list grade it (#600). The features
+      # match the test above, so the CLI is already built.
+      - name: Windows grades fs.ntfs mv into another directory
+        shell: pwsh
+        run: |
+          cargo build --locked --features cli,harness --bin rust-fs-ntfs
+          if ($LASTEXITCODE -ne 0) { throw 'the CLI did not build' }
+          ./tests/scripts/mv-across-directories-windows-oracle.ps1 `
+            -Cli target/debug/rust-fs-ntfs.exe -OutDir tmp/mv-across-directories
+          if (Test-Path -LiteralPath tmp/mv-across-directories/mv-across-directories.vhd) { throw 'the oracle image survived' }
+      - name: Retain the cross-directory move verdicts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mv-across-directories-windows-${{ github.sha }}
+          path: |
+            tmp/mv-across-directories/*.json
+            tmp/mv-across-directories/chkdsk.txt
+          if-no-files-found: warn
       - name: Measure which names Win32 can create as files
         shell: pwsh
         run: pwsh -File test-disks/measure-win32-names.ps1
