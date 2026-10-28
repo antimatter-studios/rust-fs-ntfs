@@ -172,5 +172,17 @@ $diff = @(Compare-PhysicalSectorGeometryRows $row512n $row512e)
 Assert-Geometry (($diff -join ',') -eq 'boot.mft_lcn') 'the diff names each changed field and excludes the locked $LogFile'
 $row512e.partition_offset = 1048576
 Assert-Geometry (@(Compare-PhysicalSectorGeometryRows $row512n $row512e) -contains 'partition_offset') 'the diff names a moved partition'
-if ($checks -ne 59) { throw "only $checks geometry contracts executed, expected 59" }
-Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 59)"
+# The index VCN unit (#704): one unit dividing every later block's offset.
+$vcnBlocks = @([pscustomobject]@{ offset = 0; vcn = 0 }, [pscustomobject]@{ offset = 4096; vcn = 8 },
+    [pscustomobject]@{ offset = 8192; vcn = 16 })
+Assert-Geometry ((Measure-IndexVcnUnit $vcnBlocks) -eq 512) 'blocks 4096 bytes apart at VCNs 8 apart measure a 512-byte unit'
+$clusterBlocks = @([pscustomobject]@{ offset = 0; vcn = 0 }, [pscustomobject]@{ offset = 65536; vcn = 1 },
+    [pscustomobject]@{ offset = 131072; vcn = 2 })
+Assert-Geometry ((Measure-IndexVcnUnit $clusterBlocks) -eq 65536) 'blocks a cluster apart at consecutive VCNs measure a cluster unit'
+Assert-GeometryFailure { Measure-IndexVcnUnit @($vcnBlocks[0], $vcnBlocks[1], $clusterBlocks[2]) } 'blocks disagreeing on the unit fail'
+Assert-GeometryFailure { Measure-IndexVcnUnit @($vcnBlocks[0], $vcnBlocks[1]) } 'one block past the first measures nothing'
+Assert-GeometryFailure { Measure-IndexVcnUnit @($vcnBlocks[1], $vcnBlocks[2]) } 'no block at offset 0 fails'
+Assert-GeometryFailure { Measure-IndexVcnUnit @($vcnBlocks[0], [pscustomobject]@{ offset = 4096; vcn = 3 },
+    [pscustomobject]@{ offset = 8192; vcn = 6 }) } 'a VCN that does not divide its offset fails'
+if ($checks -ne 65) { throw "only $checks geometry contracts executed, expected 65" }
+Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 65)"
