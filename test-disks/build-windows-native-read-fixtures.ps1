@@ -1,6 +1,7 @@
 # Builds the fixtures whose shapes only Windows can author:
 #   * ntfs-attrlist.img: named $DATA streams overflow into extension records
-#   * ntfs-compressed.img: classic NTFS/LZNT1-compressed $DATA
+#   * ntfs-compressed.img: classic NTFS/LZNT1-compressed $DATA, plus
+#     ntfs-compressed.sha256.tsv, each file's path, size and Windows' SHA-256
 #   * ntfs-symlink.img: symlinks Windows created, plus
 #     ntfs-symlink.targets.tsv, the target Windows itself reports for each
 #   * ntfs-cli-read.img: files Windows wrote, plus ntfs-cli-read.sha256.tsv,
@@ -73,6 +74,12 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-attrlist-names.img' -Label 'ATTRN
     [IO.File]::WriteAllText($attrNamesReport, (($lines -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
 }
 
+# mixed.bin spans six 64 KiB compression units and a partial seventh, so
+# export is graded on every way NTFS stores a unit: LZNT1-compressed
+# pattern units, a unit Windows deallocates (zeros, made a hole with
+# FSCTL_SET_ZERO_DATA) and three random units that do not shrink and are
+# stored raw. ntfs-compressed.sha256.tsv holds the SHA-256 Windows computes.
+$compressedReport = [System.IO.Path]::GetFullPath('test-disks/ntfs-compressed.sha256.tsv')
 New-WindowsFixture -ImagePath 'test-disks/ntfs-compressed.img' -Label 'COMPRESSED' -Populate {
     param($root)
     $file = Join-Path $root 'comp.txt'
@@ -81,12 +88,35 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-compressed.img' -Label 'COMPRESSE
     for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = $pattern[$i % 3] }
     [System.IO.File]::WriteAllBytes($file, $bytes)
 
-    & compact.exe /C /I /Q $file | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "compact.exe failed with exit $LASTEXITCODE" }
-    $attrs = (Get-Item $file -Force).Attributes
-    if (($attrs -band [System.IO.FileAttributes]::Compressed) -eq 0) {
-        throw 'Windows did not mark comp.txt as NTFS-compressed'
+    $unit = 65536
+    $mixed = Join-Path $root 'mixed.bin'
+    $bytes = New-Object byte[] (6 * $unit + 1000)
+    for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = $pattern[$i % 3] }
+    [System.Array]::Clear($bytes, $unit, $unit)
+    $random = New-Object byte[] (3 * $unit)
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($random)
+    [System.Array]::Copy($random, 0, $bytes, 2 * $unit, $random.Length)
+    [System.IO.File]::WriteAllBytes($mixed, $bytes)
+
+    foreach ($target in @($file, $mixed)) {
+        & compact.exe /C /I /Q $target | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "compact.exe failed with exit $LASTEXITCODE" }
+        $attrs = (Get-Item $target -Force).Attributes
+        if (($attrs -band [System.IO.FileAttributes]::Compressed) -eq 0) {
+            throw "Windows did not mark $target as NTFS-compressed"
+        }
     }
+    & fsutil.exe sparse setflag $mixed | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "fsutil sparse setflag failed with exit $LASTEXITCODE" }
+    & fsutil.exe sparse setrange $mixed $unit $unit | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "fsutil sparse setrange failed with exit $LASTEXITCODE" }
+    $lines = foreach ($target in @($file, $mixed)) {
+        $size = (Get-Item -LiteralPath $target -Force).Length
+        $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+        "/$(Split-Path -Leaf $target)`t$size`t$hash"
+    }
+    [System.IO.File]::WriteAllText($compressedReport, (($lines -join "`n") + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
 }
 
 # Symlinks created by Windows, and the target Windows reports for each, so
