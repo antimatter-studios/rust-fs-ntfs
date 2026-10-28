@@ -34,6 +34,26 @@ fn volume_with_a_file(tag: &str) -> (PathIo, u64) {
     (io, rec)
 }
 
+/// Mark every free cluster of the volume in use, so that nothing written
+/// after it can go into clusters.
+fn take_every_free_cluster(io: &mut PathIo) {
+    let bm = bitmap::locate_bitmap_io(io).expect("locate $Bitmap");
+    let mut want = bitmap::count_free_io(io, &bm).expect("count free clusters");
+    while want > 0 {
+        match bitmap::find_free_run_io(io, &bm, want, 0).expect("find a free run") {
+            Some(lcn) => {
+                bitmap::allocate_io(io, &bm, lcn, want).expect("take a free run");
+                want = bitmap::count_free_io(io, &bm).expect("count free clusters");
+            }
+            None => want /= 2,
+        }
+    }
+    assert_eq!(
+        bitmap::count_free_io(io, &bm).expect("count free clusters"),
+        0
+    );
+}
+
 fn stream<T: BlockIo + ?Sized>(io: &mut T, rec: u64, name: &str) -> Option<Vec<u8>> {
     read::read_attribute_value_if_present(io, rec, AttrType::Data, Some(name))
         .expect("read the stream")
@@ -43,21 +63,24 @@ fn stream<T: BlockIo + ?Sized>(io: &mut T, rec: u64, name: &str) -> Option<Vec<u
 /// non-resident `zz`, and the refused rewrite must leave the empty
 /// resident `zz` in place.
 ///
-/// #469's reproduction was a file whose `$EA` filled the record. A file's
-/// stream now moves to an extension record instead (#480), so the record
-/// here is a directory's, whose attributes are not moved between records,
-/// filled with small streams until the next is refused.
+/// #469's reproduction was a file whose `$EA` filled the record. A stream
+/// its record cannot hold now moves to an extension record instead, a
+/// file's (#480) and, as Windows does, a directory's (#814), so a full
+/// record alone no longer refuses it. A stream goes through the list only
+/// when it has a cluster to go to otherwise, so here the volume has no
+/// free cluster: the record fills with small streams until the next is
+/// refused, and the rewrite has room neither in the record nor in clusters.
 #[test]
 fn a_rewrite_refused_for_want_of_record_space_keeps_the_resident_stream() {
-    let (mut io, _) = volume_with_a_file("record");
-    let rec = write::mkdir_io(&mut io, "/", "d").expect("mkdir /d");
-    write::write_named_stream_io(&mut io, "/d", "zz", b"").expect("create zz, empty");
+    let (mut io, rec) = volume_with_a_file("record");
+    write::write_named_stream_io(&mut io, "/f", "zz", b"").expect("create zz, empty");
+    take_every_free_cluster(&mut io);
     let filled = (0..64).any(|i| {
-        write::write_named_stream_io(&mut io, "/d", &format!("f{i:02}"), &[7u8; 8]).is_err()
+        write::write_named_stream_io(&mut io, "/f", &format!("f{i:02}"), &[7u8; 8]).is_err()
     });
-    assert!(filled, "64 small streams fitted in a directory's record");
+    assert!(filled, "64 small streams fitted in a file's record");
 
-    let got = write::write_named_stream_io(&mut io, "/d", "zz", &[5u8; 556]);
+    let got = write::write_named_stream_io(&mut io, "/f", "zz", &[5u8; 556]);
     assert!(
         got.is_err(),
         "the rewrite was expected to be refused for want of record space, and succeeded; \
