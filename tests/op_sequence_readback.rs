@@ -77,10 +77,17 @@ fn verify(image: &str, model: &BTreeMap<String, Vec<u8>>, initialized: &BTreeMap
     );
 }
 
+/// The explorer's tests share its artifacts and its image, so they take
+/// turns; libFuzzer itself runs one input at a time.
+static EXPLORER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A geometry the formatter refuses (#1025) runs nothing: the explorer
 /// records the formatter's reason and counts it in its histogram.
 #[test]
 fn the_explorer_counts_a_refused_geometry_with_its_reason() {
+    let _turn = EXPLORER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     runner::fuzz_input(&[0, 255, 0, 1, 2, 3]);
     let artifacts = Path::new("tmp/op-sequence-model/explorer");
     let geometry = fs::read_to_string(artifacts.join("geometry.txt")).unwrap();
@@ -94,6 +101,40 @@ fn the_explorer_counts_a_refused_geometry_with_its_reason() {
         serde_json::from_slice(&fs::read(artifacts.join("refusal-histogram.json")).unwrap())
             .expect("accepted and refused operations, then refused geometries");
     assert!(histogram.2 >= 1, "{histogram:?}");
+    // By reason too (#1031): a refused geometry is a `format` refusal.
+    let reasons = fs::read_to_string(artifacts.join("refusal-reasons.tsv")).unwrap();
+    assert!(
+        reasons
+            .lines()
+            .any(|row| row.starts_with("format\tInvalid\t")),
+        "{reasons}"
+    );
+    assert!(
+        artifacts.join("seed.txt").is_file(),
+        "the finding names no seed"
+    );
+}
+
+/// Every refusal is counted under its operation and reason (#1031), and
+/// the finding names the seed of the run beside its geometry.
+#[test]
+fn the_explorer_counts_refusals_by_operation_and_reason() {
+    let _turn = EXPLORER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    runner::fuzz_input(
+        br#"{"version":1,"operations":[{"op":"create","parent":"/","name":"a"},{"op":"create","parent":"/","name":"a"}]}"#,
+    );
+    let artifacts = Path::new("tmp/op-sequence-model/explorer");
+    let reasons = fs::read_to_string(artifacts.join("refusal-reasons.tsv")).unwrap();
+    let duplicate = reasons
+        .lines()
+        .find_map(|row| row.strip_prefix("create\tExists\t"))
+        .unwrap_or_else(|| panic!("no create/Exists row: {reasons}"));
+    assert!(duplicate.parse::<usize>().unwrap() >= 1, "{reasons}");
+    assert!(artifacts.join("geometry.txt").is_file());
+    let seed = fs::read_to_string(artifacts.join("seed.txt")).expect("the finding names its seed");
+    assert!(!seed.trim().is_empty(), "empty seed");
 }
 
 fn sequence(seed: u64) {
