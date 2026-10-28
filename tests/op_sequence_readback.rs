@@ -748,9 +748,10 @@ fn capture_pins_a_minimized_regression_and_never_discards_the_original() {
     let _ = fs::remove_dir_all(root);
     let corpus = root.join("corpus");
     fs::create_dir_all(&corpus).unwrap();
-    // Raw generator bytes, as libFuzzer saves them: create /a, write five
-    // bytes to it, mkdir /b, then shrink /a to two bytes.
-    let mut input = Vec::new();
+    // Raw generator bytes, as libFuzzer saves them: a zero geometry header
+    // (the default image, #1024), then create /a, write five bytes to it,
+    // mkdir /b, and shrink /a to two bytes.
+    let mut input = vec![0; generator::GEOMETRY_HEADER];
     for (frame, data) in [
         ([0, 2, 2, 0, 0, 0, 0, 0], &[][..]),
         ([2, 2, 2, 0, 5, 0, 0, 0], &[9, 8, 7, 6, 5][..]),
