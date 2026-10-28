@@ -8,6 +8,8 @@ Mount + write of freshly-formatted volumes is validated end-to-end
 against Microsoft's `chkdsk` running on real Windows VMs — that's
 the test contract, not byte-equivalence with any third-party tool.
 
+Published on crates.io as `rust-fs-ntfs`; the library name is `fs_ntfs`.
+
 ## Status
 
 In active development, not yet 1.0. Reading covers resident, non-resident,
