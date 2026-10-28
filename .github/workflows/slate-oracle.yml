@@ -18,6 +18,8 @@ on:
       - tests/scripts/slate-oracle.sh
       - tests/slate-disagreements.tsv
       - tests/slate-writes.tsv
+      - tests/slate-writer-families.tsv
+      - tests/scripts/slate-writer-families.sh
       - tests/scripts/slate-write-workflow.sh
       - tests/scripts/slate-write-grading.sh
       - tests/scripts/slate-oracle-schedule.sh
@@ -200,6 +202,13 @@ jobs:
           bash scripts/slate-oracle.sh compare
           tmp/slate-oracle/cases.tsv tmp/slate-oracle/images
           "$SLATE_CHECKER" tmp/slate-oracle/out 16
+      # Every writer mutation family keeps an executed case (#830): one
+      # that loses its last case fails here by name, whatever the floor
+      # above says, and a duplicate or ungraded row covers no family.
+      - name: Every writer mutation family has an executed case
+        if: ${{ !cancelled() }}
+        run: >-
+          bash scripts/slate-oracle.sh families tests/slate-writer-families.tsv tmp/slate-oracle/out/verdicts.tsv
       - uses: actions/upload-artifact@v4
         if: always()
         with:

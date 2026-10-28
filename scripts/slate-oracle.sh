@@ -78,6 +78,18 @@
 #       and the issue; an ungraded row is assigned to nobody (`-`), because
 #       no row is assigned before Windows has graded it.
 #
+#   slate-oracle.sh families TABLE VERDICTS
+#       Every writer mutation family has an executed case (#830, part of
+#       #688). TABLE is a header and then one `family scenario` row per
+#       captured matrix scenario that writes a family (tab-separated);
+#       VERDICTS is the table compare wrote. A writer case is executed when
+#       it is listed once, its origin is `writer:SCENARIO` for a scenario in
+#       TABLE graded under that one case name, its SHA-256 is well formed,
+#       Windows' verdict is `clean` and the result is `agree` or `recorded`.
+#       Each required family with no executed case fails by name, whatever
+#       compare's floor said, and so does one with no scenario in TABLE. The
+#       required families are listed here, not read from TABLE.
+#
 #   slate-oracle.sh window MIN OUT RUN=VERDICTS...
 #       The stable shared subset of a measured run window (#882, part of
 #       #694). Each argument names one advisory run's ID and the verdicts.tsv
@@ -100,7 +112,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
-    echo "usage: slate-oracle.sh fetch DEST | build SRC [BIN] | compare CASES IMAGES CHECKER OUT FLOOR | ledger [LEDGER] | write WRITES IMAGES WRITER OUT FLOOR | replay CAPTURES REPLAYER OUT FLOOR | window MIN OUT RUN=VERDICTS..." >&2
+    echo "usage: slate-oracle.sh fetch DEST | build SRC [BIN] | compare CASES IMAGES CHECKER OUT FLOOR | ledger [LEDGER] | families TABLE VERDICTS | write WRITES IMAGES WRITER OUT FLOOR | replay CAPTURES REPLAYER OUT FLOOR | window MIN OUT RUN=VERDICTS..." >&2
     exit 2
 }
 die() { echo "slate-oracle: $*" >&2; exit 1; }
@@ -377,6 +389,10 @@ compare() {
         printf '%s\n' "$found"
         problems=$((problems + $(printf '%s\n' "$found" | wc -l)))
     fi
+    # A case listed more than once is graded by none of its rows, so it can
+    # never count twice towards the floor (#830).
+    local duplicates
+    duplicates=" $(awk -F'\t' 'NR > 1 && $1 != "" { n[$1]++ } END { for (c in n) if (n[c] > 1) printf "%s ", c }' "$cases")"
     local name origin image digest windows windows_exit
     while IFS=$'\t' read -r name origin image digest windows windows_exit; do
         windows_exit="${windows_exit%$'\r'}"
@@ -386,7 +402,10 @@ compare() {
         local source="$images/$image" copy="$out/work/$name.img" report="$out/$name.slate.txt"
         local slate=- status=- result
 
-        if [ "$windows" != clean ] && [ "$windows" != not-clean ]; then
+        if [[ $duplicates == *" $name "* ]]; then
+            result=duplicate
+            echo "FAIL $name: the case is listed more than once in $cases; none of its rows counts"
+        elif [ "$windows" != clean ] && [ "$windows" != not-clean ]; then
             result=malformed
             echo "FAIL $name: windows_verdict '$windows' is neither clean nor not-clean"
         elif [ ! -f "$source" ]; then
@@ -460,6 +479,71 @@ compare() {
         return 1
     fi
     echo "slate-oracle: $agreed of $rows cases agree with Windows chkdsk and $recorded are recorded disagreements (floor $floor); table in $out/verdicts.tsv"
+}
+
+# The mutation families the writer tier must cover (#830, #1065). Held here
+# rather than read from the family table, so deleting a family's rows from
+# the table cannot drop the requirement.
+WRITER_FAMILIES='create overwrite extend truncate mkdir rename unlink rmdir named-stream ea reparse object-id security-descriptor timestamps'
+
+families() {
+    [ "$#" -eq 2 ] || usage
+    local table=$1 verdicts=$2
+    local header=$'case\torigin\tsha256\twindows_verdict\twindows_exit\tslate_verdict\tslate_exit\tresult'
+    [ -f "$table" ] || die "no family table at $table"
+    [ -f "$verdicts" ] || die "no verdicts table at $verdicts"
+    [ "$(head -n 1 "$table" | tr -d '\r')" = $'family\tscenario' ] || die "$table is not a family table"
+    [ "$(head -n 1 "$verdicts" | tr -d '\r')" = "$header" ] || die "$verdicts is not a verdicts table"
+
+    awk -F'\t' -v required="$WRITER_FAMILIES" -v table="$table" -v verdicts="$verdicts" '
+        FNR == 1 { next }
+        { sub(/\r$/, "") }
+        $1 == "" { next }
+        FILENAME == table {
+            if (index(" " required " ", " " $1 " ") == 0) {
+                print "FAIL family table: unknown family \x27" $1 "\x27"; bad++; next
+            }
+            writes[$2] = writes[$2] " " $1; named[$1] = 1; next
+        }
+        {
+            rows++; name[rows] = $1; origin[rows] = $2; digest[rows] = $3
+            windows[rows] = $4; result[rows] = $8; listed[$1]++
+            if ($2 ~ /^writer:/) graded[substr($2, 8)]++
+        }
+        END {
+            for (i = 1; i <= rows; i++) {
+                c = name[i]
+                if (origin[i] !~ /^writer:/) continue
+                s = substr(origin[i], 8)
+                # Duplicate evidence covers nothing: neither copy counts.
+                if (listed[c] > 1) {
+                    if (!told[c]++) { print "FAIL " c ": listed " listed[c] " times; it covers no family"; bad++ }
+                    continue
+                }
+                if (graded[s] > 1) {
+                    if (!told["writer:" s]++) { print "FAIL " s ": graded under " graded[s] " case names; it covers no family"; bad++ }
+                    continue
+                }
+                if (!(s in writes)) { print "FAIL " c ": scenario " s " is not in " table; bad++; continue }
+                # Only a well-formed row Windows accepted and Slate agreed
+                # with, or a ledger-recorded disagreement, is an executed case.
+                if (digest[i] !~ /^[0-9a-f]+$/ || length(digest[i]) != 64) continue
+                if (windows[i] != "clean") continue
+                if (result[i] != "agree" && result[i] != "recorded") continue
+                n = split(writes[s], fs, " ")
+                for (j = 1; j <= n; j++) covered[fs[j]] = covered[fs[j]] " " c
+            }
+            n = split(required, need, " ")
+            for (j = 1; j <= n; j++) {
+                f = need[j]
+                if (!(f in named)) { print "FAIL family " f ": no scenario in " table; bad++ }
+                else if (!(f in covered)) { print "FAIL family " f ": no executed case in " verdicts; bad++ }
+                else print "covered " f ":" covered[f]
+            }
+            if (bad) { print "slate-oracle: " bad " problem(s) in the writer mutation families"; exit 1 }
+            print "slate-oracle: all " n " writer mutation families have an executed case"
+        }
+    ' "$table" "$verdicts"
 }
 
 window() {
@@ -548,6 +632,7 @@ case "$command" in
     ledger) ledger "$@" ;;
     write) write "$@" ;;
     replay) replay "$@" ;;
+    families) families "$@" ;;
     window) window "$@" ;;
     *) usage ;;
 esac
