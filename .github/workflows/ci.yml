@@ -450,11 +450,12 @@ jobs:
         run: |
           bash ../rust-fs-core/scripts/tier.sh --refuse-skips mkfs -- cargo test --release --locked --features cli,harness --test mkfs_roundtrip --test mkfs_bin_smoke
           # Measured 16 executed (mkfs_roundtrip 9 + mkfs_bin_smoke 7) on
-          # 2026-09-29, when mkfs_bin_smoke gained the --version test. Floor 15.
+          # 2026-09-29, when mkfs_bin_smoke gained the --version test. Floor 15;
+          # 16 since mkfs_bin_smoke gained the acl catalog test (#606).
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/mkfs.log | awk '{s+=$4} END{print s+0}')
-          echo "tests executed: $n (floor 15)"
-          if [ "$n" -lt 15 ]; then
-              echo "::error::only $n tests executed, floor is 15 -- 16 ran on 2026-09-29, and a run that executes less than that stopped early rather than passed"
+          echo "tests executed: $n (floor 16)"
+          if [ "$n" -lt 16 ]; then
+              echo "::error::only $n tests executed, floor is 16 -- 16 ran on 2026-09-29 and the acl catalog test (#606) adds one, and a run that executes less than that stopped early rather than passed"
               exit 1
           fi
 

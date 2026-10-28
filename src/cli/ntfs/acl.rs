@@ -23,6 +23,7 @@ use fs_core::cli::Json;
 use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::error::{Error, Kind};
 use fs_ntfs::read;
+use fs_ntfs::sds::{mirror_state, CatalogEntry, CatalogError, MirrorState, SdsCopy};
 use fs_ntfs::security_descriptor::{Acl, SecurityDescriptor, Sid};
 
 use super::device::Device;
@@ -211,11 +212,69 @@ pub fn file_descriptor(dev: &mut Device, path: &str) -> Result<Vec<u8>, Error> {
             format!("{path}: no $SECURITY_DESCRIPTOR and no security id"),
         ));
     };
-    let sds =
-        read::read_attribute_value_if_present(dev, SECURE_RECORD, AttrType::Data, Some("$SDS"))?
-            .ok_or_else(|| Error::new(Kind::NotFound, "$Secure has no $SDS stream"))?;
+    let sds = sds_stream(dev)?;
     sds_lookup(&sds, id)?
         .ok_or_else(|| Error::new(Kind::NotFound, format!("security id {id} not in $SDS")))
+}
+
+/// The volume's $Secure:$SDS stream.
+fn sds_stream(dev: &mut Device) -> Result<Vec<u8>, Error> {
+    read::read_attribute_value_if_present(dev, SECURE_RECORD, AttrType::Data, Some("$SDS"))?
+        .ok_or_else(|| Error::new(Kind::NotFound, "$Secure has no $SDS stream"))
+}
+
+/// `acl catalog`: every copy in $SDS in stream order, as JSON, with the
+/// error that stopped the walk if one did. `id` keeps only that security
+/// id's copies.
+pub fn catalog(
+    dev: &mut Device,
+    id: Option<u32>,
+) -> Result<(Vec<Json>, Option<CatalogError>), Error> {
+    let sds = sds_stream(dev)?;
+    let mut rows = Vec::new();
+    for entry in fs_ntfs::sds::catalog(&sds) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => return Ok((rows, Some(e))),
+        };
+        if id.is_some_and(|id| id != entry.security_id) {
+            continue;
+        }
+        rows.push(catalog_json(&sds, &entry));
+    }
+    Ok((rows, None))
+}
+
+/// One catalog copy as reported: where it is, what its header claims,
+/// both verdicts, its mirror's agreement for a primary, and its
+/// descriptor decoded, or why it does not decode.
+fn catalog_json(sds: &[u8], e: &CatalogEntry<'_>) -> Json {
+    let (copy, mirror) = match e.copy {
+        SdsCopy::Primary => (
+            "primary",
+            Json::from(match mirror_state(sds, e) {
+                MirrorState::Same => "same",
+                MirrorState::Different => "different",
+                MirrorState::Missing => "missing",
+            }),
+        ),
+        SdsCopy::Mirror => ("mirror", Json::Null),
+    };
+    let descriptor = descriptor_json(e.descriptor)
+        .unwrap_or_else(|error| Json::object([("error", Json::from(error))]));
+    Json::object([
+        ("copy", Json::from(copy)),
+        ("physical", Json::from(e.physical)),
+        ("logical", Json::from(e.logical)),
+        ("security_id", Json::from(u64::from(e.security_id))),
+        ("size", Json::from(u64::from(e.declared_len))),
+        ("stored_hash", Json::from(u64::from(e.stored_hash))),
+        ("computed_hash", Json::from(u64::from(e.computed_hash))),
+        ("hash_verified", Json::from(e.hash_verified())),
+        ("offset_verified", Json::from(e.offset_verified())),
+        ("mirror", mirror),
+        ("descriptor", descriptor),
+    ])
 }
 
 /// The descriptor `id` names in the $SDS stream, through the library's
