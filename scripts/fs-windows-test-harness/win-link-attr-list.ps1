@@ -80,7 +80,9 @@ public static class NtfsRecordReader {
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandleFileInformation info);
 
-    [StructLayout(LayoutKind.Sequential)]
+    // Pack = 4: the native struct packs its FILETIMEs on 4 bytes, where
+    // a long would be padded to 8 and shift every later field.
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
     struct ByHandleFileInformation {
         public uint Attributes;
         public long Created, Accessed, Written;
