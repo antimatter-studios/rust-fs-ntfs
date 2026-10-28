@@ -67,6 +67,15 @@
 #                                    IMAGE.manifest lists every file's SHA-256
 #                                    under its new name, the exact case of each
 #                                    new name and each old name now absent
+#   import IMAGE                     fs.ntfs import copies host files onto the
+#                                    volume: one byte, a resident size, a cluster
+#                                    plus one and 64 MiB from host paths, and a
+#                                    Unicode name through stdin, each report's
+#                                    SHA-256 the source's. A destination already
+#                                    there is refused with every byte left as it
+#                                    was. IMAGE.manifest lists each file's size and
+#                                    SHA-256, read in place and copied off the
+#                                    volume, for win-cli-verify.ps1 (#1079)
 #   link IMAGE                       fs.ntfs ln adds hard links -- in the same
 #                                    directory, in others, to data that is not
 #                                    resident, and to one file past the names its
@@ -1063,6 +1072,45 @@ case "$step" in
         done
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the writes exited $status: $out"
+        ;;
+    import)
+        [ $# -eq 0 ] || die "import IMAGE"
+        manifest="$image.manifest"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        : >"$manifest"
+        # A host path as the native binary takes it: Git Bash's own path is
+        # not one Windows opens, and MSYS_NO_PATHCONV leaves it unconverted.
+        host_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else echo "$1"; fi; }
+        run fs "$image" mkdir /d
+        [ "$status" -eq 0 ] || die "fs.ntfs mkdir /d exited $status: $(cat "$image.cli-err")"
+        printf 'dir\t/d\n' >>"$manifest"
+        unicode="/d/na$(printf '\303\257')ve-$(printf '\346\227\245\346\234\254').txt"
+        # path:size; the Unicode name comes through stdin, the rest by path.
+        for spec in /one.bin:1 /resident.bin:500 /cluster-plus-one.bin:4097 \
+            "$unicode:42" /d/big.bin:67108864; do
+            path="${spec%:*}"
+            size="${spec##*:}"
+            random "$work/src" "$size"
+            want="$(sha "$work/src")"
+            if [ "$path" = "$unicode" ]; then
+                run fs "$image" import - "$path" <"$work/src"
+            else
+                run fs "$image" import "$(host_path "$work/src")" "$path"
+            fi
+            [ "$status" -eq 0 ] || die "fs.ntfs import $path ($size bytes) exited $status: $(cat "$image.cli-err")"
+            has "\"sha256\": \"$want\"" || die "fs.ntfs import $path did not report the source's SHA-256 $want: $out"
+            printf 'file\t%s\t%s\t%s\n' "$path" "$size" "$want" >>"$manifest"
+            printf 'copy-out\t%s\t%s\t%s\n' "$path" "$size" "$want" >>"$manifest"
+        done
+        # A destination already there is refused, writing nothing.
+        random "$work/again" 7
+        before="$(sha "$image")"
+        run fs "$image" import "$(host_path "$work/again")" /one.bin
+        [ "$status" -eq 1 ] || die "fs.ntfs import onto /one.bin exited $status, not 1: $out"
+        [ "$(sha "$image")" = "$before" ] || die "the refused import onto /one.bin changed the image"
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the imports exited $status: $out"
         ;;
     *)
         die "unknown step '$step'"
