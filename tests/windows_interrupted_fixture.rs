@@ -68,6 +68,10 @@
 //!   past the log's end onto the first page of its record area. See
 //!   [`WRAP_CONTINUATION_LOG_END`].
 //!
+//! * `windows-interrupted-freed*`: the same three files for a capture
+//!   whose files are compressed, so the log rewrites the header of a
+//!   non-resident `$DATA` attribute in place. See [`FREED_LOG_END`].
+//!
 //! Every partition's SHA-256 is in [`PARTITIONS`] and checked on unpacking.
 //!
 //! WHAT WINDOWS' REPLAY CHANGED, read by ntfs-3g without replaying: on
@@ -104,7 +108,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 /// The SHA-256 of each decompressed partition after bootstrap-only removal.
-const PARTITIONS: [(&str, &str); 28] = [
+const PARTITIONS: [(&str, &str); 30] = [
     (
         "windows-interrupted-1",
         "c45659e95104eca5f793c3f21061f42705a01783e62d1c7a46c63e4089db0b9a",
@@ -217,6 +221,14 @@ const PARTITIONS: [(&str, &str); 28] = [
         "windows-interrupted-wrap-continuation.recovered",
         "f1128b982e9c1430d11bfd3ce617e050326d9bfa1f3ca3525499c7e48044a9c4",
     ),
+    (
+        "windows-interrupted-freed",
+        "756b45a5e6b2fb7e64a748e3263a63c5202783e2abe18a87a06f973ae4166791",
+    ),
+    (
+        "windows-interrupted-freed.recovered",
+        "be5061d3b3d24139b31596216e0a3a240bfabd8908c61fe8811f3c363d5c75d5",
+    ),
 ];
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -287,12 +299,18 @@ fn walk(img: &str) -> BTreeMap<String, (u64, String)> {
                 continue;
             }
             let path = format!("{}/{}", dir.name, entry.name);
-            let mut buf = vec![0u8; 64 * 1024];
-            let n = fs
-                .read_file(&format!("/{path}"), 0, &mut buf)
-                .unwrap_or_else(|e| panic!("read /{path}: {e:?}"));
-            let hash = hex_sha256(&buf[..n]);
-            out.insert(path, (n as u64, hash));
+            // Read to the end: `freed`'s files run past one buffer.
+            let (mut bytes, mut buf) = (Vec::new(), vec![0u8; 64 * 1024]);
+            loop {
+                let n = fs
+                    .read_file(&format!("/{path}"), bytes.len() as u64, &mut buf)
+                    .unwrap_or_else(|e| panic!("read /{path}: {e:?}"));
+                if n == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buf[..n]);
+            }
+            out.insert(path, (bytes.len() as u64, hex_sha256(&bytes)));
         }
     }
     out
@@ -473,6 +491,19 @@ const QUOTA_SPILLED_LOG_END: [(&str, u64); 1] = [("quota-spilled", 0x20_754f)];
 /// LSN of its record pages.
 const WRAP_CONTINUATION_LOG_END: [(&str, u64); 1] = [("wrap-continuation", 0xe8_fecf)];
 
+/// A volume whose workload wrote compressed files over several
+/// compression units, so each file's `$DATA` is non-resident and the log
+/// rewrites its 72-byte header with `UpdateResidentValue` when the
+/// attribute becomes compressed. A replay that read that header's
+/// lowest VCN as a resident value's offset and length took the write for
+/// a value growing to 72 bytes, shrank the 80-byte attribute by 8, and
+/// left the records it built with no end marker, or with no `FILE`
+/// signature once later writes landed on the shifted bytes (#1231).
+/// Windows recovered every snapshot of this capture clean. Run
+/// 39051606379, `mix=freed`, one writer for 40 s, snapshot 1. Its last
+/// LSN is the highest last LSN of its record pages.
+const FREED_LOG_END: [(&str, u64); 1] = [("freed", 0x10_ac4b)];
+
 /// Where, in each pre-image, a `$LogFile` record page the replay needs
 /// sits: inside the walk from the oldest dirty page to the log's end, and
 /// in no tail copy.
@@ -606,6 +637,18 @@ fn a_record_that_wraps_onto_the_first_record_page_is_replayed_to_what_windows_re
 }
 
 #[test]
+fn a_non_resident_header_rewritten_in_place_is_replayed_to_what_windows_recovered() {
+    // `UpdateResidentValue` also rewrites the header of a non-resident
+    // attribute, whose bytes at 0x10 and 0x14 are its lowest VCN, not a
+    // value's length and offset. Read as a value, the write grew it and
+    // shrank the attribute, and every record so built lost its end
+    // marker (#1231).
+    for (k, log_end) in FREED_LOG_END {
+        fsck_and_mount_rw_replay_to_what_windows_recovered(k, log_end);
+    }
+}
+
+#[test]
 fn a_transaction_the_log_ends_inside_is_rolled_back_to_what_windows_recovered() {
     // A log may stop before a transaction's ForgetTransaction. Windows'
     // restart redoes everything and then undoes that transaction, newest
@@ -724,9 +767,13 @@ fn a_quota_entry_updated_in_an_index_block_is_replayed_to_what_windows_recovered
 ///   `0x208229`, the first after it to log one;
 /// * the entry at `0xd70` of VCN 2: the undo of `0x2076c9`.
 ///
+/// On `freed`, Windows' transaction 24 updates the root directory's entry
+/// for `System Volume Information` at `0xa90` of its index block at VCN 0,
+/// whose LSN stays `0x10a88b`: the undo of `0x10b121`.
+///
 /// Fields: fixture, MFT record, the index block in that record's
 /// `$INDEX_ALLOCATION` (or `None` for the record itself), offset, bytes.
-const AFTER_RESTART_UNSTAMPED: [(&str, u64, Option<IndexBlock>, usize, &str); 7] = [
+const AFTER_RESTART_UNSTAMPED: [(&str, u64, Option<IndexBlock>, usize, &str); 8] = [
     (
         "quota",
         24,
@@ -778,6 +825,14 @@ const AFTER_RESTART_UNSTAMPED: [(&str, u64, Option<IndexBlock>, usize, &str); 7]
         Some(("$I30", 2)),
         0xd70 + 0x18,
         "56fc2425b65bdd0156fc2425b65bdd0156fc2425b65bdd0156fc2425b65bdd01\
+         000000000000000000000000000000000600001000000000",
+    ),
+    (
+        "freed",
+        5,
+        Some(("$I30", 0)),
+        0xa90 + 0x18,
+        "c79551575c5edd01c79551575c5edd01c79551575c5edd01c79551575c5edd01\
          000000000000000000000000000000000600001000000000",
     ),
 ];
@@ -960,6 +1015,8 @@ fn fsck_and_mount_rw_replay_to_what_windows_recovered(k: &str, log_end: u64) {
     let lines = match k {
         "fresh-log" => 100,
         "quota-spilled" => 300,
+        // `freed` after 16 workload operations: 15.
+        "freed" => 10,
         _ => 500,
     };
     assert!(want.len() > lines, "{k}: the manifest lost its lines");
@@ -1556,6 +1613,7 @@ fn what_windows_recovered_reads_here_as_windows_lists_it() {
     let undo = UNDO_LOG_END.map(|(k, _)| k);
     let open_at_checkpoint = OPEN_AT_CHECKPOINT_LOG_END.map(|(k, _)| k);
     let wrap_continuation = WRAP_CONTINUATION_LOG_END.map(|(k, _)| k);
+    let freed = FREED_LOG_END.map(|(k, _)| k);
     for k in ["1", "6"]
         .into_iter()
         .chain(wrapped)
@@ -1565,11 +1623,14 @@ fn what_windows_recovered_reads_here_as_windows_lists_it() {
         .chain(undo)
         .chain(open_at_checkpoint)
         .chain(wrap_continuation)
+        .chain(freed)
     {
         let img = unpack(&format!("windows-interrupted-{k}.recovered"));
         let want = manifest(k);
+        // `freed`'s 15 files are each hundreds of KiB.
+        let lines = if k == "freed" { 10 } else { 200 };
         assert!(
-            want.len() > 200,
+            want.len() > lines,
             "snapshot {k}: the manifest lost its lines"
         );
         let got = walk(&img);
@@ -1658,6 +1719,7 @@ fn windows_replay_changed_what_the_volumes_hold() {
 /// | fresh-log      | 213     | 4      | 535   |
 /// | quota-spilled  | 19      | 34     | <= 48 |
 /// | wrap-continuation | 193  | 414    | 324   |
+/// | freed          | 44      | 1      | 1,913 |
 ///
 /// `quota`'s and `fresh-log`'s were measured on 2026-10-07, with Windows'
 /// changes after its restart that moved no LSN undone
@@ -1670,6 +1732,11 @@ fn windows_replay_changed_what_the_volumes_hold() {
 ///
 /// `wrap-continuation`'s were measured on 2026-10-28, with replay reading
 /// the wrapped record from the first page of the record area.
+///
+/// `freed`'s were measured on 2026-10-29, with a non-resident header that
+/// `UpdateResidentValue` rewrites overwritten in place. Its one index
+/// block is the root directory's: every file is in a directory of its own
+/// whose index stays in its root.
 ///
 /// `index-vcn`'s records and blocks were measured from the pre-image and
 /// Windows' recovered copy alone; its bits are at most the 99 `$Bitmap`
@@ -1690,6 +1757,7 @@ fn floors(k: &str) -> (usize, usize, usize) {
         "fresh-log" => (150, 3, 400),
         "quota-spilled" => (14, 25, 30),
         "wrap-continuation" => (130, 300, 230),
+        "freed" => (30, 1, 1300),
         other => panic!("no floors measured for fixture {other}"),
     }
 }
@@ -2492,6 +2560,7 @@ fn captures_holding_work() -> Vec<(&'static str, u64)> {
         &FRESH_LOG_END,
         &QUOTA_SPILLED_LOG_END,
         &WRAP_CONTINUATION_LOG_END,
+        &FREED_LOG_END,
     ]
     .concat()
 }
