@@ -3794,6 +3794,73 @@ pub fn list_ea_keys_io<T: BlockIo + ?Sized>(
     Ok(eas.into_iter().map(|ea| ea.name).collect())
 }
 
+/// Store a file's Linux owner, group and mode where WSL keeps them, in
+/// `$LXUID`, `$LXGID` and `$LXMOD` (#1195, part of #599), in one `$EA`
+/// update. A field that is `None` is left as it is; the native security
+/// descriptor is never touched.
+///
+/// A mode of permission bits alone takes the file's type. A mode naming
+/// another kind of file is refused, and so is any mode on a file with a
+/// reparse point: a symbolic link, device, FIFO or socket needs the reparse
+/// tag and the mode to agree, which this crate does not write yet (#1196).
+pub fn set_unix_metadata(
+    image: &Path,
+    file_path: &str,
+    meta: &crate::unix_metadata::UnixMetadata,
+) -> Result<(), Error> {
+    let mut io = open_for_write(image)?;
+    set_unix_metadata_io(&mut io, file_path, meta)
+}
+
+pub fn set_unix_metadata_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+    meta: &crate::unix_metadata::UnixMetadata,
+) -> Result<(), Error> {
+    if meta.is_empty() {
+        return Err(Error::invalid(
+            "set_unix_metadata was given no owner, group or mode",
+        ));
+    }
+    let rec = resolve_path_to_record_number_io(io, file_path)?;
+    refuse_metafile_io(io, rec, &format!("set_unix_metadata {file_path}"))?;
+    let mut meta = *meta;
+    if let Some(mode) = meta.mode {
+        if crate::read::read_attribute_value_if_present(io, rec, AttrType::ReparsePoint, None)?
+            .is_some()
+        {
+            return Err(Error::refused(format!(
+                "{file_path} is a reparse point; its mode must agree with its reparse tag, \
+                 which this crate does not write yet (#1196)"
+            )));
+        }
+        let is_dir = crate::read::read_stat(io, rec)?.is_dir;
+        meta.mode = Some(crate::unix_metadata::checked_mode(mode, is_dir)?);
+    }
+    change_eas_io(io, rec, |eas| {
+        crate::unix_metadata::apply(&meta, eas);
+        Ok(())
+    })
+}
+
+/// A file's Linux owner, group and mode, from WSL's `$LXUID`, `$LXGID` and
+/// `$LXMOD`. A field the file does not carry is `None`; a value of the wrong
+/// length is refused by name.
+pub fn read_unix_metadata(
+    image: &Path,
+    file_path: &str,
+) -> Result<crate::unix_metadata::UnixMetadata, Error> {
+    let mut io = PathIo::open_ro(image)?;
+    read_unix_metadata_io(&mut io, file_path)
+}
+
+pub fn read_unix_metadata_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_path: &str,
+) -> Result<crate::unix_metadata::UnixMetadata, Error> {
+    crate::unix_metadata::from_eas(&list_eas_io(io, file_path)?)
+}
+
 /// Apply `change` to the EAs of the file whose base record is `rec`, and
 /// write them back.
 ///

@@ -252,6 +252,12 @@ pub fn kernel_write(
     ))
 }
 
+/// Mount `image` with ntfs3, read-only or writable, run `script` in it and
+/// return its stdout with the kernel log lines `mounted` appends.
+pub fn kernel_run(image: &str, writable: bool, script: &str) -> String {
+    mounted(image, writable, script)
+}
+
 /// The kernel the guest runs, to name in a failure.
 pub fn kernel_release() -> String {
     let out = guest("uname -r");

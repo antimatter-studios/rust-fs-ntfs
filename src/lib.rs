@@ -79,6 +79,7 @@ pub mod rescue;
 pub mod sds;
 pub mod security_descriptor;
 pub mod sparse;
+pub mod unix_metadata;
 pub mod upcase;
 pub mod usn;
 pub mod usn_cursor;
