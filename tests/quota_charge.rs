@@ -38,9 +38,15 @@
 //! part of #677). The Windows matrix scenario
 //! `win-format-win-quota-mac-streams-win-chkdsk` has Windows charge named
 //! streams of its own first, and its recount grades the same writes.
+//!
+//! A write whose recharge cannot succeed -- the owner has no `$Q` entry,
+//! or is charged less than the file -- is refused before any of its data
+//! lands, so it cannot report an error with the file already changed
+//! (#1081, part of #847).
 
 mod common;
 
+use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::block_io::PathIo;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -182,6 +188,18 @@ impl Vol {
 
     fn records(&self) -> u64 {
         self.mft_runs.iter().map(|r| r.1).sum::<u64>() * self.cluster / self.record
+    }
+
+    /// Where record `n` starts in the image.
+    fn offset(&self, n: u64) -> usize {
+        let mut off = n * self.record;
+        for &(lcn, len) in &self.mft_runs {
+            if off < len * self.cluster {
+                return (lcn * self.cluster + off) as usize;
+            }
+            off -= len * self.cluster;
+        }
+        panic!("record {n} is past the end of $MFT")
     }
 
     /// Record `n`, fixups undone, when it is in use.
@@ -554,4 +572,89 @@ fn writing_and_deleting_a_named_stream_moves_its_files_charge() {
     fs_ntfs::write::delete_named_stream(Path::new(&img), &path, "s2")
         .unwrap_or_else(|e| panic!("delete {path}:s2: {e}"));
     assert_in_step(&img, &path, "its stream s2 deleted");
+}
+
+/// Point record `n`'s `$STANDARD_INFORMATION` at `owner`, in the raw image.
+fn charge_to(img: &str, n: u64, owner: u32) {
+    let vol = Vol::read(img);
+    let rec = vol.record(n).unwrap();
+    let a = attrs(&rec)
+        .into_iter()
+        .find(|a| a.ty == STANDARD_INFORMATION && !a.non_resident)
+        .expect("a resident $STANDARD_INFORMATION");
+    let at = vol.offset(n) + a.at + le(&rec, a.at + 0x14, 2) as usize + 0x30;
+    assert!(
+        at % 512 < 510,
+        "the owner id sits under an update-sequence fixup"
+    );
+    let mut bytes = vol.bytes;
+    bytes[at..at + 4].copy_from_slice(&owner.to_le_bytes());
+    std::fs::write(img, bytes).unwrap();
+}
+
+/// One write to a file, as the caller sees it.
+type Attempt<'a> = dyn Fn() -> Result<u64, fs_ntfs::error::Error> + 'a;
+
+fn data_of(img: &str, rec: u64) -> Vec<u8> {
+    let mut io = PathIo::open_ro(Path::new(img)).unwrap();
+    fs_ntfs::read::read_attribute_value(&mut io, rec, AttrType::Data, None).unwrap()
+}
+
+#[test]
+fn a_write_whose_recharge_cannot_succeed_is_refused_before_its_data_lands() {
+    let img = unpack(TRACKED, "unrechargeable");
+    let path = charged_files(&img, TRACKED).swap_remove(1);
+    let rec = record_of(&img, &path);
+    // An owner with no `$Q` entry: the recharge has no usage to move.
+    charge_to(&img, rec, 0xDEAD);
+    let (data, charge_before, usage_before) = {
+        let vol = Vol::read(&img);
+        (
+            data_of(&img, rec),
+            charge(&vol.record(rec).unwrap()),
+            usage(&vol).0,
+        )
+    };
+    assert_eq!(charge_before.0, 0xDEAD);
+    assert!(!usage_before.contains_key(&0xDEAD));
+
+    let attempts: [(&str, Box<Attempt>); 3] = [
+        (
+            "a rewrite",
+            Box::new(|| {
+                fs_ntfs::write::write_file_contents(Path::new(&img), &path, &[0x5A; 200_000])
+            }),
+        ),
+        (
+            "a write past the end",
+            Box::new(|| fs_ntfs::write::write_at(Path::new(&img), &path, 300_000, b"past the end")),
+        ),
+        (
+            "a truncate",
+            Box::new(|| fs_ntfs::write::truncate(Path::new(&img), &path, 1)),
+        ),
+    ];
+    for (what, attempt) in attempts {
+        let result = attempt();
+        assert!(
+            result.is_err(),
+            "{what} of {path} was not refused: {result:?}"
+        );
+        let vol = Vol::read(&img);
+        assert_eq!(
+            data_of(&img, rec),
+            data,
+            "{what} was refused with {path}'s data changed"
+        );
+        assert_eq!(
+            charge(&vol.record(rec).unwrap()),
+            charge_before,
+            "{what} was refused with {path}'s charge changed"
+        );
+        assert_eq!(
+            usage(&vol).0,
+            usage_before,
+            "{what} was refused with $Q changed"
+        );
+    }
 }
