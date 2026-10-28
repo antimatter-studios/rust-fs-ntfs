@@ -20,6 +20,7 @@ on:
       - tests/slate-writes.tsv
       - tests/scripts/slate-write-workflow.sh
       - tests/scripts/slate-write-grading.sh
+      - tests/scripts/slate-oracle-schedule.sh
       - scripts/slate-read-compare.py
       - tests/scripts/slate-read-compare.sh
       - scripts/reader-write-compare.py
@@ -40,8 +41,10 @@ on:
       - tests/scripts/slate-windows-acl.ps1
       - chores.yml
       - src/**
+  # Daily, so #694's reliability window fills in days rather than weeks;
+  # scheduled runs are always on main (#883).
   schedule:
-    - cron: '17 4 * * 1'
+    - cron: '17 4 * * *'
   workflow_dispatch:
 permissions:
   contents: read
@@ -194,7 +197,9 @@ jobs:
           name: slate-oracle-verdicts-${{ github.sha }}
           path: tmp/slate-oracle/out/
           if-no-files-found: error
-          retention-days: 14
+          # Longer than a window takes to collect, so its earliest runs are
+          # still there when slate-oracle.sh window reads them (#883).
+          retention-days: 30
       # Slate's copy-only writer (#863): each row of tests/slate-writes.tsv
       # patches bytes the write-at recipe left in one root file, on a copy
       # of the captured image, and the source must keep its SHA-256. Runs
