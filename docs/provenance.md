@@ -138,6 +138,18 @@ below those a `0xFF`-filled log left on the volume (#649, merge-queue run
 
 ## What verifies each layout
 
+The extension-record checker (#820, Windows grading in #826) changes one
+extension record's base reference to the root, bumps its sequence number,
+or clears its in-use flag in three disposable copies of Windows'
+`ntfs-attrlist.img`. CI retains `check_io`'s findings, record identities and
+image SHA-256 values, then grades each exact copy and an untouched control
+with read-only `chkdsk`. It uses the harness's `Clean` shape with `readonly`
+to avoid the `Damaged` shape's repair passes. The evidence consumer requires
+four complete raw verdicts and records Windows' actual clean/damaged answer
+in `attribute-list-record-checks/comparisons.json`; disagreement fails the
+check without changing `check_io`. These Windows verdicts are pending CI,
+not measured locally.
+
 The attribute-list checker (#821) changes one entry field at a time in
 disposable copies of Windows' `ntfs-attrlist.img`: type, UTF-16 name,
 lowest VCN or instance. The Windows-native fixture job runs `check_io`

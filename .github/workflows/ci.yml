@@ -758,6 +758,54 @@ jobs:
       - name: Build Windows-authored fixtures
         shell: pwsh
         run: pwsh -File test-disks/build-windows-native-read-fixtures.ps1
+      - name: Grade attribute-list extension records with read-only Windows chkdsk
+        shell: pwsh
+        env:
+          NTFS_LIST_RECORD_CHECK_IMAGES: tmp/list-record-check
+        run: |
+          $failed = @()
+          cargo test --locked --test check_io_attribute_list_records
+          if ($LASTEXITCODE -ne 0) { $failed += 'check_io extension-record cases failed' }
+          # Clean + readonly records the raw result without the Damaged
+          # shape's implicit /F and post-repair /scan passes. The next step
+          # compares the recorded answer with each case's expected verdict.
+          foreach ($case in @('clean', 'base-reference', 'sequence', 'in-use')) {
+            $image = Join-Path $PWD "tmp/list-record-check/$case.img"
+            if (-not (Test-Path -LiteralPath $image)) {
+              $failed += "${case}: missing disposable image; run check_io_attribute_list_records"
+              continue
+            }
+            try {
+              (Get-FileHash -LiteralPath $image -Algorithm SHA256).Hash |
+                Out-File "tmp/list-record-check/$case.sha256.txt" -Encoding ASCII
+              pwsh -File scripts/fs-windows-test-harness/win-chkdsk.ps1 `
+                -ImagePath $image -Diag "tmp/list-record-check/$case" `
+                -Modes readonly -VerdictShape Clean
+              Write-Host "${case}: harness exited $LASTEXITCODE"
+              # Exit 1 can mean the deliberately corrupted image was
+              # damaged; never let it prevent grading the remaining copies.
+              if ($LASTEXITCODE -notin @(0, 1)) { $failed += "${case}: harness exited $LASTEXITCODE" }
+            } catch { $failed += "${case}: $_" }
+          }
+          if ($failed) { throw ($failed -join '; ') }
+          # A pwsh step otherwise exits with the last native command's
+          # status, which is the damaged in-use copy's 1.
+          exit 0
+      - name: Every attribute-list extension-record copy has a matching Windows verdict
+        if: always()
+        shell: bash
+        run: python3 scripts/check-attrlist-records-chkdsk.py
+      - name: Retain attribute-list extension-record disagreements and raw verdicts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attribute-list-record-checks
+          path: |
+            tmp/list-record-check/*.txt
+            tmp/list-record-check/*.json
+            tmp/list-record-check/*/*.txt
+            tmp/list-record-check/*/verdict.json
+          if-no-files-found: error
       - name: Attribute-list entry mismatches agree with Windows chkdsk
         shell: pwsh
         env:
