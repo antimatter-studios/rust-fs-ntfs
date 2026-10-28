@@ -542,7 +542,7 @@ tasks:
     # report as a green `0 passed`.
     cmds:
       - bash ../rust-fs-core/scripts/tier.sh --refuse-skips kernel -- ../fs-linux-test-harness/scripts/vm.sh session cargo test --release --locked --features cli,harness,kernel --test kernel_ntfs3
-      - bash ../rust-fs-core/scripts/test-floor.sh kernel 4
+      - bash ../rust-fs-core/scripts/test-floor.sh kernel 6
 
   test:
     desc: 'Every test tier CI runs, quietly: unit, unit (debug), mkfs, the whole suite, the kernel oracle, the installed tools, the host half of the cli matrix'
