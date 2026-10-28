@@ -334,8 +334,11 @@ directory, exits 1 with the complete partial report on stdout and the bound
 or stopping path named on stderr. A missing starting path prints no report.
 
 `mv SOURCE PATH` gives SOURCE the name PATH, which is the new name itself,
-not a directory to move into, and must be in SOURCE's directory. A move to
-another directory answers `not implemented` (exit 3) and changes nothing.
+not a directory to move into. A file may move into another directory, under
+its own name or a new one; the new name is added before the old one goes, so
+a move cut short leaves the file with both names, never with none. A
+directory moves only within its own directory: a move of one to another
+directory answers `not implemented` (exit 3) and changes nothing.
 A name already at PATH is refused rather than replaced, with names compared
 as Windows compares them, without regard to case; a case-only rename of
 SOURCE itself is allowed. Everything that can be refused -- a missing

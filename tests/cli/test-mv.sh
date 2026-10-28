@@ -1,10 +1,12 @@
 # fs.ntfs mv, as installed: a name renamed within its directory -- to a
 # name of the same length, a longer one and a shorter one, a case-only
 # rename, a directory, a file whose data is not resident, a Unicode name --
-# keeping the file's record and bytes; a rename onto itself that writes
+# keeping the file's record and bytes; a file moved into another
+# directory, under its own name or a new one; a rename onto itself that writes
 # nothing; --text and --offset; and every refusal, each leaving the image
-# byte-identical: a cross-directory move (exit 3, which this driver cannot
-# do), a name already there as Windows compares names, a missing source,
+# byte-identical: a directory moved to another directory (exit 3, which
+# this driver cannot do), a name already there as Windows compares names,
+# in the same directory or another, a missing source,
 # the names Windows cannot address, the root, `.`, a metafile, a trailing
 # `/` on a file, a dirty volume and the usage errors. What Windows makes of
 # a renamed volume is the cli-rename-win-verify-chkdsk scenario in
@@ -32,7 +34,7 @@ names() { fs.ntfs "$img" ls "$1" 2>/dev/null | jq -r '.[].name'; }
 
 # moved SOURCE PATH BYTES: mv SOURCE PATH succeeds and reports PATH; PATH
 # holds BYTES (a file in $SANDBOX) in SOURCE's record, and SOURCE's name is
-# gone from the directory. BYTES `-` is a directory.
+# gone from its directory. BYTES `-` is a directory.
 moved() {
     local source="$1" path="$2" bytes="$3" was
     was="$(record "$source")"
@@ -43,10 +45,10 @@ moved() {
     jq_check "mv $source $path reports {\"path\": \"$path\", \"moved\": true}" \
         ". == {\"path\": \"$path\", \"moved\": true}" "$SANDBOX/mv.json"
     check "$path is $source's record ($was)" test -n "$was" -a "$(record "$path")" = "$was"
-    local dir="${path%/*}"
+    local dir="${path%/*}" from="${source%/*}"
     check "ls ${dir:-/} lists ${path##*/}, exactly so" grep -qxF -- "${path##*/}" <<<"$(names "${dir:-/}")"
-    check "ls ${dir:-/} no longer lists ${source##*/}" \
-        test -z "$(grep -xF -- "${source##*/}" <<<"$(names "${dir:-/}")")"
+    check "ls ${from:-/} no longer lists ${source##*/}" \
+        test -z "$(grep -xF -- "${source##*/}" <<<"$(names "${from:-/}")")"
     if [ "$bytes" != - ]; then
         fs.ntfs "$img" read "$path" >"$SANDBOX/read" 2>/dev/null
         check "read $path gives the bytes written to $source" cmp -s "$SANDBOX/read" "$SANDBOX/$bytes"
@@ -61,6 +63,10 @@ moved /s.txt /S.TXT small                     # case only
 moved /d /docs -                              # a directory
 moved /docs/f.txt /docs/g.txt small           # inside a directory
 moved /naive.txt "/na$(printf '\303\257')ve-$(printf '\346\227\245\346\234\254').txt" small
+moved /S.TXT /e/S.TXT small                   # into another directory
+moved /e/S.TXT /S.TXT small                   # and back, to the root
+moved /e/taken.txt /docs/given.txt small      # another directory and name
+moved /docs/given.txt /e/taken.txt small      # and back
 fs.ntfs "$img" read /docs/g.txt >"$SANDBOX/read" 2>/dev/null
 check "the renamed directory still holds its file" cmp -s "$SANDBOX/read" "$SANDBOX/small"
 
@@ -106,15 +112,16 @@ refused() {
     check "mv $* leaves the image byte-identical" cmp -s "$img" "$SANDBOX/before.img"
 }
 
-# Another directory is a move this driver cannot make: exit 3, by name.
-refused 3 'not implemented.*director' /S.TXT /e/S.TXT
-refused 3 'not implemented.*director' /e/taken.txt /taken.txt
+# A directory into another directory is a move this driver cannot make:
+# exit 3, by name.
 refused 3 'not implemented.*director' /docs /e/docs
+refused 3 'not implemented.*director' /docs/ /e/docs/
 # A name already there, as Windows compares names: through $UpCase, so
 # case does not tell two names apart.
 refused 1 'already exists' /S.TXT /large-renamed.bin
 refused 1 'already exists' /S.TXT /LARGE-RENAMED.BIN
 refused 1 'already exists' /docs /E
+refused 1 'already exists' /S.TXT /e/TAKEN.TXT
 # What is not there, and a parent that is not a directory.
 refused 1 'not found' /missing.txt /other.txt
 refused 1 'not found' /S.TXT /nowhere/S.TXT
