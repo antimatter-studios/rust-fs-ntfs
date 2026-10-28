@@ -4987,7 +4987,11 @@ pub fn read_object_id_io<T: BlockIo + ?Sized>(
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
     let Some(loc) = attr_io::find_attribute(&record, AttrType::ObjectId, None) else {
-        return Ok(None);
+        return Ok(listed_object_id_value(io, rec)?.map(|value| {
+            let mut out = [0u8; 16];
+            out.copy_from_slice(&value[..16]);
+            out
+        }));
     };
     if !loc.is_resident {
         return Err(Error::io("$OBJECT_ID is non-resident (unexpected)"));
@@ -5015,6 +5019,28 @@ pub fn read_object_id_io<T: BlockIo + ?Sized>(
     let mut out = [0u8; 16];
     out.copy_from_slice(&record[val_off..val_off + 16]);
     Ok(Some(out))
+}
+
+/// The `$OBJECT_ID` value of record `rec` when its base record does not
+/// hold one: on a file with an `$ATTRIBUTE_LIST` the object id may live in
+/// an extension record the list names (#809). `None` when the file has no
+/// object id at all.
+fn listed_object_id_value<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+) -> Result<Option<Vec<u8>>, Error> {
+    let Some(value) =
+        crate::read::read_attribute_value_if_present(io, rec, AttrType::ObjectId, None)?
+    else {
+        return Ok(None);
+    };
+    if value.len() != 16 && value.len() != 64 {
+        return Err(Error::io(format!(
+            "unexpected $OBJECT_ID length: {} (expected 16 or 64)",
+            value.len()
+        )));
+    }
+    Ok(Some(value))
 }
 
 /// Result of [`read_object_id_extended`]: the file's `$OBJECT_ID`
@@ -5048,7 +5074,21 @@ pub fn read_object_id_extended_io<T: BlockIo + ?Sized>(
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     let (_, record) = read_mft_record_io(io, rec)?;
     let Some(loc) = attr_io::find_attribute(&record, AttrType::ObjectId, None) else {
-        return Ok(None);
+        return Ok(listed_object_id_value(io, rec)?.map(|value| {
+            let mut object_id = [0u8; 16];
+            object_id.copy_from_slice(&value[..16]);
+            let birth_ids = (value.len() == 64).then(|| {
+                let mut ids = [[0u8; 16]; 3];
+                for (i, id) in ids.iter_mut().enumerate() {
+                    id.copy_from_slice(&value[16 * (i + 1)..16 * (i + 2)]);
+                }
+                (ids[0], ids[1], ids[2])
+            });
+            ObjectIdExtended {
+                object_id,
+                birth_ids,
+            }
+        }));
     };
     if !loc.is_resident {
         return Err(Error::io("$OBJECT_ID is non-resident (unexpected)"));
@@ -5166,7 +5206,21 @@ fn write_object_id_inner<T: BlockIo + ?Sized>(
     refuse_metafile_io(io, rec, &format!("write_object_id {file_path}"))?;
     let (_, before) = read_mft_record_io(io, rec)?;
     let file_ref = file_reference_of(rec, &before);
-    let old = object_id_of(&before);
+    // A file with an $ATTRIBUTE_LIST may keep its $OBJECT_ID in an
+    // extension record, so its old id is found through the list (#809).
+    let is_directory =
+        crate::mft_io::record_flags(&before) & crate::mft_io::MFT_FLAG_DIRECTORY != 0;
+    let listed =
+        !is_directory && attr_io::find_attribute(&before, AttrType::AttributeList, None).is_some();
+    let old = if listed {
+        let file = crate::attr_list::ListedFile::open(io, rec)?;
+        match file.find(AttrType::ObjectId, "")? {
+            Some(found) => Some(listed_object_id(&file, &found, rec)?),
+            None => None,
+        }
+    } else {
+        object_id_of(&before)
+    };
     // An object id names one file on the volume: $Extend\$ObjId:$O is
     // keyed by it, and Windows refuses a second file the same id.
     // The whole index is searched, its root and its INDX blocks (#571).
@@ -5213,6 +5267,13 @@ fn write_object_id_inner<T: BlockIo + ?Sized>(
         }
         Ok(())
     };
+    // A file with an $ATTRIBUTE_LIST, or whose base record has no room
+    // for the attribute, takes it through the list (#809).
+    if !is_directory && (listed || set_attribute(&mut before.clone()).is_err()) {
+        let attr =
+            crate::record_build::build_resident_object_id_attribute_full(0, object_id, birth_ids);
+        return write_listed_object_id_io(io, rec, old.is_some(), attr, old_entry, new_entry);
+    }
     set_attribute(&mut before.clone())?;
     rekey_view_entry_io(
         io,
@@ -5253,6 +5314,11 @@ pub fn remove_object_id_io<T: BlockIo + ?Sized>(
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     refuse_metafile_io(io, rec, &format!("remove_object_id {file_path}"))?;
     let (_, before) = read_mft_record_io(io, rec)?;
+    let is_directory =
+        crate::mft_io::record_flags(&before) & crate::mft_io::MFT_FLAG_DIRECTORY != 0;
+    if !is_directory && attr_io::find_attribute(&before, AttrType::AttributeList, None).is_some() {
+        return remove_listed_object_id_io(io, rec, file_reference_of(rec, &before));
+    }
     if let Some((id, births)) = object_id_of(&before) {
         // Its entry leaves $Extend\$ObjId:$O with it (#478), from the root
         // or an INDX block (#571).
@@ -5293,6 +5359,122 @@ pub fn remove_object_id_io<T: BlockIo + ?Sized>(
         Ok(())
     })?;
     Ok(removed)
+}
+
+/// The object id, and its three birth ids when it carries them, of the
+/// `$OBJECT_ID` `found` in `file`, whose base record is `rec`. One in
+/// clusters is refused: this driver writes them resident.
+fn listed_object_id(
+    file: &crate::attr_list::ListedFile,
+    found: &crate::attr_list::Found,
+    rec: u64,
+) -> Result<([u8; 16], Option<[u8; 48]>), Error> {
+    if !found.loc.is_resident {
+        return Err(Error::refused(format!(
+            "record {rec}: its $OBJECT_ID is non-resident, which this driver does not rewrite"
+        )));
+    }
+    let attr = file.attribute_bytes(found);
+    let off = found.loc.resident_value_offset.unwrap_or(0) as usize;
+    let len = found.loc.resident_value_length.unwrap_or(0) as usize;
+    let value = attr
+        .get(off..off + len)
+        .filter(|v| v.len() >= 16)
+        .ok_or_else(|| {
+            Error::io(format!(
+                "record {rec}: its $OBJECT_ID is too short to hold an object id"
+            ))
+        })?;
+    let id: [u8; 16] = value[..16].try_into().expect("16 bytes");
+    let births = value.get(16..64).and_then(|b| b.try_into().ok());
+    Ok((id, births))
+}
+
+/// Put `attr`, a whole `$OBJECT_ID`, in the file whose base record is
+/// `rec` through the file's `$ATTRIBUTE_LIST`, which is made when the file
+/// has none (#809), replacing the one it has when `exists`. The file's
+/// entry in `$Extend\$ObjId:$O` moves from `old_entry` to `new_entry` as
+/// for a file without a list, and is put back when the records cannot be
+/// written.
+fn write_listed_object_id_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    exists: bool,
+    attr: Vec<u8>,
+    old_entry: Option<ViewEntry<'_>>,
+    new_entry: Option<ViewEntry<'_>>,
+) -> Result<(), Error> {
+    let mut file = crate::attr_list::ListedFile::open(io, rec)?;
+    let placed = if exists {
+        file.replace(io, AttrType::ObjectId, "", attr).map(|_| ())
+    } else {
+        file.add(io, attr).map(|_| ())
+    };
+    if let Err(e) = placed {
+        return Err(file.abandon(io, e));
+    }
+    if let Err(e) = rekey_view_entry_io(
+        io,
+        view_index::OBJID_PATH,
+        view_index::OBJID_INDEX,
+        old_entry,
+        new_entry,
+    ) {
+        return Err(file.abandon(io, e));
+    }
+    if let Err(e) = file.commit(io) {
+        return Err(
+            match rekey_view_entry_io(
+                io,
+                view_index::OBJID_PATH,
+                view_index::OBJID_INDEX,
+                new_entry,
+                old_entry,
+            ) {
+                Ok(()) => e,
+                Err(u) => e.context(format!("and putting $ObjId:$O back failed: {u}")),
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Take the `$OBJECT_ID` out of the file whose base record is `rec`, whose
+/// file reference is `file_ref`, through the file's `$ATTRIBUTE_LIST`
+/// (#809), with its entry in the list and in `$Extend\$ObjId:$O`.
+/// `Ok(false)` when the file has none.
+fn remove_listed_object_id_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    file_ref: u64,
+) -> Result<bool, Error> {
+    let mut file = crate::attr_list::ListedFile::open(io, rec)?;
+    let Some(found) = file.find(AttrType::ObjectId, "")? else {
+        return Ok(false);
+    };
+    let (id, births) = listed_object_id(&file, &found, rec)?;
+    if let Err(e) = file.remove(AttrType::ObjectId, "") {
+        return Err(file.abandon(io, e));
+    }
+    if let Err(e) = remove_view_entry_io(io, view_index::OBJID_PATH, view_index::OBJID_INDEX, &id) {
+        return Err(file.abandon(io, e));
+    }
+    if let Err(e) = file.commit(io) {
+        let data = view_index::objid_data(file_ref, &id, births.as_ref());
+        return Err(
+            match rekey_view_entry_io(
+                io,
+                view_index::OBJID_PATH,
+                view_index::OBJID_INDEX,
+                None,
+                Some((&id, &data)),
+            ) {
+                Ok(()) => e,
+                Err(u) => e.context(format!("and putting $ObjId:$O back failed: {u}")),
+            },
+        );
+    }
+    Ok(true)
 }
 
 /// The most names Windows gives one file; see [`link_io`].
