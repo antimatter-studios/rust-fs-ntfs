@@ -8,6 +8,7 @@
 
 mod common;
 
+use common::fn_fields_windows::{observed, Fields};
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::write;
@@ -109,6 +110,26 @@ struct FnFields {
     name: String,
 }
 
+impl FnFields {
+    fn copy(&self) -> Fields {
+        Fields {
+            data_size: self.data_size,
+            allocated_size: self.allocated_size,
+            attributes: self.file_attributes,
+        }
+    }
+}
+
+/// The root-index copy of `file_path`'s `$FILE_NAME`, as `Fields`.
+fn index_copy(img: &str, file_path: &str) -> Fields {
+    let (allocated_size, data_size, attributes) = read_index_fn(img, file_path);
+    Fields {
+        data_size,
+        allocated_size,
+        attributes,
+    }
+}
+
 /// Navigate to `file_path` and return all `$FILE_NAME` attribute field tuples.
 /// Reads raw attribute value bytes (layout per MS-FSCC §2.4.4) to avoid
 /// the `NtfsStructuredValueFromResidentAttributeValue` trait bound on `NtfsFileName`.
@@ -194,13 +215,10 @@ fn read_fn_fields(img: &str, file_path: &str) -> Vec<FnFields> {
 // data_size field
 // ---------------------------------------------------------------------------
 
-// Native evidence (rust-fs-ntfs#629): Windows Server 2025 build 26100,
-// run 38839252064 at c05c2b6, filename-fields raw-comparison.tsv. After
-// write-close, reopen and readonly the MFT record's own $FILE_NAME keeps
-// data_size 0, allocated_size 0 and attributes 0x20; Windows refreshes it
-// only on rename (data2.bin 200/200, ro2.txt 0x21). The root-index copy
-// is the eager one (big.bin 6000/8192, data.bin 200/200, ro.txt 0x21),
-// which read_index_fn checks independently of the record copy.
+// Graded by the Windows capture (rust-fs-ntfs#629): the expected copies are
+// rows of common::fn_fields_windows::WINDOWS, which filename_fields_windows_oracle
+// checks against every capture. The record copy is lazy, the root-index copy
+// eager, and read_index_fn reads the latter independently of the record.
 #[test]
 fn data_size_matches_written_byte_count() {
     let img = fresh_vol("datasize");
@@ -215,19 +233,19 @@ fn data_size_matches_written_byte_count() {
     );
     let entries = read_fn_fields(&img, "/data.bin");
     assert!(!entries.is_empty(), "must have at least one $FILE_NAME");
+    let windows = observed("write-close", "data.bin");
     assert_eq!(
-        entries[0].data_size, 0,
-        "record $FILE_NAME.data_size must stay 0 after write, as on Windows"
+        entries[0].copy(),
+        windows.record,
+        "record $FILE_NAME must stay as Windows leaves it after write-close"
     );
-    // Root-index copy, step 2 write-close: Windows data.bin 200/200.
-    let (alloc, data, _) = read_index_fn(&img, "/data.bin");
+    let index = index_copy(&img, "/data.bin");
     assert_eq!(
-        (data, alloc),
-        (200, 200),
-        "root-index $FILE_NAME data/allocated must be 200/200, as on Windows"
+        index, windows.index,
+        "root-index $FILE_NAME must match Windows after write-close"
     );
     assert_ne!(
-        data, entries[0].data_size,
+        index.data_size, entries[0].data_size,
         "root-index copy must be eager while the record copy stays lazy"
     );
 }
@@ -249,13 +267,10 @@ fn data_size_zero_for_empty_file() {
 // allocated_size field
 // ---------------------------------------------------------------------------
 
-// Native evidence (rust-fs-ntfs#629): Windows Server 2025 build 26100,
-// run 38839252064 at c05c2b6, filename-fields raw-comparison.tsv. After
-// write-close, reopen and readonly the MFT record's own $FILE_NAME keeps
-// data_size 0, allocated_size 0 and attributes 0x20; Windows refreshes it
-// only on rename (data2.bin 200/200, ro2.txt 0x21). The root-index copy
-// is the eager one (big.bin 6000/8192, data.bin 200/200, ro.txt 0x21),
-// which read_index_fn checks independently of the record copy.
+// Graded by the Windows capture (rust-fs-ntfs#629): the expected copies are
+// rows of common::fn_fields_windows::WINDOWS, which filename_fields_windows_oracle
+// checks against every capture. The record copy is lazy, the root-index copy
+// eager, and read_index_fn reads the latter independently of the record.
 #[test]
 fn allocated_size_is_cluster_multiple_for_nonresident_file() {
     let img = fresh_vol("allocsize_nonres");
@@ -271,27 +286,21 @@ fn allocated_size_is_cluster_multiple_for_nonresident_file() {
     );
     let entries = read_fn_fields(&img, "/big.bin");
     assert!(!entries.is_empty());
-    let alloc = entries[0].allocated_size;
-    let data = entries[0].data_size;
-    // Windows leaves both record copies at 0 after the write (0 is also a
-    // cluster multiple, so the original invariant still holds).
+    let windows = observed("write-close", "big.bin");
+    // Windows leaves the record copy at 0/0 (0 is also a cluster multiple,
+    // so the original invariant still holds).
     assert_eq!(
-        data, 0,
-        "record $FILE_NAME.data_size must stay 0, as on Windows"
+        entries[0].copy(),
+        windows.record,
+        "record $FILE_NAME must stay as Windows leaves it after write-close"
     );
+    assert_eq!(entries[0].allocated_size % CLUSTER as u64, 0);
+    let index = index_copy(&img, "/big.bin");
     assert_eq!(
-        alloc, 0,
-        "record $FILE_NAME.allocated_size must stay 0, as on Windows"
+        index, windows.index,
+        "root-index $FILE_NAME must match Windows after write-close"
     );
-    assert_eq!(alloc % CLUSTER as u64, 0);
-    // Root-index copy, step 2 write-close: Windows big.bin 6000/8192.
-    let (ialloc, idata, _) = read_index_fn(&img, "/big.bin");
-    assert_eq!(
-        (idata, ialloc),
-        (6000, 8192),
-        "root-index $FILE_NAME data/allocated must be 6000/8192, as on Windows"
-    );
-    assert_eq!(ialloc % CLUSTER as u64, 0);
+    assert_eq!(index.allocated_size % CLUSTER as u64, 0);
 }
 
 #[test]
@@ -308,13 +317,17 @@ fn allocated_size_zero_for_resident_file() {
         "resident file must have allocated_size = 0 (got {})",
         entries[0].allocated_size
     );
-    // Root-index copy, step 2 write-close of the resident control ctl.txt
-    // (2 bytes "hi"): Windows reports 2/8, the value length rounded to 8.
-    let (alloc, data, _) = read_index_fn(&img, "/tiny.txt");
+    // The resident control ctl.txt holds the same 2 bytes "hi" on Windows.
+    let windows = observed("write-close", "ctl.txt");
     assert_eq!(
-        (data, alloc),
-        (2, 8),
-        "root-index $FILE_NAME data/allocated must be 2/8, as ctl.txt on Windows"
+        entries[0].copy(),
+        windows.record,
+        "record $FILE_NAME must stay as Windows leaves ctl.txt after write-close"
+    );
+    assert_eq!(
+        index_copy(&img, "/tiny.txt"),
+        windows.index,
+        "root-index $FILE_NAME must match Windows' ctl.txt after write-close"
     );
 }
 
@@ -355,13 +368,10 @@ fn directory_flag_set_in_file_name_for_dirs() {
     );
 }
 
-// Native evidence (rust-fs-ntfs#629): Windows Server 2025 build 26100,
-// run 38839252064 at c05c2b6, filename-fields raw-comparison.tsv. After
-// write-close, reopen and readonly the MFT record's own $FILE_NAME keeps
-// data_size 0, allocated_size 0 and attributes 0x20; Windows refreshes it
-// only on rename (data2.bin 200/200, ro2.txt 0x21). The root-index copy
-// is the eager one (big.bin 6000/8192, data.bin 200/200, ro.txt 0x21),
-// which read_index_fn checks independently of the record copy.
+// Graded by the Windows capture (rust-fs-ntfs#629): the expected copies are
+// rows of common::fn_fields_windows::WINDOWS, which filename_fields_windows_oracle
+// checks against every capture. The record copy is lazy, the root-index copy
+// eager, and read_index_fn reads the latter independently of the record.
 #[test]
 fn readonly_attribute_reflected_in_file_name() {
     let img = fresh_vol("attr_ro");
@@ -378,20 +388,23 @@ fn readonly_attribute_reflected_in_file_name() {
 
     let entries = read_fn_fields(&img, "/ro.txt");
     assert!(!entries.is_empty());
-    let fa = entries[0].file_attributes;
-    // FILE_ATTRIBUTE_READONLY = 0x01, FILE_ATTRIBUTE_ARCHIVE = 0x20.
-    // Windows keeps the record copy at 0x20 until a rename refreshes it.
+    let windows = observed("readonly", "ro.txt");
+    // Windows keeps the record copy at ARCHIVE (0x20) until a rename
+    // refreshes it; the root-index copy gains READONLY (0x01) at once.
+    let record = entries[0].copy();
     assert_eq!(
-        fa, 0x20,
-        "record $FILE_NAME attributes must stay 0x20, as on Windows; fa={fa:#x}"
+        record, windows.record,
+        "record $FILE_NAME must stay as Windows leaves it after readonly"
     );
-    // Root-index copy, step 4 readonly: Windows ro.txt 0x21.
-    let (_, _, ifa) = read_index_fn(&img, "/ro.txt");
+    let index = index_copy(&img, "/ro.txt");
     assert_eq!(
-        ifa, 0x21,
-        "root-index $FILE_NAME attributes must be 0x21, as on Windows; fa={ifa:#x}"
+        index, windows.index,
+        "root-index $FILE_NAME must match Windows after readonly"
     );
-    assert_ne!(ifa, fa, "root-index copy must be eager, record copy lazy");
+    assert_ne!(
+        index.attributes, record.attributes,
+        "root-index copy must be eager, record copy lazy"
+    );
 }
 
 // ---------------------------------------------------------------------------
