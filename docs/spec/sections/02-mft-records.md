@@ -321,9 +321,10 @@ The single-segment path still matches by type and name alone, and neither path
 checks the extension record's base reference or the list entry's sequence.
 List name validation also needs entry-local bounds review.
 These are **OPEN** integrity gaps, not guarantees of the current implementation.
-Runtime writers generally operate on base-record attributes and do not emit
-extension records when a base record fills (#480). Writes that add streams ignore
-an existing list (#468).
+Writers that maintain a list go through `attr_list::ListedFile`, which creates
+the list when a base record fills (#480). Paths that do not maintain it refuse a
+listed record (`attr_resize::refuse_if_attribute_list`, #468). The design, and
+what is still refused, is [attribute-list-writes.md](../../attribute-list-writes.md).
 
 <a id="attribute-validation"></a>
 
