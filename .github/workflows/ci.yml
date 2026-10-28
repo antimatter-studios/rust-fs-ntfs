@@ -1739,6 +1739,16 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      # Windows hard-linking one file past what its base record holds: which
+      # attributes it moves out to extension records lands in the
+      # diagnostics, measured before fs.ntfs ln matches it (#1069).
+      - name: Measure the attributes a 33rd hard link moves on Windows
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh win-format-win-link-attr-list-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       # A file and a directory Windows charged to their owner with quota
       # tracking on, deleted here: chkdsk grades the volume, and Windows'
       # own recount of each owner's usage must be what $Quota held (#674).
