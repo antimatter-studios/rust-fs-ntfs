@@ -781,12 +781,16 @@ jobs:
               pwsh -File scripts/fs-windows-test-harness/win-chkdsk.ps1 `
                 -ImagePath $image -Diag "tmp/list-record-check/$case" `
                 -Modes readonly -VerdictShape Clean
+              Write-Host "${case}: harness exited $LASTEXITCODE"
               # Exit 1 can mean the deliberately corrupted image was
               # damaged; never let it prevent grading the remaining copies.
               if ($LASTEXITCODE -notin @(0, 1)) { $failed += "${case}: harness exited $LASTEXITCODE" }
             } catch { $failed += "${case}: $_" }
           }
           if ($failed) { throw ($failed -join '; ') }
+          # A pwsh step otherwise exits with the last native command's
+          # status, which is the damaged in-use copy's 1.
+          exit 0
       - name: Every attribute-list extension-record copy has a matching Windows verdict
         if: always()
         shell: bash
