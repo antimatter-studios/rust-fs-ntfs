@@ -72,6 +72,60 @@ fn the_untouched_windows_attribute_list_is_clean() {
 }
 
 #[test]
+fn an_attribute_list_type_inversion_is_reported() {
+    let (img, base, mut list) = copy("order-type");
+    let first = u16::from_le_bytes([list[4], list[5]]) as usize;
+    let second = u16::from_le_bytes([list[first + 4], list[first + 5]]) as usize;
+    assert_eq!(
+        u32::from_le_bytes(list[..4].try_into().unwrap()),
+        AttrType::StandardInformation as u32
+    );
+    assert_eq!(
+        u32::from_le_bytes(list[first..first + 4].try_into().unwrap()),
+        AttrType::FileName as u32
+    );
+    // Only entry order changes. Every entry retains all its bytes and still
+    // identifies exactly the same Windows-authored attribute and record.
+    let original = read::parse_attribute_list(&list).unwrap();
+    list[..first + second].rotate_left(first);
+    let reordered = read::parse_attribute_list(&list).unwrap();
+    assert_eq!(reordered.len(), original.len());
+    assert_eq!(reordered[0], original[1]);
+    assert_eq!(reordered[1], original[0]);
+    assert_eq!(reordered[2..], original[2..]);
+    let mut io = PathIo::open_rw(&img).unwrap();
+    let (_, record) = mft_io::read_mft_record_io(&mut io, base).unwrap();
+    assert!(
+        !attr_io::find_attribute(&record, AttrType::AttributeList, None)
+            .unwrap()
+            .is_resident
+    );
+    write_list(&mut io, base, &list);
+    drop(io);
+    let before = std::fs::read(&img).unwrap();
+    let mut io = PathIo::open_ro(&img).unwrap();
+    let report = fsck::check_io(&mut io).unwrap();
+    if std::env::var_os("NTFS_LIST_CHECK_IMAGES").is_some() {
+        std::fs::write(img.with_extension("findings.txt"), format!("{report:#?}")).unwrap();
+    }
+    assert_eq!(report.findings.len(), 1, "{report:#?}");
+    assert!(
+        report.findings.iter().any(|f| matches!(f,
+            CheckFinding::BadAttributeList { record, reason }
+                if *record == base && reason.contains(&format!("entry at {second}"))
+                    && reason.contains("out of type order")
+                    && reason.contains("0x10") && reason.contains("0x30")
+        )),
+        "{report:#?}"
+    );
+    assert_eq!(
+        std::fs::read(&img).unwrap(),
+        before,
+        "checking must not write"
+    );
+}
+
+#[test]
 fn an_attribute_list_that_lists_itself_is_reported() {
     let (img, base, mut list) = copy("self-entry");
     let mut io = PathIo::open_rw(&img).unwrap();
