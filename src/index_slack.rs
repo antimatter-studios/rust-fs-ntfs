@@ -184,16 +184,37 @@ pub(crate) fn scan_index_slack(
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct BlockSlack {
     pub vcn: u64,
+    /// Offset of the block in the `$INDEX_ALLOCATION:$I30` stream.
+    pub logical_offset: u64,
+    /// Where the block was read from on the device, one extent per run it
+    /// crosses, in block order.
+    pub extents: Vec<crate::idx_block::BlockExtent>,
     /// Offset of the scanned region (the block's index header) in the block.
     pub region_start: usize,
     pub scan: SlackScan,
 }
 
+impl BlockSlack {
+    /// The device offset of byte `block_offset` of this block. A candidate's
+    /// block offset is `region_start + region_offset`. An entry that crosses
+    /// an extent boundary continues at the next extent's device offset.
+    pub(crate) fn device_offset(&self, block_offset: usize) -> Option<u64> {
+        let extent = self
+            .extents
+            .iter()
+            .find(|e| block_offset >= e.block_offset && block_offset - e.block_offset < e.length)?;
+        extent
+            .device_offset
+            .checked_add((block_offset - extent.block_offset) as u64)
+    }
+}
+
 /// Scans the unused tail of every allocated INDX block of a directory.
 ///
 /// Blocks come through `idx_block::load_for_directory_io` and
-/// `read_indx_block_io`, so the runlist, block size and update sequence array
-/// are the reader's own checked values. Used and allocated lengths are read
+/// `read_indx_block_mapped_io`, so the runlist, block size and update sequence
+/// array are the reader's own checked values, and each block keeps the device
+/// extents it was read from. Used and allocated lengths are read
 /// from each block's index header and handed to [`scan_index_slack`]
 /// unchanged, which refuses impossible ones rather than clamping. A directory
 /// with no allocated block is an error, not an empty result: a caller that
@@ -204,16 +225,28 @@ pub(crate) fn scan_directory_allocation_slack_io<T: crate::block_io::BlockIo + ?
     budget: SlackBudget,
 ) -> Result<Vec<BlockSlack>, Error> {
     let ia = crate::idx_block::load_for_directory_io(io, directory_record)?;
+    scan_allocation_slack_io(io, &ia, budget)
+        .map_err(|e| Error::io(format!("directory record {directory_record}: {e}")))
+}
+
+/// [`scan_directory_allocation_slack_io`] over an index allocation already
+/// loaded for one directory.
+pub(crate) fn scan_allocation_slack_io<T: crate::block_io::BlockIo + ?Sized>(
+    io: &mut T,
+    ia: &crate::idx_block::IndexAllocation,
+    budget: SlackBudget,
+) -> Result<Vec<BlockSlack>, Error> {
     let vcns = ia.allocated_block_vcns();
     if vcns.is_empty() {
-        return Err(Error::io(format!(
-            "directory record {directory_record} has no allocated INDX block"
-        )));
+        return Err(Error::io("the index has no allocated INDX block"));
     }
     let start = crate::idx_block::INDX_INDEX_HEADER_OFFSET;
     let mut out = Vec::with_capacity(vcns.len());
     for vcn in vcns {
-        let block = crate::idx_block::read_indx_block_io(io, &ia, vcn)?;
+        let logical_offset = vcn
+            .checked_mul(ia.params.cluster_size)
+            .ok_or_else(|| Error::io(format!("INDX block at VCN {vcn} has no byte offset")))?;
+        let (block, extents) = crate::idx_block::read_indx_block_mapped_io(io, ia, vcn)?;
         let region = block.get(start..).ok_or_else(|| {
             Error::io(format!(
                 "INDX block at VCN {vcn} is shorter than its header"
@@ -230,6 +263,8 @@ pub(crate) fn scan_directory_allocation_slack_io<T: crate::block_io::BlockIo + ?
         let scan = scan_index_slack(region, used, allocated, budget)?;
         out.push(BlockSlack {
             vcn,
+            logical_offset,
+            extents,
             region_start: start,
             scan,
         });
