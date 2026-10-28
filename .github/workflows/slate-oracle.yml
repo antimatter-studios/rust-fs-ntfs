@@ -17,6 +17,8 @@ on:
       - scripts/slate-oracle.sh
       - tests/scripts/slate-oracle.sh
       - tests/slate-disagreements.tsv
+      - scripts/slate-read-compare.py
+      - tests/scripts/slate-read-compare.sh
       - tests/scripts/slate-writer-capture.sh
       - tests/scripts/slate-namespace-capture.sh
       - tests/scripts/slate-stream-metadata-capture.sh
