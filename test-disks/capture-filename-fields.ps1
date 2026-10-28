@@ -1,12 +1,14 @@
 # Captures what Windows itself leaves in the $FILE_NAME data_size,
-# allocated_size and file_attributes fields, for the three probes that
-# tests/field_exhaustion_fn.rs keeps ignored (issue #629):
+# allocated_size and file_attributes fields, for the three probes in
+# tests/field_exhaustion_fn.rs (issue #629):
 #   * data_size_matches_written_byte_count
 #   * allocated_size_is_cluster_multiple_for_nonresident_file
 #   * readonly_attribute_reflected_in_file_name
 #
-# Windows may update those fields lazily, so the expected values are not
-# assumed. Each step of the operation sequence below gets its own image,
+# Windows updates the record copy lazily and the index copy eagerly; the
+# observed values live in tests/common/fn_fields_windows.rs, which
+# tests/filename_fields_windows_oracle.rs grades every capture against.
+# Each step of the operation sequence below gets its own image,
 # built from scratch and holding every step up to and including it, so a
 # decoder can read the raw $FILE_NAME bytes after each step independently:
 #   1 create        data.bin, big.bin, ro.txt and ctl.txt, all empty
@@ -24,8 +26,9 @@
 # Outputs, in test-disks/:
 #   * ntfs-fn-fields-step<N>.img for N = 1..6
 #   * ntfs-fn-fields.manifest.tsv: step, operation, image SHA-256, then per
-#     file the size, allocation and attributes Windows reports through
-#     Get-Item and fsutil, and the Windows build that produced it
+#     file the size and attributes Windows reports through Get-Item, the
+#     unnamed $DATA stream's allocation from fsutil file layout, and the
+#     Windows build that produced it
 #
 # Run from the repository root on an elevated Windows host. rust-img-vhd must
 # be on PATH, as for build-windows-native-read-fixtures.ps1.
@@ -96,7 +99,13 @@ function Get-Observations {
     # Runs while the volume is still mounted; the image hash is added later.
     foreach ($item in Get-ChildItem -LiteralPath $Root -File -Force) {
         $layout = (& fsutil file layout $item.FullName 2>&1 | Out-String)
-        $allocation = if ($layout -match 'Allocated Size\s*:\s*(\S+)') { $Matches[1] } else { 'unknown' }
+        # fsutil lists every attribute stream, and the first "Allocated Size"
+        # it prints is another stream's (72 for every file, the size of
+        # $STANDARD_INFORMATION). Take the one in the unnamed ::$DATA
+        # stream's block, without digit grouping.
+        $allocation = if ($layout -match '(?s)\s::\$DATA\s.*?Allocated Size\s*:\s*([\d,.]+)') {
+            $Matches[1] -replace '\D', ''
+        } else { 'unknown' }
         "$($item.Name)`t$($item.Length)`t$allocation`t$([int]$item.Attributes)"
     }
 }
