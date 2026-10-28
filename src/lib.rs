@@ -70,6 +70,7 @@ pub mod mft_bitmap;
 pub mod mft_inventory;
 pub mod mft_io;
 pub mod mkfs;
+pub mod quota;
 pub mod read;
 pub mod record_build;
 #[cfg(feature = "plan-file")]
