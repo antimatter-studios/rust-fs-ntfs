@@ -419,7 +419,7 @@ fn command() -> Cmd {
         )
         .subcommand(
             Cmd::new("mv")
-                .about("Give a file or directory a new name in the same directory")
+                .about("Give a file or directory a new name, a file perhaps in another directory")
                 .arg(
                     Arg::new("source")
                         .value_name("SOURCE")
@@ -435,10 +435,12 @@ fn command() -> Cmd {
                 .after_help(
                     "Examples:\n  fs.ntfs disk.img mv /notes.txt /notes-2026.txt\n  \
                      fs.ntfs disk.img mv /backup/old.tar /backup/2025.tar\n  \
-                     fs.ntfs disk.img mv /readme.txt /README.txt\n\n\
-                     PATH is the new name itself, not a directory to move into, and must be \
-                     in SOURCE's directory: a move to another directory answers `not \
-                     implemented` (exit 3). A name already at PATH is refused, never \
+                     fs.ntfs disk.img mv /readme.txt /README.txt\n  \
+                     fs.ntfs disk.img mv /inbox/report.txt /archive/2026/report.txt\n\n\
+                     PATH is the new name itself, not a directory to move into. A file may \
+                     move into another directory; a directory moves only within its own, \
+                     and a move of one to another directory answers `not implemented` \
+                     (exit 3). A name already at PATH is refused, never \
                      replaced, and names are compared as Windows compares them, without \
                      regard to case; a case-only rename of SOURCE itself is allowed. A \
                      missing SOURCE, a name Windows cannot address, the root, . and .. and \
@@ -2069,34 +2071,39 @@ fn directory(dev: &mut Device, path: &str) -> Result<u64, Error> {
     Ok(record)
 }
 
-/// Give `source` the name `path`, in the same directory, through the
-/// library's rename. Everything that can be refused is refused on a
+/// Give `source` the name `path` through the library's rename, or its
+/// move when `path` is in another directory. Everything that can be refused is refused on a
 /// read-only open, so a refused command never opens the image for writing
 /// and leaves it byte-identical: first what this verb decides itself, then
 /// the rename rehearsed in full, so the library refuses whatever it would
 /// refuse on the real volume, in the same words. A rename that would change
 /// nothing succeeds without opening the image for writing either.
 fn rename(target: &OsString, offset: u64, source: &str, path: &str) -> Result<Outcome, CliError> {
-    if let Some((from, name)) = renamable(target, offset, source, path)? {
-        edit(target, offset, source, |dev| {
-            fs_ntfs::write::rename_io(dev, &from, name)
+    if let Some((from, into, name)) = renamable(target, offset, source, path)? {
+        edit(target, offset, source, |dev| match into {
+            None => fs_ntfs::write::rename_io(dev, &from, name),
+            Some(into) => fs_ntfs::write::move_to_io(dev, &from, into, name),
         })?;
     }
     let report = Json::object([("path", Json::from(path)), ("moved", Json::from(true))]);
     Ok(Outcome::report(report).with_text(format!("moved {source} to {path}")))
 }
 
-/// The rename of `source` to `path` -- `source` without a trailing `/`, and
-/// the new name -- or `None` when it would change nothing, once every
-/// refusal has been ruled out. In order:
+/// A rename `renamable` allows: `source` without a trailing `/`, the
+/// directory to move it into when that is not its own, and the new name.
+type Rename<'p> = (String, Option<&'p str>, &'p str);
+
+/// The rename of `source` to `path` -- `source` without a trailing `/`, the
+/// directory to move it into when that is not its own, and the new name --
+/// or `None` when it would change nothing, once every refusal has been ruled
+/// out. In order:
 ///
 /// - `.`, `..` or the root as either path;
 /// - a directory part of either path that does not resolve, or is not a
 ///   directory, `source`'s first;
-/// - a directory part that is not `source`'s directory: the move this
-///   driver cannot make, exit 3;
-/// - a missing `source`; a trailing `/` on either path when `source` is not
-///   a directory; a new name too long for NTFS;
+/// - a missing `source`; a directory moved to another directory, the move
+///   this driver cannot make, exit 3; a trailing `/` on either path when
+///   `source` is not a directory; a new name too long for NTFS;
 /// - whatever the library refuses: a name Windows cannot address, a name
 ///   already there as Windows compares names (through `$UpCase`), a
 ///   metafile, and a volume not fit to be written.
@@ -2105,7 +2112,7 @@ fn renamable<'p>(
     offset: u64,
     source: &'p str,
     path: &'p str,
-) -> Result<Option<(String, &'p str)>, CliError> {
+) -> Result<Option<Rename<'p>>, CliError> {
     let (from_parent, from_name, from_slash) = last_name(source)?;
     let (to_parent, to_name, to_slash) = last_name(path)?;
     for (p, name) in [(source, from_name), (path, to_name)] {
@@ -2118,17 +2125,18 @@ fn renamable<'p>(
     let (mut dev, _) = device::mount(target, offset, false)?;
     let from_dir = directory(&mut dev, from_parent).map_err(|e| ntfs_error(source, e))?;
     let to_dir = directory(&mut dev, to_parent).map_err(|e| ntfs_error(path, e))?;
-    if from_dir != to_dir {
-        return Err(CliError::not_implemented(format!(
-            "mv across directories: {source} is in {from_parent} and {path} in {to_parent}; \
-             this driver renames a name only within its own directory"
-        )));
-    }
+    let into = (from_dir != to_dir).then_some(to_parent);
     let from = source.trim_end_matches('/').to_string();
     let record = read::resolve_path(&mut dev, &from).map_err(|e| ntfs_error(source, e))?;
     let is_dir = read::read_stat(&mut dev, record)
         .map_err(|e| ntfs_error(source, e))?
         .is_dir;
+    if is_dir && into.is_some() {
+        return Err(CliError::not_implemented(format!(
+            "mv of a directory across directories: {source} is in {from_parent} and {path} in \
+             {to_parent}; this driver moves a directory only within its own directory"
+        )));
+    }
     if !is_dir && (from_slash || to_slash) {
         let p = if from_slash { source } else { path };
         return Err(CliError::failed(format!("{p}: not a directory")));
@@ -2139,16 +2147,22 @@ fn renamable<'p>(
             "{path}: the name is {units} UTF-16 units, too long: NTFS allows 255"
         )));
     }
-    if stored_name(&mut dev, from_dir, record, from_name)
-        .map_err(|e| ntfs_error(source, e))?
-        .is_some_and(|stored| stored == to_name)
+    if into.is_none()
+        && stored_name(&mut dev, from_dir, record, from_name)
+            .map_err(|e| ntfs_error(source, e))?
+            .is_some_and(|stored| stored == to_name)
     {
         return Ok(None);
     }
-    prepared(&mut device::Rehearsal::over(&mut dev), source, |io| {
-        fs_ntfs::write::rename_io(io, &from, to_name)
-    })?;
-    Ok(Some((from, to_name)))
+    prepared(
+        &mut device::Rehearsal::over(&mut dev),
+        source,
+        |io| match into {
+            None => fs_ntfs::write::rename_io(io, &from, to_name),
+            Some(into) => fs_ntfs::write::move_to_io(io, &from, into, to_name),
+        },
+    )?;
+    Ok(Some((from, into, to_name)))
 }
 
 /// The name directory `dir` lists `record` under that Windows takes for

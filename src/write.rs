@@ -4963,7 +4963,7 @@ pub fn read_file_names_io<T: BlockIo + ?Sized>(
 
 /// Every `$FILE_NAME` attribute in `record`, in record order; see
 /// [`read_file_names_io`].
-fn file_names_in_record(record: &[u8]) -> Result<Vec<FileNameRecord>, Error> {
+pub(crate) fn file_names_in_record(record: &[u8]) -> Result<Vec<FileNameRecord>, Error> {
     let mut out = Vec::new();
     for loc in attr_io::iter_attributes(record) {
         if loc.type_code != AttrType::FileName as u32 {
@@ -6026,16 +6026,46 @@ fn link_unstamped_io<T: BlockIo + ?Sized>(
         }
     }
 
-    let parent_seq = crate::mft_io::record_sequence(&parent_record_bytes);
-    let parent_reference = crate::record_build::encode_file_reference(new_parent_rec, parent_seq);
-    let target_seq = u16::from_le_bytes([target_record_bytes[0x10], target_record_bytes[0x11]]);
-    let target_reference = crate::record_build::encode_file_reference(target_rec, target_seq);
-    let nt_time = crate::record_build::nt_time_now();
     // The independent Windows hard-link capture (run 39710860283) stores
     // added names in namespace 0, even when they fit 8.3. A fresh link is
     // not a second DOS alias for the original name. Keep the record and
     // its directory key in the same namespace; leave existing names alone.
     const HARD_LINK_NAMESPACE: u8 = 0;
+    add_file_name_io(
+        io,
+        target_rec,
+        &target_record_bytes,
+        new_parent_rec,
+        &parent_record_bytes,
+        new_basename,
+        HARD_LINK_NAMESPACE,
+    )
+}
+
+/// Give the regular file `target_rec` the name `new_basename` in directory
+/// `new_parent_rec`, in `namespace`: a `$FILE_NAME` in its record, the
+/// record's link count one higher, and a matching entry in the directory's
+/// index. `target_record_bytes` and `parent_record_bytes` are the two
+/// records as read; the caller has checked the name is free. A failed index
+/// insert takes the `$FILE_NAME` back out. Shared by [`link_io`] and
+/// [`move_to_io`].
+fn add_file_name_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    target_rec: u64,
+    target_record_bytes: &[u8],
+    new_parent_rec: u64,
+    parent_record_bytes: &[u8],
+    new_basename: &str,
+    namespace: u8,
+) -> Result<(), Error> {
+    let ir_flags = index_io::index_root_flags(parent_record_bytes)
+        .ok_or_else(|| missing_index_root(parent_record_bytes, "add a name to a directory"))?;
+    let parent_has_overflow = ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0;
+    let parent_seq = crate::mft_io::record_sequence(parent_record_bytes);
+    let parent_reference = crate::record_build::encode_file_reference(new_parent_rec, parent_seq);
+    let target_seq = u16::from_le_bytes([target_record_bytes[0x10], target_record_bytes[0x11]]);
+    let target_reference = crate::record_build::encode_file_reference(target_rec, target_seq);
+    let nt_time = crate::record_build::nt_time_now();
 
     // Step 1: append a new $FILE_NAME to the target record + bump
     // hard_link_count. A file that carries an $ATTRIBUTE_LIST, or whose
@@ -6049,9 +6079,9 @@ fn link_unstamped_io<T: BlockIo + ?Sized>(
         /* is_dir */ false,
     )?
     .len();
-    let through_list = attr_io::find_attribute(&target_record_bytes, AttrType::AttributeList, None)
+    let through_list = attr_io::find_attribute(target_record_bytes, AttrType::AttributeList, None)
         .is_some()
-        || !crate::attr_list::ListedFile::record_has_room(&target_record_bytes, fn_len);
+        || !crate::attr_list::ListedFile::record_has_room(target_record_bytes, fn_len);
     if through_list {
         let mut fn_attr = crate::record_build::build_file_name_attribute(
             0,
@@ -6061,7 +6091,7 @@ fn link_unstamped_io<T: BlockIo + ?Sized>(
             /* is_dir */ false,
         )?;
         // Resident value starts at 24; FILE_NAME's namespace is at +65.
-        fn_attr[24 + 65] = HARD_LINK_NAMESPACE;
+        fn_attr[24 + 65] = namespace;
         let mut listed = crate::attr_list::ListedFile::open(io, target_rec)?;
         if let Err(e) = listed.add_file_name(io, fn_attr) {
             return Err(listed.abandon(io, e));
@@ -6078,7 +6108,7 @@ fn link_unstamped_io<T: BlockIo + ?Sized>(
                 /* is_dir */ false,
             )?;
             // Resident value starts at 24; FILE_NAME's namespace is at +65.
-            fn_attr[24 + 65] = HARD_LINK_NAMESPACE;
+            fn_attr[24 + 65] = namespace;
             crate::attr_resize::insert_attribute_sorted(record, &fn_attr)?;
             let cur = u16::from_le_bytes([record[0x12], record[0x13]]);
             record[0x12..0x14].copy_from_slice(&cur.saturating_add(1).to_le_bytes());
@@ -6094,7 +6124,7 @@ fn link_unstamped_io<T: BlockIo + ?Sized>(
         nt_time,
         /* is_dir */ false,
     )?;
-    index_io::set_entry_namespace(&mut entry, HARD_LINK_NAMESPACE)?;
+    index_io::set_entry_namespace(&mut entry, namespace)?;
     let insert_res = insert_entry_in_parent_io(
         io,
         new_parent_rec,
@@ -8323,7 +8353,20 @@ pub fn rename_replace_io<T: BlockIo + ?Sized>(
 }
 
 /// Move the regular file at `old_path` to `new_parent_path/new_basename`,
-/// which may be in another directory.
+/// which may be in another directory (#600).
+///
+/// A move within one directory is [`rename_io`]. Into another directory the
+/// new name is added first, through the path [`link_io`] takes, and the old
+/// one dropped after, through the path [`unlink_io`] takes for one of several
+/// names. A move cut short between the two leaves the file with both names
+/// and a link count of two: a consistent volume, never one where the file
+/// has no name or a name its directory does not index. The moved name takes
+/// the namespace a rename gives it.
+///
+/// A destination that is another name of the same file changes nothing, as
+/// rename(2) does; any other existing destination is refused. Refused before
+/// anything is written: a directory, a metafile, a file whose name is half
+/// of a WIN32 + DOS pair, and a new parent that is not a directory.
 pub fn move_to(
     image: &Path,
     old_path: &str,
@@ -8335,14 +8378,109 @@ pub fn move_to(
 }
 
 pub fn move_to_io<T: BlockIo + ?Sized>(
-    _io: &mut T,
+    io: &mut T,
     old_path: &str,
     new_parent_path: &str,
     new_basename: &str,
 ) -> Result<(), Error> {
-    Err(Error::refused(format!(
-        "move {old_path} to {new_parent_path}/{new_basename}: not yet supported"
-    )))
+    validate_basename(new_basename)?;
+    let (old_parent, file_rec, old_basename) = resolve_parent_and_child_io(io, old_path, "move")?;
+    refuse_metafile_io(io, file_rec, &format!("move {old_path}"))?;
+    let new_parent = resolve_path_to_record_number_io(io, new_parent_path)?;
+    let (_, parent_record_bytes) = read_mft_record_io(io, new_parent)?;
+    if crate::mft_io::record_flags(&parent_record_bytes) & MFT_FLAG_DIRECTORY == 0 {
+        return Err(Error::not_directory(format!(
+            "move: new parent '{new_parent_path}' is not a directory"
+        )));
+    }
+    refuse_metafile_io(io, new_parent, &format!("move into {new_parent_path}"))?;
+    if new_parent == old_parent {
+        return rename_io(io, old_path, new_basename);
+    }
+
+    let (_, file_record_bytes) = read_mft_record_io(io, file_rec)?;
+    if crate::mft_io::record_flags(&file_record_bytes) & MFT_FLAG_DIRECTORY != 0 {
+        return Err(Error::refused(format!(
+            "move: '{old_path}' is a directory, and a directory is not yet moved into \
+             another directory"
+        )));
+    }
+    // A long name Windows gave an 8.3 alias is two $FILE_NAMEs, WIN32 and
+    // DOS, both indexed in the old directory. Moving one would leave the
+    // other behind there. A WIN32 name with no alias, which Windows writes
+    // with short names off, moves like any other.
+    let namespace = file_name_namespace_io(io, file_rec, &file_record_bytes, &old_basename)?;
+    if namespace == Some(DOS_NAMESPACE)
+        || has_dos_name_io(io, file_rec, &file_record_bytes, old_parent)?
+    {
+        return Err(Error::refused(format!(
+            "move: '{old_path}' has a separate DOS 8.3 name, and a name with one is not yet \
+             moved into another directory"
+        )));
+    }
+    match find_existing_entry_record_io(io, new_parent, new_basename)? {
+        Some(rec) if rec == file_rec => return Ok(()),
+        Some(_) => {
+            return Err(Error::exists(format!(
+                "'{new_basename}' already exists in '{new_parent_path}'"
+            )))
+        }
+        None => {}
+    }
+    let namespace = namespace.map_or_else(
+        || crate::record_build::fn_namespace_for(new_basename),
+        |old| crate::record_build::fn_namespace_after_rename(old, new_basename),
+    );
+
+    add_file_name_io(
+        io,
+        file_rec,
+        &file_record_bytes,
+        new_parent,
+        &parent_record_bytes,
+        new_basename,
+        namespace,
+    )
+    .map_err(|e| e.context(format!("move {old_path}: add the new name")))?;
+    if let Err(drop_old) = remove_file_record_io(io, old_parent, file_rec, &old_basename) {
+        // Take the new name back out, so the failure leaves the file as it
+        // was rather than with two names.
+        return Err(
+            match remove_file_record_io(io, new_parent, file_rec, new_basename) {
+                Ok(()) => drop_old,
+                Err(undo) => drop_old.map_message(|m| {
+                    format!(
+                        "{m}; and taking the new name back out failed too ({undo}): \
+                         '{old_path}' is also named '{new_basename}' in '{new_parent_path}'"
+                    )
+                }),
+            },
+        );
+    }
+    stamp_written_io(io, old_parent)?;
+    stamp_written_io(io, new_parent)?;
+    stamp_changed_io(io, file_rec)
+}
+
+/// `$FILE_NAME.namespace` of a DOS 8.3 alias kept beside a WIN32 name.
+const DOS_NAMESPACE: u8 = 2;
+
+/// Whether the file holds a DOS 8.3 name in directory `parent_rec`, in its
+/// base record or, through its `$ATTRIBUTE_LIST`, an extension record.
+fn has_dos_name_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file_rec: u64,
+    record: &[u8],
+    parent_rec: u64,
+) -> Result<bool, Error> {
+    let names = if attr_io::find_attribute(record, AttrType::AttributeList, None).is_some() {
+        crate::attr_list::ListedFile::open(io, file_rec)?.file_names()?
+    } else {
+        file_names_in_record(record)?
+    };
+    Ok(names.iter().any(|n| {
+        n.namespace == DOS_NAMESPACE && n.parent_reference & 0x0000_FFFF_FFFF_FFFF == parent_rec
+    }))
 }
 
 /// [`rename_replace_io`] without advancing the times of what it changed; see
