@@ -10,6 +10,12 @@
 //! queryjournal` reported of it and `ntfs-usnjrnl.records.csv` every record
 //! `fsutil usn readjournal` read back, all from
 //! `test-disks/build-windows-native-read-fixtures.ps1`.
+//!
+//! fsutil answered while the volume was still mounted, and Windows went on
+//! writing to the journal before the image was detached: the fixture's `$J`
+//! holds two `$TxfLog.blf` records past the `NextUsn` fsutil reported. So
+//! fsutil's `NextUsn` is a floor, and its records are the journal's records
+//! below that floor, exactly.
 
 mod common;
 
@@ -126,7 +132,11 @@ fn the_journal_state_is_what_fsutil_queried() {
 
     assert_eq!(journal.journal_id, field("Usn Journal ID"), "journal ID");
     assert_eq!(journal.first_usn as u64, field("First Usn"), "FirstUsn");
-    assert_eq!(journal.next_usn as u64, field("Next Usn"), "NextUsn");
+    assert!(
+        journal.next_usn as u64 >= field("Next Usn"),
+        "NextUsn {:#x} is below fsutil's",
+        journal.next_usn
+    );
     assert_eq!(
         journal.lowest_valid_usn as u64,
         field("Lowest Valid Usn"),
@@ -160,6 +170,8 @@ fn bounded_batches_read_every_record_fsutil_read() {
         "only {} records in {RECORDS}",
         listed.len()
     );
+    let query = std::fs::read_to_string(QUERY).expect("read the query");
+    let queried_next = fsutil_field(&query, "Next Usn") as i64;
     let mut io = PathIo::open_ro(Path::new(IMG)).expect("open the fixture");
     let journal = active_journal(&mut io);
 
@@ -201,7 +213,12 @@ fn bounded_batches_read_every_record_fsutil_read() {
             parent: r.parent_file_reference.into(),
         })
         .collect();
-    assert_eq!(decoded, listed, "the records differ from fsutil's");
+    let queried = decoded.iter().take_while(|r| r.usn < queried_next).count();
+    assert_eq!(
+        &decoded[..queried],
+        &listed[..],
+        "the records below fsutil's NextUsn {queried_next} differ from fsutil's"
+    );
 
     // One unbounded batch reads the same records the bounded ones did.
     let whole = read_records_io(
