@@ -1025,5 +1025,16 @@ fn finding(f: &CheckFinding) -> Json {
             ("why", Json::from(reason.as_str())),
             ("repairable", Json::from(false)),
         ]),
+        CheckFinding::QuotaChargeDrift {
+            record,
+            charged,
+            due,
+        } => Json::object([
+            ("kind", Json::from("quota_charge_drift")),
+            ("record", Json::from(*record)),
+            ("charged", Json::from(*charged)),
+            ("due", Json::from(*due)),
+            ("repairable", Json::from(false)),
+        ]),
     }
 }
