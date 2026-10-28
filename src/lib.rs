@@ -84,6 +84,7 @@ pub mod unix_metadata;
 pub mod upcase;
 pub mod usn;
 pub mod usn_cursor;
+pub mod usn_image;
 pub mod view_index;
 pub mod write;
 

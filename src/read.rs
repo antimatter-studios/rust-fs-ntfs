@@ -879,6 +879,58 @@ pub fn read_attribute_range<T: BlockIo + ?Sized>(
     Ok(full[start..end].to_vec())
 }
 
+/// An attribute's data size, and where its first allocated byte is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttributeAllocation {
+    /// The value's length in bytes.
+    pub data_size: u64,
+    /// Byte offset of the first cluster a run maps to the disk; `None`
+    /// when every cluster is a sparse hole or the value is empty. A
+    /// resident value is allocated from byte 0.
+    pub first_allocated: Option<u64>,
+}
+
+/// The data size of an attribute and its first allocated byte, from its
+/// header and run list alone: no value is read. Follows
+/// `$ATTRIBUTE_LIST`. `Ok(None)` when the record has no such attribute.
+pub fn attribute_allocation_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    record_number: u64,
+    attr_type: AttrType,
+    name: Option<&str>,
+) -> Result<Option<AttributeAllocation>, Error> {
+    let Some((params, _, record, loc)) = locate_attribute(io, record_number, attr_type, name)?
+    else {
+        return Ok(None);
+    };
+    if loc.is_resident {
+        let data_size = u64::from(loc.resident_value_length.unwrap_or(0));
+        return Ok(Some(AttributeAllocation {
+            data_size,
+            first_allocated: (data_size > 0).then_some(0),
+        }));
+    }
+    let data_size = loc
+        .non_resident_value_length
+        .ok_or(Error::io("non-resident attr has no data size"))?;
+    let mpo = loc
+        .non_resident_mapping_pairs_offset
+        .ok_or(Error::io("non-resident attr has no mapping-pairs offset"))? as usize;
+    let runs = record
+        .get(loc.attr_offset + mpo..loc.attr_offset + loc.attr_length)
+        .ok_or(Error::io("mapping pairs lie outside the attribute"))
+        .and_then(data_runs::decode_runs)?;
+    let first_allocated = runs
+        .iter()
+        .find(|run| run.lcn.is_some() && run.length > 0)
+        .map(|run| run.starting_vcn.saturating_mul(params.cluster_size))
+        .filter(|&at| at < data_size);
+    Ok(Some(AttributeAllocation {
+        data_size,
+        first_allocated,
+    }))
+}
+
 /// Ranged read of an uncompressed non-resident attribute: reads only the
 /// clusters overlapping `[offset, offset+len)`, zero-filling sparse holes and
 /// the `[initialized_size, data_size)` tail.
