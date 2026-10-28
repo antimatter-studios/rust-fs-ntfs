@@ -1463,6 +1463,12 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+          # A directory whose named stream lives in clusters: rmdir must
+          # free them, or chkdsk finds them allocated to nothing (#735).
+          bash scripts/run-matrix.sh mac-format-mkdir-dir-stream-rmdir-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       - name: Validate foreign fragmented INDX fixture
         shell: bash
         run: |
