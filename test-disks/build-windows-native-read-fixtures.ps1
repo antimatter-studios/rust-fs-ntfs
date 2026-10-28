@@ -48,6 +48,31 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-attrlist.img' -Label 'ATTRLIST' -
     Write-NamedStreamOracle $file '/many.bin' $attrStreamsReport
 }
 
+# Stream names whose order differs under ordinal UTF-16, upcase folding,
+# length-first and code-point comparison (#1047): B/a/Ac/ab/abc for case,
+# prefix and length, '_' between the cases, e9/ca and ff/100 for Latin-1 and
+# Latin Extended upcase, ff41 against a surrogate pair for UTF-16 against code
+# points. No two names fold to one, so each stays its own stream. The padding
+# only forces the $ATTRIBUTE_LIST. Every name is reported as UTF-16 code units
+# in ntfs-attrlist-names.names.tsv; tests/attrlist_name_order_windows.rs keeps
+# the order Windows wrote them in.
+$attrNamesReport = [IO.Path]::GetFullPath('test-disks/ntfs-attrlist-names.names.tsv')
+New-WindowsFixture -ImagePath 'test-disks/ntfs-attrlist-names.img' -Label 'ATTRNAMES' -Populate {
+    param($root)
+    $file = Join-Path $root 'names.bin'
+    [System.IO.File]::WriteAllBytes($file, [byte[]](0x42))
+    $names = @('B', 'a', 'Ac', 'ab', 'abc', '_',
+        "$([char]0x00E9)", "$([char]0x00CA)", "$([char]0x00FF)", "$([char]0x0100)",
+        "$([char]0xFF41)", "$([char]0xD83D)$([char]0xDE00)")
+    for ($i = 0; $i -lt 96; $i++) { $names += 'pad-{0:D3}' -f $i }
+    $lines = foreach ($name in $names) {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes("payload-$name")
+        [System.IO.File]::WriteAllBytes("${file}:$name", $bytes)
+        ($name.ToCharArray() | ForEach-Object { '{0:x4}' -f [int]$_ }) -join ' '
+    }
+    [IO.File]::WriteAllText($attrNamesReport, (($lines -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
+}
+
 New-WindowsFixture -ImagePath 'test-disks/ntfs-compressed.img' -Label 'COMPRESSED' -Populate {
     param($root)
     $file = Join-Path $root 'comp.txt'
@@ -700,5 +725,5 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-ls-recursive.img' -Label 'LSRECUR
     [IO.File]::WriteAllText($walkReport, (($lines -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
 }
 
-Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img,test-disks/ntfs-format-64k.img,test-disks/ntfs-usnjrnl.img,test-disks/ntfs-inventory.img,test-disks/ntfs-stat.img,test-disks/ntfs-ls-recursive.img |
+Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-attrlist-names.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img,test-disks/ntfs-format-64k.img,test-disks/ntfs-usnjrnl.img,test-disks/ntfs-inventory.img,test-disks/ntfs-stat.img,test-disks/ntfs-ls-recursive.img |
     Format-Table Name,Length
