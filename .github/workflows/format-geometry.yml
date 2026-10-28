@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Fixture-free decoding and coverage contracts (66 checks)
+      - name: Fixture-free decoding and coverage contracts (75 checks)
         shell: pwsh
         run: ./tests/scripts/windows-format-geometry.ps1
       - name: Capture all 26 Windows format requests, six large-cluster layouts and their index VCN units
@@ -27,6 +27,13 @@ jobs:
         if: ${{ !cancelled() }}
         shell: pwsh
         run: ./test-disks/capture-512e-geometry.ps1
+      # The smallest volume Windows formats as NTFS at 4 KiB clusters, with
+      # its $LogFile size and $MFTMirr position, which mkfs's small-volume
+      # policy is written against (#961).
+      - name: Capture the smallest NTFS volume Windows formats at 4 KiB clusters
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: ./test-disks/capture-small-volume-geometry.ps1
       - name: No generated image survives capture
         if: always()
         shell: pwsh
