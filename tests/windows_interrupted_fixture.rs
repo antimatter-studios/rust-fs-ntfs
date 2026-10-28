@@ -63,6 +63,11 @@
 //!   capture whose `$Quota` index has outgrown its root, so the log updates
 //!   its entries in index blocks. See [`QUOTA_SPILLED_LOG_END`].
 //!
+//! * `windows-interrupted-wrap-continuation*`: the same three files for a
+//!   capture whose checkpoint's dirty page table is a record that wrapped
+//!   past the log's end onto the first page of its record area. See
+//!   [`WRAP_CONTINUATION_LOG_END`].
+//!
 //! Every partition's SHA-256 is in [`PARTITIONS`] and checked on unpacking.
 //!
 //! WHAT WINDOWS' REPLAY CHANGED, read by ntfs-3g without replaying: on
@@ -99,7 +104,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 /// The SHA-256 of each decompressed partition after bootstrap-only removal.
-const PARTITIONS: [(&str, &str); 26] = [
+const PARTITIONS: [(&str, &str); 28] = [
     (
         "windows-interrupted-1",
         "c45659e95104eca5f793c3f21061f42705a01783e62d1c7a46c63e4089db0b9a",
@@ -203,6 +208,14 @@ const PARTITIONS: [(&str, &str); 26] = [
     (
         "windows-interrupted-quota-spilled.recovered",
         "6c3caf4281b34494f05a661a1895059473f6b0d3a542d888516d69423437e2db",
+    ),
+    (
+        "windows-interrupted-wrap-continuation",
+        "650ef86942ce7b005f2d83f68cf27677ad334885c7cef555b38accbf389efe5b",
+    ),
+    (
+        "windows-interrupted-wrap-continuation.recovered",
+        "f1128b982e9c1430d11bfd3ce617e050326d9bfa1f3ca3525499c7e48044a9c4",
     ),
 ];
 
@@ -445,6 +458,21 @@ const FRESH_LOG_END: [(&str, u64); 1] = [("fresh-log", 0x22_578d)];
 /// reader.
 const QUOTA_SPILLED_LOG_END: [(&str, u64); 1] = [("quota-spilled", 0x20_754f)];
 
+/// A volume whose last checkpoint dumped its dirty page table into a
+/// 5,824-byte record that starts 640 bytes before the end of the 2 MiB log
+/// and wraps onto the first page of the record area, page 34. That page
+/// holds nothing but the record's continuation, so its last LSN names the
+/// log's last page. A replay that took the first page sitting at its own
+/// home for the start of the record area read the continuation from page
+/// 35. It read the records written after it there as two table entries
+/// that describe no page, and refused "a dirty page of no clusters"
+/// (#654). The independent `ntfslog` reader reads the table as 131 entries,
+/// each with clusters. Made by the same capture, and recovered by Windows
+/// the same way, as the snapshots above (run 37179118078, `log_kb=2048`,
+/// two writers for 240 s, snapshot 10). Its last LSN is the highest last
+/// LSN of its record pages.
+const WRAP_CONTINUATION_LOG_END: [(&str, u64); 1] = [("wrap-continuation", 0xe8_fecf)];
+
 /// Where, in each pre-image, a `$LogFile` record page the replay needs
 /// sits: inside the walk from the oldest dirty page to the log's end, and
 /// in no tail copy.
@@ -560,6 +588,19 @@ fn a_record_whose_end_only_a_tail_copy_holds_is_replayed_to_what_windows_recover
     // the page the record starts on cannot read the record, and refuses a
     // volume Windows recovers (#137).
     for (k, log_end) in TAIL_CONTINUATION_LOG_END {
+        fsck_and_mount_rw_replay_to_what_windows_recovered(k, log_end);
+    }
+}
+
+#[test]
+fn a_record_that_wraps_onto_the_first_record_page_is_replayed_to_what_windows_recovered() {
+    // An LFS 2.x log's record area starts after its two restart pages and
+    // 32 tail-copy pages, whatever its first page holds. When a record
+    // wraps past the log's end, that page holds only its continuation and
+    // names the log's last page. Read from any other page, the
+    // continuation is bytes of other records, and the replay refuses a
+    // volume Windows recovers (#654).
+    for (k, log_end) in WRAP_CONTINUATION_LOG_END {
         fsck_and_mount_rw_replay_to_what_windows_recovered(k, log_end);
     }
 }
@@ -1514,6 +1555,7 @@ fn what_windows_recovered_reads_here_as_windows_lists_it() {
     let tail_continuation = TAIL_CONTINUATION_LOG_END.map(|(k, _)| k);
     let undo = UNDO_LOG_END.map(|(k, _)| k);
     let open_at_checkpoint = OPEN_AT_CHECKPOINT_LOG_END.map(|(k, _)| k);
+    let wrap_continuation = WRAP_CONTINUATION_LOG_END.map(|(k, _)| k);
     for k in ["1", "6"]
         .into_iter()
         .chain(wrapped)
@@ -1522,6 +1564,7 @@ fn what_windows_recovered_reads_here_as_windows_lists_it() {
         .chain(tail_continuation)
         .chain(undo)
         .chain(open_at_checkpoint)
+        .chain(wrap_continuation)
     {
         let img = unpack(&format!("windows-interrupted-{k}.recovered"));
         let want = manifest(k);
@@ -1614,6 +1657,7 @@ fn windows_replay_changed_what_the_volumes_hold() {
 /// | quota          | 43      | 73     | 106   |
 /// | fresh-log      | 213     | 4      | 535   |
 /// | quota-spilled  | 19      | 34     | <= 48 |
+/// | wrap-continuation | 193  | 414    | 324   |
 ///
 /// `quota`'s and `fresh-log`'s were measured on 2026-10-07, with Windows'
 /// changes after its restart that moved no LSN undone
@@ -1623,6 +1667,9 @@ fn windows_replay_changed_what_the_volumes_hold() {
 /// Windows' copy alone, by a separate reader, with the same changes
 /// undone; its bits are at most the 48 `$Bitmap` differs in between them
 /// on clusters no record Windows wrote after its restart holds.
+///
+/// `wrap-continuation`'s were measured on 2026-10-28, with replay reading
+/// the wrapped record from the first page of the record area.
 ///
 /// `index-vcn`'s records and blocks were measured from the pre-image and
 /// Windows' recovered copy alone; its bits are at most the 99 `$Bitmap`
@@ -1642,6 +1689,7 @@ fn floors(k: &str) -> (usize, usize, usize) {
         "quota" => (30, 50, 80),
         "fresh-log" => (150, 3, 400),
         "quota-spilled" => (14, 25, 30),
+        "wrap-continuation" => (130, 300, 230),
         other => panic!("no floors measured for fixture {other}"),
     }
 }
@@ -2443,6 +2491,7 @@ fn captures_holding_work() -> Vec<(&'static str, u64)> {
         &QUOTA_LOG_END,
         &FRESH_LOG_END,
         &QUOTA_SPILLED_LOG_END,
+        &WRAP_CONTINUATION_LOG_END,
     ]
     .concat()
 }
