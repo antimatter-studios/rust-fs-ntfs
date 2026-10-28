@@ -25,7 +25,8 @@ use fs_ntfs::facade::{FileType, Filesystem};
 use fs_ntfs::{attr_io, data_runs, mft_io, mkfs, read, write};
 use sha2::{Digest, Sha256};
 
-use kernel_support::{kernel_release, kernel_report, kernel_write};
+use fs_ntfs::unix_metadata::UnixMetadata;
+use kernel_support::{kernel_release, kernel_report, kernel_run, kernel_write};
 
 const VOLUME_BYTES: u64 = 64 << 20;
 
@@ -376,5 +377,115 @@ fn what_ntfs3_logs_reaches_the_report() {
         diff.is_empty(),
         "the dirty volume still reads back:\n{diff}"
     );
+    std::fs::remove_file(&img).unwrap();
+}
+
+/// `stat` of each path in `image` under ntfs3, read-only, as
+/// `path -> (uid, gid, mode)` with the mode in octal, and what ntfs3 logged.
+fn kernel_owners(image: &str, paths: &[&str]) -> (BTreeMap<String, String>, Vec<String>) {
+    let script = paths
+        .iter()
+        .map(|path| format!("stat -c '%n\t%u %g %a %F' '{path}'"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut owners = BTreeMap::new();
+    let mut dmesg = Vec::new();
+    for line in kernel_run(image, false, &script).lines() {
+        if let Some(log) = line.strip_prefix("dmesg\t\t") {
+            dmesg.push(log.to_string());
+        } else if let Some((path, rest)) = line.split_once('\t') {
+            owners.insert(path.to_string(), rest.to_string());
+        }
+    }
+    (owners, dmesg)
+}
+
+#[test]
+fn ntfs3_reports_the_owner_group_and_mode_this_crate_wrote() {
+    // WSL's `$LXUID`, `$LXGID` and `$LXMOD` (#1195): ntfs3 is the reader
+    // that takes a file's owner, group and mode from them, so it grades the
+    // bytes. A file with none of them is the control: ntfs3 must not report
+    // another file's owner for it, or the comparison proves nothing.
+    let img = fresh_volume("kernel_unix_metadata", 4096);
+    {
+        let mut io = PathIo::open_rw(Path::new(&img)).expect("open");
+        write::create_file_io(&mut io, "/", "owned").expect("create");
+        write::write_file_contents_io(&mut io, "/owned", b"owned\n").expect("write");
+        write::mkdir_io(&mut io, "/", "owned-dir").expect("mkdir");
+        write::create_file_io(&mut io, "/", "plain").expect("create");
+        write::set_unix_metadata_io(
+            &mut io,
+            "/owned",
+            &UnixMetadata {
+                uid: Some(1234),
+                gid: Some(5678),
+                mode: Some(0o640),
+            },
+        )
+        .expect("owner of /owned");
+        write::set_unix_metadata_io(
+            &mut io,
+            "/owned-dir",
+            &UnixMetadata {
+                uid: Some(42),
+                gid: Some(43),
+                mode: Some(0o2750),
+            },
+        )
+        .expect("owner of /owned-dir");
+    }
+    let (owners, dmesg) = kernel_owners(&img, &["owned", "owned-dir", "plain"]);
+    let release = kernel_release();
+    assert_eq!(
+        owners.get("owned").map(String::as_str),
+        Some("1234 5678 640 regular file"),
+        "ntfs3 ({release}) reports another owner, group or mode for /owned: {owners:?}"
+    );
+    assert_eq!(
+        owners.get("owned-dir").map(String::as_str),
+        Some("42 43 2750 directory"),
+        "ntfs3 ({release}) reports another owner, group or mode for /owned-dir: {owners:?}"
+    );
+    let plain = owners.get("plain").expect("ntfs3 stat of /plain");
+    assert!(
+        !plain.starts_with("1234 ") && !plain.contains(" 640 "),
+        "ntfs3 ({release}) reports /owned's owner or mode for /plain, which has none: {plain}"
+    );
+    assert_eq!(dmesg, Vec::<String>::new(), "ntfs3 complained about {img}");
+    std::fs::remove_file(&img).unwrap();
+}
+
+#[test]
+fn this_crate_reads_the_owner_group_and_mode_ntfs3_wrote() {
+    let img = fresh_volume("kernel_unix_metadata_back", 4096);
+    let (_, dmesg) = kernel_write(
+        &img,
+        "cd \"$MNT\"\n\
+         printf made > made\n\
+         chown 2001:2002 made\n\
+         chmod 0604 made\n\
+         mkdir made-dir\n\
+         chown 3001:3002 made-dir\n\
+         chmod 0715 made-dir",
+    );
+    assert_eq!(dmesg, Vec::<String>::new(), "ntfs3 complained about {img}");
+    let release = kernel_release();
+    for (path, want) in [
+        ("/made", (2001, 2002, 0o100_604)),
+        ("/made-dir", (3001, 3002, 0o040_715)),
+    ] {
+        let got = write::read_unix_metadata(Path::new(&img), path).unwrap_or_else(|e| {
+            panic!("read the WSL attributes ntfs3 ({release}) wrote on {path}: {e:?}")
+        });
+        assert_eq!(
+            got,
+            UnixMetadata {
+                uid: Some(want.0),
+                gid: Some(want.1),
+                mode: Some(want.2),
+            },
+            "{path} as ntfs3 ({release}) left it"
+        );
+    }
     std::fs::remove_file(&img).unwrap();
 }
