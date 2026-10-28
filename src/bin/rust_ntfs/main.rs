@@ -1,6 +1,6 @@
 //! rust-ntfs — unified NTFS CLI (format, list, write, delete).
 //!
-//! Subcommand dispatcher for the fifteen operations the matrix runner and
+//! Subcommand dispatcher for the twenty operations the matrix runner and
 //! one-off NTFS work both need. (It said "the four operations" and then
 //! listed ten, for a binary that dispatched twelve -- #186.)
 //!
@@ -21,6 +21,8 @@
 //!   layout     Print how a file's `$DATA` is stored (flags, sizes, runs).
 //!   stream     Write or delete one of a file's named streams.
 //!   ea         Set or remove one of a file's extended attributes.
+//!   times      Set a file's four `$STANDARD_INFORMATION` times.
+//!   security-id  Point a file at a descriptor already in `$Secure`.
 //!
 //! Single binary so distribution (GitHub releases, Homebrew taps) ships
 //! one artefact rather than four. Each subcommand lives in its own
@@ -42,10 +44,12 @@ mod remove;
 mod rename;
 mod rm;
 mod rmdir;
+mod security_id;
 mod set_dirty;
 mod sparse;
 mod stream;
 mod symlink;
+mod times;
 mod touch;
 mod write;
 
@@ -73,6 +77,8 @@ Subcommands:
   directory-layout  Assert a listed directory's resident or spilled index shape.
   stream     Write or delete one of a file's named streams.
   ea         Set or remove one of a file's extended attributes.
+  times      Set a file's creation, modification, change and access times.
+  security-id  Point a file at a security descriptor already in $Secure.
 
 Run `rust-ntfs <subcommand> --help` for per-subcommand options.
 
@@ -108,6 +114,8 @@ fn main() -> ExitCode {
         "directory-layout" => directory_layout::run(rest),
         "stream" => stream::run(rest),
         "ea" => ea::run(rest),
+        "times" => times::run(rest),
+        "security-id" => security_id::run(rest),
         "-h" | "--help" => {
             print!("{HELP}");
             ExitCode::SUCCESS

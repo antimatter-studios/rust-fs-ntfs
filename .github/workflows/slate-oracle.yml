@@ -28,6 +28,8 @@ on:
       - tests/scripts/slate-writer-capture.sh
       - tests/scripts/slate-namespace-capture.sh
       - tests/scripts/slate-stream-metadata-capture.sh
+      - tests/scripts/slate-metadata-recipes.sh
+      - scripts/fs-windows-test-harness/win-cli-verify.ps1
       - scripts/fs-windows-test-harness/run-host-steps
       - scripts/cli-oracle.sh
       - fs-windows-test-harness.toml
@@ -69,6 +71,9 @@ jobs:
       # also writes the symbolic link, a reparse point. Then the stream and
       # metadata writes (#829): twelve named streams and an EA spilling into
       # an $ATTRIBUTE_LIST, and a split $DATA with its own streams and EA.
+      # Then one recipe each for object IDs, timestamps and a security
+      # descriptor (#1065), the last on a volume Windows formatted, since
+      # ours carries only one descriptor to point a file at.
       - name: Capture the existing data, namespace and stream mutation recipes
         run: |
           mkdir -p tmp/logs
@@ -82,7 +87,10 @@ jobs:
             --scenario cli-empty-directory-win-verify-chkdsk \
             --scenario cli-attrlist-data-win-verify-chkdsk \
             --scenario cli-attrlist-split-extents-win-verify-chkdsk \
-            --capture-dir tmp/slate-writer --floor 9 \
+            --scenario cli-objid-win-verify-chkdsk \
+            --scenario cli-times-win-verify-chkdsk \
+            --scenario cli-windows-1-security-id-win-verify-chkdsk \
+            --capture-dir tmp/slate-writer --floor 12 \
             >tmp/logs/slate-writer-capture.log 2>&1
       - uses: actions/upload-artifact@v4
         if: always()
@@ -97,7 +105,7 @@ jobs:
     name: Windows formats and chkdsk grades the cases
     needs: writer-cases
     runs-on: windows-latest
-    # Thirteen 256 MiB images, two Windows formats and thirteen read-only chkdsk
+    # Sixteen images of up to 256 MiB, two Windows formats and sixteen read-only chkdsk
     # passes. A bound, so a hung mount fails by name (#388).
     timeout-minutes: 30
     steps:
@@ -183,14 +191,15 @@ jobs:
             printf 'source_head\t%s\n' "${{ github.event.pull_request.head.sha || github.sha }}"
           } >tmp/slate-oracle/out/provenance.tsv
       # Four format controls plus populate, write-at and truncate (#827),
-      # mkdir, rename, unlink and rmdir (#828), and the named-stream and EA
-      # recipes (#829) from the existing Windows matrix: thirteen cases,
-      # never fewer silently.
+      # mkdir, rename, unlink and rmdir (#828), the named-stream and EA
+      # recipes (#829), and the object ID, timestamp and security
+      # descriptor recipes (#1065) from the existing Windows matrix:
+      # sixteen cases, never fewer silently.
       - name: Compare Slate's verdicts with Windows chkdsk's
         run: >-
           bash scripts/slate-oracle.sh compare
           tmp/slate-oracle/cases.tsv tmp/slate-oracle/images
-          "$SLATE_CHECKER" tmp/slate-oracle/out 13
+          "$SLATE_CHECKER" tmp/slate-oracle/out 16
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -25,6 +25,17 @@
 #   refuse<TAB>/path                     Windows refuses to make the directory chain
 #                                        /path, as fs.ntfs mkdir -p did: CreateDirectory
 #                                        fails because something is in the way
+#   objid<TAB>/path<TAB>hex              FSCTL_GET_OBJECT_ID returns these 16 bytes,
+#                                        32 hexadecimal digits in on-disk order
+#                                        (rust-ntfs objid)
+#   times<TAB>/path<TAB>c<TAB>m<TAB>chg<TAB>a
+#                                        FILE_BASIC_INFO through a handle opened only
+#                                        for its attributes: creation, last write,
+#                                        change and last access, each a FILETIME in
+#                                        decimal (rust-ntfs times)
+#   acl<TAB>/path<TAB>/other             Get-Acl reads the same descriptor, as SDDL,
+#                                        for both: /path was pointed at /other's
+#                                        security id (rust-ntfs security-id)
 #
 # Args:
 #   -ImagePath  Path on the VM to the .img file.
@@ -59,6 +70,67 @@ if ($lines.Count -eq 0) {
     [Console]::Error.WriteLine("win-cli-verify: $Manifest is empty")
     exit 1
 }
+
+# Object IDs and the four times are read through a handle, not a directory
+# listing: a listing reports the times duplicated into the parent's index,
+# which Windows refreshes lazily, while a handle reports the file's own
+# $STANDARD_INFORMATION. The handle asks only for FILE_READ_ATTRIBUTES, so
+# opening it does not touch the last access time it is reading.
+# https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_basic_info
+# https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_get_object_id
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public static class CliVerifyHandle {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern SafeFileHandle CreateFileW(string path, uint access, uint share,
+        IntPtr security, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int kind,
+        [Out] byte[] info, uint size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(SafeFileHandle handle, uint code, IntPtr input,
+        uint inputSize, [Out] byte[] output, uint outputSize, out uint returned, IntPtr overlapped);
+
+    // FILE_READ_ATTRIBUTES, every share mode, OPEN_EXISTING, and
+    // FILE_FLAG_BACKUP_SEMANTICS so a directory opens too.
+    static SafeFileHandle Open(string path) {
+        var h = CreateFileW(path, 0x80, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+        if (h.IsInvalid) {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error, path + ": CreateFileW, Win32 " + error);
+        }
+        return h;
+    }
+
+    // Creation, last write, change, last access: FILE_BASIC_INFO holds them
+    // as creation, last access, last write, change.
+    public static long[] Times(string path) {
+        var info = new byte[40];
+        using (var h = Open(path)) {
+            if (!GetFileInformationByHandleEx(h, 0, info, 40))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), path + ": FileBasicInfo");
+        }
+        return new long[] {
+            BitConverter.ToInt64(info, 0), BitConverter.ToInt64(info, 16),
+            BitConverter.ToInt64(info, 24), BitConverter.ToInt64(info, 8) };
+    }
+
+    // The first 16 bytes of FILE_OBJECTID_BUFFER, as lower-case hex.
+    public static string ObjectId(string path) {
+        var buffer = new byte[64];
+        uint returned;
+        using (var h = Open(path)) {
+            if (!DeviceIoControl(h, 0x0009009C, IntPtr.Zero, 0, buffer, 64, out returned, IntPtr.Zero))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), path + ": FSCTL_GET_OBJECT_ID");
+        }
+        return BitConverter.ToString(buffer, 0, 16).Replace("-", "").ToLowerInvariant();
+    }
+}
+'@
 
 $Vhd = Get-VhdPathFor -ImagePath $ImagePath
 
@@ -226,6 +298,57 @@ try {
                     $report += "ok   refuse $($f[1]) (Win32 error $code)"
                 } else {
                     $report += "FAIL refuse $($f[1]): Windows failed for another reason, Win32 error ${code}: $why"
+                    $failures++
+                }
+            }
+            'objid' {
+                $target = "${letter}:" + ($f[1] -replace '/', '\')
+                try {
+                    $got = [CliVerifyHandle]::ObjectId($target)
+                } catch {
+                    $report += "FAIL objid $($f[1]): Windows reads no object id: $($_.Exception.Message)"
+                    $failures++
+                    continue
+                }
+                if ($got -ceq $f[2]) {
+                    $report += "ok   objid $($f[1]) $got"
+                } else {
+                    $report += "FAIL objid $($f[1]): Windows reads $got; rust-ntfs objid wrote $($f[2])"
+                    $failures++
+                }
+            }
+            'times' {
+                $target = "${letter}:" + ($f[1] -replace '/', '\')
+                try {
+                    $got = [CliVerifyHandle]::Times($target)
+                } catch {
+                    $report += "FAIL times $($f[1]): Windows cannot read them: $($_.Exception.Message)"
+                    $failures++
+                    continue
+                }
+                $want = @($f[2..5] | ForEach-Object { [int64]$_ })
+                if (($got -join ' ') -ceq ($want -join ' ')) {
+                    $report += "ok   times $($f[1]) $($got -join ' ')"
+                } else {
+                    $report += "FAIL times $($f[1]): Windows reads creation, write, change, access $($got -join ' '); rust-ntfs times wrote $($want -join ' ')"
+                    $failures++
+                }
+            }
+            'acl' {
+                $target = "${letter}:" + ($f[1] -replace '/', '\')
+                $other = "${letter}:" + ($f[2] -replace '/', '\')
+                try {
+                    $got = (Get-Acl -LiteralPath $target).Sddl
+                    $want = (Get-Acl -LiteralPath $other).Sddl
+                } catch {
+                    $report += "FAIL acl $($f[1]): Windows cannot read the descriptor: $($_.Exception.Message)"
+                    $failures++
+                    continue
+                }
+                if ($got -and $got -ceq $want) {
+                    $report += "ok   acl $($f[1]) reads $($f[2])'s descriptor $got"
+                } else {
+                    $report += "FAIL acl $($f[1]): Windows reads '$got'; $($f[2]) reads '$want'"
                     $failures++
                 }
             }
