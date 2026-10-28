@@ -75,8 +75,9 @@ jobs:
           if-no-files-found: error
   filename-fields-capture:
     # Issue #629: runs the six-step FILE_NAME producer on an elevated hosted
-    # Windows runner. It records what Windows reports; it grades nothing, so
-    # the three ignored probes stay ignored until a decoder compares them.
+    # Windows runner and grades what Windows wrote against the table in
+    # tests/common/fn_fields_windows.rs, which field_exhaustion_fn holds this
+    # crate's writer to.
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -121,7 +122,7 @@ jobs:
               throw "step $step image hash $hash is absent from the manifest"
             }
           }
-      - name: The three FILE_NAME fields are decoded raw for all six steps
+      - name: The three FILE_NAME fields match the shared expectations for all six steps
         shell: pwsh
         run: cargo test --locked --features fn-fields-oracle --test filename_fields_windows_oracle
       - uses: actions/upload-artifact@v4
