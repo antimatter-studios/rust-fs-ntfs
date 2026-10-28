@@ -271,6 +271,103 @@ mod tests {
         assert!(scan_directory_allocation_slack_io(&mut dev, 5, budget).is_err());
     }
 
+    /// A 4096-byte INDX block whose index header claims `used` bytes of the
+    /// block's whole allocation, with `slack` written at `slack_at`, fixed up
+    /// for writing at 512-byte sectors.
+    fn indx_block(vcn: u64, used: usize, slack_at: usize, slack: &[u8]) -> Vec<u8> {
+        const HEADER: usize = crate::idx_block::INDX_INDEX_HEADER_OFFSET;
+        let mut block = vec![0u8; 4096];
+        block[0..4].copy_from_slice(b"INDX");
+        block[0x04..0x06].copy_from_slice(&0x28u16.to_le_bytes());
+        block[0x06..0x08].copy_from_slice(&9u16.to_le_bytes());
+        block[0x10..0x18].copy_from_slice(&vcn.to_le_bytes());
+        block[HEADER + 4..HEADER + 8].copy_from_slice(&(used as u32).to_le_bytes());
+        block[HEADER + 8..HEADER + 12].copy_from_slice(&((4096 - HEADER) as u32).to_le_bytes());
+        block[slack_at..slack_at + slack.len()].copy_from_slice(slack);
+        crate::mft_io::apply_fixup_on_write_magic(&mut block, 512, b"INDX").unwrap();
+        block
+    }
+
+    #[test]
+    fn a_fragmented_block_reports_where_each_candidate_was_read_from() {
+        use crate::data_runs::DataRun;
+        // 512-byte clusters, so one 4096-byte block spans eight clusters.
+        // Block 0 is split across two runs (LCN 100 and LCN 300); block 1
+        // (VCN 8) lies in one run at LCN 400.
+        let ia = crate::idx_block::IndexAllocation {
+            params: crate::mft_io::BootParams {
+                bytes_per_sector: 512,
+                sectors_per_cluster: 1,
+                cluster_size: 512,
+                mft_lcn: 4,
+                file_record_size: 1024,
+                total_sectors: 1 << 20,
+                serial_number: 0,
+                index_block_size: 4096,
+                oem_id: *b"NTFS    ",
+            },
+            block_size: 4096,
+            runs: vec![
+                DataRun {
+                    starting_vcn: 0,
+                    length: 4,
+                    lcn: Some(100),
+                },
+                DataRun {
+                    starting_vcn: 4,
+                    length: 4,
+                    lcn: Some(300),
+                },
+                DataRun {
+                    starting_vcn: 8,
+                    length: 8,
+                    lcn: Some(400),
+                },
+            ],
+            bitmap: vec![0b11],
+            data_length: 8192,
+        };
+        let gone = entry((7 << 48) | 41, (5 << 48) | 5, 1, "gone.txt");
+        // In the second fragment, 64 bytes past its start.
+        let block_offset = 2048 + 64;
+        let block0 = indx_block(0, 0x40, block_offset, &gone);
+        let block1 = indx_block(8, 0x40, 0, &[]);
+        let mut dev = ZeroDev(vec![0u8; 420 * 512]);
+        dev.0[100 * 512..100 * 512 + 2048].copy_from_slice(&block0[..2048]);
+        dev.0[300 * 512..300 * 512 + 2048].copy_from_slice(&block0[2048..]);
+        dev.0[400 * 512..400 * 512 + 4096].copy_from_slice(&block1);
+
+        let blocks = scan_allocation_slack_io(&mut dev, &ia, WIDE).unwrap();
+        assert_eq!(blocks.len(), 2);
+        let (first, second) = (&blocks[0], &blocks[1]);
+        assert_eq!((first.vcn, first.logical_offset), (0, 0));
+        assert_eq!((second.vcn, second.logical_offset), (8, 4096));
+        let extent = |block_offset, device_offset, length| crate::idx_block::BlockExtent {
+            block_offset,
+            device_offset,
+            length,
+        };
+        assert_eq!(
+            first.extents,
+            vec![extent(0, 100 * 512, 2048), extent(2048, 300 * 512, 2048)]
+        );
+        assert_eq!(second.extents, vec![extent(0, 400 * 512, 4096)]);
+
+        assert_eq!(first.scan.candidates.len(), 1);
+        let c = &first.scan.candidates[0];
+        assert_eq!(c.name, name("gone.txt"));
+        assert_eq!(first.region_start + c.region_offset, block_offset);
+        let device = first.device_offset(block_offset).unwrap();
+        assert_eq!(device, 300 * 512 + 64);
+        // The device bytes at that offset, read without the scanner, are
+        // the entry itself.
+        let at = device as usize;
+        assert_eq!(&dev.0[at..at + gone.len()], &gone[..]);
+        assert_eq!(first.device_offset(2047), Some(100 * 512 + 2047));
+        assert_eq!(first.device_offset(4096), None);
+        assert!(second.scan.candidates.is_empty());
+    }
+
     const WIDE: SlackBudget = SlackBudget {
         max_offsets: 4096,
         max_candidates: 64,
@@ -616,6 +713,44 @@ mod windows_capture {
                 read_u64(&raw, at),
                 observation["raw_file_reference"].as_u64()
             );
+        }
+    }
+
+    #[test]
+    fn attested_entries_are_located_where_windows_wrote_them() {
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(env_path("NTFS_I30_SLACK_MANIFEST")).expect("manifest readable"),
+        )
+        .expect("manifest is JSON");
+        let directory_record = manifest["directory_file_id"].as_u64().unwrap() & 0xFFFF_FFFF_FFFF;
+        let cluster_size = manifest["cluster_size_bytes"].as_u64().unwrap();
+        let mut io = crate::block_io::PathIo::open_ro(&env_path("NTFS_I30_SLACK_IMAGE"))
+            .expect("image opens");
+        let blocks = scan_directory_allocation_slack_io(&mut io, directory_record, tests_budget())
+            .expect("Windows allocated INDX blocks for the capture directory");
+        let attested = manifest["raw_deleted_evidence"].as_array().unwrap();
+        assert!(!attested.is_empty());
+        // block_image_offset comes from the capture script's own sweep of
+        // the image for INDX magic, not from any runlist this crate decodes.
+        for e in attested {
+            let vcn = e["vcn"].as_u64().unwrap();
+            let image_offset = e["block_image_offset"].as_u64().unwrap();
+            let at = e["entry_offset_in_block"].as_u64().unwrap() as usize;
+            let block = blocks
+                .iter()
+                .find(|b| b.vcn == vcn)
+                .unwrap_or_else(|| panic!("attested VCN {vcn} was not scanned"));
+            assert_eq!(block.logical_offset, vcn * cluster_size);
+            assert_eq!(block.device_offset(0), Some(image_offset));
+            assert!(
+                block
+                    .scan
+                    .candidates
+                    .iter()
+                    .any(|c| block.region_start + c.region_offset == at),
+                "no candidate at attested block offset {at} of VCN {vcn}"
+            );
+            assert_eq!(block.device_offset(at), Some(image_offset + at as u64));
         }
     }
 
