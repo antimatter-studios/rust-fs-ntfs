@@ -573,7 +573,7 @@ impl ListedFile {
     ) -> Result<(), Error> {
         if attr.len() > self.max_attribute_len() {
             return Err(Error::no_space(format!(
-                "an attribute of {} bytes does not fit in an MFT record of {}",
+                "no room for an attribute of {} bytes in an MFT record of {}",
                 attr.len(),
                 self.params.file_record_size
             )));
@@ -612,7 +612,7 @@ impl ListedFile {
     ) -> Result<(), Error> {
         if attr.len() > self.max_attribute_len() {
             return Err(Error::no_space(format!(
-                "an attribute extent of {} bytes does not fit in an MFT record of {}",
+                "no room for an attribute extent of {} bytes in an MFT record of {}",
                 attr.len(),
                 self.params.file_record_size
             )));
@@ -758,6 +758,18 @@ impl ListedFile {
         let base = &mut self.segments[0];
         let links = u16_at(&base.bytes, 0x12).saturating_add(1);
         base.bytes[0x12..0x14].copy_from_slice(&links.to_le_bytes());
+        base.dirty = true;
+        Ok(())
+    }
+
+    /// Change the base record in place with `change`, which neither moves
+    /// nor resizes an attribute: a flag in its `$STANDARD_INFORMATION`.
+    pub(crate) fn change_base<F>(&mut self, change: F) -> Result<(), Error>
+    where
+        F: FnOnce(&mut [u8]) -> Result<(), Error>,
+    {
+        let base = &mut self.segments[0];
+        change(&mut base.bytes)?;
         base.dirty = true;
         Ok(())
     }
