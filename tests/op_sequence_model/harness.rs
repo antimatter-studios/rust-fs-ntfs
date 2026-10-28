@@ -399,14 +399,25 @@ impl Harness {
     pub fn new(name: &str) -> Self {
         Self::with(name, |model| model)
     }
+
+    /// A harness whose image is formatted at `geometry`, such as a pin's.
+    pub fn on(name: &str, geometry: &Geometry) -> Self {
+        Self::formatted(name, geometry, |model| model)
+    }
 }
 
 impl<M: Expected> Harness<M> {
     /// `wrap` receives the real model of the freshly formatted image.
     pub fn with(name: &str, wrap: impl FnOnce(Model) -> M) -> Self {
-        let geometry = geometry();
+        Self::formatted(name, &geometry(), wrap)
+    }
+
+    fn formatted(name: &str, geometry: &Geometry, wrap: impl FnOnce(Model) -> M) -> Self {
         let image = common::temp_image_path(format!("opseq_{name}"));
-        File::create(&image).unwrap().set_len(SIZE).unwrap();
+        File::create(&image)
+            .unwrap()
+            .set_len(geometry.size)
+            .unwrap();
         let mut io = PathIo::open_rw(Path::new(&image)).unwrap();
         mkfs::format_filesystem(
             &mut io,
