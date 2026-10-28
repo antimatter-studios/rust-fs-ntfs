@@ -36,7 +36,7 @@
 //!   entry's offset is the id its records carry
 //!   (`test-disks/windows-interrupted-open-at-checkpoint`). A transaction
 //!   prepared or committed and not forgotten is refused: no capture has
-//!   held one.
+//!   held one (#653).
 //!
 //! Every redo operation replayed here was checked against what Windows'
 //! own restart produced from the same pre-image (the `.recovered` images):
@@ -145,11 +145,13 @@ const NOOP: u16 = 0x00;
 const COMPENSATION: u16 = 0x01;
 const INITIALIZE_FILE_RECORD: u16 = 0x02;
 const DEALLOCATE_FILE_RECORD: u16 = 0x03;
+const WRITE_END_OF_FILE_RECORD_SEGMENT: u16 = 0x04;
 const CREATE_ATTRIBUTE: u16 = 0x05;
 const DELETE_ATTRIBUTE: u16 = 0x06;
 const UPDATE_RESIDENT_VALUE: u16 = 0x07;
 const UPDATE_NONRESIDENT_VALUE: u16 = 0x08;
 const UPDATE_MAPPING_PAIRS: u16 = 0x09;
+const DELETE_DIRTY_CLUSTERS: u16 = 0x0A;
 const SET_NEW_ATTRIBUTE_SIZES: u16 = 0x0B;
 const ADD_INDEX_ENTRY_ROOT: u16 = 0x0C;
 const DELETE_INDEX_ENTRY_ROOT: u16 = 0x0D;
@@ -162,6 +164,7 @@ const UPDATE_FILE_NAME_ROOT: u16 = 0x13;
 const UPDATE_FILE_NAME_ALLOCATION: u16 = 0x14;
 const SET_BITS_IN_NONRESIDENT_BITMAP: u16 = 0x15;
 const CLEAR_BITS_IN_NONRESIDENT_BITMAP: u16 = 0x16;
+const HOT_FIX: u16 = 0x17;
 const END_TOP_LEVEL_ACTION: u16 = 0x18;
 const PREPARE_TRANSACTION: u16 = 0x19;
 const COMMIT_TRANSACTION: u16 = 0x1A;
@@ -171,6 +174,8 @@ const OPEN_ATTRIBUTE_TABLE_DUMP: u16 = 0x1D;
 const TRANSACTION_TABLE_DUMP: u16 = 0x20;
 const UPDATE_RECORD_DATA_ROOT: u16 = 0x21;
 const UPDATE_RECORD_DATA_ALLOCATION: u16 = 0x22;
+const UPDATE_RELATIVE_DATA_IN_INDEX: u16 = 0x23;
+const UPDATE_RELATIVE_DATA_IN_INDEX2: u16 = 0x24;
 const ZERO_END_OF_FILE_RECORD: u16 = 0x25;
 
 /// Operations on an MFT record (`$MFT`'s `$DATA`).
@@ -244,10 +249,36 @@ fn op_name(op: u16) -> &'static str {
 }
 
 fn refuse(why: impl std::fmt::Display) -> Error {
+    refuse_until(137, why)
+}
+
+/// A refusal of a shape no capture has held yet, naming the open issue
+/// that waits for one, so the message outlives #137.
+fn refuse_until(issue: u32, why: impl std::fmt::Display) -> Error {
     Error::io(format!(
         "$LogFile cannot be replayed in full ({why}), so nothing was replayed \
-         (rust-fs-ntfs#137)"
+         (rust-fs-ntfs#{issue})"
     ))
+}
+
+/// The refusal of a redo operation replay does not perform, naming the
+/// issue that waits for a capture holding one.
+fn unperformed(lsn: u64, op: u16) -> Error {
+    let issue = match op {
+        WRITE_END_OF_FILE_RECORD_SEGMENT => 650,
+        DELETE_DIRTY_CLUSTERS => 651,
+        UPDATE_RELATIVE_DATA_IN_INDEX | UPDATE_RELATIVE_DATA_IN_INDEX2 => 652,
+        HOT_FIX => 1158,
+        // A code NTFS does not define: a damaged log, not missing work.
+        _ => 137,
+    };
+    refuse_until(
+        issue,
+        format!(
+            "LSN {lsn:#x} holds a {} ({op:#x}) redo, which replay does not perform yet",
+            op_name(op)
+        ),
+    )
 }
 
 fn u16_at(b: &[u8], off: usize) -> Result<u16, Error> {
@@ -601,11 +632,14 @@ fn read_log(log: &[u8]) -> Result<(Log<'_>, Option<u64>), Error> {
         (Err(a), Err(_)) => return Err(a),
     };
     if ra.major != 2 {
-        return Err(refuse(format!(
-            "LFS version {}, and replay has been checked only on the 2.x logs Windows 8 \
-             and later write",
-            ra.major
-        )));
+        return Err(refuse_until(
+            1159,
+            format!(
+                "LFS version {}, and replay has been checked only on the 2.x logs Windows 8 \
+                 and later write",
+                ra.major
+            ),
+        ));
     }
     let lps = ra.log_page;
     if !(512..=65536).contains(&lps)
@@ -801,7 +835,7 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| refuse("a dirty page whose clusters run past its entry"))?;
             if lcns.is_empty() {
-                return Err(refuse("a dirty page of no clusters"));
+                return Err(refuse_until(654, "a dirty page of no clusters"));
             }
             // A record names the VCN of the block it changes, which may be
             // any cluster of the page, so each cluster is entered under its
@@ -829,11 +863,14 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
         }
         for (at, e) in entries(&t)? {
             if e[0x04] != TRANSACTION_ACTIVE {
-                return Err(refuse(format!(
-                    "the checkpoint lists transaction {at} in state {}, and only active \
-                     ones have been seen",
-                    e[0x04]
-                )));
+                return Err(refuse_until(
+                    653,
+                    format!(
+                        "the checkpoint lists transaction {at} in state {}, and only active \
+                         ones have been seen",
+                        e[0x04]
+                    ),
+                ));
             }
             let undo_next = u64_at(&e, 0x18)?;
             checkpoint_transactions.push((at as u32, (undo_next != 0, u64_at(&e, 0x10)?)));
@@ -884,10 +921,13 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
             open_transactions.remove(&transaction);
         } else {
             if matches!(redo, PREPARE_TRANSACTION | COMMIT_TRANSACTION) {
-                return Err(refuse(format!(
-                    "transaction {transaction} is prepared or committed at LSN {lsn:#x} and \
-                     not forgotten, which no capture has shown"
-                )));
+                return Err(refuse_until(
+                    653,
+                    format!(
+                        "transaction {transaction} is prepared or committed at LSN {lsn:#x} \
+                         and not forgotten, which no capture has shown"
+                    ),
+                ));
             }
             let t = open_transactions.entry(transaction).or_default();
             t.0 |= !matches!(undo, NOOP | COMPENSATION);
@@ -985,10 +1025,7 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
                     | CLEAR_BITS_IN_NONRESIDENT_BITMAP
             );
         if !supported {
-            return Err(refuse(format!(
-                "LSN {lsn:#x} holds a {} ({op:#x}) redo, which replay does not perform yet",
-                op_name(op)
-            )));
+            return Err(unperformed(lsn, op));
         }
         let target = u16_at(data, 0x0C)?;
         let vcn = u64_at(data, 0x18)?;
@@ -1662,6 +1699,24 @@ mod tests {
         let err = plan(&vec![0u8; 65536], &params, &mut read).unwrap_err();
         assert!(err.contains("$LogFile"), "{err}");
     }
+
+    #[test]
+    fn each_redo_replay_does_not_perform_names_the_issue_waiting_for_it() {
+        // #137 tracked them all; each now has an open issue of its own,
+        // waiting for a capture that holds the operation.
+        for (op, issue) in [
+            (WRITE_END_OF_FILE_RECORD_SEGMENT, "(rust-fs-ntfs#650)"),
+            (DELETE_DIRTY_CLUSTERS, "(rust-fs-ntfs#651)"),
+            (UPDATE_RELATIVE_DATA_IN_INDEX, "(rust-fs-ntfs#652)"),
+            (UPDATE_RELATIVE_DATA_IN_INDEX2, "(rust-fs-ntfs#652)"),
+            (HOT_FIX, "(rust-fs-ntfs#1158)"),
+        ] {
+            let err = unperformed(0x1234, op).to_string();
+            assert!(err.contains(op_name(op)) && err.ends_with(issue), "{err}");
+        }
+        let err = unperformed(0x1234, 0x30).to_string();
+        assert!(err.ends_with("(rust-fs-ntfs#137)"), "{err}");
+    }
 }
 
 /// A read-only view of one `$LogFile` client record: the fields replay
@@ -1778,6 +1833,7 @@ mod record_view_tests {
         let before = out.stdout.clone();
         let error = record_at_lsn(&out.stdout, 0x184415, out.stdout.len()).unwrap_err();
         assert!(error.to_string().contains("LFS version 1"), "{error}");
+        assert!(error.to_string().contains("(rust-fs-ntfs#1159)"), "{error}");
         assert_eq!(out.stdout, before);
     }
 
