@@ -616,7 +616,7 @@ mod tests {
     #[test]
     fn an_update_resident_value_record_is_byte_for_byte_what_windows_writes() {
         let log = interrupted_logfile_1();
-        let mut seen = 0;
+        let (mut seen, mut uninitialised) = (0, 0);
         for (lsn, header, data) in whole_records(&log) {
             // Flag 0x4 marks a record Windows left resident file data out
             // of, which this writer never does.
@@ -630,6 +630,24 @@ mod tests {
                 data[field(0x04)..field(0x04) + field(0x06)].to_vec(),
                 data[field(0x08)..field(0x08) + field(0x0A)].to_vec(),
             );
+            let mut want = [header.clone(), data.clone()].concat();
+            let padding = [
+                field(0x04) + field(0x06)..field(0x08),
+                field(0x08) + field(0x0A)..data.len(),
+            ];
+            if padding
+                .iter()
+                .any(|p| data[p.clone()].iter().any(|&b| b != 0))
+            {
+                // Alignment after the values Windows left uninitialised:
+                // the rest of the record is still compared.
+                for p in padding {
+                    want[RECORD_HEADER + p.start..RECORD_HEADER + p.end].fill(0);
+                }
+                uninitialised += 1;
+            } else {
+                seen += 1;
+            }
             let update = ResidentUpdate {
                 target_vcn: u64_at(&data, 0x18).unwrap(),
                 lcns: (0..field(0x0E))
@@ -651,12 +669,15 @@ mod tests {
                 &update,
             )
             .unwrap();
-            assert_eq!(ours, [header, data].concat(), "LSN {lsn:#x}");
-            seen += 1;
+            assert_eq!(ours, want, "LSN {lsn:#x}");
         }
         // Counted independently of this crate, by a Python walk of the
         // same pages with the same rule.
-        assert_eq!(seen, 689, "UpdateResidentValue records compared");
+        assert_eq!(
+            (seen, uninitialised),
+            (656, 33),
+            "UpdateResidentValue records compared"
+        );
     }
 
     #[test]
