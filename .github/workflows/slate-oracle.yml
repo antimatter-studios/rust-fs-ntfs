@@ -17,6 +17,8 @@ on:
       - scripts/slate-oracle.sh
       - tests/scripts/slate-oracle.sh
       - tests/slate-disagreements.tsv
+      - tests/slate-writes.tsv
+      - tests/scripts/slate-write-workflow.sh
       - scripts/slate-read-compare.py
       - tests/scripts/slate-read-compare.sh
       - tests/scripts/slate-writer-capture.sh
@@ -182,5 +184,30 @@ jobs:
         with:
           name: slate-oracle-verdicts-${{ github.sha }}
           path: tmp/slate-oracle/out/
+          if-no-files-found: error
+          retention-days: 14
+      # Slate's copy-only writer (#863): each row of tests/slate-writes.tsv
+      # patches bytes the write-at recipe left in one root file, on a copy
+      # of the captured image, and the source must keep its SHA-256. Runs
+      # whether or not the comparison agreed: they grade different things.
+      - name: Build Slate's MIT copy-only writer
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          writer="$(bash scripts/slate-oracle.sh build "$RUNNER_TEMP/slate-ntfs" ntfs-write-lab)"
+          echo "SLATE_WRITER=$writer" >>"$GITHUB_ENV"
+      - name: Slate writes copies of the write-at image, never the source
+        if: ${{ !cancelled() && env.SLATE_WRITER != '' }}
+        run: >-
+          bash scripts/slate-oracle.sh write
+          tests/slate-writes.tsv tmp/slate-oracle/images
+          "$SLATE_WRITER" tmp/slate-oracle/writes 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: slate-oracle-writes-${{ github.sha }}
+          path: |
+            tmp/slate-oracle/images/cli-write-at-win-verify-chkdsk.img
+            tmp/slate-oracle/writes/
           if-no-files-found: error
           retention-days: 14
