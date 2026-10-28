@@ -11940,6 +11940,13 @@ mod tests {
             out
         }
 
+        /// The namespace a rename gives a name: WIN32_AND_DOS for one that
+        /// fits 8.3, so it is its own DOS name, and POSIX for one that does
+        /// not. A move gives the moved name the same. A hard link's name is
+        /// POSIX whatever it is; see `link_io`.
+        const FITS_8_3: u8 = 3;
+        const LONG: u8 = 0;
+
         fn link_count(dev: &mut MemDev, rec: u64) -> u16 {
             crate::read::read_stat(dev, rec).unwrap().link_count
         }
@@ -11974,7 +11981,7 @@ mod tests {
             assert_eq!(gone.kind(), crate::error::Kind::NotFound, "{gone}");
             assert!(!indexed_names(&dev, a).contains(&"f".to_string()));
             assert_eq!(indexed_names(&dev, b), ["g"]);
-            assert_eq!(own_names(&dev, f), [(b, "g".to_string(), 0)]);
+            assert_eq!(own_names(&dev, f), [(b, "g".to_string(), FITS_8_3)]);
             assert_eq!(link_count(&mut dev, f), 1);
             assert_eq!(contents(&dev, f), body);
             assert_clean(&mut dev);
@@ -11988,7 +11995,7 @@ mod tests {
             assert_eq!(resolve_path_to_record_number_io(&mut dev, "/f").unwrap(), f);
             assert!(indexed_names(&dev, a).is_empty());
             assert!(indexed_names(&dev, 5).contains(&"f".to_string()));
-            assert_eq!(own_names(&dev, f), [(5, "f".to_string(), 0)]);
+            assert_eq!(own_names(&dev, f), [(5, "f".to_string(), FITS_8_3)]);
             assert_eq!(link_count(&mut dev, f), 1);
             assert_clean(&mut dev);
         }
@@ -12027,10 +12034,13 @@ mod tests {
             assert_eq!(names.len(), 80);
             assert_eq!(names.iter().filter(|n| *n == "file-040.txt").count(), 1);
             assert!(!indexed_names(&dev, 5).contains(&"incoming.txt".to_string()));
-            assert_eq!(own_names(&dev, out), [(5, "outgoing.txt".to_string(), 0)]);
+            assert_eq!(
+                own_names(&dev, out),
+                [(5, "outgoing.txt".to_string(), FITS_8_3)]
+            );
             assert_eq!(
                 own_names(&dev, into),
-                [(big, "file-040.txt".to_string(), 0)]
+                [(big, "file-040.txt".to_string(), FITS_8_3)]
             );
             assert_clean(&mut dev);
         }
@@ -12049,7 +12059,7 @@ mod tests {
             assert_eq!(indexed_names(&dev, c), ["h"]);
             assert_eq!(
                 own_names(&dev, f),
-                [(b, "f".to_string(), 0), (c, "h".to_string(), 0)]
+                [(b, "f".to_string(), FITS_8_3), (c, "h".to_string(), LONG)]
             );
             assert_eq!(link_count(&mut dev, f), 2);
             assert_clean(&mut dev);
@@ -12061,7 +12071,7 @@ mod tests {
             let (mut dev, a, _, f) = two_directories(b"same directory");
             move_to_io(&mut dev, "/a/f", "/a", "longer-name").unwrap();
             assert_eq!(indexed_names(&dev, a), ["longer-name"]);
-            assert_eq!(own_names(&dev, f), [(a, "longer-name".to_string(), 0)]);
+            assert_eq!(own_names(&dev, f), [(a, "longer-name".to_string(), LONG)]);
             assert_clean(&mut dev);
         }
 
