@@ -87,6 +87,8 @@ fn every_verb_documents_itself_on_stdout() {
         "directory-layout",
         "stream",
         "ea",
+        "times",
+        "security-id",
     ] {
         let out = run(&[verb, "--help"]);
         assert_eq!(code(&out), 0, "`{verb} --help` exit status");
@@ -164,6 +166,21 @@ fn the_verbs_that_change_a_volume_report_success() {
         code(&run(&["ea", &img, "/f.txt", "USER.NOTE", "--delete"])),
         0
     );
+    assert_eq!(
+        code(&run(&[
+            "times",
+            &img,
+            "/f.txt",
+            "126000000000000007",
+            "-",
+            "-",
+            "132000000000000031"
+        ])),
+        0
+    );
+    // mkfs writes one descriptor, at 0x100, which every file starts with.
+    assert_eq!(code(&run(&["security-id", &img, "/f.txt", "0x100"])), 0);
+    assert_eq!(code(&run(&["security-id", &img, "/f.txt", "256"])), 0);
     assert_eq!(code(&run(&["set-dirty", &img])), 0);
 
     // `layout` reads the file `write` left resident, and prints it.
@@ -236,6 +253,14 @@ fn the_verbs_fail_when_the_target_is_wrong() {
             "removing an EA that is not there",
             vec!["ea", &img, "/f.txt", "USER.NOPE", "--delete"],
         ),
+        (
+            "times for a file that is not there",
+            vec!["times", &img, "/nope.txt", "1", "-", "-", "-"],
+        ),
+        (
+            "a security id that names no descriptor",
+            vec!["security-id", &img, "/f.txt", "0x200"],
+        ),
         ("ls of an image that is not there", vec!["ls", "/nope.img"]),
     ] {
         let out = run(&args);
@@ -286,6 +311,21 @@ fn a_usage_error_and_a_failure_have_different_exit_codes() {
         code(&run(&["objid", &img, "/f.txt", "not-hexadecimal"])),
         2,
         "an object id that is not 32 hexadecimal digits is a usage error"
+    );
+    assert_eq!(
+        code(&run(&["times", &img, "/f.txt", "yesterday", "-", "-", "-"])),
+        2,
+        "a time that is neither a FILETIME nor `-` is a usage error"
+    );
+    assert_eq!(
+        code(&run(&["times", &img, "/f.txt", "1"])),
+        2,
+        "times without all four is a usage error"
+    );
+    assert_eq!(
+        code(&run(&["security-id", &img, "/f.txt", "0xnope"])),
+        2,
+        "a security id that is not a number is a usage error"
     );
     assert_eq!(
         code(&run(&["stream", &img, "/f.txt", "s"])),

@@ -4211,6 +4211,118 @@
       "image": "nfs-cli-attrlist-split-extents-win-verify-chkdsk.img",
       "_notes": "rust-ntfs ea and stream fill /split.dat's base record, so it gains an $ATTRIBUTE_LIST. fs.ntfs then cuts the volume's free space into one-cluster holes: 7200 one-cluster files, one filler over what else is free, and every second one-cluster file removed. fs.ntfs write --at grows /split.dat's unnamed stream to 3200 clusters over the holes, a run per hole, more mapping pairs than one MFT record holds, so its run list is split into extents in extension records, each named in the list with its starting VCN (#799); a patch inside it, a whole rewrite and two truncates then move those extents (#800); after every write fs.ntfs reads the stream back as the host's model of it and every named stream unchanged, the list names more than one unnamed $DATA extent, and fsck.ntfs finds the volume clean. Windows grades the result: /split.dat reads back with the size and SHA-256 written (Get-FileHash), and chkdsk finds the volume clean. The counts follow the volume's 4096-byte MFT records (scripts/split-extents-plan.sh: 800 runs over 900 holes per 1024 bytes of record), so the run list still needs two records once cut to half, and the volume is 128 MiB to hold the one-cluster files; 800 runs fit in one 4096-byte record, and the step refused its own image at 64 MiB (#1190). Not yet run: it runs in CI's Windows `cli` group, and its first outcome is recorded here (#801, part of #664)."
     },
+    "cli-objid-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 64,
+        "label": "CLI OBJID",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-mkfs"
+        },
+        {
+          "op": "cli-objid"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        {
+          "op": "win-cli-verify",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-objid-win-verify-chkdsk.img",
+      "_notes": "rust-ntfs objid gives a random 16-byte object id to a resident file, a non-resident file, a directory and 24 empty files, so $ObjId:$O holds 27 entries in its index root; fs.ntfs stat reads each id back and fsck.ntfs finds the volume clean. Windows grades the result: FSCTL_GET_OBJECT_ID returns each id written, both files read back with the size and SHA-256 written (Get-FileHash), and chkdsk finds the volume clean. The Slate tier captures the image before Windows mounts it (#1065, part of #688). Not yet run: it runs in CI's Windows `cli` group, and its first outcome is recorded here."
+    },
+    "cli-times-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 64,
+        "label": "CLI TIMES",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-mkfs"
+        },
+        {
+          "op": "cli-times"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        {
+          "op": "win-cli-verify",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-times-win-verify-chkdsk.img",
+      "_notes": "rust-ntfs times sets the creation, modification, MFT change and access times in $STANDARD_INFORMATION of a resident file, a non-resident file and a directory, every value off a whole second, one in 1949 and one in 2108, then only the modification time of one file; fs.ntfs stat reads each back and fsck.ntfs finds the volume clean. Windows grades the result: FILE_BASIC_INFO, through a handle opened only for attributes, reads each path's final four FILETIMEs exactly, both files read back with the size and SHA-256 written (Get-FileHash), and chkdsk finds the volume clean. The Slate tier captures the image before Windows mounts it (#1065, part of #688). Not yet run: it runs in CI's Windows `cli` group, and its first outcome is recorded here."
+    },
+    "cli-windows-1-security-id-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 127,
+        "label": "ORACLE366",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "cli-security-id",
+          "snapshot": "1"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        {
+          "op": "win-cli-verify",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-windows-1-security-id.img",
+      "_notes": "What Windows recovered from test-disks/windows-interrupted-1, where Windows gave its directories one security descriptor and its files another; this crate's mkfs.ntfs writes only one, so there is nothing to choose between on its volumes. rust-ntfs security-id points /d000/f0000064.bin at /d001's security id and /d002 at /d001/f0000001.bin's; fs.ntfs acl show reads each pair differently before and alike after, and fsck.ntfs finds the volume clean. Windows grades the result: Get-Acl reads the same SDDL for each pair, every file Windows listed reads back with its size and SHA-256 (Get-FileHash), and chkdsk finds the volume clean. The Slate tier captures the image before Windows mounts it (#1065, part of #688). Not yet run: it runs in CI's Windows `cli` group, and its first outcome is recorded here."
+    },
     "cli-mkdir-parents-win-verify-chkdsk": {
       "status": "pending",
       "volume_params": {

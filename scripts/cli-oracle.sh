@@ -103,6 +103,24 @@
 #                                    stream over them, so its run list is split
 #                                    into extents the list names. IMAGE.manifest
 #                                    lists the file's final size and SHA-256
+#   objid IMAGE                      rust-ntfs objid gives a random object id to a
+#                                    resident file, a non-resident one, a directory
+#                                    and 24 empty files; fs.ntfs stat reads each
+#                                    back.
+#                                    IMAGE.manifest lists each id, for win-cli-verify
+#   times IMAGE                      rust-ntfs times sets the four times of a
+#                                    resident file, a non-resident one and a
+#                                    directory, one before 1970 and one past 2100,
+#                                    then only one time of one file; fs.ntfs stat
+#                                    reads each back. IMAGE.manifest lists each
+#                                    path's final FILETIMEs, for win-cli-verify
+#   security-id IMAGE SNAPSHOT       IMAGE is what Windows recovered from
+#                                    test-disks/windows-interrupted-SNAPSHOT;
+#                                    rust-ntfs security-id points a file at a
+#                                    directory's descriptor and a directory at a
+#                                    file's, fs.ntfs acl show reading each pair the
+#                                    same after and not before. IMAGE.manifest is
+#                                    Windows' listing plus each pair, for win-cli-verify
 #   mkdir-parents IMAGE              fs.ntfs mkdir -p makes missing chains: three
 #                                    levels, under existing directories through
 #                                    names in another case, through `.` and `..`,
@@ -203,6 +221,14 @@ unpack_interrupted() {
     run fsck "$image"
     [ "$status" -eq 4 ] || die "fsck.ntfs on the volume Windows left mid-write exited $status, not 4: $out"
     has '"kind": "logfile"' || die "fsck.ntfs did not report the log holding work: $out"
+}
+
+# need_harness: HARNESS is the harness binary, rust-ntfs, which writes what
+# fs.ntfs reads but has no writer for.
+need_harness() {
+    HARNESS="${RUST_NTFS:-$REPO/target/release/rust-ntfs}"
+    [ -x "$HARNESS" ] || [ -x "$HARNESS.exe" ] ||
+        die "no $HARNESS: build it with \`cargo build --release --locked --features harness --bin rust-ntfs\`"
 }
 
 case "$step" in
@@ -916,6 +942,156 @@ case "$step" in
         [ "$status" -eq 0 ] || die "fsck.ntfs after the split stream's writes exited $status: $out"
         run fs "$image" get dirty --text
         [ "$status" -eq 0 ] && [ "$out" = false ] || die "the split stream's writes left the volume dirty"
+        ;;
+    objid)
+        [ $# -eq 0 ] || die "objid IMAGE"
+        need_harness
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        : >"$image.manifest"
+        run fs "$image" mkdir -p /objid/dir
+        [ "$status" -eq 0 ] || die "fs.ntfs mkdir -p /objid/dir exited $status: $(cat "$image.cli-err")"
+        # Files whose data is resident and not, a directory, and 24 empty
+        # files, so $ObjId:$O holds many entries in key order. They stay in
+        # its index root: an $O spilled past its root is #571's. Each id is
+        # random, so no two runs grade the same bytes.
+        targets=(/objid/dir /objid/resident.txt /objid/large.bin)
+        random "$work/resident" 40
+        random "$work/large" 20000
+        for spec in 'resident /objid/resident.txt 40' 'large /objid/large.bin 20000'; do
+            read -r name target size <<<"$spec"
+            run fs "$image" write "$target" <"$work/$name"
+            [ "$status" -eq 0 ] || die "fs.ntfs write $target exited $status: $(cat "$image.cli-err")"
+            printf 'file\t%s\t%s\t%s\n' "$target" "$size" "$(sha "$work/$name")" >>"$image.manifest"
+        done
+        for i in $(seq -w 1 24); do
+            : >"$work/empty"
+            run fs "$image" write "/objid/dir/f$i" <"$work/empty"
+            [ "$status" -eq 0 ] || die "fs.ntfs write /objid/dir/f$i exited $status: $(cat "$image.cli-err")"
+            targets+=("/objid/dir/f$i")
+        done
+        for target in "${targets[@]}"; do
+            id="$(od -An -tx1 -N 16 /dev/urandom | tr -d ' \n')"
+            set +e
+            "$HARNESS" objid "$image" "$target" "$id" >/dev/null 2>"$image.cli-err"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] || die "rust-ntfs objid $target exited $status: $(cat "$image.cli-err")"
+            run fs "$image" stat "$target"
+            has "\"object_id\": \"$id\"" || die "fs.ntfs stat $target does not read back object id $id: $out"
+            printf 'objid\t%s\t%s\n' "$target" "$id" >>"$image.manifest"
+        done
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the object ids exited $status: $out"
+        ;;
+    times)
+        [ $# -eq 0 ] || die "times IMAGE"
+        need_harness
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        : >"$work/times"
+        : >"$work/files"
+        run fs "$image" mkdir -p /times/dir
+        [ "$status" -eq 0 ] || die "fs.ntfs mkdir -p /times/dir exited $status: $(cat "$image.cli-err")"
+        random "$work/resident" 40
+        random "$work/large" 20000
+        run fs "$image" write /times/resident.txt <"$work/resident"
+        [ "$status" -eq 0 ] || die "fs.ntfs write /times/resident.txt exited $status: $(cat "$image.cli-err")"
+        run fs "$image" write /times/large.bin <"$work/large"
+        [ "$status" -eq 0 ] || die "fs.ntfs write /times/large.bin exited $status: $(cat "$image.cli-err")"
+        printf 'file\t/times/resident.txt\t40\t%s\nfile\t/times/large.bin\t20000\t%s\n' \
+            "$(sha "$work/resident")" "$(sha "$work/large")" >"$work/files"
+        # filetime FIELD: one of fs.ntfs stat's times, as a FILETIME: 100 ns
+        # intervals since 1601, the epoch's 11644473600 seconds before 1970.
+        filetime() {
+            local s n
+            s="$(sed -n "s/^  \"$1\": \(-\{0,1\}[0-9]*\),$/\1/p" <<<"$out")"
+            n="$(sed -n "s/^  \"$1_nsec\": \([0-9]*\),$/\1/p" <<<"$out")"
+            [ -n "$s" ] && [ -n "$n" ] || die "fs.ntfs stat reports no $1: $out"
+            echo $(((s + 11644473600) * 10000000 + n / 100))
+        }
+        # settimes PATH C M CHG A: rust-ntfs times sets them, `-` leaving one
+        # as it was, and fs.ntfs stat reads back WANT_C WANT_M WANT_CHG WANT_A.
+        settimes() {
+            local path="$1"
+            set +e
+            "$HARNESS" times "$image" "$path" "$2" "$3" "$4" "$5" >/dev/null 2>"$image.cli-err"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] || die "rust-ntfs times $path exited $status: $(cat "$image.cli-err")"
+            run fs "$image" stat "$path"
+            [ "$status" -eq 0 ] || die "fs.ntfs stat $path exited $status: $(cat "$image.cli-err")"
+            got="$(filetime btime) $(filetime mtime) $(filetime ctime) $(filetime atime)"
+            [ "$got" = "$6 $7 $8 $9" ] || die "fs.ntfs stat $path reads times $got; rust-ntfs times wrote $6 $7 $8 $9"
+            printf '%s\t%s\t%s\t%s\t%s\n' "$path" "$6" "$7" "$8" "$9" >>"$work/times"
+        }
+        # Every time distinct, none on a whole second, one before 1970 and
+        # one past 2100, so a time read from the wrong field, rounded or
+        # clipped to the Unix range does not pass.
+        settimes /times/resident.txt 126000000000000007 130000000000000013 131000000000000029 132000000000000031 \
+            126000000000000007 130000000000000013 131000000000000029 132000000000000031
+        settimes /times/large.bin 110000000000000003 133000000000000017 134000000000000019 135000000000000023 \
+            110000000000000003 133000000000000017 134000000000000019 135000000000000023
+        settimes /times/dir 127000000000000001 128000000000000011 129000000000000041 160000000000000043 \
+            127000000000000001 128000000000000011 129000000000000041 160000000000000043
+        # Only the modification time: the other three stay as they were.
+        settimes /times/resident.txt - 133444444444444447 - - \
+            126000000000000007 133444444444444447 131000000000000029 132000000000000031
+        # The last setting of a path is what Windows must read. The times
+        # lines go first: Windows reads each file's bytes for its `file` line.
+        : >"$image.manifest"
+        awk -F '\t' '{ last[$1] = $0; if (!($1 in seen)) { order[++n] = $1; seen[$1] = 1 } }
+            END { for (i = 1; i <= n; i++) print last[order[i]] }' "$work/times" |
+            while IFS=$'\t' read -r path c m chg a; do
+                printf 'times\t%s\t%s\t%s\t%s\t%s\n' "$path" "$c" "$m" "$chg" "$a" >>"$image.manifest"
+            done
+        cat "$work/files" >>"$image.manifest"
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the times exited $status: $out"
+        ;;
+    security-id)
+        [ $# -eq 1 ] || die "security-id IMAGE SNAPSHOT"
+        need_harness
+        mkdir -p "$(dirname "$image")"
+        gzip -dc "$REPO/test-disks/windows-interrupted-$1.recovered.img.gz" >"$image" ||
+            die "no test-disks/windows-interrupted-$1.recovered.img.gz"
+        windows_listing "$1"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        # Our mkfs.ntfs writes one descriptor, so a volume Windows formatted
+        # and wrote is where two to choose between are: Windows gave its
+        # directories one descriptor and its files another.
+        security_id() {
+            run fs "$image" stat "$1"
+            [ "$status" -eq 0 ] || die "fs.ntfs stat $1 exited $status: $(cat "$image.cli-err")"
+            sed -n 's/^    "security_id": \([0-9]*\),$/\1/p' <<<"$out"
+        }
+        acl() {
+            run fs "$image" acl show "$1"
+            [ "$status" -eq 0 ] || die "fs.ntfs acl show $1 exited $status: $(cat "$image.cli-err")"
+            printf '%s\n' "$out"
+        }
+        : >"$work/acl"
+        for pair in '/d000/f0000064.bin /d001' '/d002 /d001/f0000001.bin'; do
+            read -r target other <<<"$pair"
+            from="$(security_id "$target")"
+            to="$(security_id "$other")"
+            [ -n "$from" ] && [ -n "$to" ] || die "fs.ntfs stat reports no security id for $target or $other"
+            [ "$from" != "$to" ] || die "$target and $other already share security id $to: nothing to change"
+            [ "$(acl "$target")" != "$(acl "$other")" ] || die "$target and $other read the same descriptor before"
+            set +e
+            "$HARNESS" security-id "$image" "$target" "$to" >/dev/null 2>"$image.cli-err"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] || die "rust-ntfs security-id $target $to exited $status: $(cat "$image.cli-err")"
+            [ "$(security_id "$target")" = "$to" ] || die "fs.ntfs stat $target does not read back security id $to"
+            [ "$(acl "$target")" = "$(acl "$other")" ] || die "$target does not read $other's descriptor after"
+            printf 'acl\t%s\t%s\n' "$target" "$other" >>"$work/acl"
+        done
+        cat "$image.manifest" >>"$work/acl"
+        cp "$work/acl" "$image.manifest"
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the security ids exited $status: $out"
         ;;
     write-at)
         [ $# -eq 0 ] || die "write-at IMAGE"
