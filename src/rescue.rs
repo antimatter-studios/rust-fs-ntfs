@@ -39,6 +39,8 @@ pub const RECORD_HEADER_LEN: usize = 28;
 pub const KIND_DATA: u32 = 1;
 /// A record naming a span the source could not read. It has no payload.
 pub const KIND_UNREADABLE: u32 = 2;
+/// The sector size of a source whose boot sector names none.
+pub const DEFAULT_SECTOR: u32 = 512;
 /// The bulk read size [`ScanOptions::default`] uses.
 pub const DEFAULT_CHUNK: usize = 1024 * 1024;
 
@@ -173,8 +175,10 @@ fn is_media_error(e: &io::Error) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanOptions {
     /// The unit a failed bulk read is retried in, and the granularity of an
-    /// unreadable span: a power of two from 512 to 4096.
-    pub sector_size: u32,
+    /// unreadable span: a power of two from 512 to 4096. `None` follows the
+    /// source: an NTFS boot sector's bytes per sector, else 512. A size given
+    /// for a source whose boot sector names another is refused.
+    pub sector_size: Option<u32>,
     /// Bytes per bulk read: a whole number of sectors, at most 64 MiB.
     pub chunk_size: usize,
 }
@@ -182,15 +186,30 @@ pub struct ScanOptions {
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
-            sector_size: 512,
+            sector_size: None,
             chunk_size: DEFAULT_CHUNK,
         }
     }
 }
 
 impl ScanOptions {
-    fn validate(&self) -> Result<(), String> {
-        let sector = self.sector_size;
+    /// The sector size a scan works in: `boot`, the bytes per sector the
+    /// source's boot sector names, which a given size must match; else the
+    /// given size; else `otherwise`. The chunk size is checked against it.
+    fn sector(&self, boot: Option<u32>, otherwise: u32) -> Result<u32, String> {
+        let sector = match (self.sector_size, boot) {
+            (Some(given), Some(boot)) if given != boot => {
+                return Err(format!(
+                "the sector size {given} is not the {boot} bytes per sector the boot sector names"
+            ))
+            }
+            (given, boot) => boot.or(given).unwrap_or(otherwise),
+        };
+        self.validate(sector)?;
+        Ok(sector)
+    }
+
+    fn validate(&self, sector: u32) -> Result<(), String> {
         if !sector.is_power_of_two() || !(512..=4096).contains(&sector) {
             return Err(format!(
                 "sector size {sector} is not a power of two from 512 to 4096"
@@ -243,11 +262,12 @@ pub fn scan_to_path(
     archive: &Path,
     options: ScanOptions,
 ) -> Result<ScanReport, String> {
-    options.validate()?;
     let mut input = FileSource::open(source)?;
-    if input.size() == 0 {
+    let size = input.size();
+    if size == 0 {
         return Err(EMPTY_SOURCE.into());
     }
+    options.sector(boot_sector_size(&mut input, size), DEFAULT_SECTOR)?;
     let mut out = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -264,19 +284,19 @@ pub fn scan<S: RescueSource + ?Sized>(
     archive: &mut File,
     options: ScanOptions,
 ) -> Result<ScanReport, String> {
-    options.validate()?;
     let size = source.size();
     if size == 0 {
         return Err(EMPTY_SOURCE.into());
     }
-    write_header(archive, options.sector_size, size)?;
+    let sector = options.sector(boot_sector_size(source, size), DEFAULT_SECTOR)?;
+    write_header(archive, sector, size)?;
     let order =
         ntfs_order(source, size).unwrap_or_else(|| vec![(0, size, RangeClass::Unclassified)]);
     let mut out = Records::new(archive, size);
     let mut buf = vec![0u8; options.chunk_size];
     for (start, end, class) in order {
         out.class = class;
-        scan_span(source, &mut out, &mut buf, start, end, options.sector_size)?;
+        scan_span(source, &mut out, &mut buf, start, end, sector)?;
     }
     out.finish()
 }
@@ -307,7 +327,9 @@ pub fn resume<S: RescueSource + ?Sized>(
     archive: &mut File,
     options: ScanOptions,
 ) -> Result<ScanReport, String> {
-    options.validate()?;
+    if let Some(given) = options.sector_size {
+        options.validate(given)?;
+    }
     archive
         .seek(SeekFrom::Start(0))
         .map_err(|e| format!("rewind the archive: {e}"))?;
@@ -319,13 +341,14 @@ pub fn resume<S: RescueSource + ?Sized>(
             contents.source_size
         ));
     }
-    if contents.sector_size != options.sector_size {
+    let sector = options.sector(boot_sector_size(source, size), contents.sector_size)?;
+    if contents.sector_size != sector {
         return Err(format!(
-            "the archive was scanned in {}-byte sectors, not {}",
-            contents.sector_size, options.sector_size
+            "the archive was scanned in {}-byte sectors, not {sector}",
+            contents.sector_size
         ));
     }
-    compare_retained(source, archive, &contents.records, options)?;
+    compare_retained(source, archive, &contents.records, options, sector)?;
     archive
         .set_len(contents.whole_len)
         .and_then(|()| archive.sync_all())
@@ -353,7 +376,7 @@ pub fn resume<S: RescueSource + ?Sized>(
     for (start, end, class) in order {
         out.class = class;
         for (a, b) in missing(&held, start, end) {
-            scan_span(source, &mut out, &mut buf, a, b, options.sector_size)?;
+            scan_span(source, &mut out, &mut buf, a, b, sector)?;
         }
     }
     out.finish()
@@ -368,8 +391,9 @@ fn compare_retained<S: RescueSource + ?Sized>(
     archive: &mut File,
     records: &[ArchivedRecord],
     options: ScanOptions,
+    sector: u32,
 ) -> Result<(), String> {
-    let sector = options.sector_size as usize;
+    let sector = sector as usize;
     let mut now = vec![0u8; options.chunk_size];
     let mut kept = vec![0u8; options.chunk_size];
     for r in records.iter().filter(|r| r.kind == KIND_DATA) {
@@ -515,6 +539,22 @@ fn scan_span<S: RescueSource + ?Sized>(
         offset += n as u64;
     }
     Ok(())
+}
+
+/// The bytes per sector `source`'s NTFS boot sector names, when it reads,
+/// is NTFS and names a power of two from 512 to 4096. This read touches no
+/// record and no report.
+fn boot_sector_size<S: RescueSource + ?Sized>(source: &mut S, size: u64) -> Option<u32> {
+    let mut boot = [0u8; 512];
+    if size < boot.len() as u64 {
+        return None;
+    }
+    source.read_at(0, &mut boot).ok()?;
+    if &boot[3..11] != b"NTFS    " {
+        return None;
+    }
+    let bps = u32::from(u16::from_le_bytes([boot[11], boot[12]]));
+    (bps.is_power_of_two() && (512..=4096).contains(&bps)).then_some(bps)
 }
 
 /// A half-open span of the source and the class of space it is in.
@@ -1338,10 +1378,10 @@ mod tests {
     fn options_refuse_a_sector_size_or_chunk_the_scan_cannot_use() {
         let bad = |sector_size, chunk_size| {
             ScanOptions {
-                sector_size,
+                sector_size: Some(sector_size),
                 chunk_size,
             }
-            .validate()
+            .validate(sector_size)
             .is_err()
         };
         assert!(bad(1000, 1 << 20));
@@ -1351,6 +1391,112 @@ mod tests {
         assert!(bad(512, 1000));
         assert!(bad(512, MAX_CHUNK + 512));
         assert!(!bad(4096, 4096));
-        assert!(ScanOptions::default().validate().is_ok());
+        assert!(ScanOptions::default().validate(DEFAULT_SECTOR).is_ok());
+    }
+
+    /// An in-memory source whose boot sector names `bytes_per_sector`, with
+    /// the `bad` byte span unreadable.
+    struct Sectored {
+        bytes: Vec<u8>,
+        bad: (u64, u64),
+    }
+
+    impl Sectored {
+        fn new(bytes_per_sector: u16, bad: (u64, u64)) -> Self {
+            let mut bytes: Vec<u8> = (0..64 * 1024u32).map(|i| (i * 7 + 3) as u8).collect();
+            bytes[3..11].copy_from_slice(b"NTFS    ");
+            bytes[11..13].copy_from_slice(&bytes_per_sector.to_le_bytes());
+            Self { bytes, bad }
+        }
+    }
+
+    impl RescueSource for Sectored {
+        fn size(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), ReadFailure> {
+            let end = offset + buf.len() as u64;
+            if offset < self.bad.1 && self.bad.0 < end {
+                return Err(ReadFailure::Unreadable(format!("injected at {offset}")));
+            }
+            buf.copy_from_slice(&self.bytes[offset as usize..end as usize]);
+            Ok(())
+        }
+    }
+
+    fn archive_file(name: &str) -> (std::path::PathBuf, File) {
+        let at = std::env::temp_dir().join(format!(
+            "fs-ntfs-rescue-{name}-{}.archive",
+            std::process::id()
+        ));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&at)
+            .expect("create the archive");
+        (at, file)
+    }
+
+    #[test]
+    fn a_4096_byte_sector_volume_is_scanned_in_4096_byte_sectors() {
+        let bad = (5 * 4096, 6 * 4096);
+        let mut source = Sectored::new(4096, bad);
+        let (at, mut archive) = archive_file("4096");
+        let report = scan(&mut source, &mut archive, ScanOptions::default()).expect("scan");
+        archive.seek(SeekFrom::Start(0)).expect("rewind");
+        let contents = read_archive(&mut archive).expect("read back");
+        std::fs::remove_file(&at).expect("remove the archive");
+        assert_eq!(contents.sector_size, 4096, "the boot sector's sector size");
+        let unreadable: Vec<(u64, u64)> = contents
+            .records
+            .iter()
+            .filter(|r| r.kind == KIND_UNREADABLE)
+            .map(|r| (r.offset, r.len))
+            .collect();
+        assert_eq!(unreadable, vec![(bad.0, 4096)]);
+        assert_eq!(report.unreadable_bytes, 4096);
+        assert_eq!(report.readable_bytes, source.size() - 4096);
+    }
+
+    #[test]
+    fn a_given_sector_size_the_boot_sector_disagrees_with_is_refused() {
+        let given = ScanOptions {
+            sector_size: Some(512),
+            ..ScanOptions::default()
+        };
+        let (at, mut archive) = archive_file("given");
+        let err = scan(&mut Sectored::new(4096, (0, 0)), &mut archive, given)
+            .expect_err("512 against a 4096-byte boot sector");
+        let written = archive.metadata().expect("stat the archive").len();
+        std::fs::remove_file(&at).expect("remove the archive");
+        assert!(err.contains("512") && err.contains("4096"), "{err}");
+        assert_eq!(written, 0, "nothing is written before the refusal");
+    }
+
+    #[test]
+    fn a_resume_against_a_source_of_another_sector_size_is_refused() {
+        for (scanned, now) in [(512u16, 4096u16), (4096, 512)] {
+            let (at, mut archive) = archive_file(&format!("resume-{scanned}"));
+            scan(
+                &mut Sectored::new(scanned, (0, 0)),
+                &mut archive,
+                ScanOptions::default(),
+            )
+            .expect("scan");
+            let err = resume(
+                &mut Sectored::new(now, (0, 0)),
+                &mut archive,
+                ScanOptions::default(),
+            )
+            .expect_err("a resume across sector sizes");
+            std::fs::remove_file(&at).expect("remove the archive");
+            assert!(
+                err.contains(&format!("{scanned}-byte sectors")) && err.contains(&now.to_string()),
+                "{scanned} then {now}: {err}"
+            );
+        }
     }
 }
