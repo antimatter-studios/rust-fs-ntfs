@@ -1047,6 +1047,28 @@ jobs:
         shell: pwsh
         run: |
           cargo test --locked --test usn_cursor_read_probe_windows
+      # A volume Windows enforces quotas on, with a warning level and hard
+      # limit of one owner's own, read here and checked against what
+      # Windows' fsutil said about it before the detach (#868).
+      - name: Capture a quota-enforced volume and read its limits
+        id: quota_limits_capture
+        shell: pwsh
+        run: |
+          pwsh -File test-disks/capture-quota-limits.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --test quota_limits_windows_capture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # fsutil's output, as printed and as parsed, kept on every outcome.
+      - name: Upload the quota limits capture
+        if: always() && steps.quota_limits_capture.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-quota-limits-capture
+          path: |
+            test-disks/quota-limits.tsv
+            test-disks/quota-limits.fsutil.txt
+          if-no-files-found: warn
+          retention-days: 7
       # The journal identity controls' verdicts, the actual and control IDs and
       # the control's failure reason, kept on every outcome.
       - name: Upload the USN journal identity controls

@@ -95,3 +95,5 @@ __pycache__/
 test-disks/usn-v2-capture.bin
 test-disks/usn-v2-capture.tsv
 test-disks/usn-journal-data.tsv
+test-disks/quota-limits.tsv
+test-disks/quota-limits.fsutil.txt
