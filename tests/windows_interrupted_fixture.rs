@@ -2596,3 +2596,153 @@ fn a_dry_run_plans_the_writes_that_reach_what_windows_recovered_and_makes_none()
         std::fs::remove_file(&src).unwrap();
     }
 }
+
+#[cfg(feature = "plan-file")]
+/// Where each section of a saved plan starts, read from the layout
+/// docs/repair-plan-file.md documents, not from the reader under test:
+/// the units' starts, then the trailer's, then the file's end.
+fn plan_file_sections(units: &[fs_ntfs::repair_plan::PlanUnit]) -> (Vec<usize>, usize, usize) {
+    // Header: magic, version, unit count, file length. Identity: source
+    // size, volume serial number.
+    let mut at = 8 + 4 + 4 + 8 + 8 + 8;
+    let mut starts = Vec::new();
+    for unit in units {
+        starts.push(at);
+        // Write count, the before-image's SHA-256, then each write's
+        // offset, length, before- and after-image.
+        at += 4 + 32;
+        at += unit
+            .writes
+            .iter()
+            .map(|w| 8 + 4 + w.before.len() + w.after.len())
+            .sum::<usize>();
+    }
+    (starts, at, at + 32)
+}
+
+#[cfg(feature = "plan-file")]
+/// Applies a loaded plan onto `bytes` by this test's own writes, refusing
+/// any write whose before-image is not what `bytes` hold.
+fn apply_plan(k: &str, bytes: &mut [u8], units: &[fs_ntfs::repair_plan::PlanUnit]) {
+    for (u, unit) in units.iter().enumerate() {
+        for w in &unit.writes {
+            let at = w.offset as usize;
+            let there = &mut bytes[at..at + w.after.len()];
+            assert!(
+                there == &w.before[..],
+                "{k}: unit {u}: the write at {at} finds other bytes than its before-image"
+            );
+            there.copy_from_slice(&w.after);
+        }
+    }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn a_saved_plan_loads_back_to_what_windows_recovered_and_only_when_intact() {
+    // A repair plan is saved to a file of its own and loads back only when
+    // intact (#905). Saved from each Windows capture, loaded and applied
+    // by this test's own writes, it must reach what Windows' own restart
+    // reached; truncated or changed anywhere, it must load as nothing.
+    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    for (k, log_end) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let mut volume = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let plan = plan_fsck_io(&mut volume, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        assert!(
+            volume.bytes == pristine,
+            "{k}: planning wrote to the volume"
+        );
+        let saved = save_plan(&plan, &mut volume).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        assert_eq!(
+            loaded.source_size,
+            pristine.len() as u64,
+            "{k}: source size"
+        );
+        let serial = u64::from_le_bytes(pristine[0x48..0x50].try_into().unwrap());
+        assert_eq!(loaded.volume_serial, serial, "{k}: volume serial number");
+        assert!(
+            loaded.units == plan.units,
+            "{k}: the units loaded back differ"
+        );
+
+        let mut copy = pristine.clone();
+        apply_plan(k, &mut copy, &loaded.units);
+        let repaired = format!("{src}.repaired");
+        std::fs::write(&repaired, &copy).unwrap();
+        let want = manifest(k);
+        let got = walk(&repaired);
+        assert!(
+            got == want,
+            "{k}: {} files after the loaded plan, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+        let recovered = unpack(&format!("windows-interrupted-{k}.recovered"));
+        oracle::same_metadata_as_windows(
+            k,
+            &Image::read(&src),
+            &Image::read(&repaired),
+            &Image::read(&recovered),
+            log_end,
+        );
+        std::fs::remove_file(&recovered).unwrap();
+        std::fs::remove_file(&repaired).unwrap();
+
+        let (starts, trailer, end) = plan_file_sections(&plan.units);
+        assert_eq!(saved.len(), end, "{k}: the saved file's length");
+        let pristine_sha = hex_sha256(&pristine);
+        let refused = |what: &str, bytes: &[u8], names: &str| {
+            let mut copy = pristine.clone();
+            match load_plan(bytes) {
+                Ok(p) => {
+                    apply_plan(k, &mut copy, &p.units);
+                    panic!("{k}: {what}: loaded");
+                }
+                Err(e) => assert!(
+                    e.to_string().contains(names),
+                    "{k}: {what}: refused as {e:?}, not naming {names:?}"
+                ),
+            }
+            assert_eq!(hex_sha256(&copy), pristine_sha, "{k}: {what}: copy changed");
+        };
+        for &cut in starts.iter().chain([&trailer]) {
+            refused(&format!("cut at {cut}"), &saved[..cut], "truncated");
+            refused(
+                &format!("cut at {}", cut + 1),
+                &saved[..cut + 1],
+                "truncated",
+            );
+        }
+        let sections = [("header", 0), ("identity", 32), ("trailer", end - 1)]
+            .into_iter()
+            .map(|(s, at)| (s.to_string(), at))
+            .chain(starts.iter().enumerate().flat_map(|(u, &at)| {
+                [
+                    (format!("unit {u} write count"), at),
+                    (format!("unit {u} before-image hash"), at + 4),
+                    (format!("unit {u} first write"), at + 4 + 32),
+                ]
+            }));
+        for (section, at) in sections {
+            let mut flipped = saved.clone();
+            flipped[at] ^= 0x01;
+            refused(&format!("{section} byte {at} flipped"), &flipped, "");
+        }
+        let mut newer = saved.clone();
+        newer[8..12].copy_from_slice(&2u32.to_le_bytes());
+        let sum = Sha256::digest(&newer[..trailer]);
+        newer[trailer..].copy_from_slice(&sum);
+        refused("format version 2", &newer, "version 2");
+
+        std::fs::remove_file(&src).unwrap();
+    }
+}
