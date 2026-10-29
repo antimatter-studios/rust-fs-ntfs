@@ -349,6 +349,12 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -File tests/scripts/capture-chkdsk.ps1
 
+      # Also runs on dispatched red refs before the collector is supplied.
+      - name: Windows format geometry collector contracts (24 checks)
+        if: matrix.os == 'ubuntu-latest'
+        shell: pwsh
+        run: pwsh -NoProfile -File tests/scripts/windows-format-geometry.ps1
+
       # The Windows harness's image sync, run through the real function with
       # the storage cmdlets mocked: dismount, then offline, then copy, and a
       # failed dismount stops the copy. Linux only: the test stands an
