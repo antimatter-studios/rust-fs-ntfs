@@ -498,6 +498,104 @@ pub fn check_unit_on_device<T: BlockIo + ?Sized>(
     Ok(())
 }
 
+/// Why a copy-repair was refused, or stopped.
+#[cfg(feature = "plan-file")]
+#[derive(Debug)]
+pub enum CopyRepairError {
+    /// The source was refused for the plan; no target was created.
+    Source(PlanSourceError),
+    /// Something already exists at the target path; it is left as it was.
+    TargetExists(std::path::PathBuf),
+    /// Opening, copying, writing or flushing failed.
+    Io(String),
+}
+
+#[cfg(feature = "plan-file")]
+impl std::fmt::Display for CopyRepairError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Source(e) => write!(f, "{e}"),
+            Self::TargetExists(path) => {
+                write!(f, "the target '{}' already exists", path.display())
+            }
+            Self::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+#[cfg(feature = "plan-file")]
+impl std::error::Error for CopyRepairError {}
+
+/// Apply `plan` by copy-repair: open `source` read-only and check it with
+/// [`check_plan_source`], and only then create `target`, copy the source
+/// into it and apply the plan's units there with [`apply_plan_units`]. The
+/// source is never opened for writing. A source the check refuses leaves
+/// no target behind, and a `target` that already exists is refused and
+/// left as it was.
+#[cfg(feature = "plan-file")]
+pub fn copy_repair(
+    plan: &SavedPlan,
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<(), CopyRepairError> {
+    use crate::block_io::PathIo;
+    use std::io::Write;
+    let mut from = PathIo::open_ro(source).map_err(CopyRepairError::Io)?;
+    check_plan_source(plan, &mut from).map_err(CopyRepairError::Source)?;
+    // `create_new` refuses a path that exists, with no window between a
+    // check and the create.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => CopyRepairError::TargetExists(target.into()),
+            _ => CopyRepairError::Io(format!("create '{}': {e}", target.display())),
+        })?;
+    let copy_err =
+        |e: String| CopyRepairError::Io(format!("copy into '{}': {e}", target.display()));
+    let mut chunk = vec![0u8; COPY_CHUNK];
+    let mut at = 0;
+    while at < plan.source_size {
+        let n = (plan.source_size - at).min(COPY_CHUNK as u64) as usize;
+        from.read_exact_at(at, &mut chunk[..n]).map_err(copy_err)?;
+        file.write_all(&chunk[..n])
+            .map_err(|e| copy_err(e.to_string()))?;
+        at += n as u64;
+    }
+    // The copy is durable before the first unit lands on it.
+    file.sync_all().map_err(|e| copy_err(e.to_string()))?;
+    drop(file);
+    let mut to = PathIo::open_rw(target).map_err(CopyRepairError::Io)?;
+    apply_plan_units(plan, &mut to)
+}
+
+/// How much of the source a copy-repair reads at a time.
+#[cfg(feature = "plan-file")]
+const COPY_CHUNK: usize = 1 << 20;
+
+/// Apply `plan`'s units to `target` in order, each unit's writes in order
+/// and then a [`BlockIo::sync`]: a sync at every unit boundary and none
+/// inside a unit, so a stop leaves whole units. `target` must already hold
+/// what the plan was made from; nothing is checked here.
+#[cfg(feature = "plan-file")]
+pub fn apply_plan_units<T: BlockIo + ?Sized>(
+    plan: &SavedPlan,
+    target: &mut T,
+) -> Result<(), CopyRepairError> {
+    for (u, unit) in plan.units.iter().enumerate() {
+        for (w, write) in unit.writes.iter().enumerate() {
+            target
+                .write_all_at(write.offset, &write.after)
+                .map_err(|e| CopyRepairError::Io(format!("plan unit {u} write {w}: {e}")))?;
+        }
+        target
+            .sync()
+            .map_err(|e| CopyRepairError::Io(format!("plan unit {u}: flushing: {e}")))?;
+    }
+    Ok(())
+}
+
 /// The first byte of `write`'s range where `device`, with the after-images
 /// of `earlier` writes laid over it, does not hold the write's
 /// before-image; `None` when it holds it all.
