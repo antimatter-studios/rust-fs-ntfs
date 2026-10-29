@@ -1,0 +1,3 @@
+### Changed
+
+- **A resumed in-place repair accepts a torn final journal record only as the start of the record the plan expects next (#934).** `repair_journal::resume_in_place` used to treat any final record running past the end of the journal as a torn append, so a record whose length field was damaged, or a torn tail with a byte changed, was overwritten and the resume carried on. It now refuses such a tail with `JournalFault::TornTailDiffers`, naming the record, before writing anything to the device or the journal; a true prefix of the expected record still resumes. It is behind the `plan-file` feature.
