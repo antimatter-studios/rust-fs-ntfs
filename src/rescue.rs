@@ -281,6 +281,143 @@ pub fn scan<S: RescueSource + ?Sized>(
     out.finish()
 }
 
+/// Resume an interrupted scan of `source` in `archive`, an archive of that
+/// source opened for reading and writing.
+///
+/// The archive is read back to its last whole record and the torn record
+/// after it, if any, is cut away; nothing before the cut is rewritten. The
+/// scan then runs in the order it would have, but reads only the ranges of
+/// the source no data record holds: the ranges the interrupted pass never
+/// reached, and the spans it recorded as unreadable. A span that reads now
+/// gains a data record; the earlier unreadable record stays, as history.
+///
+/// The layout reads an NTFS scan starts with are served from the archive's
+/// data records where those hold the bytes, so no range already archived is
+/// read from the source again. The report counts what this pass appended.
+pub fn resume<S: RescueSource + ?Sized>(
+    source: &mut S,
+    archive: &mut File,
+    options: ScanOptions,
+) -> Result<ScanReport, String> {
+    options.validate()?;
+    archive
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| format!("rewind the archive: {e}"))?;
+    let contents = read_archive(&mut io::BufReader::new(&mut *archive))?;
+    let size = source.size();
+    if contents.source_size != size {
+        return Err(format!(
+            "the archive is of a {}-byte source; this source is {size} bytes",
+            contents.source_size
+        ));
+    }
+    if contents.sector_size != options.sector_size {
+        return Err(format!(
+            "the archive was scanned in {}-byte sectors, not {}",
+            contents.sector_size, options.sector_size
+        ));
+    }
+    archive
+        .set_len(contents.whole_len)
+        .and_then(|()| archive.sync_all())
+        .map_err(|e| format!("cut the torn record from the archive: {e}"))?;
+    let mut held: Vec<ArchivedRecord> = contents
+        .records
+        .into_iter()
+        .filter(|r| r.kind == KIND_DATA)
+        .collect();
+    held.sort_by_key(|r| r.offset);
+    let order = ntfs_order(
+        &mut Archived {
+            source: &mut *source,
+            archive: &mut *archive,
+            held: &held,
+        },
+        size,
+    )
+    .unwrap_or_else(|| vec![(0, size, RangeClass::Unclassified)]);
+    archive
+        .seek(SeekFrom::Start(contents.whole_len))
+        .map_err(|e| format!("seek to the archive's end: {e}"))?;
+    let mut out = Records::new(archive, size);
+    let mut buf = vec![0u8; options.chunk_size];
+    for (start, end, class) in order {
+        out.class = class;
+        for (a, b) in missing(&held, start, end) {
+            scan_span(source, &mut out, &mut buf, a, b, options.sector_size)?;
+        }
+    }
+    out.finish()
+}
+
+/// The parts of `start..end` no record of `held`, sorted by offset, covers.
+fn missing(held: &[ArchivedRecord], start: u64, end: u64) -> Vec<(u64, u64)> {
+    let mut gaps = Vec::new();
+    let mut at = start;
+    for r in held {
+        if at >= end || r.offset >= end {
+            break;
+        }
+        if r.offset > at {
+            gaps.push((at, r.offset));
+        }
+        at = at.max(r.offset + r.len);
+    }
+    if at < end {
+        gaps.push((at, end));
+    }
+    gaps
+}
+
+/// The source as a resumed scan reads its layout: bytes the archive's data
+/// records hold come from the archive, and only the rest from the source.
+struct Archived<'a, S: ?Sized> {
+    source: &'a mut S,
+    archive: &'a mut File,
+    /// The archive's data records, sorted by offset.
+    held: &'a [ArchivedRecord],
+}
+
+impl<S: RescueSource + ?Sized> RescueSource for Archived<'_, S> {
+    fn size(&self) -> u64 {
+        self.source.size()
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), ReadFailure> {
+        let end = offset + buf.len() as u64;
+        let mut at = offset;
+        for r in self.held {
+            let (a, b) = (r.offset, r.offset + r.len);
+            if at >= end || a >= end {
+                break;
+            }
+            if b <= at {
+                continue;
+            }
+            if a > at {
+                self.source
+                    .read_at(at, &mut buf[(at - offset) as usize..(a - offset) as usize])?;
+                at = a;
+            }
+            let upto = b.min(end);
+            let part = &mut buf[(at - offset) as usize..(upto - offset) as usize];
+            let from = r.position + RECORD_HEADER_LEN as u64 + (at - a);
+            self.archive
+                .seek(SeekFrom::Start(from))
+                .and_then(|_| self.archive.read_exact(part))
+                .map_err(|e| {
+                    ReadFailure::Failed(format!("read the archived {a}+{}: {e}", r.len))
+                })?;
+            at = upto;
+        }
+        if at < end {
+            self.source
+                .read_at(at, &mut buf[(at - offset) as usize..])?;
+        }
+        Ok(())
+    }
+}
+
 /// Archive `start..end` of the source in bulk reads of `buf`'s length.
 fn scan_span<S: RescueSource + ?Sized>(
     source: &mut S,
