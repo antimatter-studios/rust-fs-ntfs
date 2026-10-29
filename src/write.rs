@@ -1642,7 +1642,6 @@ fn rename_same_length_unstamped_io<T: BlockIo + ?Sized>(
     let ir_flags = index_io::index_root_flags(&parent_record_bytes).ok_or_else(|| {
         missing_index_root(&parent_record_bytes, "remove a name from a directory")
     })?;
-
     // Reject a destination that already exists: two $I30 entries with the
     // same key is corruption (chkdsk flags it) and a silent clobber leaks
     // the target. An exact-equal rename is a no-op, handled above only in
@@ -1844,6 +1843,92 @@ fn rename_same_length_unstamped_io<T: BlockIo + ?Sized>(
     }
 
     Ok(())
+}
+
+/// Plan the removal as a resident leaf when the remaining keys fit. Keep
+/// their original FILE_NAME bytes, remove both index attributes through the
+/// list, publish the root, then release storage that no record maps (#817).
+fn fold_listed_directory_index_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent: u64,
+    child: u64,
+    basename: &str,
+    upcase: &crate::upcase::UpcaseTable,
+) -> Result<bool, Error> {
+    let (_, record) = read_mft_record_io(io, parent)?;
+    let ia = idx_block::load_for_directory_io(io, parent)?;
+    let root = index_io::parse_index_root_node_of(&record, "$I30", index_io::NodeKeys::FileNames)?;
+    let wanted: Vec<u16> = basename.encode_utf16().collect();
+    let mut remaining = Vec::new();
+    let mut bytes = 0;
+    let mut removed = false;
+    // Bound retained keys by one MFT record. Large indexes take their
+    // ordinary in-place removal path without building a whole-tree copy.
+    let mut retain = |node: index_io::IndexNode| -> Result<bool, Error> {
+        for mut entry in node.entries {
+            let name = index_io::node_entry_name(&entry)?;
+            if index_io::compare_names(&name, &wanted, Some(upcase)) == std::cmp::Ordering::Equal {
+                let target =
+                    u64::from_le_bytes(entry.key[..8].try_into().unwrap()) & 0x0000_FFFF_FFFF_FFFF;
+                if removed || target != child {
+                    return Err(Error::io(
+                        "the directory index has a duplicate or mismatched removal target",
+                    ));
+                }
+                removed = true;
+                continue;
+            }
+            bytes += entry.key.len();
+            if bytes > record.len() {
+                return Ok(false);
+            }
+            entry.child = None;
+            remaining.push((name, entry));
+        }
+        Ok(true)
+    };
+    if !retain(root)? {
+        return Ok(false);
+    }
+    for vcn in ia.allocated_block_vcns() {
+        let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+        if !retain(index_io::parse_indx_node_of(
+            &block,
+            index_io::NodeKeys::FileNames,
+        )?)? {
+            return Ok(false);
+        }
+    }
+    if !removed {
+        return Err(Error::io("the directory index has no removal target"));
+    }
+    remaining.sort_by(|(a, _), (b, _)| index_io::compare_names(a, b, Some(upcase)));
+    let leaf = index_io::IndexNode {
+        entries: remaining.into_iter().map(|(_, entry)| entry).collect(),
+        last_child: None,
+    };
+    let mut file = crate::attr_list::ListedFile::open(io, parent)?;
+    let mut released = Vec::new();
+    for ty in [AttrType::IndexAllocation, AttrType::Bitmap] {
+        let found = file
+            .find(ty, "$I30")?
+            .ok_or_else(|| Error::io(format!("{ty:?}:$I30 missing")))?;
+        released.extend(file.runs(&found)?);
+        file.remove(ty, "$I30")?;
+    }
+    match file.change_base(|record| index_io::write_index_root_node_of(record, "$I30", &leaf)) {
+        Ok(()) => {}
+        Err(e) if e.contains("exceeds record capacity") => return Ok(false),
+        Err(e) => return Err(file.abandon(io, e)),
+    }
+    file.commit(io)?;
+    let bitmap = bitmap::locate_bitmap_io(io)?;
+    for (lcn, count) in released {
+        bitmap::free_io(io, &bitmap, lcn, count).map_err(|e| {
+            e.context("the listed index folded back, but releasing its index clusters failed")
+        })?;
+    }
+    Ok(true)
 }
 
 /// Put a same-length index-entry rename back, for the rollback above.
@@ -7539,6 +7624,12 @@ fn remove_parent_index_entry_io<T: BlockIo + ?Sized>(
     let ir_flags = index_io::index_root_flags(&parent_record_bytes).ok_or_else(|| {
         missing_index_root(&parent_record_bytes, "remove a name from a directory")
     })?;
+    if ir_flags & index_io::IH_FLAG_HAS_SUBNODES != 0
+        && attr_io::find_attribute(&parent_record_bytes, AttrType::AttributeList, None).is_some()
+        && fold_listed_directory_index_io(io, parent_rec, child_rec, basename, &upcase)?
+    {
+        return Ok(());
+    }
     let in_root = index_io::find_index_entry(&parent_record_bytes, basename, Some(&upcase))?;
     if let Some(entry) = in_root {
         if entry.file_record_number != child_rec {
@@ -7763,7 +7854,8 @@ pub(crate) fn remove_interior_entry_of_io<T: BlockIo + ?Sized>(
     // A bitmap this cannot clear refuses the removal before anything is
     // written.
     if !freed.is_empty() {
-        clear_index_block_bits_of(&mut record.to_vec(), index, &ia, &freed)?;
+        let (_, mut directory) = crate::read::read_directory_record_io(io, parent_rec)?;
+        clear_index_block_bits_of(&mut directory, index, &ia, &freed)?;
     }
 
     // 1) The entry's node, holding the neighbour in the entry's place.
@@ -7806,10 +7898,7 @@ pub(crate) fn remove_interior_entry_of_io<T: BlockIo + ?Sized>(
     }
     // 3) The empty nodes no entry points to any more.
     if !freed.is_empty() {
-        update_mft_record_io(io, parent_rec, |record| {
-            clear_index_block_bits_of(record, index, &ia, &freed)
-        })
-        .map_err(|e| {
+        clear_index_block_bits_io(io, parent_rec, index, &ia, &freed).map_err(|e| {
             e.map_message(|m| {
                 format!(
                     "removing {basename}: freeing {} empty index block(s) failed ({m}); they \
@@ -7820,6 +7909,25 @@ pub(crate) fn remove_interior_entry_of_io<T: BlockIo + ?Sized>(
         })?;
     }
     Ok(())
+}
+
+/// Update the bitmap where the directory's list keeps it, including an
+/// extension record. Its id and list entry stay unchanged.
+fn clear_index_block_bits_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent: u64,
+    index: &str,
+    ia: &idx_block::IndexAllocation,
+    vcns: &[u64],
+) -> Result<(), Error> {
+    let (_, mut record) = crate::read::read_directory_record_io(io, parent)?;
+    clear_index_block_bits_of(&mut record, index, ia, vcns)?;
+    let loc = attr_io::find_attribute(&record, AttrType::Bitmap, Some(index))
+        .ok_or_else(|| Error::io(format!("$Bitmap:{index} missing")))?;
+    let attr = record[loc.attr_offset..loc.attr_offset + loc.attr_length].to_vec();
+    let mut file = crate::attr_list::ListedFile::open(io, parent)?;
+    file.replace(io, AttrType::Bitmap, index, attr)?;
+    file.commit(io)
 }
 
 /// Clear the bits of the index blocks at `vcns` in the resident
@@ -11252,6 +11360,180 @@ mod tests {
             }
             let report = crate::fsck::check_io(&mut dev).unwrap();
             assert!(report.findings.is_empty(), "{:?}", report.findings);
+        }
+    }
+
+    #[test]
+    fn listed_directory_index_removal_folds_back_with_a_true_list() {
+        for (directory, streams) in [
+            ("d".to_string(), 0),
+            ("d".to_string(), 130),
+            ("d".repeat(180), 0),
+        ] {
+            let size = 16 * 1024 * 1024;
+            let mut dev = MemDev { buf: vec![0; size] };
+            format_filesystem(&mut dev, size as u64, 4096, 1024, None, Some(1)).unwrap();
+            let rec = mkdir_io(&mut dev, "/", &directory).unwrap();
+            let directory_path = format!("/{directory}");
+            write_ea_io(&mut dev, &directory_path, b"USER.BIG", &[7; 800], 0).unwrap();
+            for i in 0..streams {
+                write_named_stream_io(
+                    &mut dev,
+                    &directory_path,
+                    &format!("s{i:03}"),
+                    &[i as u8; 120],
+                )
+                .unwrap();
+            }
+            let mut expected = Vec::new();
+            for i in 0..48 {
+                let name = format!("entry-{i:03}");
+                create_file_io(&mut dev, &directory_path, &name).unwrap();
+                expected.push(name);
+            }
+            let ia = idx_block::load_for_directory_io(&mut dev, rec).unwrap();
+            assert!(
+                ia.allocated_block_vcns().len() > 1,
+                "exercise a split index"
+            );
+            let index_clusters: u64 = ia.runs.iter().map(|r| r.length).sum();
+            let bitmap = bitmap::locate_bitmap_io(&mut dev).unwrap();
+            let free_before = bitmap::count_free_io(&mut dev, &bitmap).unwrap();
+            let list =
+                crate::read::read_attribute_value(&mut dev, rec, AttrType::AttributeList, None)
+                    .unwrap();
+            let initial = crate::read::parse_attribute_list(&list).unwrap();
+            if directory.len() > 1 {
+                assert!(initial
+                    .iter()
+                    .any(|e| e.record_number != rec && e.type_code == AttrType::Bitmap as u32));
+            }
+            let (_, before) = read_mft_record_io(&mut dev, rec).unwrap();
+            let list_loc = attr_io::find_attribute(&before, AttrType::AttributeList, None).unwrap();
+            assert_eq!(
+                list_loc.is_resident,
+                streams == 0 && directory.len() == 1,
+                "streams={streams}, directory length={}",
+                directory.len()
+            );
+
+            // Remove an interior separator first, then alternate the ends.
+            let root =
+                index_io::parse_index_root_node_of(&before, "$I30", index_io::NodeKeys::FileNames)
+                    .unwrap();
+            let separator =
+                String::from_utf16(&index_io::node_entry_name(&root.entries[0]).unwrap()).unwrap();
+            let at = expected.iter().position(|n| n == &separator).unwrap();
+            let mut next = expected.remove(at);
+            let mut saw_indx = false;
+            let mut saw_resident_with_names = false;
+            loop {
+                unlink_io(&mut dev, &format!("{directory_path}/{next}")).unwrap();
+                let list =
+                    crate::read::read_attribute_value(&mut dev, rec, AttrType::AttributeList, None)
+                        .unwrap();
+                let entries = crate::read::parse_attribute_list(&list).unwrap();
+                let mut numbers: Vec<_> = initial
+                    .iter()
+                    .chain(&entries)
+                    .map(|e| e.record_number)
+                    .collect();
+                numbers.sort_unstable();
+                numbers.dedup();
+                let mut held = 0;
+                for number in numbers {
+                    let (_, record) = read_mft_record_io(&mut dev, number).unwrap();
+                    if crate::mft_io::record_flags(&record) & crate::mft_io::MFT_FLAG_IN_USE == 0 {
+                        assert!(!entries.iter().any(|e| e.record_number == number));
+                        continue;
+                    }
+                    for loc in attr_io::iter_attributes(&record) {
+                        if loc.type_code == AttrType::AttributeList as u32 {
+                            continue;
+                        }
+                        held += 1;
+                        let name = attr_io::decode_attr_name(&record, &loc);
+                        assert_eq!(
+                            entries
+                                .iter()
+                                .filter(|e| e.record_number == number
+                                    && e.type_code == loc.type_code
+                                    && e.attribute_id == loc.attribute_id
+                                    && e.name.as_deref().unwrap_or("") == name)
+                                .count(),
+                            1
+                        );
+                    }
+                }
+                assert_eq!(held, entries.len(), "no stale list entry");
+                let has_allocation = entries
+                    .iter()
+                    .any(|e| e.type_code == AttrType::IndexAllocation as u32);
+                assert_eq!(
+                    has_allocation,
+                    entries
+                        .iter()
+                        .any(|e| e.type_code == AttrType::Bitmap as u32)
+                );
+                saw_indx |= has_allocation;
+                saw_resident_with_names |= !has_allocation && !expected.is_empty();
+
+                // The independent MIT/Apache ntfs reader grades each state.
+                let mut reader = std::io::Cursor::new(&dev.buf);
+                let mut ntfs = ntfs::Ntfs::new(&mut reader).unwrap();
+                ntfs.read_upcase_table(&mut reader).unwrap();
+                let dir = ntfs.file(&mut reader, rec).unwrap();
+                let index = dir.directory_index(&mut reader).unwrap();
+                let mut iter = index.entries();
+                let mut actual = Vec::new();
+                while let Some(entry) = iter.next(&mut reader) {
+                    if let Some(key) = entry.unwrap().key() {
+                        actual.push(key.unwrap().name().to_string_lossy());
+                    }
+                }
+                actual.sort();
+                assert_eq!(actual, expected);
+                let report = crate::fsck::check_io(&mut dev).unwrap();
+                assert!(report.findings.is_empty(), "{:?}", report.findings);
+                if expected.is_empty() {
+                    assert!(
+                        !has_allocation,
+                        "the empty index must fold back into $INDEX_ROOT"
+                    );
+                    break;
+                }
+                let at = if expected.len() % 2 == 0 {
+                    0
+                } else {
+                    expected.len() - 1
+                };
+                next = expected.remove(at);
+            }
+            assert!(saw_indx, "removals leave large indexes in INDX blocks");
+            if directory.len() == 1 {
+                assert!(saw_resident_with_names);
+            }
+            let free_after = bitmap::count_free_io(&mut dev, &bitmap).unwrap();
+            assert!(
+                free_after >= free_before + index_clusters,
+                "INDX clusters are returned"
+            );
+            assert_eq!(
+                list_eas_io(&mut dev, &directory_path).unwrap()[0].value,
+                [7; 800]
+            );
+            for i in 0..streams {
+                assert_eq!(
+                    crate::read::read_attribute_value(
+                        &mut dev,
+                        rec,
+                        AttrType::Data,
+                        Some(&format!("s{i:03}"))
+                    )
+                    .unwrap(),
+                    [i as u8; 120]
+                );
+            }
         }
     }
 
