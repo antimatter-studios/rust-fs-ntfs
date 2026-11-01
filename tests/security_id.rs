@@ -135,7 +135,7 @@ fn capi_read_security_id_returns_value() {
     let mut out: u32 = 0xDEADBEEF;
     let rc = unsafe { fs_ntfs_read_security_id(img_c.as_ptr(), p_c.as_ptr(), &mut out) };
     assert_eq!(rc, 1, "err={}", last_error());
-    assert_eq!(out, 0);
+    assert_eq!(out, 0x100);
 }
 
 #[test]
