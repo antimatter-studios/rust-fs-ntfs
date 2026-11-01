@@ -348,17 +348,17 @@ fn si_remove_attribute_bit_roundtrip() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn fresh_file_has_v3_form_with_zero_defaults() {
+fn fresh_file_has_v3_form_with_default_fields() {
     let (img, path) = fresh_file("v3_defaults");
     let si = read_si_full(Path::new(&img), &path).expect("read_si_full");
     let v3 = si.v3.expect("fresh runtime file must have v3 form");
     assert_eq!(v3.owner_id, 0, "owner_id default = 0");
     assert_eq!(v3.quota, 0, "quota default = 0");
     assert_eq!(v3.usn, 0, "usn default = 0");
-    // security_id = 0 on fresh file (no DACL inherited from parent).
+    // The new file inherits the root's canonical descriptor.
     assert_eq!(
-        v3.security_id, 0,
-        "security_id default = 0 before explicit set"
+        v3.security_id, 0x100,
+        "security_id inherits root descriptor"
     );
 }
 

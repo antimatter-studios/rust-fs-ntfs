@@ -16,24 +16,62 @@ on:
       - .github/workflows/slate-oracle.yml
       - scripts/slate-oracle.sh
       - tests/scripts/slate-oracle.sh
+      - tests/scripts/slate-writer-capture.sh
+      - scripts/fs-windows-test-harness/run-host-steps
+      - scripts/cli-oracle.sh
+      - fs-windows-test-harness.toml
+      - test-matrix.json
       - test-disks/build-slate-oracle-cases.ps1
       - chores.yml
-      - src/mkfs.rs
-      - src/cli/ntfs/mkfs.rs
+      - src/**
   schedule:
     - cron: '17 4 * * 1'
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
+  writer-cases:
+    name: Capture matrix data writes before Windows mounts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - name: Build the release CLI
+        run: cargo build --locked --release --features cli --bin rust-fs-ntfs
+      - name: Capture the existing data mutation recipes
+        run: |
+          mkdir -p tmp/logs
+          python3 scripts/fs-windows-test-harness/run-host-steps \
+            --scenario cli-populate-win-verify-chkdsk \
+            --scenario cli-write-at-win-verify-chkdsk \
+            --scenario cli-truncate-win-verify-chkdsk \
+            --capture-dir tmp/slate-writer --floor 3 \
+            >tmp/logs/slate-writer-capture.log 2>&1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: slate-writer-cases-${{ github.sha }}
+          path: |
+            tmp/slate-writer/
+            tmp/logs/slate-writer-capture.log
+          if-no-files-found: error
+          retention-days: 7
   windows-cases:
     name: Windows formats and chkdsk grades the cases
+    needs: writer-cases
     runs-on: windows-latest
-    # Four 256 MiB images, two Windows formats and four read-only chkdsk
+    # Seven 256 MiB images, two Windows formats and seven read-only chkdsk
     # passes. A bound, so a hung mount fails by name (#388).
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: slate-writer-cases-${{ github.sha }}
+          path: tmp/writer-input
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.95.0
@@ -55,11 +93,15 @@ jobs:
           ./test-disks/build-slate-oracle-cases.ps1
           -Cli target/release/rust-fs-ntfs.exe
           -OutDir tmp/slate-oracle
+          -WriterCases tmp/writer-input/slate-writer/captures.tsv
+          -WriterImages tmp/writer-input/slate-writer/images
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: slate-oracle-cases-${{ github.sha }}
           path: |
             tmp/slate-oracle/cases.tsv
+            tmp/slate-oracle/writer-captures.tsv
             tmp/slate-oracle/images/*.img
             tmp/slate-oracle/*.mkfs.json
             tmp/slate-oracle/chkdsk/
@@ -92,13 +134,13 @@ jobs:
             printf 'rustc\t%s\n' "$(rustc --version)"
             printf 'source_head\t%s\n' "${{ github.event.pull_request.head.sha || github.sha }}"
           } >tmp/slate-oracle/out/provenance.tsv
-      # The floor is the four cases build-slate-oracle-cases.ps1 makes. A run
-      # that compared fewer did not do the work, whatever it printed.
+      # Four format controls plus populate, write-at and truncate from the
+      # existing Windows matrix (#827): seven cases, never fewer silently.
       - name: Compare Slate's verdicts with Windows chkdsk's
         run: >-
           bash scripts/slate-oracle.sh compare
           tmp/slate-oracle/cases.tsv tmp/slate-oracle/images
-          "$SLATE_CHECKER" tmp/slate-oracle/out 4
+          "$SLATE_CHECKER" tmp/slate-oracle/out 7
       - uses: actions/upload-artifact@v4
         if: always()
         with:

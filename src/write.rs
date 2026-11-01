@@ -413,6 +413,35 @@ fn security_id_is_defined_io<T: BlockIo + ?Sized>(
     Ok(keys.iter().any(|key| key[..] == wanted))
 }
 
+/// Pick a valid security descriptor for a newly created child. Files inherit
+/// their parent's descriptor; when the parent uses the implicit zero id or
+/// the old 48-byte STANDARD_INFORMATION form, use the volume's canonical
+/// default descriptor instead. A new 72-byte STANDARD_INFORMATION must not
+/// carry security_id=0: that id has no entry in $Secure:$SII.
+fn inherited_security_id_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_path: &str,
+) -> Result<u32, Error> {
+    if let Some(id) = read_security_id_io(io, parent_path)? {
+        if id != 0 && security_id_is_defined_io(io, id)? {
+            return Ok(id);
+        }
+    }
+    const DEFAULT_SECURITY_ID: u32 = 0x100;
+    if security_id_is_defined_io(io, DEFAULT_SECURITY_ID)? {
+        return Ok(DEFAULT_SECURITY_ID);
+    }
+    Err(Error::refused(format!(
+        "cannot create in '{parent_path}': $Secure:$SII has no valid inherited or default security descriptor"
+    )))
+}
+
+fn assign_new_record_security_id(record: &mut [u8], security_id: u32) -> Result<(), Error> {
+    let offset = si_security_id_offset(record)?;
+    record[offset..offset + 4].copy_from_slice(&security_id.to_le_bytes());
+    Ok(())
+}
+
 /// Modify the `file_attributes` field in `$STANDARD_INFORMATION`. Bits in
 /// `add` are ORed on; bits in `remove` are ANDed off. `add` and `remove`
 /// overlap is not allowed (caller must not ask to both add and remove
@@ -2475,6 +2504,7 @@ fn create_file_unstamped_io<T: BlockIo + ?Sized>(
     // parent_reference. Sequence is at record header offset +0x10.
     let parent_seq = crate::mft_io::record_sequence(&parent_record_bytes);
     let parent_reference = crate::record_build::encode_file_reference(parent_rec, parent_seq);
+    let security_id = inherited_security_id_io(io, parent_path)?;
 
     // Build the new record.
     let nt_time = crate::record_build::nt_time_now();
@@ -2494,6 +2524,7 @@ fn create_file_unstamped_io<T: BlockIo + ?Sized>(
         nt_time,
         params.bytes_per_sector,
     )?;
+    assign_new_record_security_id(&mut new_record, security_id)?;
     // Apply fixup before writing.
     crate::mft_io::apply_fixup_on_write(&mut new_record, params.bytes_per_sector)?;
 
@@ -3356,6 +3387,7 @@ fn mkdir_unstamped_io<T: BlockIo + ?Sized>(
 
     let parent_seq = crate::mft_io::record_sequence(&parent_record_bytes);
     let parent_reference = crate::record_build::encode_file_reference(parent_rec, parent_seq);
+    let security_id = inherited_security_id_io(io, parent_path)?;
 
     let nt_time = crate::record_build::nt_time_now();
     // CONTINUE THE SLOT'S HISTORY RATHER THAN RESTARTING IT. This was
@@ -3383,6 +3415,7 @@ fn mkdir_unstamped_io<T: BlockIo + ?Sized>(
         index_block_size,
         params.cluster_size as u32,
     )?;
+    assign_new_record_security_id(&mut new_record, security_id)?;
     crate::mft_io::apply_fixup_on_write(&mut new_record, params.bytes_per_sector)?;
 
     crate::mft_bitmap::allocate_io(io, &mbm, new_rec)?;

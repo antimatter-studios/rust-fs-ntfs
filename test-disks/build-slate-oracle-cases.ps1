@@ -36,7 +36,9 @@
 # on PATH; CI installs the pinned rust-img-vhd before invoking this.
 param(
     [Parameter(Mandatory=$true)] [string]$Cli,
-    [string]$OutDir = 'tmp/slate-oracle'
+    [string]$OutDir = 'tmp/slate-oracle',
+    [string]$WriterCases,
+    [string]$WriterImages
 )
 
 $ErrorActionPreference = 'Stop'
@@ -98,6 +100,36 @@ foreach ($case in $cases) {
     if ($geometry -gt $length) {
         throw "$($case.Name) is $length bytes but its boot sector describes ${geometry}: the volume was cut short"
     }
+}
+
+# These are the actual matrix host recipes, captured before their first
+# Windows step (#827). Verify the captured hash before mounting a copy;
+# Windows must not silently substitute bytes for the writer's evidence.
+if ([bool]$WriterCases -ne [bool]$WriterImages) {
+    throw 'WriterCases and WriterImages must be supplied together'
+}
+if ($WriterCases) {
+    $seen = @{}
+    foreach ($case in $cases) { $seen[$case.Name] = $true }
+    $captures = @(Import-Csv -LiteralPath $WriterCases -Delimiter "`t")
+    if ($captures.Count -eq 0) { throw 'WriterCases contains no captured matrix cases' }
+    foreach ($capture in $captures) {
+        if ($capture.case -notmatch '^[A-Za-z0-9_-]+$' -or $seen.ContainsKey($capture.case) -or
+            $capture.scenario -ne $capture.case -or $capture.image -ne "$($capture.case).img" -or
+            $capture.sha256 -notmatch '^[0-9a-f]{64}$') {
+            throw "Malformed or duplicate writer capture: $($capture.case)"
+        }
+        $seen[$capture.case] = $true
+        $source = Join-Path $WriterImages $capture.image
+        if ((Get-Sha256 $source) -ne $capture.sha256) {
+            throw "Writer capture $($capture.case) is not the SHA-256 exported by the matrix recipe"
+        }
+        $image = Join-Path $images $capture.image
+        Copy-Item -LiteralPath $source -Destination $image -Force
+        if ((Get-Sha256 $image) -ne $capture.sha256) { throw "Copy changed writer capture $($capture.case)" }
+        $cases += @{ Name = $capture.case; Origin = "writer:$($capture.scenario)" }
+    }
+    Copy-Item -LiteralPath $WriterCases -Destination (Join-Path $out 'writer-captures.tsv') -Force
 }
 
 $rows = @("case`torigin`timage`tsha256`twindows_verdict`twindows_exit")

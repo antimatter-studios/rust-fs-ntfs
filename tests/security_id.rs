@@ -40,12 +40,11 @@ fn working_copy(tag: &str) -> (String, &'static str) {
 fn read_default_security_id_on_runtime_file() {
     let (img, path) = working_copy("read_default");
     // Fresh runtime-created files have $STANDARD_INFORMATION in the
-    // 72-byte v3.x form with security_id = 0 (default — points at the
-    // built-in inherited DACL).
+    // 72-byte v3.x form with the root's canonical descriptor id.
     let id = read_security_id(std::path::Path::new(&img), path)
         .unwrap()
         .expect("runtime file has the 72-byte SI form");
-    assert_eq!(id, 0);
+    assert_eq!(id, 0x100);
 }
 
 #[test]
@@ -136,7 +135,7 @@ fn capi_read_security_id_returns_value() {
     let mut out: u32 = 0xDEADBEEF;
     let rc = unsafe { fs_ntfs_read_security_id(img_c.as_ptr(), p_c.as_ptr(), &mut out) };
     assert_eq!(rc, 1, "err={}", last_error());
-    assert_eq!(out, 0);
+    assert_eq!(out, 0x100);
 }
 
 #[test]

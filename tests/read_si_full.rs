@@ -22,9 +22,9 @@ fn runtime_file_has_v3_form_with_default_values() {
     let si = read_si_full(Path::new(&img), path).unwrap();
     // Fresh runtime-created files use the 72-byte v3.x form.
     let v3 = si.v3.expect("runtime file should have v3 trailer");
-    // Defaults for fresh files: security_id = 0 (inherited DACL),
-    // owner_id = 0, quota = 0, usn = 0.
-    assert_eq!(v3.security_id, 0);
+    // The new file inherits the root's descriptor from $Secure:$SII.
+    // The remaining extended fields default to zero.
+    assert_eq!(v3.security_id, 0x100);
     assert_eq!(v3.owner_id, 0);
     assert_eq!(v3.quota, 0);
     assert_eq!(v3.usn, 0);
