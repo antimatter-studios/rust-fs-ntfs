@@ -78,6 +78,19 @@
 #       and the issue; an ungraded row is assigned to nobody (`-`), because
 #       no row is assigned before Windows has graded it.
 #
+#   slate-oracle.sh window MIN OUT RUN=VERDICTS...
+#       The stable shared subset of a measured run window (#882, part of
+#       #694). Each argument names one advisory run's ID and the verdicts.tsv
+#       compare wrote in it, oldest run first and each run once. A case is
+#       admitted only when every run of the window has a row for it with
+#       Windows' `clean` verdict on its bytes, Slate's `clean` and the result
+#       `agree`: Windows is the oracle, so agreement between Slate and our
+#       reader alone never admits a case. A disagreement, a ledger-recorded
+#       row or an absence from any run excludes it, and each exclusion is
+#       named. OUT gets a header and one `case origin runs` row per admitted
+#       case, runs being the window's run IDs. Fewer than MIN runs, or no
+#       admitted case, fails.
+#
 # Exit 0 when every case ran and agreed with Windows and the floor was met;
 # 1 when any case disagreed, could not be graded, or the floor was missed;
 # 2 for a usage error. Every case is graded before the verdict, so one run
@@ -87,7 +100,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
-    echo "usage: slate-oracle.sh fetch DEST | build SRC [BIN] | compare CASES IMAGES CHECKER OUT FLOOR | ledger [LEDGER] | write WRITES IMAGES WRITER OUT FLOOR | replay CAPTURES REPLAYER OUT FLOOR" >&2
+    echo "usage: slate-oracle.sh fetch DEST | build SRC [BIN] | compare CASES IMAGES CHECKER OUT FLOOR | ledger [LEDGER] | write WRITES IMAGES WRITER OUT FLOOR | replay CAPTURES REPLAYER OUT FLOOR | window MIN OUT RUN=VERDICTS..." >&2
     exit 2
 }
 die() { echo "slate-oracle: $*" >&2; exit 1; }
@@ -449,6 +462,82 @@ compare() {
     echo "slate-oracle: $agreed of $rows cases agree with Windows chkdsk and $recorded are recorded disagreements (floor $floor); table in $out/verdicts.tsv"
 }
 
+window() {
+    [ "$#" -ge 3 ] || usage
+    local min=$1 out=$2
+    shift 2
+    [[ $min =~ ^[1-9][0-9]*$ ]] || usage
+    local header=$'case\torigin\tsha256\twindows_verdict\twindows_exit\tslate_verdict\tslate_exit\tresult'
+    local arg run file last=0 count=0 problems=0 runs='' tables=()
+    for arg in "$@"; do
+        run="${arg%%=*}"
+        file="${arg#*=}"
+        if [[ $arg != *=* ]] || ! [[ $run =~ ^[0-9]+$ ]]; then
+            echo "FAIL '$arg' is not RUN=VERDICTS with a numeric run ID"
+            problems=$((problems + 1))
+            continue
+        fi
+        # Increasing IDs: oldest first, and no run counted twice.
+        if [ "$run" -le "$last" ]; then
+            echo "FAIL run $run does not follow run $last; give the runs oldest first, each once"
+            problems=$((problems + 1))
+            continue
+        fi
+        last=$run
+        if [ ! -f "$file" ]; then
+            echo "FAIL run $run: no verdicts table at $file"
+            problems=$((problems + 1))
+        elif [ "$(head -n 1 "$file" | tr -d '\r')" != "$header" ]; then
+            echo "FAIL run $run: $file is not a verdicts table"
+            problems=$((problems + 1))
+        else
+            tables+=("$arg")
+            count=$((count + 1))
+            runs="${runs:+$runs,}$run"
+        fi
+    done
+    if [ "$count" -lt "$min" ]; then
+        echo "FAIL the window holds $count usable run(s), below the minimum of $min"
+        problems=$((problems + 1))
+    fi
+    if [ "$problems" -gt 0 ]; then
+        echo "slate-oracle: $problems problem(s) in the window; no subset written"
+        return 1
+    fi
+
+    for arg in "${tables[@]}"; do
+        awk -F'\t' -v run="${arg%%=*}" 'NR > 1 && $1 != "" { sub(/\r$/, ""); print run "\t" $0 }' "${arg#*=}"
+    done | awk -F'\t' -v OFS='\t' -v n="$count" -v runs="$runs" -v out="$out" '
+        {
+            run = $1; name = $2
+            if (!(name in rows)) { order[++cases] = name; origin[name] = $3; rows[name] = 0 }
+            if ((name, run) in seen) { why[name] = why[name] ? why[name] : "listed twice in run " run; next }
+            seen[name, run] = 1
+            rows[name]++
+            if (why[name]) next
+            if ($5 != "clean") why[name] = "run " run ": Windows chkdsk verdict is \x27" $5 "\x27, not clean"
+            else if ($7 != "clean") why[name] = "run " run ": Slate verdict is \x27" $7 "\x27, not clean"
+            else if ($9 != "agree") why[name] = "run " run ": result is \x27" $9 "\x27, not agree"
+        }
+        END {
+            print "case", "origin", "runs" >out
+            for (i = 1; i <= cases; i++) {
+                name = order[i]
+                if (!why[name] && rows[name] < n) why[name] = "absent from " (n - rows[name]) " of " n " runs"
+                if (why[name]) print "EXCLUDED " name ": " why[name]
+                else print name, origin[name], runs >out
+            }
+        }'
+    local admitted
+    admitted=$(($(wc -l <"$out") - 1))
+    if [ "$admitted" -lt 1 ]; then
+        echo "FAIL no case agreed with Windows chkdsk in every run of the window"
+        echo "slate-oracle: an empty subset in $out"
+        return 1
+    fi
+    echo "slate-oracle: $admitted case(s) agreed with Windows chkdsk in all $count runs (minimum $min); subset in $out"
+}
+
 [ "$#" -ge 1 ] || usage
 command=$1
 shift
@@ -459,5 +548,6 @@ case "$command" in
     ledger) ledger "$@" ;;
     write) write "$@" ;;
     replay) replay "$@" ;;
+    window) window "$@" ;;
     *) usage ;;
 esac
