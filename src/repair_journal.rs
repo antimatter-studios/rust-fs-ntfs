@@ -15,7 +15,11 @@
 //!
 //! Everything here is behind the `plan-file` feature.
 
-use crate::repair_plan::{load_plan, PlanFileError, PlanUnit, PlannedWrite};
+use crate::block_io::BlockIo;
+use crate::repair_plan::{
+    check_unit_on_device, load_plan, PlanFileError, PlanSourceError, PlanUnit, PlannedWrite,
+    SavedPlan,
+};
 use sha2::{Digest, Sha256};
 
 /// The journal format this reader writes and reads.
@@ -395,4 +399,177 @@ impl<'a> Fields<'a> {
             Err(JournalFault::Malformed(what))
         }
     }
+}
+
+/// Why an in-place repair was refused, or stopped. Every unit before the
+/// one named is written, read back and marked applied in the journal; the
+/// unit named is not marked applied.
+#[derive(Debug)]
+pub enum InPlaceError {
+    /// The device does not hold the unit's before-image; nothing of the
+    /// unit was written.
+    Device(PlanSourceError),
+    /// A record appended to the journal did not read back as written; the
+    /// unit it is for was not written. `unit` is `None` for the header.
+    JournalReadBack { unit: Option<u32>, offset: u64 },
+    /// The device read write `write` of unit `unit` back different from
+    /// its redo, in bytes `start..end`.
+    DeviceReadBack {
+        unit: u32,
+        write: usize,
+        start: u64,
+        end: u64,
+    },
+    /// Writing, reading or flushing the device or the journal failed.
+    Io(String),
+}
+
+impl std::fmt::Display for InPlaceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Device(e) => write!(f, "{e}"),
+            Self::JournalReadBack { unit: None, offset } => write!(
+                f,
+                "the journal header did not read back as written (at byte {offset})"
+            ),
+            Self::JournalReadBack {
+                unit: Some(unit),
+                offset,
+            } => write!(
+                f,
+                "plan unit {unit}: its intent record did not read back from the journal as written (at byte {offset})"
+            ),
+            Self::DeviceReadBack {
+                unit,
+                write,
+                start,
+                end,
+            } => write!(
+                f,
+                "plan unit {unit} write {write}: the device read back other bytes than its redo in bytes {start}..{end}"
+            ),
+            Self::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for InPlaceError {}
+
+/// Apply `plan` in place to `device`, the source it was made from,
+/// through `journal`, an empty journal outside that device. The plan
+/// file's SHA-256 `plan_sha256` and the plan's source bind the journal's
+/// header, which is appended, flushed and read back first. Then, for each
+/// unit in order:
+///
+/// 1. [`check_unit_on_device`] checks the unit's ranges on the device; a
+///    mismatch stops the apply with nothing of the unit written.
+/// 2. The unit's intent record, every write's preimage and redo, is
+///    appended to the journal, the journal flushed, and the record read
+///    back and compared with what was written.
+/// 3. The unit's writes go to the device, and the device is flushed.
+/// 4. Every write's range is read back from the device and compared with
+///    what the unit leaves there: its redo, with the unit's later writes
+///    laid over it.
+/// 5. Only then is the unit's applied record appended to the journal and
+///    the journal flushed.
+///
+/// Nothing reaches the device outside the plan's ranges, and nothing is
+/// written into the volume's `$LogFile` but the plan's own units.
+pub fn apply_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
+    plan: &SavedPlan,
+    plan_sha256: [u8; SHA256_LEN],
+    device: &mut D,
+    journal: &mut J,
+) -> Result<(), InPlaceError> {
+    let binding = JournalBinding {
+        plan_sha256,
+        source_size: plan.source_size,
+        volume_serial: plan.volume_serial,
+    };
+    let mut at = 0u64;
+    append_durably(journal, &mut at, &header_record(&binding), None)?;
+    for (u, unit) in plan.units.iter().enumerate() {
+        let index = u32::try_from(u).expect("a plan holds at most u32::MAX units");
+        check_unit_on_device(plan, u, device).map_err(InPlaceError::Device)?;
+        append_durably(journal, &mut at, &intent_record(index, unit), Some(index))?;
+        for (w, write) in unit.writes.iter().enumerate() {
+            device
+                .write_all_at(write.offset, &write.after)
+                .map_err(|e| InPlaceError::Io(format!("plan unit {u} write {w}: {e}")))?;
+        }
+        device
+            .sync()
+            .map_err(|e| InPlaceError::Io(format!("plan unit {u}: flushing the device: {e}")))?;
+        for (w, write) in unit.writes.iter().enumerate() {
+            let mut held = vec![0u8; write.after.len()];
+            device.read_exact_at(write.offset, &mut held).map_err(|e| {
+                InPlaceError::Io(format!("plan unit {u} write {w}: reading back: {e}"))
+            })?;
+            if held != left_by_unit(unit, w) {
+                return Err(InPlaceError::DeviceReadBack {
+                    unit: index,
+                    write: w,
+                    start: write.offset,
+                    end: write.offset + write.after.len() as u64,
+                });
+            }
+        }
+        let applied = applied_record(index);
+        journal
+            .write_all_at(at, &applied)
+            .map_err(|e| InPlaceError::Io(format!("plan unit {u}: journal applied record: {e}")))?;
+        journal
+            .sync()
+            .map_err(|e| InPlaceError::Io(format!("plan unit {u}: flushing the journal: {e}")))?;
+        at += applied.len() as u64;
+    }
+    Ok(())
+}
+
+/// Append `record` to `journal` at `at`, flush the journal, read the
+/// record back and compare it with what was written; `at` then moves past
+/// it. `unit` names the unit an intent is for, `None` for the header.
+fn append_durably<J: BlockIo + ?Sized>(
+    journal: &mut J,
+    at: &mut u64,
+    record: &[u8],
+    unit: Option<u32>,
+) -> Result<(), InPlaceError> {
+    let what = match unit {
+        Some(u) => format!("plan unit {u}: journal intent record"),
+        None => "journal header".to_string(),
+    };
+    journal
+        .write_all_at(*at, record)
+        .map_err(|e| InPlaceError::Io(format!("{what}: {e}")))?;
+    journal
+        .sync()
+        .map_err(|e| InPlaceError::Io(format!("{what}: flushing the journal: {e}")))?;
+    let mut back = vec![0u8; record.len()];
+    journal
+        .read_exact_at(*at, &mut back)
+        .map_err(|e| InPlaceError::Io(format!("{what}: reading back: {e}")))?;
+    if back != record {
+        return Err(InPlaceError::JournalReadBack { unit, offset: *at });
+    }
+    *at += record.len() as u64;
+    Ok(())
+}
+
+/// What `unit` leaves in write `w`'s range: its redo, with the unit's
+/// later writes laid over it.
+fn left_by_unit(unit: &PlanUnit, w: usize) -> Vec<u8> {
+    let write = &unit.writes[w];
+    let mut left = write.after.clone();
+    let end = write.offset + left.len() as u64;
+    for later in &unit.writes[w + 1..] {
+        let from = later.offset.max(write.offset);
+        let to = (later.offset + later.after.len() as u64).min(end);
+        if from < to {
+            left[(from - write.offset) as usize..(to - write.offset) as usize].copy_from_slice(
+                &later.after[(from - later.offset) as usize..(to - later.offset) as usize],
+            );
+        }
+    }
+    left
 }

@@ -1,0 +1,3 @@
+### Added
+
+- **An in-place repair writes each unit only after its preimage and redo are durable in the journal, and marks it applied only after reading it back (#919).** `repair_journal::apply_in_place` applies a plan to the device it was made from through an external journal: each unit is checked on the device, its intent record is appended, flushed and read back, its writes go to the device and are flushed and read back, and only then is its applied record appended and flushed. A device that reads a unit back different from its redo stops the apply, naming the unit and byte range, with that unit not marked applied. The result is byte for byte the target copy-repair makes from the same plan. It is behind the `plan-file` feature.
