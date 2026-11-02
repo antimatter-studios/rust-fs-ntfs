@@ -43,6 +43,7 @@ status=$?
 check "stdin import with --verify exits 0 ($(cat "$SANDBOX/err"))" test "$status" -eq 0
 jq_check "--verify is reported" '.verified == true and .bytes == 10' "$SANDBOX/out"
 check "ntfscat /stdin.txt has the piped bytes" test "$(ntfscat "$img" /stdin.txt 2>/dev/null)" = "from stdin"
+check "the stdin spool is gone from beside the image" test -z "$(find "$(dirname "$img")" -maxdepth 1 -name '.ntfs-import-*')"
 
 before="$(sha256 <"$img")"
 fs.ntfs "$img" import "$SANDBOX/one" /one >"$SANDBOX/out" 2>"$SANDBOX/err"

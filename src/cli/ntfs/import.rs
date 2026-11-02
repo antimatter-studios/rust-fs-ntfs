@@ -45,12 +45,17 @@ impl LocalSource {
         })
     }
 
-    fn stdin() -> Result<Self, CliError> {
+    fn stdin(target: &OsStr) -> Result<Self, CliError> {
         // The released shared pump requires a known length. Spool to disk,
         // retaining bounded memory, and remove the private file on every return.
+        // Beside the target, whose disk has room for an image, where a system
+        // temporary directory may be a small tmpfs.
+        let beside = match std::path::Path::new(target).parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir,
+            _ => std::path::Path::new("."),
+        };
         for n in 0..1000 {
-            let path = std::env::temp_dir()
-                .join(format!("ntfs-import-{}-{n}.partial", std::process::id()));
+            let path = beside.join(format!(".ntfs-import-{}-{n}.partial", std::process::id()));
             let mut options = OpenOptions::new();
             options.read(true).write(true).create_new(true);
             #[cfg(unix)]
@@ -330,7 +335,7 @@ pub(super) fn run(
     let mut stage = Stage::create(target, offset, path, replace)?;
     let result: Result<Outcome, CliError> = (|| {
         if source.is_none() {
-            source = Some(LocalSource::stdin()?);
+            source = Some(LocalSource::stdin(target)?);
         }
         let copied = stage.copy(source.as_mut().expect("opened source"))?;
         if verify {
