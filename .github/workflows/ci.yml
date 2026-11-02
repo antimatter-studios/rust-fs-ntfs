@@ -350,7 +350,7 @@ jobs:
         run: pwsh -NoProfile -File tests/scripts/capture-chkdsk.ps1
 
       # Also runs on dispatched red refs before the collector is supplied.
-      - name: Windows format geometry collector contracts (33 checks)
+      - name: Windows format geometry collector contracts (48 checks)
         if: matrix.os == 'ubuntu-latest'
         shell: pwsh
         run: pwsh -NoProfile -File tests/scripts/windows-format-geometry.ps1
