@@ -4128,6 +4128,171 @@ fn an_in_place_repair_cancelled_anywhere_stops_after_a_whole_unit_and_resumes() 
     }
 }
 
+/// What the C ABI's repair callbacks saw (#957): every progress report,
+/// how many times a stop was asked about, and the ask that answers yes.
+#[cfg(all(unix, feature = "plan-file"))]
+struct CWatch {
+    reports: Vec<fs_ntfs::repair_journal::ApplyProgress>,
+    asked: usize,
+    stop_at: Option<usize>,
+}
+
+#[cfg(all(unix, feature = "plan-file"))]
+extern "C" fn c_repair_progress(
+    ctx: *mut c_void,
+    units: u32,
+    units_total: u32,
+    bytes: u64,
+    bytes_total: u64,
+) {
+    let watch = unsafe { &mut *(ctx as *mut CWatch) };
+    watch.reports.push(fs_ntfs::repair_journal::ApplyProgress {
+        units,
+        bytes,
+        units_total,
+        bytes_total,
+    });
+}
+
+#[cfg(all(unix, feature = "plan-file"))]
+extern "C" fn c_repair_cancel(ctx: *mut c_void) -> c_int {
+    let watch = unsafe { &mut *(ctx as *mut CWatch) };
+    let stop = watch.stop_at == Some(watch.asked);
+    watch.asked += 1;
+    c_int::from(stop)
+}
+
+#[cfg(all(unix, feature = "plan-file"))]
+#[test]
+fn a_c_abi_in_place_repair_cancelled_by_its_callback_resumes_through_the_c_abi() {
+    // The C ABI's in-place apply and resume take a progress callback and
+    // a cancellation callback over the library observer (#957). Cancelled
+    // from the callback halfway through a Windows interrupted capture's
+    // plan, the apply must return the cancelled status naming the units
+    // applied; resumed through the C ABI it must reach the bytes of an
+    // uninterrupted apply, and the files and metadata Windows' own restart
+    // reached. Progress must rise to the stop, then from there to the end.
+    use fs_ntfs::repair_journal::apply_in_place;
+    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use fs_ntfs::{
+        fs_ntfs_repair_apply_in_place, fs_ntfs_repair_resume_in_place, FS_NTFS_REPAIR_CANCELLED,
+    };
+    for (k, log_end) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let mut v = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        let plan_sha256: [u8; 32] = Sha256::digest(&saved).into();
+        let units = loaded.units.len();
+        assert!(units > 0, "{k}: a log holding work planned nothing");
+        let bytes_of = |n: usize| -> u64 {
+            loaded.units[..n]
+                .iter()
+                .flat_map(|u| &u.writes)
+                .map(|w| w.after.len() as u64)
+                .sum()
+        };
+        let total = (units as u32, bytes_of(units));
+
+        let (mut device, mut journal, _) = recording_pair(&pristine, None);
+        apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+            .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+        let whole = device.bytes;
+
+        let device = format!("{src}.capi");
+        let plan_file = format!("{src}.capi.plan");
+        let journal_dir =
+            std::env::temp_dir().join(format!("ntfs-capi-journal-{k}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&journal_dir);
+        std::fs::create_dir_all(&journal_dir).unwrap();
+        let journal_file = journal_dir.join("repair.journal");
+        std::fs::write(&device, &pristine).unwrap();
+        std::fs::write(&plan_file, &saved).unwrap();
+        let c_device = CString::new(device.as_str()).unwrap();
+        let c_plan = CString::new(plan_file.as_str()).unwrap();
+        let c_journal = CString::new(journal_file.to_str().unwrap()).unwrap();
+
+        let stop = units / 2;
+        let mut watch = CWatch {
+            reports: Vec::new(),
+            asked: 0,
+            stop_at: Some(stop),
+        };
+        let mut applied = u32::MAX;
+        let rc = fs_ntfs_repair_apply_in_place(
+            c_device.as_ptr(),
+            c_plan.as_ptr(),
+            c_journal.as_ptr(),
+            Some(c_repair_progress),
+            Some(c_repair_cancel),
+            &mut watch as *mut CWatch as *mut c_void,
+            &mut applied,
+        );
+        assert_eq!(
+            rc, FS_NTFS_REPAIR_CANCELLED,
+            "{k}: the apply cancelled at boundary {stop} of {units} returned {rc}"
+        );
+        assert_eq!(applied as usize, stop, "{k}: units applied before the stop");
+        let done = (stop as u32, bytes_of(stop));
+        rising(&watch.reports, (0, 0), done, total)
+            .unwrap_or_else(|e| panic!("{k}: the cancelled apply's progress: {e}"));
+
+        let mut again = CWatch {
+            reports: Vec::new(),
+            asked: 0,
+            stop_at: None,
+        };
+        let mut finished = u32::MAX;
+        let rc = fs_ntfs_repair_resume_in_place(
+            c_device.as_ptr(),
+            c_plan.as_ptr(),
+            c_journal.as_ptr(),
+            Some(c_repair_progress),
+            Some(c_repair_cancel),
+            &mut again as *mut CWatch as *mut c_void,
+            &mut finished,
+        );
+        assert_eq!(rc, 0, "{k}: the resume through the C ABI returned {rc}");
+        assert_eq!(finished as usize, units, "{k}: units applied by the resume");
+        rising(&again.reports, done, total, total)
+            .unwrap_or_else(|e| panic!("{k}: the resume's progress: {e}"));
+        assert!(
+            std::fs::read(&device).unwrap() == whole,
+            "{k}: the device resumed through the C ABI holds other bytes than an \
+             uninterrupted apply"
+        );
+
+        let want = manifest(k);
+        let got = walk(&device);
+        assert!(
+            got == want,
+            "{k}: {} files after the C ABI repair resumed, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+        let recovered = unpack(&format!("windows-interrupted-{k}.recovered"));
+        oracle::same_metadata_as_windows(
+            k,
+            &Image::read(&src),
+            &Image::read(&device),
+            &Image::read(&recovered),
+            log_end,
+        );
+        std::fs::remove_dir_all(&journal_dir).unwrap();
+        std::fs::remove_file(&recovered).unwrap();
+        std::fs::remove_file(&plan_file).unwrap();
+        std::fs::remove_file(&device).unwrap();
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
 #[cfg(feature = "plan-file")]
 #[test]
 fn a_device_write_torn_by_a_cut_resumes_to_the_uninterrupted_volume() {

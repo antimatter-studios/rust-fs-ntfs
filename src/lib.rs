@@ -3788,6 +3788,259 @@ pub extern "C" fn fs_ntfs_fsck_with_fs_core_device(
 }
 
 // ---------------------------------------------------------------------------
+// In-place repair apply (#957)
+// ---------------------------------------------------------------------------
+
+/// Told how far an in-place repair has gone (#957): `units` of
+/// `units_total` plan units marked applied, their writes holding `bytes`
+/// of the plan's `bytes_total`. Called once before the first unit and
+/// again after each unit is marked applied; the reports never fall.
+pub type FsNtfsRepairProgressFn = unsafe extern "C" fn(
+    context: *mut c_void,
+    units: u32,
+    units_total: u32,
+    bytes: u64,
+    bytes_total: u64,
+);
+
+/// Asked before each unit of an in-place repair begins whether to stop
+/// (#957): nonzero stops. A unit already begun is finished, read back and
+/// marked applied first, so a stop never leaves half a unit.
+pub type FsNtfsRepairCancelFn = unsafe extern "C" fn(context: *mut c_void) -> c_int;
+
+/// The status of an in-place repair its cancellation callback stopped
+/// (#957). Every unit begun is applied and none is open; the journal
+/// resumes the repair through [`fs_ntfs_repair_resume_in_place`].
+pub const FS_NTFS_REPAIR_CANCELLED: c_int = 1;
+
+/// The library observer driven by the C ABI's repair callbacks.
+#[cfg(all(unix, feature = "plan-file"))]
+struct CallbackObserver {
+    progress: Option<FsNtfsRepairProgressFn>,
+    cancel: Option<FsNtfsRepairCancelFn>,
+    context: *mut c_void,
+}
+
+#[cfg(all(unix, feature = "plan-file"))]
+impl repair_journal::ApplyObserver for CallbackObserver {
+    fn progress(&mut self, at: repair_journal::ApplyProgress) {
+        if let Some(cb) = self.progress {
+            unsafe {
+                cb(
+                    self.context,
+                    at.units,
+                    at.units_total,
+                    at.bytes,
+                    at.bytes_total,
+                )
+            };
+        }
+    }
+
+    fn cancel_requested(&mut self) -> bool {
+        self.cancel
+            .is_some_and(|cb| unsafe { cb(self.context) } != 0)
+    }
+}
+
+/// Apply, or with `resume` continue, the plan file at `plan` in place on
+/// `device` through the journal at `journal`, as `fsck.ntfs --apply PLAN
+/// --in-place --journal FILE` does (#957). A new apply checks the journal
+/// location, the plan and the device before it creates the journal; a
+/// resume opens the journal a stopped apply left.
+#[cfg(all(unix, feature = "plan-file"))]
+fn repair_in_place(
+    func: &str,
+    paths: (&str, &str, &str),
+    resume: bool,
+    observer: &mut CallbackObserver,
+    out_units_applied: *mut u32,
+) -> c_int {
+    use repair_journal::{
+        apply_in_place_observed, check_journal_location, resume_in_place_observed, InPlaceError,
+    };
+    use repair_plan::{check_plan_source, load_plan};
+    use sha2::{Digest, Sha256};
+    use std::path::Path;
+    let (device, plan, journal) = (Path::new(paths.0), Path::new(paths.1), Path::new(paths.2));
+    let (name, plan_name, journal_name) = (paths.0, paths.1, paths.2);
+    let report = |units: u32| {
+        if !out_units_applied.is_null() {
+            unsafe { *out_units_applied = units };
+        }
+    };
+    if !resume {
+        if let Err(e) = check_journal_location(journal, device) {
+            set_einval(&format!(
+                "{func}: journal '{journal_name}' refused, nothing written: {e}"
+            ));
+            return -1;
+        }
+    }
+    let bytes = match std::fs::read(plan) {
+        Ok(b) => b,
+        Err(e) => return err_int(Error::io(format!("{func}: read plan '{plan_name}': {e}"))),
+    };
+    let saved = match load_plan(&bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            set_einval(&format!("{func}: plan '{plan_name}' refused: {e}"));
+            return -1;
+        }
+    };
+    let mut io = match block_io::PathIo::open_exclusive(device) {
+        Ok(io) => io,
+        Err(e) => {
+            return err_int(Error::io(format!(
+                "{func}: {name}: refused, nothing written: {e}"
+            )))
+        }
+    };
+    if !resume {
+        if let Err(e) = check_plan_source(&saved, &mut io) {
+            set_einval(&format!(
+                "{func}: {name}: refused for plan '{plan_name}', nothing written: {e}"
+            ));
+            return -1;
+        }
+        if let Err(e) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(journal)
+        {
+            return err_int(Error::io(format!(
+                "{func}: create journal '{journal_name}': {e}"
+            )));
+        }
+    }
+    let mut journal_io = match block_io::PathIo::open_rw(journal) {
+        Ok(j) => j,
+        Err(e) => return err_int(Error::io(format!("{func}: {e}"))),
+    };
+    let sha: [u8; 32] = Sha256::digest(&bytes).into();
+    let done = if resume {
+        resume_in_place_observed(&saved, sha, &mut io, &mut journal_io, observer)
+    } else {
+        apply_in_place_observed(&saved, sha, &mut io, &mut journal_io, observer)
+    };
+    match done {
+        Ok(()) => {
+            report(u32::try_from(saved.units.len()).expect("a plan holds at most u32::MAX units"));
+            0
+        }
+        Err(InPlaceError::Cancelled { applied }) => {
+            report(applied);
+            FS_NTFS_REPAIR_CANCELLED
+        }
+        Err(e) => err_int(Error::io(format!(
+            "{func}: {name}: in-place repair stopped: {e}; the journal '{journal_name}' holds \
+             how far it got"
+        ))),
+    }
+}
+
+/// Repair the device at `device_path` in place by the plan file at
+/// `plan_path`, journalling into a new file at `journal_path` outside that
+/// device (#957). `progress_cb` (may be NULL) is told the units and bytes
+/// applied of the plan's total before the first unit and after each unit;
+/// `cancel_cb` (may be NULL) is asked before each unit begins whether to
+/// stop. Both receive `context`.
+///
+/// `out_units_applied` (may be NULL) receives the units marked applied.
+///
+/// Returns `0` once every unit is applied, [`FS_NTFS_REPAIR_CANCELLED`]
+/// when `cancel_cb` stopped it with the journal resumable by
+/// [`fs_ntfs_repair_resume_in_place`], and `-1` on error: EINVAL for a
+/// refused journal location, plan or device, nothing written; EIO when
+/// I/O failed, the journal holding how far the repair got.
+#[cfg(all(unix, feature = "plan-file"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_repair_apply_in_place(
+    device_path: *const c_char,
+    plan_path: *const c_char,
+    journal_path: *const c_char,
+    progress_cb: Option<FsNtfsRepairProgressFn>,
+    cancel_cb: Option<FsNtfsRepairCancelFn>,
+    context: *mut c_void,
+    out_units_applied: *mut u32,
+) -> c_int {
+    ffi_guard("fs_ntfs_repair_apply_in_place", -1, move || {
+        cstr_or_return!(
+            device_path,
+            "fs_ntfs_repair_apply_in_place",
+            "device_path",
+            -1
+        );
+        cstr_or_return!(plan_path, "fs_ntfs_repair_apply_in_place", "plan_path", -1);
+        cstr_or_return!(
+            journal_path,
+            "fs_ntfs_repair_apply_in_place",
+            "journal_path",
+            -1
+        );
+        let mut observer = CallbackObserver {
+            progress: progress_cb,
+            cancel: cancel_cb,
+            context,
+        };
+        repair_in_place(
+            "fs_ntfs_repair_apply_in_place",
+            (device_path, plan_path, journal_path),
+            false,
+            &mut observer,
+            out_units_applied,
+        )
+    })
+}
+
+/// Continue an in-place repair of `device_path` by the plan file at
+/// `plan_path` from the journal at `journal_path` that a stopped or
+/// cancelled [`fs_ntfs_repair_apply_in_place`] left (#957). Units the
+/// journal marks applied and that read back are skipped; the open unit is
+/// finished without asking `cancel_cb`. The callbacks, `context`,
+/// `out_units_applied` and the return value are as for
+/// [`fs_ntfs_repair_apply_in_place`].
+#[cfg(all(unix, feature = "plan-file"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_repair_resume_in_place(
+    device_path: *const c_char,
+    plan_path: *const c_char,
+    journal_path: *const c_char,
+    progress_cb: Option<FsNtfsRepairProgressFn>,
+    cancel_cb: Option<FsNtfsRepairCancelFn>,
+    context: *mut c_void,
+    out_units_applied: *mut u32,
+) -> c_int {
+    ffi_guard("fs_ntfs_repair_resume_in_place", -1, move || {
+        cstr_or_return!(
+            device_path,
+            "fs_ntfs_repair_resume_in_place",
+            "device_path",
+            -1
+        );
+        cstr_or_return!(plan_path, "fs_ntfs_repair_resume_in_place", "plan_path", -1);
+        cstr_or_return!(
+            journal_path,
+            "fs_ntfs_repair_resume_in_place",
+            "journal_path",
+            -1
+        );
+        let mut observer = CallbackObserver {
+            progress: progress_cb,
+            cancel: cancel_cb,
+            context,
+        };
+        repair_in_place(
+            "fs_ntfs_repair_resume_in_place",
+            (device_path, plan_path, journal_path),
+            true,
+            &mut observer,
+            out_units_applied,
+        )
+    })
+}
+
+// ---------------------------------------------------------------------------
 // mkfs (volume formatter)
 // ---------------------------------------------------------------------------
 
