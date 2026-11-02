@@ -8,5 +8,5 @@
   file that was gone, which `chkdsk` reports. Each now takes the file's
   `quota_charged` off its owner's `$Q` usage, in the index root or in an
   index block. An owner with no `$Q` entry, or one charged less than the
-  file, refuses the delete with nothing written. Writes, truncates and
-  creates do not yet move a file's charge (#675, #676).
+  file, refuses the delete with nothing written. Creates do not yet
+  charge a file (#676).

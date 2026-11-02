@@ -96,6 +96,11 @@
 #                                    named stream read back unchanged each time.
 #                                    IMAGE.manifest lists each file's final size
 #                                    and SHA-256
+#   fragmented-data IMAGE            fs.ntfs write --at extends two files in turn, so
+#                                    neither gets contiguous clusters and the mapping
+#                                    pairs outgrow the attribute, which grows into its
+#                                    record and moves the named stream after it.
+#                                    IMAGE.manifest lists each file's size and SHA-256
 #   mkdir-parents IMAGE              fs.ntfs mkdir -p makes missing chains: three
 #                                    levels, under existing directories through
 #                                    names in another case, through `.` and `..`,
@@ -630,6 +635,56 @@ case "$step" in
         printf 'links\t%s\n' "$(paste -s -d '\t' - <"$work/names")" >>"$manifest"
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the links, unlinks and renames exited $status: $out"
+        ;;
+    fragmented-data)
+        [ $# -eq 0 ] || die "fragmented-data IMAGE"
+        manifest="$image.manifest"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        : >"$manifest"
+        HARNESS="${RUST_NTFS:-$REPO/target/release/rust-ntfs}"
+        [ -x "$HARNESS" ] || [ -x "$HARNESS.exe" ] ||
+            die "no $HARNESS: build it with \`cargo build --release --locked --features harness --bin rust-ntfs\`"
+        for file in /f /g; do
+            random "$work/${file#/}" 8192
+            set +e
+            "$BIN" fs "$image" write "$file" <"$work/${file#/}" >/dev/null 2>"$image.cli-err"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] || die "fs.ntfs write $file exited $status: $(cat "$image.cli-err")"
+        done
+        set +e
+        MSYS_NO_PATHCONV=1 "$HARNESS" stream "$image" /f s --content "held after the unnamed data" \
+            >/dev/null 2>"$image.cli-err"
+        status=$?
+        set -e
+        [ "$status" -eq 0 ] || die "rust-ntfs stream /f s exited $status: $(cat "$image.cli-err")"
+        for round in $(seq 1 60); do
+            for file in /f /g; do
+                random "$work/patch" 4096
+                cat "$work/patch" >>"$work/${file#/}"
+                at=$(($(wc -c <"$work/${file#/}" | tr -d ' ') - 4096))
+                set +e
+                "$BIN" fs "$image" write --at "$at" "$file" <"$work/patch" >/dev/null 2>"$image.cli-err"
+                status=$?
+                set -e
+                [ "$status" -eq 0 ] || die "round $round: fs.ntfs write --at $at $file exited $status: $(cat "$image.cli-err")"
+            done
+        done
+        for file in /f /g; do
+            set +e
+            "$BIN" fs "$image" read "$file" >"$work/back" 2>"$image.cli-err"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] || die "fs.ntfs read $file exited $status: $(cat "$image.cli-err")"
+            cmp -s "$work/back" "$work/${file#/}" || die "$file does not read back as written"
+            size="$(wc -c <"$work/${file#/}" | tr -d ' ')"
+            printf 'file\t%s\t%s\t%s\n' "$file" "$size" "$(sha "$work/${file#/}")" >>"$manifest"
+        done
+        run fs "$image" read --stream s /f
+        [ "$status" -eq 0 ] && [ "$out" = "held after the unnamed data" ] || die "/f:s changed: $out"
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the fragmented writes exited $status: $out"
         ;;
     attrlist-data)
         [ $# -eq 0 ] || die "attrlist-data IMAGE"
