@@ -85,7 +85,7 @@ pub(crate) fn load_index_io<T: BlockIo + ?Sized>(
 ) -> Result<IndexAllocation, Error> {
     // Where the index's attributes are, even when $ATTRIBUTE_LIST moved some
     // of them into an extension record (#471).
-    let (params, record) = crate::read::read_directory_record_io(io, parent_record_number)?;
+    let (params, record) = crate::read::read_index_record_io(io, parent_record_number, index_name)?;
 
     // Get block_size from $INDEX_ROOT:$I30.
     let ir = attr_io::find_attribute(&record, AttrType::IndexRoot, Some(index_name))
