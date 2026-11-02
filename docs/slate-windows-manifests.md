@@ -35,3 +35,33 @@ This is the capture slice (#856) of #689. Slate extraction and comparison are
 #857; the Windows-authored CLI image, complete writer coverage and read-case
 floor are #858. The existing seven-case checker floor is unchanged because
 this slice adds no images or Slate comparisons.
+
+## Allocation manifests
+
+On the same disposable mount, the builder also writes
+`windows-alloc/<case>.json` (#875, part of #692). Schema 1 has `case`,
+`image_sha256`, `oracle`, `volume`, `capabilities` and `entries`, bound to
+`cases.tsv` exactly as the read manifest is.
+
+`volume` holds `bytes_per_cluster`, `total_clusters`, `free_clusters` and
+`reserved_clusters` from `FSCTL_GET_NTFS_VOLUME_DATA`, the control behind
+`fsutil fsinfo ntfsinfo`. Each entry has the read manifest's `path` and
+`kind`, and a `streams` array covering the same streams. Every stream has its
+`name`, its `extents` from `FSCTL_GET_RETRIEVAL_POINTERS`, the control behind
+`fsutil file queryextents`, and `allocated_clusters`, the sum of its
+allocated extents. An extent is `vcn`, `clusters` and `lcn`; a null `lcn` is
+a sparse or compressed hole. A resident or empty stream has no extents. The
+controls are called directly, so no locale-formatted text is parsed.
+
+The volume counts are Windows' counts after it mounted the read wrapper, so
+they include the clusters of any mount-created root names the entries
+exclude; `capabilities.volume_counts` says so. Reparse points and
+unreadable streams fail by path.
+
+`tests/scripts/slate-windows-allocation.ps1` formats a scratch volume with
+Windows, writes a resident file, a 256 KiB file with a 64 KiB named stream,
+a sparse file with a leading hole and a junction through Windows, and
+requires fourteen contracts to execute. Get-Volume's free bytes, another
+Windows API, must lie between the free and the unreserved free clusters. No
+NTFS reader from this crate or Slate supplies expected values. Comparing
+Slate's allocation with these records is #877.
