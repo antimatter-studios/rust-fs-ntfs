@@ -241,7 +241,7 @@ fn command() -> Cmd {
             Cmd::new("import")
                 .about("Import one regular file or stdin through bounded staged writes")
                 .arg(Arg::new("source").value_name("SRC").required(true).value_parser(value_parser!(OsString)))
-                .arg(Arg::new("path").value_name("PATH").required(true))
+                .arg(Arg::new("path").value_name("PATH").required(true).value_parser(value_parser!(OsString)))
                 .arg(Arg::new("replace").long("replace").action(ArgAction::SetTrue))
                 .arg(Arg::new("verify").long("verify").action(ArgAction::SetTrue))
                 .after_help(
