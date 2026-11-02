@@ -155,6 +155,30 @@ same offset, preimage and redo; an intent that does not, or names a unit
 the plan does not hold, is refused naming the unit and write, even though
 its checksum is whole.
 
+## Resuming a stopped apply
+
+`repair_journal::resume_in_place` continues an in-place apply that
+stopped, on the same device and the same journal. It reads the journal
+back with `read_journal` and `progress`, drops a torn final record and
+appends the next record where the torn one starts. That next record is
+always the one that was torn, the same bytes, so nothing of the torn tail
+is left after it. Then:
+
+1. Every unit the journal marks applied is read back from the device:
+   each write's range must hold its unit's redo with the later applied
+   units' writes laid over it. Those units are skipped, never written
+   again. Bytes the open unit also writes are left to its own check.
+2. The open unit is redone when every write's range holds its whole
+   preimage or its whole redo: its writes reach the device, the device is
+   flushed and read back, and its applied record is appended and flushed,
+   as the apply's steps 3 to 5 do. Its intent is not appended again.
+3. Every later unit is applied exactly as the apply applies it.
+
+A journal holding no whole record is started again from its header. A
+range of the open unit holding anything else stops the resume, naming the
+unit, the write and its byte range, with nothing of it written again; an
+applied unit that does not read back stops it the same way.
+
 ## Tests
 
 `a_repair_journal_reads_back_to_its_last_whole_record_and_refuses_the_rest`
@@ -186,3 +210,13 @@ side of it and the middle of each record, and checks `progress` against
 the answer the plan's own record lengths give; and replaces unit 0's
 intent with one whose redo differs by a byte, its checksum recomputed,
 and checks it is refused naming unit 0 write 0.
+`an_in_place_repair_stopped_after_any_write_resumes_to_the_uninterrupted_volume`
+cuts each capture's in-place apply after every device write and every
+journal append, resumes it on the same device and journal, and checks the
+device is byte for byte where an uninterrupted apply leaves it and the
+journal holds exactly one intent and one applied record per unit, in
+order; the resumed device must reach Windows' manifest and recovered
+metadata. `a_resumed_in_place_repair_writes_nothing_to_the_device_for_a_unit_marked_applied`
+cuts the apply right after each unit's applied record and checks the
+resume writes exactly the later units' writes to the device, and that
+resuming a finished apply writes nothing to the device or the journal.
