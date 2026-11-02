@@ -126,6 +126,83 @@ rc=$?
 [ "$rc" -ne 0 ] && ok || bad "two cases against a floor of three: exit 0, want a failure"
 grep -q 'floor' "$WORK/log" && ok || bad "a run below its floor says so: $(cat "$WORK/log")"
 
+# write: a stand-in for Slate's copy-only writer (#863), taking
+# `SOURCE NEW ROOT_FILENAME OFFSET EXPECTED_HEX REPLACEMENT_HEX` as
+# ntfs-write-lab does. The source's first line picks its behaviour: `copy`
+# writes a changed copy, `scribble` also changes its source, `crash` exits 1,
+# and `same` leaves the copy identical to its source.
+cat >"$WORK/writer" <<'SH'
+#!/usr/bin/env bash
+[ "$#" -eq 6 ] || { echo "stand-in: expected six arguments, got $#" >&2; exit 16; }
+[ "$3" = target.bin ] && [ "$4" = 8 ] && [ "$5" = 00ff ] && [ "$6" = abcd ] ||
+    { echo "stand-in: unexpected arguments $*" >&2; exit 16; }
+case "$(head -n 1 "$1")" in
+    copy) cp "$1" "$2" && chmod u+w "$2" && echo written >>"$2" ;;
+    scribble) cp "$1" "$2" && chmod u+w "$2" && echo written >>"$2"; chmod u+w "$1" && echo changed >>"$1" ;;
+    crash) echo "expected bytes do not match" >&2; exit 1 ;;
+    same) cp "$1" "$2" ;;
+    *) exit 16 ;;
+esac
+SH
+chmod +x "$WORK/writer"
+image copy.img copy
+image scribble.img scribble
+image wcrash.img crash
+image same.img same
+
+# writes ROW...: a write table, one `case source` per argument, every row
+# replacing 00ff with abcd at offset 8 of the root file target.bin.
+writes() {
+    printf 'case\tsource\troot_file\toffset\texpected_hex\treplacement_hex\n' >"$WORK/writes.tsv"
+    for row in "$@"; do
+        # shellcheck disable=SC2086 # a row is split into its fields on purpose
+        set -- $row
+        printf '%s\t%s\ttarget.bin\t8\t00ff\tabcd\n' "$1" "$2" >>"$WORK/writes.tsv"
+    done
+}
+write() {
+    rm -rf "$WORK/wout"
+    bash "$ROOT/scripts/slate-oracle.sh" write "$WORK/writes.tsv" "$WORK/images" \
+        "$WORK/writer" "$WORK/wout" "$1" >"$WORK/log" 2>&1
+}
+
+before="$(sha "$WORK/images/copy.img")"
+writes 'copy copy.img'
+write 1
+rc=$?
+[ "$rc" -eq 0 ] && ok || bad "a writer that changes only its copy: exit $rc, want 0: $(cat "$WORK/log")"
+[ "$(sha "$WORK/images/copy.img")" = "$before" ] && ok || bad "the source image is unchanged after a write"
+[ -f "$WORK/wout/images/copy.img" ] && [ "$(sha "$WORK/wout/images/copy.img")" != "$before" ] && ok ||
+    bad "the written copy is kept in OUT/images and differs from its source"
+grep -q $'^copy\tcopy.img\t'"$before"$'\t[0-9a-f]\\{64\\}\t0\twritten$' "$WORK/wout/slate-writes.tsv" 2>/dev/null && ok ||
+    bad "slate-writes.tsv records the case, source, both hashes, exit and result: $(cat "$WORK/wout/slate-writes.tsv" 2>/dev/null)"
+
+writes 'copy copy.img' 'scribble scribble.img'
+write 1
+[ "$?" -ne 0 ] && ok || bad "a writer that changes its source: exit 0, want a failure"
+grep -q 'FAIL scribble:' "$WORK/log" && ok || bad "a changed source is named by case: $(cat "$WORK/log")"
+[ "$(head -n 1 "$WORK/images/scribble.img")" = scribble ] && [ "$(wc -l <"$WORK/images/scribble.img")" -eq 1 ] && ok ||
+    bad "the writer is never handed the source image itself"
+
+writes 'wcrash wcrash.img'
+write 0
+[ "$?" -ne 0 ] && ok || bad "a writer that exits 1: exit 0, want a failure"
+grep -q 'FAIL wcrash:' "$WORK/log" && ok || bad "a failed write is named by case: $(cat "$WORK/log")"
+
+writes 'same same.img'
+write 0
+[ "$?" -ne 0 ] && ok || bad "a writer that leaves its copy unchanged: exit 0, want a failure"
+grep -q 'FAIL same:' "$WORK/log" && ok || bad "an unchanged copy is named by case: $(cat "$WORK/log")"
+
+writes 'gone absent.img'
+write 0
+[ "$?" -ne 0 ] && ok || bad "a missing source image: exit 0, want a failure"
+
+writes 'copy copy.img'
+write 2
+[ "$?" -ne 0 ] && ok || bad "one written case against a floor of two: exit 0, want a failure"
+grep -q 'floor' "$WORK/log" && ok || bad "a write run below its floor says so: $(cat "$WORK/log")"
+
 # fetch: a local repository stands in for Slate's.
 src="$WORK/slate-src"
 mkdir -p "$src/src/tools"
