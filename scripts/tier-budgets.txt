@@ -165,6 +165,10 @@
 # verdict lines, 81 bytes with "41 passed". No output is suppressed.
 # Evidence: https://github.com/antimatter-studios/rust-fs-ntfs/actions/runs/39883142419/job/120189356148
 #
+# THE CLI-ORACLE ROW MOVED for #834, from 27/1156 to 39/1640: its merge-queue
+# run 41374559039 printed 30 lines and 1256 bytes, all checks passed, once its
+# new Windows-authored export file joined the tier. That is about 30% over the
+# measurement, as the other rows are.
 # THE CLI-ORACLE ROW MOVED for #658, from 24/1058 to 27/1156, and the new
 # figure is DERIVED: that run stopped at the cli tier, so cli-oracle did
 # not run. tests/cli-oracle/test-xattr-windows.sh is one more file, whose
@@ -216,5 +220,5 @@ scripts       135    3500
 semver         40    4000
 matrix       1850  135000
 cli            54    1784
-cli-oracle     27    1156
+cli-oracle     39    1640
 cli-host       37    2630
