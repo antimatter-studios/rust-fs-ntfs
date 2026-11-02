@@ -64,6 +64,24 @@ applies it must still check that the target's size and volume serial
 number match, and that each unit's before-image is what the target holds,
 before writing anything.
 
+## Checking a plan against its source
+
+`repair_plan::check_plan_source` (#908) is that check. It only reads the
+source, and refuses it, naming what differs, when:
+
+- its size in bytes is not the plan's source size (`source size is N
+  bytes, the plan was made from M`);
+- its volume serial number, boot-sector bytes `0x48..0x50`, is not the
+  plan's (`source volume serial is ..., the plan was made from ...`);
+- a write's before-image is not what the source holds at that write's
+  turn (`plan unit U write W: the source does not hold its before-image at
+  byte N`). A write's turn is the source's own bytes with the after-images
+  of every earlier write of the plan over them, so a write to bytes an
+  earlier write already changed is checked against what that write left.
+
+The first mismatch, in plan order, is the one named. Size and serial
+number are checked before any before-image.
+
 ## Tests
 
 `a_saved_plan_loads_back_to_what_windows_recovered_and_only_when_intact` in
@@ -73,3 +91,10 @@ compares the result with Windows' own restart. It computes the section
 boundaries from this layout, independently of the reader, truncates the
 file at each one and one byte past it, flips a byte in every section, and
 writes a version 2 header, and checks that each is refused.
+
+`a_loaded_plan_is_checked_against_its_source_and_refused_on_the_first_mismatch`
+checks a plan from each Windows capture against that capture, then against
+copies with a byte changed under the first write and under the last write
+no earlier write covers, one sector shorter, and with another volume serial
+number, and checks that each is refused, naming what differs, and that no
+copy is written.
