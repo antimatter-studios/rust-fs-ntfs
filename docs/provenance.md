@@ -85,12 +85,14 @@ Microsoft's devnotes, and #489 corrected the remaining inline citations in
 - **Measured on Windows**, because no documentation used here states it:
   - the view-index entry's data offset and length (`view_index.rs`, measured
     on `windows-interrupted-quota.recovered`);
-  - quota accounting with tracking on: each file is charged its record plus
-    its non-resident `$DATA` allocation, each owner's `$Q` usage is the sum
+  - quota accounting with tracking on: each file is charged its record, a
+    record-sized amount for each named `$DATA` stream even when resident or
+    empty, and its non-resident `$DATA` allocation; each owner's `$Q` usage is the sum
     of its files' charges, and most charges leave the entry's change time
     as it was (`write.rs`, `quota_charge.rs`, measured on
     `windows-interrupted-quota.recovered` and the log of
-    `windows-interrupted-quota`);
+    `windows-interrupted-quota`; named-stream measurements with 1024- and
+    4096-byte Windows file records are in `quota-charge-findings.md`);
   - the `$SDH`/`$SII` hash (`sds.rs`, from `Format-Volume` output);
   - 8-byte alignment of attribute headers and resident values: all 927
     attributes and 703 resident values in the 301 records of
