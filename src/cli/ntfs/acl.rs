@@ -32,8 +32,6 @@ const SE_SACL_PRESENT: u16 = 0x0010;
 
 /// $Secure is a fixed system record on every NTFS 3.x volume.
 const SECURE_RECORD: u64 = 9;
-/// An $SDS entry header: hash, security id, offset, length.
-const SDS_HEADER: usize = 20;
 
 /// A SID in the `S-R-A-S1-...` form Windows prints.
 pub fn sid_string(sid: Sid<'_>) -> String {
@@ -216,27 +214,17 @@ pub fn file_descriptor(dev: &mut Device, path: &str) -> Result<Vec<u8>, Error> {
     let sds =
         read::read_attribute_value_if_present(dev, SECURE_RECORD, AttrType::Data, Some("$SDS"))?
             .ok_or_else(|| Error::new(Kind::NotFound, "$Secure has no $SDS stream"))?;
-    sds_lookup(&sds, id)
+    sds_lookup(&sds, id)?
         .ok_or_else(|| Error::new(Kind::NotFound, format!("security id {id} not in $SDS")))
 }
 
-/// Walks $SDS entries (16-byte aligned) for the one carrying `id`.
-fn sds_lookup(sds: &[u8], id: u32) -> Option<Vec<u8>> {
-    let mut at = 0usize;
-    while at + SDS_HEADER <= sds.len() {
-        let field = |o: usize| u32::from_le_bytes(sds[at + o..at + o + 4].try_into().unwrap());
-        let entry_id = field(4);
-        let len = field(16) as usize;
-        if len < SDS_HEADER || at + len > sds.len() {
-            at = (at + 16) & !15;
-            continue;
-        }
-        if entry_id == id {
-            return Some(sds[at + SDS_HEADER..at + len].to_vec());
-        }
-        at = (at + len + 15) & !15;
-    }
-    None
+/// The descriptor `id` names in the $SDS stream, through the library's
+/// checked catalog: a verified primary copy, else its verified mirror, and
+/// an error rather than a copy nothing vouches for (#606).
+fn sds_lookup(sds: &[u8], id: u32) -> Result<Option<Vec<u8>>, Error> {
+    fs_ntfs::sds::find_descriptor(sds, id)
+        .map(|found| found.map(<[u8]>::to_vec))
+        .map_err(|e| Error::new(Kind::Io, format!("security id {id}: {e}")))
 }
 
 #[cfg(test)]
@@ -414,20 +402,27 @@ mod tests {
     }
 
     #[test]
-    fn sds_lookup_finds_the_entry_by_security_id() {
+    fn sds_lookup_finds_the_entry_by_security_id_in_a_verified_copy() {
+        use fs_ntfs::sds::{build_sds, SdEntry};
         let sd = descriptor(0, None);
-        let mut sds = Vec::new();
-        for (id, body) in [(0x100u32, vec![0u8; 8]), (0x101, sd.clone())] {
-            let start = sds.len();
-            let len = (SDS_HEADER + body.len()) as u32;
-            sds.extend_from_slice(&0u32.to_le_bytes());
-            sds.extend_from_slice(&id.to_le_bytes());
-            sds.extend_from_slice(&(start as u64).to_le_bytes());
-            sds.extend_from_slice(&len.to_le_bytes());
-            sds.extend_from_slice(&body);
-            sds.resize((sds.len() + 15) & !15, 0);
-        }
-        assert_eq!(sds_lookup(&sds, 0x101), Some(sd));
-        assert_eq!(sds_lookup(&sds, 0x102), None);
+        let other = vec![0u8; 8];
+        let sds = build_sds(&[
+            SdEntry {
+                security_id: 0x100,
+                sd: &other,
+            },
+            SdEntry {
+                security_id: 0x101,
+                sd: &sd,
+            },
+        ]);
+        assert_eq!(sds_lookup(&sds, 0x101).unwrap(), Some(sd.clone()));
+        assert_eq!(sds_lookup(&sds, 0x102).unwrap(), None);
+        // A torn primary is read from its mirror; both torn is an error.
+        let mut torn = sds.clone();
+        torn[32 + fs_ntfs::sds::SDS_HEADER_LEN as usize] ^= 0xff;
+        assert_eq!(sds_lookup(&torn, 0x101).unwrap(), Some(sd));
+        torn[0x40000 + 32 + fs_ntfs::sds::SDS_HEADER_LEN as usize] ^= 0xff;
+        assert!(sds_lookup(&torn, 0x101).is_err());
     }
 }
