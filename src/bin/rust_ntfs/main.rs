@@ -30,6 +30,7 @@
 //! through `cli::finish`, not only by this dispatcher -- see `cli.rs`.
 
 mod cli;
+mod directory_layout;
 mod ea;
 mod format;
 mod layout;
@@ -69,6 +70,7 @@ Subcommands:
   symlink    Create a symbolic link (a reparse point).
   objid      Give a file an object id.
   layout     Print how a file's $DATA is stored (flags, sizes, runs).
+  directory-layout  Assert a listed directory's resident or spilled index shape.
   stream     Write or delete one of a file's named streams.
   ea         Set or remove one of a file's extended attributes.
 
@@ -103,6 +105,7 @@ fn main() -> ExitCode {
         "symlink" => symlink::run(rest),
         "objid" => objid::run(rest),
         "layout" => layout::run(rest),
+        "directory-layout" => directory_layout::run(rest),
         "stream" => stream::run(rest),
         "ea" => ea::run(rest),
         "-h" | "--help" => {
