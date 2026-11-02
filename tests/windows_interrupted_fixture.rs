@@ -4278,3 +4278,100 @@ fn a_torn_journal_tail_resumes_only_as_a_prefix_of_the_record_the_plan_expects_n
         std::fs::remove_file(&src).unwrap();
     }
 }
+
+#[test]
+fn a_plan_for_an_in_place_apply_opens_by_setting_the_dirty_flag() {
+    // An in-place repair keeps the volume dirty until it has been audited
+    // (#716), so the flag is set before the first repair unit, and set by
+    // a unit of the plan itself (#939): the in-place apply journals,
+    // checks and resumes it like any other, and nothing reaches the device
+    // outside the plan's ranges. Unit 0 must be exactly what `set_dirty_io`
+    // writes on a copy of the source, and every later unit what
+    // `plan_fsck_io` plans over that dirtied copy. On a source already
+    // dirty, nothing is added.
+    use fs_ntfs::repair_plan::{plan_fsck_io, plan_in_place_io};
+    let recorded = |units: &[fs_ntfs::repair_plan::PlanUnit]| -> Vec<Vec<PlannedWrite>> {
+        units
+            .iter()
+            .map(|unit| {
+                unit.writes
+                    .iter()
+                    .map(|w| {
+                        (
+                            w.offset,
+                            w.after.len() as u64,
+                            hex_sha256(&w.before),
+                            hex_sha256(&w.after),
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        std::fs::remove_file(&src).unwrap();
+        let mut dirtied = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let was_dirty = fsck::is_dirty_io(&mut dirtied).unwrap();
+        fsck::set_dirty_io(&mut dirtied).unwrap_or_else(|e| panic!("{k}: set dirty: {e}"));
+        fs_ntfs::block_io::BlockIo::sync(&mut dirtied).unwrap();
+        let set_dirty = std::mem::take(&mut dirtied.units);
+        let repair = plan_fsck_io(&mut dirtied, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan over the dirtied copy: {e}"));
+
+        let mut v = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let plan = plan_in_place_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: in-place plan: {e}"));
+        assert_eq!(v.bytes, pristine, "{k}: planning wrote to the source");
+        assert!(
+            v.units.is_empty() && v.open.is_empty(),
+            "{k}: planning wrote"
+        );
+        let got = recorded(&plan.units);
+        if was_dirty {
+            assert_eq!(
+                got,
+                recorded(&repair.units),
+                "{k}: a source already dirty gained units"
+            );
+        } else {
+            // The flag, then its `$MFTMirr` copy, each flushed.
+            let n = set_dirty.len();
+            assert!(n > 0, "{k}: set_dirty_io wrote nothing to a clean volume");
+            assert_eq!(
+                got[..n.min(got.len())],
+                set_dirty[..],
+                "{k}: the plan does not open with set_dirty_io's writes"
+            );
+            assert_eq!(
+                got[n..],
+                recorded(&repair.units)[..],
+                "{k}: the units after the dirty flag are not the repair's"
+            );
+            assert_eq!(plan.report, repair.report, "{k}: report");
+        }
+
+        // A source whose flag is already set gains nothing.
+        let mut already = RecordedRepair {
+            bytes: dirtied.bytes.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let plan = plan_in_place_io(&mut already, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: in-place plan of a dirty source: {e}"));
+        assert_eq!(
+            recorded(&plan.units),
+            recorded(&repair.units),
+            "{k}: a source already dirty gained units"
+        );
+    }
+}
