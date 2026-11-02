@@ -36,7 +36,8 @@ for item in 'one /one' 'big /d/big'; do
 done
 check "ntfsls / lists d and one, and no staging name" \
     test "$(ntfsls "$img" 2>/dev/null | sort | tr '\n' ' ')" = "d one "
-check "ntfsls -p /d lists big alone" test "$(ntfsls -p /d "$img" 2>/dev/null | tr '\n' ' ')" = "big "
+# ntfsls names the directory itself as `.` when given a path.
+check "ntfsls -p /d lists big alone" test "$(ntfsls -p /d "$img" 2>/dev/null | grep -vx '\.' | tr '\n' ' ')" = "big "
 
 printf 'from stdin' | fs.ntfs "$img" import - /stdin.txt --verify >"$SANDBOX/out" 2>"$SANDBOX/err"
 status=$?
@@ -57,7 +58,9 @@ check "the backing image as source is refused" test $? -eq 1
 check "refusals leave the image byte-identical" test "$(sha256 <"$img")" = "$before"
 
 small="$SANDBOX/small.img"
-mkfs.ntfs -q --size 8M --label FULL "$small" >/dev/null 2>&1
+# 16 MiB: this mkfs refuses 8 MiB as too small for its layout.
+mkfs.ntfs -q --size 16M --label FULL "$small" >/dev/null 2>&1
+check "mkfs.ntfs made the small image" test -s "$small"
 printf keep | fs.ntfs "$small" write /keep >/dev/null 2>&1
 fs.ntfs "$small" import "$SANDBOX/big" /big >"$SANDBOX/out" 2>"$SANDBOX/err"
 check "an import that runs out of space fails" test $? -eq 1
