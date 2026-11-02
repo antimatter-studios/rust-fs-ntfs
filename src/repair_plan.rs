@@ -99,6 +99,36 @@ pub fn plan_in_place_io<T: BlockIo + ?Sized>(
     })
 }
 
+/// The writes that retire clusters into `$BadClus`, and which clusters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetirePlan {
+    /// In the order they are made; empty when nothing is retired.
+    pub units: Vec<PlanUnit>,
+    /// The clusters the plan retires, sorted: none `$BadClus` already maps.
+    pub retired: Vec<u64>,
+}
+
+/// Plan what [`crate::bad_clusters::retire_clusters_io`] would write to
+/// retire `clusters` on `io`, writing nothing (#1006). Applied by
+/// copy-repair, it retires them on a new target and never on the failing
+/// source.
+pub fn plan_retire_clusters_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    clusters: &[u64],
+) -> Result<RetirePlan, Error> {
+    let mut planning = Planning {
+        io,
+        units: Vec::new(),
+        open: PlanUnit::default(),
+    };
+    let retired = crate::bad_clusters::retire_clusters_io(&mut planning, clusters)?;
+    planning.close_unit();
+    Ok(RetirePlan {
+        units: planning.units,
+        retired,
+    })
+}
+
 /// The volume as the repair would leave it so far, recording each write
 /// instead of making it.
 struct Planning<'a, T: ?Sized> {
