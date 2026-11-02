@@ -1126,7 +1126,8 @@ pub fn logfile_state_io<T: FsckIo>(io: &mut T) -> Result<LogfileState, Error> {
 /// chain of every MFT record `$MFT`'s bitmap marks in use (#515), and
 /// `$Bitmap` against the clusters every run list in those records claims
 /// (#517), the records every base record's `$ATTRIBUTE_LIST` names
-/// (#820), each entry's attribute identity (#821), and, on a volume
+/// (#820), each entry's attribute identity (#821), every extension
+/// attribute's presence in its base record's list (#822), and, on a volume
 /// tracking quotas, each owner's usage in `$Extend\$Quota:$Q` against what
 /// its files are charged (#678).
 ///
@@ -1186,6 +1187,7 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
                         claims_of(record, &rec, volume_clusters, &mut claims, &mut findings);
                 }
                 check_list_records(io, &bitmap, record, &rec, &mut findings);
+                check_extension_list(io, record, &rec, &mut findings);
             }
         }
     }
@@ -1516,6 +1518,87 @@ fn check_list_records<T: FsckIo>(
                      with type {ty:#x}, name {name:?}, lowest VCN {vcn}, instance {id}"
                 ));
             }
+        }
+    }
+}
+
+/// Walk extensions independently of the list: an extension whose last
+/// entry was removed cannot be discovered by following list references.
+fn check_extension_list<T: FsckIo>(
+    io: &mut T,
+    extension: u64,
+    rec: &[u8],
+    findings: &mut Vec<CheckFinding>,
+) {
+    let owner = u64_le(rec, REC_BASE_REFERENCE);
+    if owner == 0 {
+        return;
+    }
+    let base = owner & RECORD_NUMBER_MASK;
+    let mut report = |reason| {
+        findings.push(CheckFinding::BadAttributeList {
+            record: base,
+            reason,
+        })
+    };
+    let value = match crate::read::read_attribute_value(io, base, AttrType::AttributeList, None) {
+        Ok(value) => value,
+        Err(e) => {
+            return report(format!(
+                "extension record {extension} has no readable base $ATTRIBUTE_LIST: {e}"
+            ))
+        }
+    };
+    let mut entries = Vec::new();
+    let mut at = 0;
+    while at + LIST_ENTRY_MIN <= value.len() {
+        let len = u16::from_le_bytes([value[at + 4], value[at + 5]]) as usize;
+        if len < LIST_ENTRY_MIN || at + len > value.len() {
+            // The base-record walk reports the malformed entry itself.
+            return;
+        }
+        entries.push(&value[at..at + len]);
+        at += len;
+    }
+    let sequence = u16::from_le_bytes([rec[REC_SEQUENCE], rec[REC_SEQUENCE + 1]]);
+    let reference = extension | (u64::from(sequence) << 48);
+    for loc in crate::attr_io::iter_attributes(rec) {
+        let attr = &rec[loc.attr_offset..loc.attr_offset + loc.attr_length];
+        let name_len = usize::from(loc.name_length) * 2;
+        let name_at = if name_len == 0 {
+            0
+        } else {
+            usize::from(loc.name_offset)
+        };
+        let name = &attr[name_at..name_at + name_len];
+        let vcn = if loc.is_resident { 0 } else { u64_le(attr, 16) };
+        let found = entries.iter().any(|entry| {
+            let entry_name_len = usize::from(entry[6]) * 2;
+            let entry_name_at = if entry_name_len == 0 {
+                0
+            } else {
+                usize::from(entry[7])
+            };
+            u64_le(entry, LIST_ENTRY_REFERENCE) == reference
+                && u32::from_le_bytes(entry[..4].try_into().expect("type")) == loc.type_code
+                && u16::from_le_bytes([entry[24], entry[25]]) == loc.attribute_id
+                && u64_le(entry, 8) == vcn
+                && entry_name_len == name_len
+                && (entry_name_len == 0 || entry_name_at >= LIST_ENTRY_MIN)
+                && entry.get(entry_name_at..entry_name_at + entry_name_len) == Some(name)
+        });
+        if !found {
+            let name = String::from_utf16_lossy(
+                &name
+                    .chunks_exact(2)
+                    .map(|p| u16::from_le_bytes([p[0], p[1]]))
+                    .collect::<Vec<_>>(),
+            );
+            report(format!(
+                "extension record {extension} holds attribute at {}, type {:#x}, name {name:?}, \
+                 lowest VCN {vcn}, instance {}, which no $ATTRIBUTE_LIST entry names",
+                loc.attr_offset, loc.type_code, loc.attribute_id
+            ));
         }
     }
 }
@@ -2869,6 +2952,75 @@ mod check_tests {
             report.findings
         );
         assert_eq!(dev.0, before, "checking must not write");
+    }
+
+    #[test]
+    fn extension_attributes_missing_from_the_list_are_reported() {
+        for whole_record in [false, true] {
+            let mut dev = fresh();
+            let base = crate::write::create_file_io(&mut dev, "/", "listed").unwrap();
+            for i in 0..16 {
+                crate::write::write_named_stream_io(
+                    &mut dev,
+                    "/listed",
+                    &format!("stream{i:02}"),
+                    &[42; 400],
+                )
+                .unwrap();
+            }
+            assert!(check_io(&mut dev).unwrap().findings.is_empty());
+            let list =
+                crate::read::read_attribute_value(&mut dev, base, AttrType::AttributeList, None)
+                    .unwrap();
+            let entries = crate::read::parse_attribute_list(&list).unwrap();
+            let entry = entries
+                .iter()
+                .find(|e| {
+                    e.record_number != base
+                        && e.name.is_some()
+                        && entries
+                            .iter()
+                            .filter(|p| p.record_number == e.record_number)
+                            .count()
+                            > 1
+                })
+                .unwrap();
+            let mut kept = Vec::new();
+            let mut at = 0;
+            for e in &entries {
+                let len = u16::from_le_bytes([list[at + 4], list[at + 5]]) as usize;
+                if e.record_number != entry.record_number
+                    || (!whole_record && e.attribute_id != entry.attribute_id)
+                {
+                    kept.extend_from_slice(&list[at..at + len]);
+                }
+                at += len;
+            }
+            crate::mft_io::update_mft_record_io(&mut dev, base, |record| {
+                let loc =
+                    crate::attr_io::find_attribute(record, AttrType::AttributeList, None).unwrap();
+                let at = loc.attr_offset + loc.resident_value_offset.unwrap() as usize;
+                record[at..at + kept.len()].copy_from_slice(&kept);
+                record[loc.attr_offset + 16..loc.attr_offset + 20]
+                    .copy_from_slice(&(kept.len() as u32).to_le_bytes());
+                Ok(())
+            })
+            .unwrap();
+            let before = dev.0.clone();
+            let report = check_io(&mut dev).unwrap();
+            assert!(
+                report.findings.iter().any(|f| matches!(f,
+                    CheckFinding::BadAttributeList { record, reason }
+                        if *record == base
+                            && reason.contains(&format!("extension record {}", entry.record_number))
+                            && reason.contains("no $ATTRIBUTE_LIST entry")
+                            && reason.contains(&format!("instance {}", entry.attribute_id))
+                )),
+                "whole_record={whole_record}: {:?}",
+                report.findings
+            );
+            assert_eq!(dev.0, before, "checking must not write");
+        }
     }
 
     /// Make the log say records were written after its last checkpoint:
