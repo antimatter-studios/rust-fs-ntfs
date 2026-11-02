@@ -622,10 +622,11 @@ pub fn apply_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
 ///    not written again. Bytes the open unit also writes are left to its
 ///    own check.
 /// 2. The open unit, an intent with no applied record, is redone when
-///    every write's range holds its whole preimage or its whole redo:
-///    written, flushed and read back, then its applied record appended
-///    and flushed, as [`apply_in_place`] does. Its intent is not appended
-///    a second time.
+///    every write's range holds its preimage, its redo, or a write torn
+///    between them (#928): every byte equal to the same byte of the
+///    preimage or of what the unit leaves there. It is written, flushed
+///    and read back, then its applied record appended and flushed, as
+///    [`apply_in_place`] does. Its intent is not appended a second time.
 /// 3. Every later unit is applied exactly as [`apply_in_place`] applies it.
 ///
 /// A journal holding no whole record is started again from its header.
@@ -686,7 +687,11 @@ pub fn resume_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
         let unit = &plan.units[o];
         for (w, write) in unit.writes.iter().enumerate() {
             let held = read_range(device, o, w, write)?;
-            if held != write.before && held != write.after && held != left_by_unit(unit, w) {
+            let left = left_by_unit(unit, w);
+            let torn = (0..held.len()).all(|i| {
+                held[i] == write.before[i] || held[i] == write.after[i] || held[i] == left[i]
+            });
+            if !torn {
                 return Err(InPlaceError::OpenUnitRange {
                     unit: o as u32,
                     write: w,

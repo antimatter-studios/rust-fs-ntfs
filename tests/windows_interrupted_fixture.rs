@@ -3424,7 +3424,9 @@ type IoLog = std::rc::Rc<std::cell::RefCell<Vec<(bool, IoEvent)>>>;
 /// `journal` or not. `drop_write` names one write, by its order among
 /// this side's writes, that is recorded but never lands. `cut_after`
 /// cuts the power once that many writes have landed on either side: every
-/// later write fails and lands nothing.
+/// later write fails and lands nothing. `tear` makes the first write the
+/// cut stops land in part before it fails: the half of its bytes it
+/// names, the other half left as the device held it.
 #[cfg(feature = "plan-file")]
 struct RecordingIo {
     bytes: Vec<u8>,
@@ -3433,6 +3435,17 @@ struct RecordingIo {
     writes: usize,
     drop_write: Option<usize>,
     cut_after: Option<usize>,
+    tear: Option<Tear>,
+}
+
+/// Which half of a write torn by a power cut lands: the first half, as a
+/// device writing in order leaves it, or the second, as one writing its
+/// sectors out of order can.
+#[cfg(feature = "plan-file")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tear {
+    FirstHalf,
+    SecondHalf,
 }
 
 #[cfg(feature = "plan-file")]
@@ -3457,6 +3470,19 @@ impl fs_ntfs::block_io::BlockIo for RecordingIo {
                 .filter(|(_, e)| *e == IoEvent::Write)
                 .count();
             if landed >= n {
+                let at = offset as usize;
+                let half = buf.len() / 2;
+                let landing = match self.tear.take() {
+                    Some(Tear::FirstHalf) => Some(at..at + half),
+                    Some(Tear::SecondHalf) => Some(at + half..at + buf.len()),
+                    None => None,
+                };
+                if let Some(range) = landing {
+                    let from = range.start - at;
+                    if let Some(there) = self.bytes.get_mut(range.clone()) {
+                        there.copy_from_slice(&buf[from..from + range.len()]);
+                    }
+                }
                 return Err("the power was cut".into());
             }
         }
@@ -3495,6 +3521,7 @@ fn recording_pair(pristine: &[u8], drop_write: Option<usize>) -> (RecordingIo, R
         writes: 0,
         drop_write,
         cut_after: None,
+        tear: None,
     };
     let journal = RecordingIo {
         bytes: Vec::new(),
@@ -3503,6 +3530,7 @@ fn recording_pair(pristine: &[u8], drop_write: Option<usize>) -> (RecordingIo, R
         writes: 0,
         drop_write: None,
         cut_after: None,
+        tear: None,
     };
     (device, journal, log)
 }
@@ -3838,6 +3866,76 @@ fn an_in_place_repair_stopped_after_any_write_resumes_to_the_uninterrupted_volum
         );
         std::fs::remove_file(&recovered).unwrap();
         std::fs::remove_file(&device).unwrap();
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn a_device_write_torn_by_a_cut_resumes_to_the_uninterrupted_volume() {
+    // A power cut can stop a device write half done (#928): the device
+    // holds part of the write's new bytes and its old bytes in the rest.
+    // For every device write of each capture's apply, the cut lands the
+    // first half of that write's new bytes and leaves the rest unchanged,
+    // and then, as a device writing its sectors out of order can, only
+    // the second half. Resumed on the same device and journal, the device
+    // must hold exactly what an uninterrupted apply leaves.
+    use fs_ntfs::repair_journal::{apply_in_place, resume_in_place};
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+        let (mut device, mut journal, log) = recording_pair(&pristine, None);
+        apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+            .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+        let whole = device.bytes;
+        // The order, among the writes reaching either side, of each write
+        // that reached the device.
+        let device_writes: Vec<usize> = log
+            .borrow()
+            .iter()
+            .filter(|(_, e)| *e == IoEvent::Write)
+            .enumerate()
+            .filter(|(_, (journal, _))| !journal)
+            .map(|(n, _)| n)
+            .collect();
+        assert!(!device_writes.is_empty(), "{k}: the apply wrote nothing");
+
+        let mut bad = Vec::new();
+        for tear in [Tear::FirstHalf, Tear::SecondHalf] {
+            for &stop in &device_writes {
+                let (mut device, mut journal, _) = recording_pair(&pristine, None);
+                cut_pair(&mut device, &mut journal, Some(stop));
+                device.tear = Some(tear);
+                if apply_in_place(&loaded, plan_sha256, &mut device, &mut journal).is_ok() {
+                    bad.push(format!(
+                        "{tear:?} of write {stop}: the cut apply reported success"
+                    ));
+                    continue;
+                }
+                if device.tear.is_some() {
+                    bad.push(format!("{tear:?} of write {stop}: the cut tore no write"));
+                    continue;
+                }
+                cut_pair(&mut device, &mut journal, None);
+                if let Err(e) = resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
+                    bad.push(format!("{tear:?} of write {stop}: the resume refused: {e}"));
+                    continue;
+                }
+                if device.bytes != whole {
+                    bad.push(format!(
+                        "{tear:?} of write {stop}: the device holds other bytes than an \
+                         uninterrupted apply"
+                    ));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{k}: of {} torn device writes, {} did not resume to the uninterrupted apply:\n{}",
+            2 * device_writes.len(),
+            bad.len(),
+            bad.iter().take(6).cloned().collect::<Vec<_>>().join("\n")
+        );
         std::fs::remove_file(&src).unwrap();
     }
 }
