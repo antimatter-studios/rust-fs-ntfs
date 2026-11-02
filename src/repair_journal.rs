@@ -129,6 +129,9 @@ pub enum JournalFault {
     AppliedWithoutIntent { unit: u32 },
     /// An applied record for a unit other than the one its intent names.
     AppliedForAnotherUnit { unit: u32, open: u32 },
+    /// A final record cut short that is not the start of the record the
+    /// plan expects next, so it was not left by a torn append (#934).
+    TornTailDiffers,
 }
 
 impl std::fmt::Display for JournalError {
@@ -159,6 +162,10 @@ impl std::fmt::Display for JournalError {
             JournalFault::AppliedForAnotherUnit { unit, open } => write!(
                 f,
                 "applied record for unit {unit}, the open intent is unit {open}"
+            )?,
+            JournalFault::TornTailDiffers => write!(
+                f,
+                "cut short, and not the start of the record the plan expects next"
             )?,
         }
         write!(f, " (at byte {})", self.offset)
@@ -640,6 +647,14 @@ pub fn apply_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
 /// names the unit, the write and the bytes, from the first that fails to
 /// the last.
 ///
+/// A torn final record must be the start of the record the plan expects
+/// next: the header, the open unit's applied record, or the next unit's
+/// intent (#934). Any other tail -- a whole record whose length field was
+/// raised, a torn record with a byte changed, or a tail after the last
+/// unit's applied record -- was not left by a torn append, and refuses the
+/// resume with [`JournalFault::TornTailDiffers`] before anything is
+/// written.
+///
 /// A journal holding no whole record is started again from its header.
 /// The record appended over a torn one is always the record that was torn,
 /// as long or longer, so no torn bytes are left after it.
@@ -662,6 +677,25 @@ pub fn resume_in_place<D: BlockIo + ?Sized, J: BlockIo + ?Sized>(
         .map_err(|e| InPlaceError::Io(format!("reading the journal back: {e}")))?;
     let read = read_journal(&bytes, &binding).map_err(InPlaceError::Journal)?;
     let stopped = progress(&read, plan).map_err(InPlaceError::Progress)?;
+    if let Some(torn) = read.torn {
+        let expected = if read.records.is_empty() {
+            Some(header_record(&binding))
+        } else if let Some(open) = stopped.open {
+            Some(applied_record(open))
+        } else {
+            plan.units
+                .get(stopped.applied as usize)
+                .map(|unit| intent_record(stopped.applied, unit))
+        };
+        let tail = &bytes[torn.offset as usize..];
+        if !expected.is_some_and(|record| record.starts_with(tail)) {
+            return Err(InPlaceError::Journal(JournalError {
+                record: torn.record,
+                offset: torn.offset,
+                fault: JournalFault::TornTailDiffers,
+            }));
+        }
+    }
     let mut at = read.torn.map_or(length as u64, |t| t.offset);
     if read.records.is_empty() {
         at = 0;
