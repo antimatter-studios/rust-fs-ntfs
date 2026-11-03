@@ -1,0 +1,3 @@
+## Interfaces
+
+| Slate disagreement ledger (test support) | Experimental ledger plumbing for Windows-clean/Slate-findings cases: rows supply a repository generator command, Windows' chkdsk verdict and reading, and the assigned implementation and issue; comparison matches the case and Windows verdict, reports recorded disagreements, and fails new, ungraded, conflicting or stale rows; validation checks generator paths and grading fields, not execution, minimization or captured Windows evidence; the ledger starts empty and Windows-rejected cases still fail | Unreleased | #693, #580 | `tests/scripts/slate-oracle.sh` (ledger contracts), `scripts/slate-oracle.sh ledger`, `tests/slate-disagreements.tsv` |
