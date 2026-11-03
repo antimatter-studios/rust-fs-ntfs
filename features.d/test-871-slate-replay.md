@@ -1,0 +1,3 @@
+## Interfaces
+
+| Slate offline journal replay step (test support) | Experimental: `scripts/slate-oracle.sh replay` runs Slate's `ntfs-chkdsk --replay-to` on a read-only decompressed copy of every Windows interrupted-write capture in `test-disks/`, keeps each replayed image and records the source and replayed SHA-256 values; exit 4 or 8 is recorded as `refused`, never counted as a replay and keeps no image, while a changed source, a replay with no image, any other exit or a capture without Windows' recovered manifest fails by case name, and a missed floor fails the run. Comparing the replayed images with Windows' recovery and wiring the step into the advisory workflow remain #872 and #873 | Unreleased (#874) | #871, #691, #580 | `tests/scripts/slate-oracle.sh` |
