@@ -98,7 +98,9 @@ returned and never applied. The whole records before it are returned.
 
 A complete frame with a damaged type, length or frame checksum is refused,
 even if its damaged length would run past the end of the file. A partial
-frame cannot yet be verified and is reported as torn.
+frame cannot yet be verified and is reported as torn. A resume,
+which has the plan, then refuses a torn tail that is not the start of the
+record it expects: see below.
 
 Before appending again, the caller must discard the incomplete suffix by
 truncating the file to `Journal::torn.offset`. Appending behind an existing
@@ -186,7 +188,16 @@ stopped, on the same device and the same journal. It reads the journal
 back with `read_journal` and `progress`, drops a torn final record and
 appends the next record where the torn one starts. That next record is
 always the one that was torn, the same bytes, so nothing of the torn tail
-is left after it. Then:
+is left after it.
+
+Because the plan fixes that next record -- the header when no record is
+whole, the open unit's applied record, or else the next unit's intent --
+a torn tail must be the start of it, byte for byte (#934). Any other tail
+was not left by a torn append: a whole record whose length field was
+raised with its frame checksum to match, a torn record with a byte changed,
+or any tail after the last unit's applied record. The resume refuses it (`journal record N: cut
+short, and not the start of the record the plan expects next`) before
+anything is written to the device or the journal. Then:
 
 1. Every unit the journal marks applied is read back from the device:
    each write's range must hold its unit's redo with the later applied
