@@ -46,6 +46,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\scripts\fs-windows-test-harness\_lib.ps1"
 . "$PSScriptRoot\windows-fixture.ps1"
 . "$PSScriptRoot\capture-slate-windows-manifest.ps1"
+. "$PSScriptRoot\capture-slate-windows-allocation.ps1"
 
 $cli = (Resolve-Path -LiteralPath $Cli).Path
 $winChkdsk = (Resolve-Path "$PSScriptRoot\..\scripts\fs-windows-test-harness\win-chkdsk.ps1").Path
@@ -53,7 +54,8 @@ $out = [System.IO.Path]::GetFullPath($OutDir)
 $images = Join-Path $out 'images'
 $scratch = Join-Path $out 'scratch'
 $manifests = Join-Path $out 'windows-read'
-New-Item -ItemType Directory -Force -Path $images, $scratch, $manifests | Out-Null
+$allocations = Join-Path $out 'windows-alloc'
+New-Item -ItemType Directory -Force -Path $images, $scratch, $manifests, $allocations | Out-Null
 
 function Get-Sha256([string]$Path) {
     (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
@@ -143,18 +145,24 @@ foreach ($case in $cases) {
     $readCopy = Join-Path $scratch "$($case.Name)-read.img"
     $readVhd = [IO.Path]::ChangeExtension($readCopy, '.vhd')
     $manifestPath = Join-Path $manifests "$($case.Name).json"
-    if ((Test-Path -LiteralPath $manifestPath) -or (Test-Path -LiteralPath $readVhd)) {
+    $allocationPath = Join-Path $allocations "$($case.Name).json"
+    if ((Test-Path -LiteralPath $manifestPath) -or (Test-Path -LiteralPath $allocationPath) -or
+        (Test-Path -LiteralPath $readVhd)) {
         throw "Stale Windows read capture for $($case.Name); use a fresh OutDir"
     }
     Copy-Item -LiteralPath $image -Destination $readCopy -Force
     if ((Get-Sha256 $readCopy) -ne $digest) { throw "Read copy differs for $($case.Name)" }
     try {
-        $manifest = Invoke-FixturePhase "$($case.Name)-windows-read" -PhaseTimeoutSeconds 600 {
+        $capture = Invoke-FixturePhase "$($case.Name)-windows-read" -PhaseTimeoutSeconds 600 {
             $readDiag = Join-Path $out "windows-read-diag\$($case.Name)"
             New-Item -ItemType Directory -Force -Path $readDiag | Out-Null
             $state = Initialize-VhdFromImg -ImagePath $readCopy -Diag $readDiag
             $letter = Mount-VhdAndGetLetter -Vhd $state.Vhd
-            Get-SlateWindowsManifest -Root "${letter}:\" -Case $case.Name -ImageSha256 $digest
+            # One mount, so the names and the clusters are the same state (#875).
+            @{
+                Read = Get-SlateWindowsManifest -Root "${letter}:\" -Case $case.Name -ImageSha256 $digest
+                Allocation = Get-SlateWindowsAllocation -Root "${letter}:\" -Case $case.Name -ImageSha256 $digest
+            }
         }
     } finally {
         # Bound and verify cleanup; a leaked mount is a failure, including
@@ -173,7 +181,9 @@ foreach ($case in $cases) {
         }
     }
     if ((Get-Sha256 $image) -ne $digest) { throw "$($case.Name) changed during Windows read capture" }
-    [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 10),
+    [IO.File]::WriteAllText($allocationPath, ($capture.Allocation | ConvertTo-Json -Depth 10),
+        [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($manifestPath, ($capture.Read | ConvertTo-Json -Depth 10),
         [Text.UTF8Encoding]::new($false))
     $copy = Join-Path $scratch "$($case.Name).img"
     Copy-Item -LiteralPath $image -Destination $copy -Force
