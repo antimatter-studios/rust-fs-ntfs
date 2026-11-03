@@ -86,6 +86,19 @@ function Get-QuotaUsage {
     return $usage
 }
 
+# The owner's usage as `fsutil quota query` reports it; 0 when it has no entry
+# yet. fsutil names an owner "DOMAIN\name (SidType)", which is not the name a
+# SID translates to, so the name is matched whole with or without the type.
+function Get-OwnerUsage {
+    param([string]$Letter, [string]$Owner)
+    $text = Get-QuotaQuery -Letter $Letter
+    $entry = '(?mi)^\s*SID Name\s*=\s*' + [regex]::Escape($Owner) +
+             '(?:\s+\([^)\r\n]*\))?\s*$[\s\S]*?^\s*Quota Used\s*=\s*(\d+)'
+    $m = [regex]::Match($text, $entry)
+    if ($m.Success) { return [UInt64]$m.Groups[1].Value }
+    return [UInt64]0
+}
+
 # A usage table as "owner<TAB>bytes" lines, sorted by owner.
 function Format-QuotaUsage {
     param([Parameter(Mandatory=$true)] $Usage)

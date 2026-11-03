@@ -358,6 +358,13 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -File tests/scripts/sync-vhd-order.ps1
 
+      # An owner's quota usage, through the real function with fsutil and WMI
+      # mocked, from the text fsutil printed on Windows (#867).
+      - name: quota owner usage test
+        if: matrix.os == 'ubuntu-latest'
+        shell: pwsh
+        run: pwsh -NoProfile -File tests/scripts/quota-owner-usage.ps1
+
       - name: Windows fixture lifecycle test
         if: matrix.os == 'ubuntu-latest'
         shell: pwsh
@@ -1282,7 +1289,8 @@ jobs:
     # retaining a finite bound for a hung runner (#388).
     # Measured: 75.6 minutes in run 41570159887, stopped by the old limit of
     # 75 inside "Validate the command-line tools on Windows", and 73.4 in run
-    # 41530819216. No test had failed.
+    # 41530819216. No test had failed. Neither run held the quota limit
+    # measurement, whose step took 1.7 minutes in run 41558177459 (#867).
     timeout-minutes: 85
     needs: [changes]
     if: needs.changes.outputs.mkfs == 'true'
@@ -1484,6 +1492,41 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      # Windows refusing a write past an owner's enforced hard limit: the
+      # error, the file's length, the owner's usage and fsutil's view of the
+      # volume before and after land in the diagnostics, measured before a
+      # write here matches it (#867).
+      - name: Measure a write past an enforced quota limit on Windows
+        id: quota_enforce
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh win-format-win-quota-enforce-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
+      # The measurement is this scenario's whole output, and it stays on the
+      # runner: the job's own fetch runs on failure only, and the next
+      # scenario's run replaces test-diagnostics/matrix/. Text only, never
+      # the image (tests/scripts/quota-enforce-measurement.sh).
+      - name: Bring the quota limit measurement home
+        if: always() && steps.quota_enforce.outcome != 'skipped'
+        shell: bash
+        run: |
+          bash scripts/matrix-fetch-diag.sh
+          report=test-diagnostics/matrix/win-format-win-quota-enforce-win-chkdsk/vm/quota-enforce.txt
+          if [ ! -s "$report" ]; then
+            echo "::error::$report did not come home from the VM"
+            exit 1
+          fi
+          cat "$report"
+      - name: Upload the quota limit measurement
+        if: always() && steps.quota_enforce.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-quota-enforce-measurement
+          path: test-diagnostics/matrix/win-format-win-quota-enforce-win-chkdsk/
+          if-no-files-found: error
+          retention-days: 90
       # A file and a directory Windows charged to their owner with quota
       # tracking on, deleted here: chkdsk grades the volume, and Windows'
       # own recount of each owner's usage must be what $Quota held (#674).
