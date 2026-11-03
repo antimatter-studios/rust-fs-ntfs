@@ -1280,7 +1280,10 @@ jobs:
     # took 32 minutes before the CLI matrix even started. Allow the expanded
     # oracle suite and trailing chkdsk/round-trip checks to finish, while
     # retaining a finite bound for a hung runner (#388).
-    timeout-minutes: 75
+    # Measured: 75.6 minutes in run 41570159887, stopped by the old limit of
+    # 75 inside "Validate the command-line tools on Windows", and 73.4 in run
+    # 41530819216. No test had failed.
+    timeout-minutes: 85
     needs: [changes]
     if: needs.changes.outputs.mkfs == 'true'
     steps:
