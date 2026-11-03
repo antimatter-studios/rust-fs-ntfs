@@ -451,6 +451,8 @@ jobs:
       # `--test mkfs_roundtrip` selecting nothing, which `cargo test` reports
       # as a clean pass. A small floor above zero catches that; a floor of
       # zero catches nothing. Raise it when the files grow.
+      - name: fixture-free repair journal framing and torn-tail tests
+        run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --release --locked --features plan-file --test repair_journal
       - name: fixture-free integration tests with an executed-test floor
         run: |
           bash ../rust-fs-core/scripts/tier.sh --refuse-skips mkfs -- cargo test --release --locked --features cli,harness --test mkfs_roundtrip --test mkfs_bin_smoke
