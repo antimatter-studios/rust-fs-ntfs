@@ -1,0 +1,69 @@
+# Fixture-free collector contracts. Synthetic bytes test decoding only;
+# the hosted capture obtains expected filesystem fields from Windows itself.
+$ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/../../scripts/windows-format-geometry.ps1"
+$checks = 0
+function Assert-Geometry([bool]$Condition, [string]$Message) {
+    if (-not $Condition) { throw $Message }
+    $script:checks++
+}
+function Assert-GeometryFailure([scriptblock]$Action, [string]$Message) {
+    $failed = $false
+    try { & $Action | Out-Null } catch { $failed = $true }
+    Assert-Geometry $failed $Message
+}
+$requests = @(Get-FormatGeometryRequests)
+Assert-Geometry ($requests.Count -eq 26) 'exactly 26 geometry requests'
+Assert-Geometry (($requests | Where-Object allocation_unit_bytes -eq 512).Count -eq 2) 'both 512-byte modes'
+Assert-Geometry (($requests | Where-Object allocation_unit_bytes -eq 2097152).Count -eq 2) 'both 2 MiB modes'
+Assert-Geometry (($requests | Where-Object large_frs).Count -eq 13) '13 large-record requests'
+$boot = [byte[]]::new(512)
+[Text.Encoding]::ASCII.GetBytes('NTFS    ').CopyTo($boot, 3)
+[BitConverter]::GetBytes([uint16]512).CopyTo($boot, 11)
+$boot[13] = 8; $boot[64] = 246; $boot[68] = 1
+[BitConverter]::GetBytes([uint64]4).CopyTo($boot, 48)
+[BitConverter]::GetBytes([uint64]128).CopyTo($boot, 56)
+$boot[510] = 85; $boot[511] = 170
+$decoded = ConvertFrom-FormatBoot $boot
+Assert-Geometry ($decoded.bytes_per_sector -eq 512 -and $decoded.sectors_per_cluster_byte -eq 8) 'raw sector fields'
+Assert-Geometry ($decoded.clusters_per_record_byte -eq 246 -and $decoded.record_bytes -eq 1024) 'negative record exponent'
+Assert-Geometry ($decoded.clusters_per_index_block_byte -eq 1 -and $decoded.index_block_bytes -eq 4096) 'positive index count'
+Assert-Geometry ($decoded.mft_lcn -eq 4 -and $decoded.mftmirr_lcn -eq 128) 'both MFT locations'
+$boot[13] = 244; $boot[64] = 244; $boot[68] = 244
+$large = ConvertFrom-FormatBoot $boot
+Assert-Geometry ($large.cluster_bytes -eq 2097152 -and $large.record_bytes -eq 4096) 'large-cluster signed exponent'
+$boot[13] = 128
+Assert-Geometry ((ConvertFrom-FormatBoot $boot).cluster_bytes -eq 65536) '128 sectors remains unsigned'
+Assert-GeometryFailure { ConvertFrom-FormatBoot ([byte[]]::new(511)) } 'short boot sector fails'
+$boot[510] = 0
+Assert-GeometryFailure { ConvertFrom-FormatBoot $boot } 'missing signature fails'
+$boot[510] = 85; $boot[3] = 0
+Assert-GeometryFailure { ConvertFrom-FormatBoot $boot } 'non-NTFS boot sector fails'
+$lines = @('Bytes Per Sector : 512', 'Bytes Per Cluster : 4096 (4 KB)',
+    'Bytes Per FileRecord Segment : 1024', 'Mft Start Lcn : 0x0000000000000004',
+    'Mft2 Start Lcn : 0x0000000000000080')
+$native = ConvertFrom-GeometryNtfsInfo $lines
+Assert-Geometry ($native.cluster_bytes -eq 4096 -and $native.record_bytes -eq 1024 -and
+    $native.mftmirr_lcn -eq 128) 'fsutil decimal, hex, and parenthesized units'
+Assert-GeometryFailure { ConvertFrom-GeometryNtfsInfo $lines[0..3] } 'missing fsutil field fails'
+Assert-GeometryFailure { ConvertFrom-GeometryNtfsInfo ($lines + $lines[0]) } 'duplicate fsutil field fails'
+Assert-FormatGeometryMatch $decoded $native 4096
+$checks++
+$native.record_bytes = 4096
+Assert-GeometryFailure { Assert-FormatGeometryMatch $decoded $native 4096 } 'native disagreement fails'
+Assert-GeometryFailure { Assert-FormatGeometryMatch $decoded (ConvertFrom-GeometryNtfsInfo $lines) 8192 } 'wrong requested allocation fails'
+$rows = @($requests | ForEach-Object {
+    [pscustomobject]@{ allocation_unit_bytes = $_.allocation_unit_bytes; large_frs = $_.large_frs;
+        accepted = ($_.allocation_unit_bytes -eq 4096); error_id = 'native-refusal' }
+})
+Assert-FormatGeometryRows $rows
+$checks++
+Assert-GeometryFailure { Assert-FormatGeometryRows $rows[0..24] } 'incomplete request set fails'
+Assert-GeometryFailure { Assert-FormatGeometryRows (@($rows[0]) + @($rows[0..24])) } 'duplicate request fails'
+$rows | ForEach-Object { $_.accepted = $false }
+Assert-GeometryFailure { Assert-FormatGeometryRows $rows } 'all-refusal infrastructure failure fails'
+$rows | ForEach-Object { $_.accepted = ($_.allocation_unit_bytes -eq 4096) }
+$rows[0].error_id = ''
+Assert-GeometryFailure { Assert-FormatGeometryRows $rows } 'refusal without diagnostic fails'
+if ($checks -ne 24) { throw "only $checks geometry contracts executed, expected 24" }
+Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 24)"
