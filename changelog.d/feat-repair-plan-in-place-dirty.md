@@ -1,0 +1,3 @@
+### Added
+
+- **A repair plan made for an in-place apply opens with units that set the dirty flag (#939).** `repair_plan::plan_in_place_io` plans what `plan_fsck_io` plans, preceded by the writes `fsck::set_dirty_io` makes -- `$Volume`'s flags, then its `$MFTMirr` copy -- each a unit of its own, flushed before the repair's first write; a volume whose flag is already set gains nothing. Because the flag is set by units of the plan, an in-place apply journals, checks and resumes them like any other, so a repair cut at any unit leaves a volume Windows checks at its next mount. `plan_fsck_io`, and so copy-repair, is unchanged.
