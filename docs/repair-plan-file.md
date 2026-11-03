@@ -83,6 +83,21 @@ source, and refuses it, naming what differs, when:
 The first mismatch, in plan order, is the one named. Size and serial
 number are checked before any before-image.
 
+## Checking a unit on the device about to receive it
+
+`repair_plan::check_unit_on_device` (#913) checks one unit immediately
+before it is written. It only reads the device, as it stands at that
+unit's turn: the plan's earlier units are already written there, so only
+the unit's own earlier writes are laid over what the device holds. It
+refuses the unit when:
+
+- a write's range does not hold its before-image (`plan unit U write W:
+  the device does not hold its before-image in bytes START..END`), naming
+  the write's whole byte range;
+- the plan has no unit at that index (`the plan has N units, no unit U`).
+
+The first mismatch, in the unit's write order, is the one named.
+
 ## Tests
 
 `tests/repair_plan_file.rs` needs no fixture. It builds files by hand from
@@ -111,3 +126,19 @@ and serial refusals stop before reading any before-image, that the first
 before-image mismatch names its unit, write and first differing byte, and
 that read failures are returned. Its source panics on any write or flush
 attempt, including on a successful check.
+
+`a_plan_unit_is_checked_on_the_device_about_to_receive_it_at_its_turn`
+applies a plan from each Windows capture to a copy unit by unit, checking
+each unit first, and checks that every unit checks clean at its turn
+without the copy changing. It then changes one byte, which no earlier
+write of the same unit covers, inside the first, a middle and the last
+unit's ranges after the earlier units are written, and checks that each is
+refused naming that write's byte range and that the copy is not written.
+
+`tests/repair_plan_unit.rs` also checks partial overlaps within a unit,
+with the latest earlier write taking precedence, and proves earlier units
+are read from the device rather than overlaid from the plan. It checks
+first, middle and last unit refusals, the exact reported range, invalid
+unit indices, and stopping at the first mismatch or read failure. Its
+device panics on any write or flush attempt, including on a successful
+check.
