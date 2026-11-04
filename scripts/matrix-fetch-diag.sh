@@ -12,7 +12,8 @@
 # and prints one line per scenario naming what Windows actually reported.
 #
 # chore matrix runs it as a `defer:`, so it runs when scenarios FAIL too --
-# which is when the evidence is wanted.
+# which is when the evidence is wanted. The Windows job runs it for every group,
+# green or not, through matrix-keep-diag.sh and one last step of its own (#1245).
 set -uo pipefail
 
 # chkdsk's verdict, in words, from one chkdsk-<mode>.txt (UTF-16 or ASCII).
