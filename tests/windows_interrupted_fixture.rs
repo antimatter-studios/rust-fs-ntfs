@@ -2491,6 +2491,7 @@ impl fs_ntfs::block_io::BlockIo for RecordedRepair {
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_dry_run_plans_the_writes_that_reach_what_windows_recovered_and_makes_none() {
     // `fsck.ntfs --dry-run` works out every write `fsck.ntfs -y` would
