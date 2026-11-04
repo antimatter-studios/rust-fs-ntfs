@@ -23,8 +23,11 @@
 #   -Diag           Directory for quota-enforce.txt.
 #
 # Exit code:
-#   0 when Windows refused the write past the limit
-#   1 when it did not, or fsutil, the scan or the setup failed
+#   0 when Windows refused the write past the limit with the measured status
+#     and the owner's usage afterwards is at or under the limit
+#   1 when it did not, when the write failed with any other error, when the
+#     usage afterwards is above the limit, or when fsutil, the scan or the
+#     setup failed
 
 param(
     [Parameter(Mandatory=$true)] [string]$ImagePath,
@@ -36,6 +39,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# What Windows returned for this write in the first retained quota-enforce.txt:
+# artifact ntfs-quota-enforce-measurement of run 41558177459, Win32 112, "There
+# is not enough space on the disk." Any other error is a device or an access
+# check, not a volume enforcing its quota (#1244).
+$REFUSAL_HRESULT = '0x80070070'
 
 . "$PSScriptRoot\_lib.ps1"
 . "$PSScriptRoot\_quota.ps1"
@@ -101,14 +110,16 @@ try {
         }
     } catch {
         $failure = $_.Exception
-        while ($failure -is [System.Management.Automation.MethodInvocationException] -and
-               $failure.InnerException) {
-            $failure = $failure.InnerException
-        }
     } finally {
         try { $fs.Dispose() } catch {
             if (-not $failure) { $failure = $_.Exception }
         }
+    }
+    # PowerShell wraps what a .NET method raises, and the wrapper has a status
+    # of its own, whichever of the calls above raised it.
+    while ($failure -is [System.Management.Automation.MethodInvocationException] -and
+           $failure.InnerException) {
+        $failure = $failure.InnerException
     }
 
     $lengthAfter = (Get-Item -LiteralPath $target).Length
@@ -145,6 +156,15 @@ try {
                "($owner charged $usedBefore before, $usedAfter after); see $report")
     }
     $hresult = "0x{0:x8}" -f $failure.HResult
+    if ($hresult -ne $REFUSAL_HRESULT) {
+        throw ("the write past the limit failed with HRESULT $hresult, not the refusal " +
+               "$REFUSAL_HRESULT Windows returned when measured: $($failure.GetType().FullName): " +
+               "$($failure.Message); see $report")
+    }
+    if ($usedAfter -gt $limit) {
+        throw ("Windows refused the write, but $owner is charged $usedAfter after it, " +
+               "above the hard limit of $limit; see $report")
+    }
     Write-Host ("win-quota-enforce: Windows refused the write past the limit: HRESULT $hresult, " +
                 "$accepted of $toWrite bytes accepted, length $lengthAfter, usage $usedBefore -> $usedAfter")
     exit 0

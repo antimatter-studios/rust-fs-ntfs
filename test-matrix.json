@@ -2614,7 +2614,7 @@
         }
       ],
       "image": "nfs-win-format-win-quota-enforce-win-chkdsk.img",
-      "_notes": "Windows turns quota tracking and enforcement on, gives a file's owner a hard limit 64 KiB above what it is charged, and writes 1 MiB to the file. The diagnostics record what Windows does with a write past the limit: the error it returns, the file's length afterwards, the owner's usage before and after, and fsutil's view of the volume before and after. The step fails when the write is not refused. The image goes back to the host, where run-matrix.sh --keep-images keeps it; CI keeps only the text (#867, part of #679)."
+      "_notes": "Windows turns quota tracking and enforcement on, gives a file's owner a hard limit 64 KiB above what it is charged, and writes 1 MiB to the file. The diagnostics record what Windows does with a write past the limit: the error it returns, the file's length afterwards, the owner's usage before and after, and fsutil's view of the volume before and after. The step fails when the write is not refused, when it fails with anything but the status Windows returned when measured, or when the owner is charged more than the limit afterwards (#1244). The image goes back to the host, where run-matrix.sh --keep-images keeps it; CI keeps only the text (#867, part of #679)."
     },
     "win-format-win-quota-mac-delete-win-chkdsk": {
       "status": "pending",
