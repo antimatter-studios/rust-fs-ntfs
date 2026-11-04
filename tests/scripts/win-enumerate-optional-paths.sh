@@ -4,6 +4,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+bash scripts/require-tomllib.sh "$(basename "$0")" || exit 1
 python3 - <<'PY'
 import shlex
 import tomllib

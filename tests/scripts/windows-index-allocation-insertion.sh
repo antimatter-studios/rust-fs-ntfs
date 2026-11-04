@@ -2,6 +2,7 @@
 # The wide Windows directory must accept insertion without losing names.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+bash scripts/require-tomllib.sh "$(basename "$0")" || exit 1
 python3 - <<'CHECK'
 import json
 import tomllib

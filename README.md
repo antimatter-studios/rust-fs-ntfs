@@ -78,6 +78,18 @@ are documented there.
   byte-decoders most likely to regress (data-runs, attribute headers,
   INDX block headers).
 - **Bench:** `benches/byte_decoders.rs` (Criterion). Not part of CI.
+- **Shell tests:** `chore test:scripts` runs `tests/scripts/*.sh`. It needs
+  Python 3.11 or newer first on `PATH` (for `tomllib`), PyYAML and PowerShell
+  (`pwsh`). A guard that lacks one fails and names it; none skips. A Mac's
+  `/usr/bin/python3` is 3.9, so on a Mac:
+
+  ```sh
+  brew install python@3.12
+  brew install --cask powershell
+  "$(brew --prefix python@3.12)/bin/python3.12" -m venv tmp/venv
+  tmp/venv/bin/pip install pyyaml
+  PATH="$PWD/tmp/venv/bin:$PATH" chore test:scripts
+  ```
 
 ## Changelog
 

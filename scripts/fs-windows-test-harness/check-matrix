@@ -41,9 +41,20 @@ import argparse
 import json
 import re
 import sys
-import tomllib
 from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    # The same line as scripts/require-tomllib.sh, for a run outside any guard.
+    print(
+        "check-matrix: needs Python 3.11 or newer, whose standard library "
+        f"provides tomllib; found Python {sys.version.split()[0]}. Put a newer "
+        "python3 first on PATH (on a Mac, brew install python@3.12).",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 # Ops defined by the harness binary itself, not in [ops.X] of consumer
 # the config. See ../fs-windows-test-harness/runner/src/dispatch.rs

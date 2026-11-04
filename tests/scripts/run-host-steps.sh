@@ -12,6 +12,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+bash "$ROOT/scripts/require-tomllib.sh" "$(basename "$0")" || exit 1
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/run-host-steps.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 
