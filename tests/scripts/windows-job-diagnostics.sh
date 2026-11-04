@@ -222,9 +222,18 @@ def should_run(step, failed, outcomes):
     return True
 
 
-def run_job(name, **extra):
-    """Run the job's matrix steps. Returns (consumer dir, step name -> (outcome, output))."""
+def run_job(name, scenarios=(), **extra):
+    """Run the job's matrix steps, with `scenarios` added to the sandbox's matrix.
+
+    Returns (sandbox dir, consumer dir, step name -> (outcome, output)).
+    """
     box, consumer = sandbox(name)
+    if scenarios:
+        with open(f"{consumer}/test-matrix.json", encoding="utf-8") as f:
+            matrix = json.load(f)
+        matrix["scenarios"].update({s: {"recipe": ["stand-in"]} for s in scenarios})
+        with open(f"{consumer}/test-matrix.json", "w", encoding="utf-8") as f:
+            json.dump(matrix, f)
     env = base_env(box)
     env.update({k: str(v) for k, v in job_env.items()})
     env.update(extra)
@@ -311,6 +320,29 @@ if lost_vm:
     fail(f"green job: the artifact holds no VM report for {len(lost_vm)} of {len(runs)} runs, first {lost_vm[0]}")
 if not any(rel.endswith("quota-enforce.txt") for rel in held):
     fail("green job: the artifact does not hold quota-enforce.txt")
+
+# ── A scenario in two groups that are both kept: neither run overwrites the
+# other. The job's one scenario that runs twice has its second run in the last
+# group, which is never kept, so the green job above cannot show this. The
+# scenario is added to the sandbox's matrix only, under a name that both filters
+# match, because counting it in the green job would hide a scenario lost from
+# the floor the seal step holds that job to.
+filters = [
+    f for s in matrix_steps[:-1] for f in re.findall(r"run-matrix\.sh\s+([a-z][\w-]*)", s["run"])
+]
+if len(filters) < 2:
+    fail(f"two groups: the job has {len(filters)} kept steps with a literal filter, and this needs 2")
+else:
+    SHARED = f"{filters[0]}-{filters[1]}"
+    box, consumer, results = run_job("two-groups", scenarios=[SHARED])
+    held = artifact(consumer)
+    both = [n for n, s in harness_runs(box) if s == SHARED]
+    if len(both) < 2:
+        fail(f"two groups: {SHARED} ran {len(both)} time(s), so this shows nothing")
+    for n in both:
+        for leaf in ("step-00/stdout.txt", "vm/report.txt"):
+            if not holds_run(held, SHARED, n, leaf):
+                fail(f"two groups: the artifact lost {leaf} of run {n} of {SHARED}")
 
 # ── A scenario fails: the steps after it do not run, and what the failure path
 # always kept is still at test-diagnostics/matrix/<scenario>/, with earlier
