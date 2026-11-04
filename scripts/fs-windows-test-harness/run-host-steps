@@ -48,9 +48,20 @@ import shutil
 import subprocess
 import sys
 import time
-import tomllib
 from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    # The same line as scripts/require-tomllib.sh, for a run outside any guard.
+    print(
+        "run-host-steps: needs Python 3.11 or newer, whose standard library "
+        f"provides tomllib; found Python {sys.version.split()[0]}. Put a newer "
+        "python3 first on PATH (on a Mac, brew install python@3.12).",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 # Ops the harness binary runs itself; both move files to or from the VM.
 HARNESS_BUILTIN_OPS = {"ship-to-vm", "ship-to-host"}

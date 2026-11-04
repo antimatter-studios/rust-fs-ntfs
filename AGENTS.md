@@ -320,6 +320,10 @@ chore matrix:check      # lint test-matrix.json against the harness config (no V
 chore matrix -- smoke   # matrix scenarios on the Windows VM
 ```
 
+`chore test:scripts` needs Python 3.11 or newer first on `PATH` (for
+`tomllib`), PyYAML and PowerShell (`pwsh`). A guard that lacks one fails and
+names it; none skips. `README.md` gives the Mac commands.
+
 ## The oracle here is Windows chkdsk
 
 Our own readers cannot prove the bytes we wrote are right, so a real Windows

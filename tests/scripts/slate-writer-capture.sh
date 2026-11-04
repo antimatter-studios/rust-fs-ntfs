@@ -4,6 +4,7 @@
 # or formatter participates in this runner contract test.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+bash "$ROOT/scripts/require-tomllib.sh" "$(basename "$0")" || exit 1
 work="$(mktemp -d "${TMPDIR:-/tmp}/slate-writer-capture.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 fails=0
