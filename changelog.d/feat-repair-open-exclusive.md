@@ -1,0 +1,3 @@
+### Added
+
+- **An in-place repair opens its device exclusively, and a device another process holds is refused with nothing written (#920).** `block_io::PathIo::open_exclusive` opens a device or image read-write and holds an exclusive, non-blocking lock on it (`flock(LOCK_EX | LOCK_NB)` through `File::try_lock`) for as long as the handle lives; on Linux a block device is also opened with `O_EXCL`. A device another holder has locked is refused at once with an error saying it is held by another process. Only the in-place repair path of the standalone fsck CLI uses it; `open_rw` and `open_ro` are unchanged.
