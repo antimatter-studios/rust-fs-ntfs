@@ -11,7 +11,10 @@ export capture
 printf '%s\n' '#!/usr/bin/env bash' 'printf "%s|" "${MSYS_NO_PATHCONV:-}" "$@" >> "$capture"; echo >> "$capture"' > "$scratch/fake"
 chmod +x "$scratch/fake"
 bash "$repo/scripts/mac-write-eas.sh" "$scratch/fake" volume.img /f 3 12 2
-mapfile -t calls < "$capture"
+calls=()
+while IFS= read -r call; do
+    calls+=("$call")
+done < "$capture"
 want=(
     "1|ea|volume.img|/f|USER.E1|--content|ea 1 ea 1 ea|"
     "1|ea|volume.img|/f|USER.E2|--content|ea 2 ea 2 ea|"

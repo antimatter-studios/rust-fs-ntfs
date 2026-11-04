@@ -11,7 +11,10 @@ export capture
 printf '%s\n' '#!/usr/bin/env bash' 'printf "%s|" "${MSYS_NO_PATHCONV:-}" "$@" >> "$capture"; echo >> "$capture"' > "$scratch/fake"
 chmod +x "$scratch/fake"
 bash "$repo/scripts/mac-write-streams.sh" "$scratch/fake" volume.img /f 3 20 2
-mapfile -t calls < "$capture"
+calls=()
+while IFS= read -r call; do
+    calls+=("$call")
+done < "$capture"
 want=(
     "1|stream|volume.img|/f|s1|--content|stream 1 stream 1 st|"
     "1|stream|volume.img|/f|s2|--content|stream 2 stream 2 st|"
