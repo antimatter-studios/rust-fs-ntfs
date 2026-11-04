@@ -80,11 +80,22 @@ insertion, chkdsk-gated. Blocks custom-ACL / inheritance / per-file-owner tests.
 
 ### C. Write refused / not wired
 
-**C1 — Resident `$DATA` in-place write / grow.**
-`write_at`, `grow_nonresident`, `truncate` operate on **non-resident** `$DATA`
-only; a freshly-created (resident) file must be promoted first
-(`promote_resident_data_to_nonresident`). *Needs:* either in-place resident
-mutation or transparent auto-promote, chkdsk-gated.
+**C1 — Resident `$DATA` through record-number APIs.**
+Verified 2026-11-04 against `main` (`690d35c5`): the path-based `write_at`,
+`grow_nonresident`, and `truncate` APIs (and their `_io` forms) already handle
+resident `$DATA`. They rewrite the resident value while it fits and
+automatically promote it when it outgrows the record. `write_at_io` supports
+overwrites, appends, and zero-filled gaps; `truncate_io` shrinks or extends
+with zeros, and `grow_nonresident_io` delegates resident resizing to it.
+Tests: `a_small_file_is_overwritten_appended_to_and_resized`,
+`appends_extend_a_large_file_and_promote_a_small_one`, and
+`a_new_file_is_written_in_chunks_at_increasing_offsets` in
+`tests/positional_writes.rs`, with readback through this crate and `ntfs`.
+**Remaining:** the corresponding `*_by_record_number` / `*_by_record_number_io`
+primitives still refuse resident `$DATA` for non-empty writes and resizing;
+those callers must promote first (`promote_resident_data_to_nonresident`).
+*Needs:* resident mutation or transparent promotion for those primitives,
+chkdsk-gated, not another implementation of the path-based behaviour.
 
 **C3 — Non-resident forms of metadata attributes (resident-only).**
 `$EA` (`ea_io.rs`), `$REPARSE_POINT` (`write.rs`), and `$Bitmap:$I30`
