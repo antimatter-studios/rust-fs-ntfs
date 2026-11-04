@@ -1,0 +1,3 @@
+## Checking and recovery
+
+| `fsck.ntfs --apply PLAN --in-place --journal FILE`: in-place repair of a volume by a saved plan, journalled unit by unit into an external file | Supported; the volume is opened exclusively and checked against the plan, and a missing `--journal` or `--in-place`, `--in-place` beside `--to`, `--dry-run` or `-y`, a refused journal location, a held volume and a volume the plan does not fit are refused before anything is created or written; the volume reaches what Windows' own restart recovered on every interrupted capture | Unreleased (#922) | #713 | `windows_interrupted_fixture.rs` |
