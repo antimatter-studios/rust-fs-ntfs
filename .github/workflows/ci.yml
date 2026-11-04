@@ -1302,6 +1302,13 @@ jobs:
     timeout-minutes: 85
     needs: [changes]
     if: needs.changes.outputs.mkfs == 'true'
+    # Every run-matrix.sh step replaces test-diagnostics/matrix/, so each one
+    # first carries the group before it here, with its VM report. Set on the job
+    # so a step added later is covered (tests/scripts/windows-job-diagnostics.sh,
+    # #1245). A scenario's scp took under a second in run 41558177459; 66 runs of
+    # them add about a minute to the job.
+    env:
+      MATRIX_KEEP_DIAG: test-diagnostics/matrix-groups
     steps:
       - uses: actions/checkout@v4
       - name: check out sibling repos
@@ -1512,29 +1519,6 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
-      # The measurement is this scenario's whole output, and it stays on the
-      # runner: the job's own fetch runs on failure only, and the next
-      # scenario's run replaces test-diagnostics/matrix/. Text only, never
-      # the image (tests/scripts/quota-enforce-measurement.sh).
-      - name: Bring the quota limit measurement home
-        if: always() && steps.quota_enforce.outcome != 'skipped'
-        shell: bash
-        run: |
-          bash scripts/matrix-fetch-diag.sh
-          report=test-diagnostics/matrix/win-format-win-quota-enforce-win-chkdsk/vm/quota-enforce.txt
-          if [ ! -s "$report" ]; then
-            echo "::error::$report did not come home from the VM"
-            exit 1
-          fi
-          cat "$report"
-      - name: Upload the quota limit measurement
-        if: always() && steps.quota_enforce.outcome != 'skipped'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ntfs-quota-enforce-measurement
-          path: test-diagnostics/matrix/win-format-win-quota-enforce-win-chkdsk/
-          if-no-files-found: error
-          retention-days: 90
       # A file and a directory Windows charged to their owner with quota
       # tracking on, deleted here: chkdsk grades the volume, and Windows'
       # own recount of each owner's usage must be what $Quota held (#674).
@@ -1638,10 +1622,25 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
-      - name: Capture Windows matrix diagnostics on failure
-        if: failure()
+      # The last group's VM report, green or not: each earlier group's came home
+      # when the next one started. It stays at test-diagnostics/matrix/.
+      - name: Capture Windows matrix diagnostics
+        if: always()
         shell: bash
         run: bash scripts/matrix-fetch-diag.sh
+      # The measurement is that scenario's whole output, so a run without it
+      # fails. It travels in the job's artifact like every other scenario's
+      # (tests/scripts/quota-enforce-measurement.sh).
+      - name: Check the quota limit measurement came home
+        if: always() && steps.quota_enforce.outcome != 'skipped'
+        shell: bash
+        run: |
+          report="$(find test-diagnostics -path '*/win-format-win-quota-enforce-win-chkdsk/vm/quota-enforce.txt' | head -n 1)"
+          if [ -z "$report" ] || [ ! -s "$report" ]; then
+            echo "::error::quota-enforce.txt did not come home from the VM"
+            exit 1
+          fi
+          cat "$report"
       - name: Generate raw image and wrap in GPT-partitioned VHD
         shell: pwsh
         run: |
@@ -1798,6 +1797,17 @@ jobs:
         shell: pwsh
         run: |
           Dismount-DiskImage -ImagePath "$pwd\wrapper.vhd" -ErrorAction SilentlyContinue | Out-Null
+      # No disk image in the artifact, the artifact within its measured size,
+      # and on a green job every scenario's step output and VM report in it.
+      # Deferred like the verdicts below, so the upload still fires.
+      - name: Hold the diagnostics to what the artifact may carry
+        id: seal
+        if: always()
+        shell: bash
+        continue-on-error: true
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: bash scripts/matrix-keep-diag.sh seal "$JOB_STATUS"
       - name: Upload diagnostics
         # Always upload — successful runs also benefit from having the
         # baseline metadata captured for cross-commit comparison.
@@ -1808,7 +1818,11 @@ jobs:
           path: |
             diag/
             test-diagnostics/matrix/
+            test-diagnostics/matrix-groups/
+            !**/*.img*
+            !**/*.vhd*
           if-no-files-found: warn
+          retention-days: 90
       - name: Fail the job if chkdsk or the round-trip found issues
         # We deferred failure earlier (continue-on-error) so the
         # artifact upload always fires. Fail the job here once
@@ -1832,7 +1846,8 @@ jobs:
           steps.chkdsk.outputs.scan_exit != '0' ||
           steps.roundtrip.outcome != 'success' ||
           steps.chkdsk_after.outcome != 'success' ||
-          steps.chkdsk_after.outputs.scan_exit != '0'
+          steps.chkdsk_after.outputs.scan_exit != '0' ||
+          steps.seal.outcome != 'success'
         shell: pwsh
         run: |
           $failures = @()
@@ -1845,6 +1860,9 @@ jobs:
           if ($env:chkdsk_after_outcome -ne 'success' -or $env:chkdsk_after_exit -ne '0') {
             $failures += "chkdsk /scan (post round-trip) outcome was $($env:chkdsk_after_outcome), exit code '$($env:chkdsk_after_exit)'"
           }
+          if ($env:seal_outcome -ne 'success') {
+            $failures += "the diagnostics step outcome was $($env:seal_outcome) (see 'Hold the diagnostics to what the artifact may carry')"
+          }
           $failures | ForEach-Object { Write-Host "::error::$_" }
           throw "Windows validation failed: $($failures -join '; ') — see uploaded diag/ artifact"
         env:
@@ -1852,6 +1870,7 @@ jobs:
           roundtrip_outcome: ${{ steps.roundtrip.outcome }}
           chkdsk_after_outcome: ${{ steps.chkdsk_after.outcome }}
           chkdsk_after_exit: ${{ steps.chkdsk_after.outputs.scan_exit }}
+          seal_outcome: ${{ steps.seal.outcome }}
 
   # THE COMMAND-LINE TOOLS, AS INSTALLED. The multi-call binary is built in
   # release mode and staged by `chore cli:install` under every name it

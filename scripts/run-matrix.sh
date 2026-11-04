@@ -269,5 +269,14 @@ start_ssh_mux
 # to do the same, which never ran on a harness-written .test-env (#411) and,
 # had it run, would have been one more remote call with no bound.
 
+# The runner removes test-diagnostics/matrix/ as it starts. Where a job asks for
+# it (MATRIX_KEEP_DIAG), the group that ran last is carried aside first. What
+# that returns is ignored: it says nothing about the scenarios about to run, and
+# a green job's seal step fails on a group that was lost (#1245).
+if [ -n "${MATRIX_KEEP_DIAG:-}" ]; then
+    bash "$repo_root/scripts/matrix-keep-diag.sh" keep \
+        || echo "[run-matrix] could not keep the last group's diagnostics" >&2
+fi
+
 # Forward to the real runner.
 bash "$repo_root/../fs-windows-test-harness/scripts/run-tests.sh" "${forwarded_args[@]+"${forwarded_args[@]}"}"
