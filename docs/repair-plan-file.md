@@ -101,21 +101,40 @@ The first mismatch, in the unit's write order, is the one named.
 ## Applying a plan by copy-repair
 
 `repair_plan::copy_repair` opens the source read-only and checks it against
-the plan first. Only once the check passes does it create the target, with
-`create_new`, so a path that already exists is refused and left as it was;
-it copies the source into the target, flushes the copy, and applies the
+the plan first. Only once the check passes does it refuse a target path that
+exists, leaving what is there as it was, and copy the source to a new hidden
+file beside the target, `.ntfs-copy-repair-<pid>-<n>.partial`. It flushes the
+copy, moves it to the target path, flushes the directory, and applies the
 plan's units there in order with `apply_plan_units`. The source is never
 opened for writing, and a refused check leaves no target behind.
+
+The move refuses a target that appeared during the copy, and removes the copy.
+It claims the path by creating an empty file there with `create_new`, then
+renames the copy over that file, so it needs no hard links, which exFAT and FAT
+do not have. A process killed between those two steps leaves that empty file at
+the target path and the hidden file beside it.
+
+On Unix the hidden file, and so the target, is created with mode 0600 whatever
+the source's mode, and the process's umask can only narrow that. The target is
+then never open to more users than the source, including when its group differs
+from the source's. The same holds for a source that is a device node, whose
+mode describes who may use the device and not who may read a copy of it. An
+owner who wants to share the target changes its mode afterwards. On Windows the
+target takes the access its directory gives new files.
 
 `apply_plan_units` writes each unit's writes in order and then flushes the
 device: a flush at every unit boundary and none inside a unit, so the
 device holds whole units whenever a flush has returned.
 
-A failure once the target exists undoes nothing, and the target stays at
-its path. A failed copy leaves part of the source there. A write or flush
-that fails stops the apply: every earlier unit is whole and flushed, the
-failing unit's earlier writes stay with no flush after them, and no later
-unit is written. Either way the target is not a repaired volume, and a
+A copy that fails removes its hidden file and leaves nothing at the target
+path, so the copy-repair can be run again. A process killed during the copy
+leaves only the hidden file, which a later copy-repair does not reuse and which
+can be removed.
+
+A failure after the move undoes nothing, and the target stays at its path. A
+write or flush that fails stops the apply: every earlier unit is whole and
+flushed, the failing unit's earlier writes stay with no flush after them, and
+no later unit is written. The target is then not a repaired volume, and a
 copy-repair onto that path is refused until it is removed.
 
 ## Tests
@@ -167,7 +186,13 @@ check.
 flush of a plan's middle unit and checks what the target then holds and
 which writes and flushes reached it, and copy-repairs a source whose file is
 read-only and checks that the source is unchanged and the target holds every
-unit.
+unit. On Unix it runs `fsck.ntfs --apply` under a file-size limit smaller than
+the source, and checks that the copy fails with no name left at the target or
+beside it, that the source is unchanged and that a retry succeeds. It also
+copy-repairs sources with modes 0600 and 0644 under umask 022 and checks that
+each target has mode 0600.
+The quick pull-request CI runs this file; `chore test:repair-plan-copy` uses the
+same command.
 
 `a_copy_repair_reaches_what_windows_recovered_and_never_writes_its_source`
 copy-repairs each Windows capture into a new target and checks that the

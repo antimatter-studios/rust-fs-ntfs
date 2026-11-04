@@ -467,6 +467,17 @@ jobs:
               echo "::error::only $n tests executed, floor is 15 -- 16 ran on 2026-09-29, and a run that executes less than that stopped early rather than passed"
               exit 1
           fi
+      # The same features as the step above, so it reuses that build. Measured
+      # 5 executed on 2026-11-04; the floor catches the drop to zero.
+      - name: fixture-free copy-repair tests with an executed-test floor
+        run: |
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --release --locked --features cli,harness --test repair_plan_copy
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
+          echo "tests executed: $n (floor 5)"
+          if [ "$n" -lt 5 ]; then
+              echo "::error::only $n tests executed, floor is 5 -- 5 ran on 2026-11-04, and a run that executes less than that stopped early rather than passed"
+              exit 1
+          fi
 
       - name: Independent operation model contract
         run: |

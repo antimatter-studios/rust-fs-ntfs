@@ -47,11 +47,13 @@
 //! WHAT `--apply PLAN --to TARGET` DOES: loads a plan file and
 //! copy-repairs the volume into a new TARGET through
 //! `fs_ntfs::repair_plan::copy_repair` (#910): the volume is opened
-//! read-only and checked against the plan, and only then is TARGET created,
-//! the volume copied into it and the plan applied there. The volume is the
-//! source and is never written. `--to` naming the source, or anything that
-//! exists, is refused before anything is created; so is `--apply` beside
-//! anything that writes or plans (`-y`, `-p`, `--dry-run`).
+//! read-only and checked against the plan, and only then is the volume
+//! copied under a hidden name beside TARGET, moved to TARGET once complete,
+//! and the plan applied there. A copy that fails leaves nothing at TARGET. On
+//! Unix TARGET has mode 0600. The volume is the source and is never written.
+//! `--to` naming the source, or anything that exists, is refused before
+//! anything is created; so is `--apply` beside anything that writes or plans
+//! (`-y`, `-p`, `--dry-run`).
 //!
 //! WHAT `--apply PLAN --in-place --journal FILE` DOES: repairs the volume
 //! in place (#922). FILE is checked as a journal location with
@@ -139,8 +141,9 @@ fn command() -> Cmd {
              with nothing written.\n\n\
              --apply PLAN --to TARGET copy-repairs the volume into a new TARGET: the \
              volume is opened read-only and checked against PLAN, and only then is \
-             TARGET created, the volume copied into it and PLAN applied there. TARGET \
-             must not exist and must not be the volume itself.\n\n\
+             the volume copied beside TARGET, moved to TARGET once complete and PLAN \
+             applied there. A copy that fails leaves nothing at TARGET. On Unix TARGET \
+             has mode 0600. TARGET must not exist and must not be the volume itself.\n\n\
              --apply PLAN --in-place --journal FILE repairs the volume in place: FILE \
              must be a new file outside the volume, the volume is opened exclusively \
              and checked against PLAN, and only then is FILE created and PLAN applied, \

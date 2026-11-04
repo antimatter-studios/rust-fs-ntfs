@@ -508,6 +508,12 @@ tasks:
     cmds:
       - bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --release --locked --features plan-file --test repair_journal
 
+  test:repair-plan-copy:
+    desc: Fixture-free copy-repair tests
+    deps: [siblings:gate]
+    cmds:
+      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --release --locked --features cli,harness --test repair_plan_copy
+
   test:unit:debug:
     desc: 'Unit tests (src/), debug, overflow checks armed -- ci.yml "unit tests (debug, ...)"'
     deps: [siblings:gate]
