@@ -26,6 +26,7 @@ Cargo.lock.bak
 
 # Test artifacts
 test-disks/*.img
+test-disks/_*.img*
 # The symlink targets Windows reports, written beside ntfs-symlink.img.
 test-disks/*.targets.tsv
 # The files Windows wrote and the SHA-256 it computed, beside ntfs-cli-read.img.
