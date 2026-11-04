@@ -28,6 +28,7 @@ bad() {
 repo="$tmp/repo"
 ev="$tmp/evidence"
 mkdir -p "$repo/scripts/fs-windows-test-harness" "$ev"
+repo="$(cd "$repo" && pwd -P)"
 cp "$ROOT/scripts/fs-windows-test-harness/run-host-steps" "$repo/scripts/fs-windows-test-harness/"
 
 cat >"$repo/fs-windows-test-harness.toml" <<EOF

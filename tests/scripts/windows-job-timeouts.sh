@@ -81,8 +81,8 @@ jobs:
           timeout-minutes: 5
 EOF
 if [ "$(unbounded_windows_jobs "$sandbox/unbounded.yml")" = hung ]; then ok; else bad "an unbounded Windows job was not caught (a step's text must not count as the job's bound)"; fi
-sed -i 's/^    name: a Windows job$/    timeout-minutes: 30/' "$sandbox/unbounded.yml"
-if [ -z "$(unbounded_windows_jobs "$sandbox/unbounded.yml")" ]; then ok; else bad "a bounded Windows job was reported as unbounded"; fi
+sed 's/^    name: a Windows job$/    timeout-minutes: 30/' "$sandbox/unbounded.yml" > "$sandbox/bounded.yml"
+if [ -z "$(unbounded_windows_jobs "$sandbox/bounded.yml")" ]; then ok; else bad "a bounded Windows job was reported as unbounded"; fi
 
 if [ "$fail" -gt 0 ]; then
     echo "windows-job-timeouts: $pass passed, $fail failed"

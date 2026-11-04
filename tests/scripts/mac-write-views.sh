@@ -12,7 +12,10 @@ export capture
 printf '%s\n' '#!/usr/bin/env bash' 'printf "%s|%s\n" "${MSYS_NO_PATHCONV:-}" "$*" >> "$capture"' > "$scratch/fake"
 chmod +x "$scratch/fake"
 bash "$repo/scripts/mac-write-views.sh" "$scratch/fake" volume.img /views 2
-mapfile -t calls < "$capture"
+calls=()
+while IFS= read -r call; do
+    calls+=("$call")
+done < "$capture"
 want=(
     '1|symlink volume.img /views l0000 target.txt'
     '1|objid volume.img /views/l0000 9e3779b1000000000571057100000000'
