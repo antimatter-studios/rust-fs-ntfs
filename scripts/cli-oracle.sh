@@ -771,7 +771,9 @@ case "$step" in
         resized() {
             local have
             have="$(wc -c <"$work/model" | tr -d ' ')"
-            if [ "$2" -le "$have" ]; then
+            if [ "$2" -eq 0 ]; then
+                : >"$work/next"
+            elif [ "$2" -le "$have" ]; then
                 head -c "$2" "$work/model" >"$work/next"
             else
                 { cat "$work/model"; head -c $(($2 - have)) /dev/zero; } >"$work/next"
@@ -825,8 +827,16 @@ case "$step" in
             'append 12289 12289 3' 'gap 12289 16385 8193' \
             'empty 0 0 3' 'null 12289 16385 0'; do
             read -r name old at count <<<"$spec"
-            head -c "$old" /dev/zero | tr '\000' Z >"$work/input"
-            head -c "$count" /dev/zero | tr '\000' Q >"$work/patch"
+            if [ "$old" -gt 0 ]; then
+                head -c "$old" /dev/zero | tr '\000' Z >"$work/input"
+            else
+                : >"$work/input"
+            fi
+            if [ "$count" -gt 0 ]; then
+                head -c "$count" /dev/zero | tr '\000' Q >"$work/patch"
+            else
+                : >"$work/patch"
+            fi
             run fs "$image" write "/$name" <"$work/input"
             [ "$status" -eq 0 ] || die "write /$name: $(cat "$image.cli-err")"
             size="$old"
