@@ -468,6 +468,16 @@ jobs:
               exit 1
           fi
 
+      - name: fixture-free copy-repair tests with an executed-test floor
+        run: |
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --release --locked --features cli,harness --test repair_plan_copy
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
+          echo "tests executed: $n (floor 5)"
+          if [ "$n" -lt 5 ]; then
+              echo "::error::only $n tests executed, floor is 5 -- 5 tests are required on 2026-11-04, including the unordered-target refusals for #1253"
+              exit 1
+          fi
+
       - name: Independent operation model contract
         run: |
           # Reuse the measured fixture-free budget, keeping a distinct log.

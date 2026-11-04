@@ -60,6 +60,7 @@ fn holding(mut bytes: Vec<u8>, writes: &[&PlannedWrite]) -> Vec<u8> {
 struct StoppingTarget {
     bytes: Vec<u8>,
     events: Vec<Option<u64>>,
+    can_sync: bool,
     fail_write_at: Option<u64>,
     fail_flush: Option<usize>,
     flushes: usize,
@@ -70,6 +71,7 @@ impl StoppingTarget {
         Self {
             bytes: source_bytes(),
             events: Vec::new(),
+            can_sync: true,
             fail_write_at: None,
             fail_flush: None,
             flushes: 0,
@@ -107,6 +109,44 @@ impl BlockIo for StoppingTarget {
         self.events.push(None);
         Ok(())
     }
+
+    fn can_sync(&self) -> bool {
+        self.can_sync
+    }
+}
+
+fn assert_unordered_target_is_refused(plan: &SavedPlan) {
+    let mut target = StoppingTarget::new();
+    target.can_sync = false;
+
+    let result = apply_plan_units(plan, &mut target);
+
+    assert!(
+        target.events.is_empty(),
+        "a target that cannot order writes was written or flushed: {:?}",
+        target.events
+    );
+    assert_eq!(target.bytes, source_bytes(), "refusal changed the target");
+    assert_eq!(target.flushes, 0, "refusal flushed the target");
+    let refused = result
+        .expect_err("a target that cannot order writes was accepted")
+        .to_string();
+    assert!(
+        refused.contains("#518") && refused.contains("order"),
+        "the refusal does not explain the ordering requirement and name #518: {refused}"
+    );
+}
+
+#[test]
+fn a_target_that_cannot_order_writes_is_refused_before_any_write_or_flush() {
+    assert_unordered_target_is_refused(&plan());
+}
+
+#[test]
+fn an_empty_plan_also_refuses_a_target_that_cannot_order_writes() {
+    let mut empty = plan();
+    empty.units.clear();
+    assert_unordered_target_is_refused(&empty);
 }
 
 #[test]
