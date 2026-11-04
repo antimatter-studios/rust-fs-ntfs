@@ -537,7 +537,7 @@ pub enum CopyRepairError {
     Source(PlanSourceError),
     /// Something already exists at the target path; it is left as it was.
     TargetExists(std::path::PathBuf),
-    /// Opening, copying, writing or flushing failed.
+    /// Opening, copying, moving, writing or flushing failed.
     Io(String),
 }
 
@@ -558,12 +558,15 @@ impl std::fmt::Display for CopyRepairError {
 impl std::error::Error for CopyRepairError {}
 
 /// Apply `plan` by copy-repair: open `source` read-only and check it with
-/// [`check_plan_source`], and only then create `target`, copy the source
-/// into it and apply the plan's units there with [`apply_plan_units`]. The
-/// source is never opened for writing. A source the check refuses leaves
-/// no target behind, and a `target` that already exists is refused and
-/// left as it was. A failure once the target exists leaves it at its path,
-/// holding what had reached it by then, which is not a repaired volume.
+/// [`check_plan_source`], and only then copy the source to a new file beside
+/// `target`, move the complete copy to `target` and apply the plan's units
+/// there with [`apply_plan_units`]. The source is never opened for writing.
+/// A source the check refuses leaves no target behind, and a `target` that
+/// already exists is refused and left as it was. A failed copy removes its
+/// file and leaves nothing at `target`. A failure after the move leaves the
+/// target at its path, holding what had reached it by then, which is not a
+/// repaired volume. On Unix the target has mode 0600 whatever the source's
+/// mode, so it is never open to more users than the source.
 #[cfg(feature = "plan-file")]
 pub fn copy_repair(
     plan: &SavedPlan,
@@ -571,19 +574,81 @@ pub fn copy_repair(
     target: &std::path::Path,
 ) -> Result<(), CopyRepairError> {
     use crate::block_io::PathIo;
-    use std::io::Write;
     let mut from = PathIo::open_ro(source).map_err(CopyRepairError::Io)?;
     check_plan_source(plan, &mut from).map_err(CopyRepairError::Source)?;
-    // `create_new` refuses a path that exists, with no window between a
-    // check and the create.
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(target)
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::AlreadyExists => CopyRepairError::TargetExists(target.into()),
-            _ => CopyRepairError::Io(format!("create '{}': {e}", target.display())),
-        })?;
+    // Refused here so that an existing target costs no copy. The move still
+    // refuses one that appears during the copy.
+    if target.symlink_metadata().is_ok() {
+        return Err(CopyRepairError::TargetExists(target.into()));
+    }
+    // Beside the target, so the move stays within one filesystem.
+    let directory = match target.parent() {
+        Some(directory) if !directory.as_os_str().is_empty() => directory,
+        _ => std::path::Path::new("."),
+    };
+    let (staged, file) = create_staged_copy(directory, target)?;
+    let moved =
+        copy_source(plan, &mut from, file, target).and_then(|()| move_copy(&staged, target));
+    if let Err(e) = moved {
+        let _ = std::fs::remove_file(&staged);
+        return Err(e);
+    }
+    sync_directory(directory).map_err(|e| {
+        CopyRepairError::Io(format!(
+            "the copy is at '{}', but its directory could not be flushed: {e}",
+            target.display()
+        ))
+    })?;
+    let mut to = PathIo::open_rw(target).map_err(CopyRepairError::Io)?;
+    apply_plan_units(plan, &mut to)
+}
+
+/// Create the new file at `path` that only its owner can use, or refuse a
+/// path that exists, with no window between a check and the create.
+#[cfg(feature = "plan-file")]
+fn create_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// A new private file in `directory` for the copy, under a hidden name that
+/// no existing file has.
+#[cfg(feature = "plan-file")]
+fn create_staged_copy(
+    directory: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<(std::path::PathBuf, std::fs::File), CopyRepairError> {
+    let create_err = |e: String| CopyRepairError::Io(format!("create '{}': {e}", target.display()));
+    for n in 0..1000 {
+        let staged = directory.join(format!(
+            ".ntfs-copy-repair-{}-{n}.partial",
+            std::process::id()
+        ));
+        match create_private(&staged) {
+            Ok(file) => return Ok((staged, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(create_err(e.to_string())),
+        }
+    }
+    Err(create_err("no free name beside it".into()))
+}
+
+/// Copy the plan's `source_size` bytes of `from` into `file`, flush them and
+/// close it. `target` is the path the copy is for, which an error names.
+#[cfg(feature = "plan-file")]
+fn copy_source<T: BlockIo + ?Sized>(
+    plan: &SavedPlan,
+    from: &mut T,
+    mut file: std::fs::File,
+    target: &std::path::Path,
+) -> Result<(), CopyRepairError> {
+    use std::io::Write;
     let copy_err =
         |e: String| CopyRepairError::Io(format!("copy into '{}': {e}", target.display()));
     let mut chunk = vec![0u8; COPY_CHUNK];
@@ -596,10 +661,36 @@ pub fn copy_repair(
         at += n as u64;
     }
     // The copy is durable before the first unit lands on it.
-    file.sync_all().map_err(|e| copy_err(e.to_string()))?;
-    drop(file);
-    let mut to = PathIo::open_rw(target).map_err(CopyRepairError::Io)?;
-    apply_plan_units(plan, &mut to)
+    file.sync_all().map_err(|e| copy_err(e.to_string()))
+}
+
+/// Give the complete copy at `staged` the name `target`, refusing a `target`
+/// that exists. The empty file `create_new` makes at `target` claims the
+/// name, and the rename then replaces only that file. A hard link would need
+/// no such file, but exFAT and FAT have none, and an image is often kept
+/// there.
+#[cfg(feature = "plan-file")]
+fn move_copy(staged: &std::path::Path, target: &std::path::Path) -> Result<(), CopyRepairError> {
+    create_private(target).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AlreadyExists => CopyRepairError::TargetExists(target.into()),
+        _ => CopyRepairError::Io(format!("create '{}': {e}", target.display())),
+    })?;
+    std::fs::rename(staged, target).map_err(|e| {
+        let _ = std::fs::remove_file(target);
+        CopyRepairError::Io(format!("move the copy to '{}': {e}", target.display()))
+    })
+}
+
+/// Make a new name in `directory` durable: on Unix a rename is on disk only
+/// once its directory is flushed.
+#[cfg(all(feature = "plan-file", unix))]
+fn sync_directory(directory: &std::path::Path) -> std::io::Result<()> {
+    std::fs::File::open(directory)?.sync_all()
+}
+
+#[cfg(all(feature = "plan-file", not(unix)))]
+fn sync_directory(_: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// How much of the source a copy-repair reads at a time.

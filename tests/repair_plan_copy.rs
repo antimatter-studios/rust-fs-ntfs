@@ -160,6 +160,184 @@ fn a_flush_that_fails_stops_the_apply_before_the_next_unit() {
     );
 }
 
+/// A directory of its own for one test, so the test can see every name a
+/// copy-repair leaves in it.
+#[cfg(unix)]
+fn new_directory(stem: &str) -> std::path::PathBuf {
+    let directory = std::path::PathBuf::from(common::temp_image_path(stem));
+    std::fs::create_dir(&directory).unwrap();
+    directory
+}
+
+/// The names in `directory`, sorted.
+#[cfg(all(unix, feature = "cli"))]
+fn names_in(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+/// `plan` as a plan file, built from the layout in docs/repair-plan-file.md.
+#[cfg(all(unix, feature = "cli"))]
+fn plan_file_bytes(plan: &SavedPlan) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut units = Vec::new();
+    for unit in &plan.units {
+        units.extend_from_slice(&(unit.writes.len() as u32).to_le_bytes());
+        let mut before = Sha256::new();
+        for write in &unit.writes {
+            before.update(&write.before);
+        }
+        units.extend_from_slice(&before.finalize());
+        for write in &unit.writes {
+            units.extend_from_slice(&write.offset.to_le_bytes());
+            units.extend_from_slice(&(write.before.len() as u32).to_le_bytes());
+            units.extend_from_slice(&write.before);
+            units.extend_from_slice(&write.after);
+        }
+    }
+    let mut file = b"NTFSPLAN".to_vec();
+    file.extend_from_slice(&1u32.to_le_bytes());
+    file.extend_from_slice(&(plan.units.len() as u32).to_le_bytes());
+    file.extend_from_slice(&((40 + units.len() + 32) as u64).to_le_bytes());
+    file.extend_from_slice(&plan.source_size.to_le_bytes());
+    file.extend_from_slice(&plan.volume_serial.to_le_bytes());
+    file.extend_from_slice(&units);
+    let sum = Sha256::digest(&file);
+    file.extend_from_slice(&sum);
+    file
+}
+
+#[cfg(all(unix, feature = "cli"))]
+#[test]
+fn a_copy_repair_that_fails_while_copying_leaves_no_target_and_a_retry_succeeds() {
+    // The failure is the kernel's own: fsck.ntfs runs under a file-size limit
+    // smaller than the source, so a write of the copy fails with EFBIG, and
+    // the limit binds only that process.
+    use std::os::unix::process::CommandExt;
+    const LIMIT: libc::rlim_t = 1 << 20;
+
+    let directory = new_directory("copy-repair-failed-copy");
+    let (source, plan_file, target) = (
+        directory.join("source"),
+        directory.join("plan"),
+        directory.join("target"),
+    );
+    let mut pristine = vec![0u8; 3 << 20];
+    pristine[SERIAL_OFFSET..SERIAL_OFFSET + 8].copy_from_slice(&SERIAL.to_le_bytes());
+    std::fs::write(&source, &pristine).unwrap();
+    let plan = SavedPlan {
+        source_size: pristine.len() as u64,
+        volume_serial: SERIAL,
+        units: vec![PlanUnit {
+            writes: vec![write(512, 1)],
+        }],
+    };
+    std::fs::write(&plan_file, plan_file_bytes(&plan)).unwrap();
+
+    let mut limited = std::process::Command::new(env!("CARGO_BIN_EXE_rust-fs-ntfs"));
+    limited
+        .arg("fsck")
+        .arg("--apply")
+        .arg(&plan_file)
+        .arg("--to")
+        .arg(&target)
+        .arg(&source);
+    // SAFETY: both calls are async-signal-safe, and the limit is a local.
+    unsafe {
+        limited.pre_exec(|| {
+            let limit = libc::rlimit {
+                rlim_cur: LIMIT,
+                rlim_max: LIMIT,
+            };
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    let failed = limited.output().expect("spawn fsck.ntfs");
+    let said = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        !failed.status.success() && said.contains("File too large"),
+        "fsck.ntfs did not fail on the file-size limit: {:?}: {said}",
+        failed.status
+    );
+
+    assert!(
+        target.symlink_metadata().is_err(),
+        "a copy that failed left {} bytes at the target path",
+        std::fs::metadata(&target).unwrap().len()
+    );
+    assert_eq!(
+        names_in(&directory),
+        ["plan", "source"],
+        "a copy that failed left another name beside the target"
+    );
+    assert!(
+        std::fs::read(&source).unwrap() == pristine,
+        "a copy that failed changed its source"
+    );
+
+    copy_repair(&plan, &source, &target)
+        .unwrap_or_else(|e| panic!("the retry of a copy that failed: {e}"));
+    assert!(
+        std::fs::read(&target).unwrap() == holding(pristine.clone(), &[&plan.units[0].writes[0]]),
+        "the retry's target holds other bytes than the source with the unit applied"
+    );
+    assert!(
+        std::fs::read(&source).unwrap() == pristine,
+        "the retry changed its source"
+    );
+    assert_eq!(
+        names_in(&directory),
+        ["plan", "source", "target"],
+        "a copy-repair left another name beside its target"
+    );
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_copy_repair_target_is_private_whatever_its_source_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = new_directory("copy-repair-mode");
+    let source = directory.join("source");
+    std::fs::write(&source, source_bytes()).unwrap();
+    // The umask is the process's. This test only asks for 022, the usual
+    // one, and puts back whatever it found before asserting anything.
+    // SAFETY: umask takes and returns a plain value and cannot fail.
+    let umask = unsafe { libc::umask(0o022) };
+    let mut modes = Vec::new();
+    for source_mode in [0o600, 0o644] {
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(source_mode)).unwrap();
+        let target = directory.join(format!("target-{source_mode:o}"));
+        let repaired = copy_repair(&plan(), &source, &target);
+        modes.push((
+            source_mode,
+            repaired.map(|()| std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777),
+        ));
+    }
+    // SAFETY: as above.
+    unsafe { libc::umask(umask) };
+
+    for (source_mode, target_mode) in modes {
+        let target_mode = target_mode
+            .unwrap_or_else(|e| panic!("copy-repair of a source with mode {source_mode:o}: {e}"));
+        assert_eq!(
+            target_mode, 0o600,
+            "a source with mode {source_mode:o} under umask 022 made a target with mode {target_mode:o}"
+        );
+    }
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
 #[test]
 fn a_copy_repair_works_from_a_source_that_refuses_writes_and_leaves_it_byte_for_byte() {
     // A source opened for writing is refused here, whatever is then written
