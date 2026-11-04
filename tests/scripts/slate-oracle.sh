@@ -82,6 +82,25 @@ grep -q $'^ours-4k\tours\t[0-9a-f]\\{64\\}\tclean\t0\tclean\t0\tagree$' "$WORK/o
     bad "a row carries case, origin, hash and both verdicts with exit codes"
 [ -s "$WORK/out/ours-4k.slate.txt" ] && ok || bad "the checker's own report is kept for each case"
 
+cat >"$WORK/checker-drains" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+exec "$(dirname "$0")/checker" "$@"
+SH
+chmod +x "$WORK/checker-drains"
+cases 'win-4k windows win-4k.img clean' 'ours-4k ours ours-4k.img not-clean'
+CHECKER="$WORK/checker-drains" compare 1
+rc=$?
+[ "$rc" -eq 1 ] && ok || bad "a checker that drains stdin still fails the second case: exit $rc, want 1: $(cat "$WORK/log")"
+grep -q $'^win-4k\twindows\t.*\tclean\t0\tclean\t0\tagree$' "$WORK/out/verdicts.tsv" 2>/dev/null && ok ||
+    bad "a checker that drains stdin records the first agreeing row: $(cat "$WORK/out/verdicts.tsv" 2>/dev/null)"
+grep -q $'^ours-4k\tours\t.*\tnot-clean\t0\tclean\t0\twindows-rejected$' "$WORK/out/verdicts.tsv" 2>/dev/null && ok ||
+    bad "a checker that drains stdin records the second disagreeing row: $(cat "$WORK/out/verdicts.tsv" 2>/dev/null)"
+grep -q 'FAIL ours-4k: Windows chkdsk did not accept' "$WORK/log" && ok ||
+    bad "a checker that drains stdin reports the second case's disagreement: $(cat "$WORK/log")"
+[ "$(wc -l <"$WORK/out/verdicts.tsv" | tr -d ' ')" = 3 ] && ok ||
+    bad "a checker that drains stdin keeps the header and both rows: $(cat "$WORK/out/verdicts.tsv")"
+
 cases 'win-4k windows win-4k.img clean' 'disagree ours disagree.img clean'
 compare 2
 rc=$?
@@ -250,6 +269,26 @@ rc=$?
     bad "the written copy is kept in OUT/images and differs from its source"
 grep -q $'^copy\tcopy.img\t'"$before"$'\t[0-9a-f]\\{64\\}\t0\twritten$' "$WORK/wout/slate-writes.tsv" 2>/dev/null && ok ||
     bad "slate-writes.tsv records the case, source, both hashes, exit and result: $(cat "$WORK/wout/slate-writes.tsv" 2>/dev/null)"
+
+cat >"$WORK/writer-drains" <<'SH'
+#!/usr/bin/env bash
+cat >/dev/null
+exec "$(dirname "$0")/writer" "$@"
+SH
+chmod +x "$WORK/writer-drains"
+writes 'copy-first copy.img' 'copy-second copy.img'
+bash "$ROOT/scripts/slate-oracle.sh" write "$WORK/writes.tsv" "$WORK/images" \
+    "$WORK/writer-drains" "$WORK/wout-drains" 1 >"$WORK/log" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] && ok || bad "a writer that drains stdin writes both cases: exit $rc, want 0: $(cat "$WORK/log")"
+for name in copy-first copy-second; do
+    grep -q "^$name"$'\tcopy.img\t'"$before"$'\t[0-9a-f]\\{64\\}\t0\twritten$' "$WORK/wout-drains/slate-writes.tsv" 2>/dev/null && ok ||
+        bad "a writer that drains stdin records $name as written: $(cat "$WORK/wout-drains/slate-writes.tsv" 2>/dev/null)"
+    [ -f "$WORK/wout-drains/images/$name.img" ] && [ "$(sha "$WORK/wout-drains/images/$name.img")" != "$before" ] && ok ||
+        bad "a writer that drains stdin keeps the changed image for $name"
+done
+[ "$(wc -l <"$WORK/wout-drains/slate-writes.tsv" | tr -d ' ')" = 3 ] && ok ||
+    bad "a writer that drains stdin keeps the header and both rows: $(cat "$WORK/wout-drains/slate-writes.tsv")"
 
 writes 'copy copy.img' 'scribble scribble.img'
 write 1

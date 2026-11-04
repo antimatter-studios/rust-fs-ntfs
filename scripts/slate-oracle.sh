@@ -194,7 +194,7 @@ write() {
             if ! cp "$original" "$staged" || ! chmod 0444 "$staged"; then
                 die "cannot make a read-only copy of $original"
             fi
-            "$writer" "$staged" "$new" "$root_file" "$offset" "$expected" "$replacement" >"$report" 2>&1
+            "$writer" "$staged" "$new" "$root_file" "$offset" "$expected" "$replacement" </dev/null >"$report" 2>&1
             status=$?
             [ -f "$new" ] && after="$(sha "$new")"
             if [ "$(sha "$original")" != "$digest" ] || [ "$(sha "$staged")" != "$digest" ]; then
@@ -410,7 +410,7 @@ compare() {
             if ! cp "$source" "$copy" || ! chmod 0444 "$copy"; then
                 die "cannot make a read-only copy of $source"
             fi
-            "$checker" --check "$copy" >"$report" 2>&1
+            "$checker" --check "$copy" </dev/null >"$report" 2>&1
             status=$?
             case "$status" in
                 0) slate=clean ;;
