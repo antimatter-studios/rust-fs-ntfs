@@ -22,7 +22,7 @@
 #   suite       2,919 / 148,548 (CI Linux, release run 38450689361) 3,900 / 198,000
 #   kernel      243 / 10,875 (CI Linux, cold, run 38233380518)    325 / 14,500
 #   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
-#   scripts     137 / 4,478 (38 shell tests, Mac, 2026-11-04)     185 / 6,000
+#   scripts     167 / 6,128 (41 shell tests, Mac, 2026-11-04)     220 / 8,000
 #   matrix      1,381 / 100,339 green (72 cases, 2026-10-10)       1,850 / 135,000
 #   cli         27 / 1,035 (estimate: CI's 5-file run + test-docs)  36 / 1,380
 #   cli-oracle  21 / 955 (CI Linux, 2026-10-21, 4 files)         21 / 990
@@ -61,11 +61,27 @@
 # 2026-09-26. The cap is 135 lines / 3,500 bytes, about one third of headroom.
 
 # THE SCRIPTS ROW MOVED ON 2026-11-04 for #1260, from 135/3,500 to
-# 185/6,000. After the #1246 and #1247 guard portability fixes on main
-# at 64d52604, `chore test:scripts` ran all 38 files successfully on an
-# arm64 Mac with /bin/bash 3.2.57 and system BSD sed: 137 lines / 4,478
-# bytes in tmp/logs/scripts.log, but exit 65 against the old 11-file budget.
+# 185/6,000. With the #1246 and #1247 guard portability fixes (#1261, main
+# at 39dec3fa), `chore test:scripts` ran all 38 files successfully on an
+# arm64 Mac with /bin/bash 3.2.57, system BSD sed, Python 3.12 with PyYAML
+# and pwsh 7.6.9: 137 lines / 4,478 bytes in tmp/logs/scripts.log, which
+# exited 65 against the old 11-file budget.
 # The new caps add roughly a third; no output or assertion is removed.
+# Linux CI printed the same bytes in its shell tests step (run 41746998482,
+# job 126322878709, timestamps stripped). Both logs have SHA-256
+# d0da25c78cb8a6f937bd6d55b549fd5ed86fea30498cc0d6ed05aa8d7a78ff67. That run's
+# step did not read this budget (#1264).
+
+# THE SCRIPTS ROW MOVED AGAIN ON 2026-11-04 for #1260, from 185/6,000 to
+# 220/8,000. #1267's guard prints 28 lines and took the tier to 166 lines /
+# 6,086 bytes on main at 6a0b009b, which exited 65 on the byte cap with every
+# guard passing. Measured on the tree 1db93c4e, which is main at 6a0b009b
+# plus #1269 at 783a1550 (one more guard file) on the same Mac and tools:
+# all 41 files ran, 167 lines / 6,128 bytes in tmp/logs/scripts.log, exit 65
+# against the old row, SHA-256
+# 3b697a9f8e5ea628fbab0885018f90128f14d193061f744f155a207ca4cdd0eb.
+# The new caps are about 30% over that measurement. No output or assertion is
+# removed.
 
 # THE SEMVER ROW is rust-fs-ext4's measurement of the same script: 11 lines /
 # 489 bytes passing with the baseline's rustdoc cached, one line more when it
@@ -223,7 +239,7 @@ mkfs          160    5200
 suite        3900  198000
 kernel        325    14500
 asan         1100   72000
-scripts       185    6000
+scripts       220    8000
 semver         40    4000
 matrix       1850  135000
 cli            54    1784
