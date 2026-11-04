@@ -703,12 +703,23 @@ const COPY_CHUNK: usize = 1 << 20;
 /// undoes nothing: every earlier unit is whole and flushed, the failing
 /// unit's earlier writes stay on `target` with no sync after them, and no
 /// later unit is written. `target` must already hold what the plan was made
-/// from; nothing is checked here.
+/// from; its contents are not checked here.
+///
+/// A target whose [`BlockIo::can_sync`] is false is refused before any
+/// write or flush, because the unit boundaries require ordered writes
+/// (#518). This also applies to an empty plan.
 #[cfg(feature = "plan-file")]
 pub fn apply_plan_units<T: BlockIo + ?Sized>(
     plan: &SavedPlan,
     target: &mut T,
 ) -> Result<(), CopyRepairError> {
+    if !target.can_sync() {
+        return Err(CopyRepairError::Io(
+            "applying the plan refused: the target cannot flush its writes to stable storage \
+             in order (#518)"
+                .into(),
+        ));
+    }
     for (u, unit) in plan.units.iter().enumerate() {
         for (w, write) in unit.writes.iter().enumerate() {
             target
