@@ -335,11 +335,13 @@ jobs:
       # The shell tests (tests/scripts/*.sh): the scripts that turn the
       # Windows VM's output into verdicts. By glob, like `chore test:scripts`.
       # Through run-script-tests.sh, which fails if ANY test failed; a bare
-      # for-loop reported only the last test's status (#362).
+      # for-loop reported only the last test's status (#362). Through tier.sh,
+      # so the scripts row of tier-budgets.txt is enforced here and the run is
+      # kept in tmp/logs/scripts.log, in the test-logs artifact (#1264).
       - name: shell tests
         if: matrix.os == 'ubuntu-latest'
         shell: bash
-        run: scripts/run-script-tests.sh tests/scripts
+        run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips scripts -- scripts/run-script-tests.sh tests/scripts
 
       # The PowerShell the capture workflow runs on Windows, driven with
       # chkdsk's real reports so it is tested on every pull request rather

@@ -36,11 +36,15 @@ chores_cmd="$(awk '
     }
 ' "$ROOT/chores.yml")"
 
-# The `run:` of the step named `shell tests` in ci.yml.
+# The `run:` of the step named `shell tests` in ci.yml, after its tier.sh prefix.
 ci_cmd="$(awk '
     /^      - name: shell tests$/ { step = 1; next }
     step && /^      - / { exit }
-    step && /^        run: / { sub(/^        run: /, ""); print; exit }
+    step && /^        run: / {
+        sub(/^        run: /, "")
+        sub(/^bash \.\.\/rust-fs-core\/scripts\/tier\.sh (--refuse-[a-z]+ )*scripts -- /, "")
+        print; exit
+    }
 ' "$ROOT/.github/workflows/ci.yml")"
 
 [ -n "$chores_cmd" ] && ok || bad "chores.yml test:scripts runs through tier.sh scripts"
