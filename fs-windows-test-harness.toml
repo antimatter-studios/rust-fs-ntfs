@@ -757,7 +757,9 @@ expect_exit = 0
 # Turn quota tracking and enforcement on, give the file at `path` to an
 # owner with a hard limit `headroom_bytes` above its usage, and write
 # `write_bytes` to it: what Windows does with a write past the limit lands
-# in quota-enforce.txt. Fails when Windows accepts the write (#867).
+# in quota-enforce.txt. Fails when Windows accepts the write (#867), when the
+# write fails with anything but the measured status, or when the owner is
+# charged more than the limit afterwards (#1244).
 #
 # Step fields:
 #   path            — file path inside the volume (e.g. "/limited.bin")
