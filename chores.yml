@@ -466,17 +466,18 @@ tasks:
 
   check:ci-gate:
     desc: ci-ok needs every gating job in ci.yml, and .github-guard requires ci-ok alone
-    # rust-fs-core's ci-gate, run in place (#409). Two jobs are
+    # rust-fs-core's ci-gate, run in place (#409). Three jobs are
     # declared non-gating, and each has to carry `if:` or
     # `continue-on-error:` for the declaration to be accepted:
     #   asan                  advisory by decision, so not in ci-ok's needs;
+    #   box-cache             main-only cache maintenance, never a queue dependency;
     #   validate-mkfs-windows `if: always()` so it can turn a skipped
     #                         Windows run into a verdict; it IS in ci-ok's
     #                         needs, and declaring it says that its condition
     #                         is deliberate rather than a job quietly skipped.
     # A job added to ci.yml goes into ci-ok's needs, or here with a reason.
     cmds:
-      - "CI_GATE_NON_GATING='asan validate-mkfs-windows' bash ../rust-fs-core/scripts/ci-gate.sh"
+      - "CI_GATE_NON_GATING='asan box-cache validate-mkfs-windows' bash ../rust-fs-core/scripts/ci-gate.sh"
 
   build:
     desc: Debug build

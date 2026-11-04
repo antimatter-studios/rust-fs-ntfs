@@ -59,5 +59,24 @@ grep -q "^        if: github.event_name != 'merge_group'$" "$CI" && ok || bad "t
 # ci-ok still reads the planner's decision.
 grep -q 'CODE: \${{ needs.changes.outputs.code }}' "$CI" && ok || bad "ci-ok does not read the run's depth"
 
+box_cache="$(sed -n '/^  box-cache:/,/^  kernel:/p' "$CI")"
+printf '%s\n' "$box_cache" | grep -q "^    if: github.event_name == 'push' && github.ref == 'refs/heads/main'$" && ok || bad "box cache must run only on a push to main"
+printf '%s\n' "$box_cache" | grep -q '^          chore siblings$' && ok || bad "box cache does not use the pinned siblings"
+printf '%s\n' "$box_cache" | grep -q 'ci-setup-linux.sh --box-cache-key' && ok || bad "box cache key does not come from the pinned harness"
+printf '%s\n' "$box_cache" | grep -q 'key: \${{ steps.vm-host.outputs.box-cache-key }}' && ok || bad "box cache key differs from the kernel job"
+printf '%s\n' "$box_cache" | grep -q 'path: ~/.vagrant.d/boxes' && ok || bad "box cache path differs from the kernel job"
+printf '%s\n' "$box_cache" | grep -q 'vagrant box add "$box" --box-version "$box_version" --provider libvirt --architecture amd64' && ok || bad "box cache does not fetch the pinned Linux box"
+if printf '%s\n' "$box_cache" | grep -Eq 'needs:|vagrant up|chore (test|linux:up|vm:up)'; then
+    bad "box cache must not depend on a suite or boot a VM"
+else
+    ok
+fi
+grep -q "CI_GATE_NON_GATING='asan box-cache validate-mkfs-windows'" "$ROOT/chores.yml" && ok || bad "main-only box cache is not declared non-gating"
+if sed -n '/^  ci-ok:/,$p' "$CI" | grep -q 'needs:.*box-cache'; then
+    bad "box cache must not lengthen the merge queue path"
+else
+    ok
+fi
+
 printf 'ci plan: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

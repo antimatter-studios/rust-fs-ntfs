@@ -1990,6 +1990,44 @@ jobs:
           path: tmp/logs/*.log
           if-no-files-found: error
 
+  box-cache:
+    name: pinned Vagrant box cache on main
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install chore and check out sibling repos
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 "https://github.com/antimatter-studios/chore/releases/download/v0.11.0/chore-0.11.0-linux-x86_64.tar.gz" \
+            | sudo tar xz -C /usr/local/bin chore
+          chore siblings
+      - name: Pinned box cache key
+        id: vm-host
+        run: echo "box-cache-key=$(bash ../fs-linux-test-harness/scripts/ci-setup-linux.sh --box-cache-key)" >> "$GITHUB_OUTPUT"
+      - name: Cache the Vagrant box
+        id: box
+        uses: actions/cache@v4
+        with:
+          path: ~/.vagrant.d/boxes
+          key: ${{ steps.vm-host.outputs.box-cache-key }}
+      - name: KVM, QEMU and Vagrant
+        if: steps.box.outputs.cache-hit != 'true'
+        run: ../fs-linux-test-harness/scripts/ci-setup-linux.sh
+      - name: Fetch the pinned box without booting a VM
+        if: steps.box.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          vagrantfile=../fs-linux-test-harness/vagrant/Vagrantfile
+          box="$(sed -n 's/^ *config\.vm\.box = "\(cloud-image[^"]*\)"$/\1/p' "$vagrantfile" | head -1)"
+          box_version="$(sed -n 's/^ *config\.vm\.box_version = "\([^"]*\)"$/\1/p' "$vagrantfile" | head -1)"
+          test -n "$box"
+          test -n "$box_version"
+          vagrant box add "$box" --box-version "$box_version" --provider libvirt --architecture amd64
+
   kernel:
     # `chore test:kernel`: Linux's ntfs3 mounts what this crate wrote and
     # writes what this crate must read, in the fs-linux-test-harness VM
