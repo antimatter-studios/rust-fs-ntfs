@@ -28,17 +28,59 @@ use std::path::Path;
 /// The archive's first eight bytes.
 pub const ARCHIVE_MAGIC: [u8; 8] = *b"NTRESCUE";
 /// The archive layout this module writes. A reader refuses any other.
-pub const ARCHIVE_VERSION: u32 = 1;
+pub const ARCHIVE_VERSION: u32 = 2;
 /// Bytes in the archive header.
 pub const HEADER_LEN: usize = 32;
 /// Bytes in a record header; a data record's payload follows it.
-pub const RECORD_HEADER_LEN: usize = 24;
+pub const RECORD_HEADER_LEN: usize = 28;
 /// A record whose payload is the source's bytes over its span.
 pub const KIND_DATA: u32 = 1;
 /// A record naming a span the source could not read. It has no payload.
 pub const KIND_UNREADABLE: u32 = 2;
 /// The bulk read size [`ScanOptions::default`] uses.
 pub const DEFAULT_CHUNK: usize = 1024 * 1024;
+
+/// The class of source space a record's span was in. A record never spans
+/// two classes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum RangeClass {
+    /// The scan knew no layout for the span: a linear scan's every record.
+    Unclassified = 0,
+    /// NTFS metadata: the boot sector and its backup, `$MFT` and `$MFTMirr`.
+    Metadata = 1,
+    /// Clusters `$Bitmap` marks allocated.
+    Allocated = 2,
+    /// Clusters `$Bitmap` marks free.
+    Free = 3,
+    /// The bytes past the volume's last whole cluster.
+    Tail = 4,
+}
+
+impl RangeClass {
+    /// Every class, in the order of its code.
+    pub const ALL: [RangeClass; 5] = [
+        RangeClass::Unclassified,
+        RangeClass::Metadata,
+        RangeClass::Allocated,
+        RangeClass::Free,
+        RangeClass::Tail,
+    ];
+
+    /// The class's code in a record header.
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+}
+
+/// What a scan archived of one class of space.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClassBytes {
+    /// Bytes held in data records of the class.
+    pub archived: u64,
+    /// Bytes named by unreadable records of the class.
+    pub unreadable: u64,
+}
 
 const MAX_CHUNK: usize = 64 * 1024 * 1024;
 const EMPTY_SOURCE: &str = "the source is empty: there is nothing to rescue";
@@ -175,12 +217,20 @@ pub struct ScanReport {
     pub unreadable_spans: u64,
     /// Bulk reads that failed and were retried sector by sector.
     pub failed_bulk_reads: u64,
+    /// Archived and unreadable bytes per class, indexed by
+    /// [`RangeClass::code`]; read them with [`ScanReport::class`].
+    pub classes: [ClassBytes; 5],
 }
 
 impl ScanReport {
     /// Whether the archive holds every byte of the source.
     pub fn is_complete(&self) -> bool {
         self.unreadable_bytes == 0 && self.readable_bytes == self.source_size
+    }
+
+    /// What the scan archived of `class`.
+    pub fn class(&self, class: RangeClass) -> ClassBytes {
+        self.classes[class as usize]
     }
 }
 
@@ -274,10 +324,13 @@ fn retry_by_sector<S: RescueSource + ?Sized>(
 }
 
 /// The record stream: appends records in source order, holding back the
-/// current unreadable span until it ends so adjacent sectors become one.
+/// current unreadable span until it ends so adjacent sectors of one class
+/// become one.
 struct Records<'a> {
     archive: &'a mut File,
-    pending: Option<(u64, u64)>,
+    /// The class of space the records being made are in.
+    class: RangeClass,
+    pending: Option<(u64, u64, RangeClass)>,
     report: ScanReport,
 }
 
@@ -285,6 +338,7 @@ impl<'a> Records<'a> {
     fn new(archive: &'a mut File, size: u64) -> Self {
         Self {
             archive,
+            class: RangeClass::Unclassified,
             pending: None,
             report: ScanReport {
                 source_size: size,
@@ -295,39 +349,51 @@ impl<'a> Records<'a> {
 
     fn data(&mut self, offset: u64, payload: &[u8]) -> Result<(), String> {
         self.close_span()?;
-        self.append(offset, payload.len() as u64, KIND_DATA, payload)?;
+        let class = self.class;
+        self.append(offset, payload.len() as u64, KIND_DATA, class, payload)?;
         self.report.readable_bytes += payload.len() as u64;
+        self.report.classes[class as usize].archived += payload.len() as u64;
         self.report.data_records += 1;
         Ok(())
     }
 
     fn unreadable(&mut self, offset: u64, len: u64) -> Result<(), String> {
+        let class = self.class;
         match &mut self.pending {
-            Some((start, span)) if *start + *span == offset => *span += len,
+            Some((start, span, of)) if *of == class && *start + *span == offset => *span += len,
             _ => {
                 self.close_span()?;
-                self.pending = Some((offset, len));
+                self.pending = Some((offset, len, class));
             }
         }
         Ok(())
     }
 
     fn close_span(&mut self) -> Result<(), String> {
-        if let Some((offset, len)) = self.pending.take() {
-            self.append(offset, len, KIND_UNREADABLE, &[])?;
+        if let Some((offset, len, class)) = self.pending.take() {
+            self.append(offset, len, KIND_UNREADABLE, class, &[])?;
             self.report.unreadable_bytes += len;
+            self.report.classes[class as usize].unreadable += len;
             self.report.unreadable_spans += 1;
         }
         Ok(())
     }
 
-    fn append(&mut self, offset: u64, len: u64, kind: u32, payload: &[u8]) -> Result<(), String> {
+    fn append(
+        &mut self,
+        offset: u64,
+        len: u64,
+        kind: u32,
+        class: RangeClass,
+        payload: &[u8],
+    ) -> Result<(), String> {
         let mut head = [0u8; RECORD_HEADER_LEN];
         head[0..8].copy_from_slice(&offset.to_le_bytes());
         head[8..16].copy_from_slice(&len.to_le_bytes());
         head[16..20].copy_from_slice(&kind.to_le_bytes());
-        let crc = crc32(&[&head[..20], payload]);
-        head[20..24].copy_from_slice(&crc.to_le_bytes());
+        head[20..24].copy_from_slice(&class.code().to_le_bytes());
+        let crc = crc32(&[&head[..24], payload]);
+        head[24..28].copy_from_slice(&crc.to_le_bytes());
         let what = |e: io::Error| format!("append the record for {offset}+{len}: {e}");
         self.archive.write_all(&head).map_err(what)?;
         self.archive.write_all(payload).map_err(what)?;
