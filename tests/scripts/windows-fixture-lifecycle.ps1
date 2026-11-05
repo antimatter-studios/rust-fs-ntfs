@@ -83,6 +83,12 @@ function Dismount-ScratchVhd {
     $global:calls.Add("dismount:$Vhd")
     $global:attached = $false
 }
+# The helper remakes the partition at the image's size; record that too.
+function Resize-FixturePartition {
+    param([string]$DriveLetter, [long]$Size)
+    $global:calls.Add("partition:${DriveLetter}:$Size")
+    $DriveLetter
+}
 
 function Invoke-Case {
     param([string]$Name, [scriptblock]$Populate, [bool]$FailSync)
@@ -127,6 +133,9 @@ $ok = Invoke-Case -Name 'success' -FailSync $false -Populate {
 Check ($null -eq $ok.Error) "success: no error reaches the caller ($($ok.Error))"
 Check ($global:populatedRoot -eq 'Q:\') "success: Populate receives the mounted root ($global:populatedRoot)"
 Check ($ok.Calls -contains 'format:Q:NTFS:4096:LIFECYCLE') 'success: the mounted letter is formatted NTFS with the default cluster size'
+Check ([array]::IndexOf($ok.Calls, "partition:Q:$(256MB)") -ge 0 -and
+       [array]::IndexOf($ok.Calls, "partition:Q:$(256MB)") -lt [array]::IndexOf($ok.Calls, 'format:Q:NTFS:4096:LIFECYCLE')) `
+    'success: the partition is made the image''s 256 MiB before it is formatted'
 Check (@($ok.Calls | Where-Object { $_ -eq "sync:$($ok.Owned)" }).Count -eq 1) 'success: the owned VHD is synced back once'
 Check ((Test-Path -LiteralPath $ok.Image) -and ((Get-Item -LiteralPath $ok.Image).Length -eq 256MB)) 'success: the raw image is 256 MiB'
 Check ([array]::IndexOf($ok.Calls, "sync:$($ok.Owned)") -lt [array]::IndexOf($ok.Calls, "dismount:$($ok.Owned)")) 'success: sync runs before the dismount'
