@@ -2,7 +2,8 @@
 //!
 //! The sources are the partitions Windows left mid-write and the copies
 //! Windows recovered from them (`test-disks/windows-interrupted-{1,6}*`).
-//! Nothing here reads an archive through this crate. The test parses the
+//! Only the read-back tests read an archive through this crate, and they
+//! grade it against the test's own parse. The test parses the
 //! layout `docs/rescue-archive.md` documents, checks every CRC-32 with an
 //! independent implementation (`crc32fast`), rebuilds an image from the data
 //! records with its own file writes, and reads each rebuilt copy Windows
@@ -12,7 +13,8 @@
 mod common;
 
 use fs_ntfs::rescue::{
-    scan, scan_to_path, FileSource, RangeClass, ReadFailure, RescueSource, ScanOptions,
+    read_archive, scan, scan_to_path, FileSource, RangeClass, ReadFailure, RescueSource,
+    ScanOptions,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -798,4 +800,110 @@ fn a_scan_stopped_after_the_allocated_pass_keeps_every_file() {
             std::fs::remove_file(path).expect("remove a scratch file");
         }
     }
+}
+
+/// The first 8 MiB of a Windows capture, with three sectors unreadable,
+/// scanned in 256 KiB chunks: an archive with both kinds of record that is
+/// small enough to cut at every record boundary. Returns the archive's
+/// bytes and where each record starts in them, by the documented layout,
+/// with the archive's length last.
+fn cut_fixture() -> (Vec<u8>, Archive, Vec<u64>) {
+    let src = unpack("windows-interrupted-1");
+    let prefix = common::temp_image_path("rescue_prefix");
+    let mut head = vec![0u8; 8 << 20];
+    File::open(&src)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .expect("read the capture's first 8 MiB");
+    new_file(&prefix)
+        .write_all(&head)
+        .expect("write the prefix");
+    let mut source = Faulty {
+        inner: FileSource::open(Path::new(&prefix)).unwrap(),
+        bad: BTreeSet::from([100, 101, 9000]),
+        reads: 0,
+    };
+    let archive = common::temp_image_path("rescue_archive");
+    let options = ScanOptions {
+        sector_size: 512,
+        chunk_size: 256 << 10,
+    };
+    scan(&mut source, &mut new_file(&archive), options).expect("scan the prefix");
+    let parsed = parse(&archive, |_, _| {});
+    let bytes = std::fs::read(&archive).expect("read the archive");
+    let mut starts = vec![32u64];
+    for r in &parsed.records {
+        let payload = if r.kind == 1 { r.len } else { 0 };
+        starts.push(starts.last().unwrap() + 28 + payload);
+    }
+    assert_eq!(
+        *starts.last().unwrap(),
+        bytes.len() as u64,
+        "the archive's length"
+    );
+    assert!(
+        !parsed.unreadable().is_empty(),
+        "the fixture has unreadable records"
+    );
+    for path in [&src, &prefix, &archive] {
+        std::fs::remove_file(path).expect("remove a scratch file");
+    }
+    (bytes, parsed, starts)
+}
+
+#[test]
+fn an_archive_cut_short_reads_back_to_its_last_whole_record() {
+    let (bytes, parsed, starts) = cut_fixture();
+    let n = parsed.records.len();
+    for k in 0..=n {
+        let mut cuts = vec![starts[k]];
+        if k < n {
+            // Inside the header, one byte short of it, and inside the payload.
+            cuts.extend([starts[k] + 1, starts[k] + 27, starts[k + 1] - 1]);
+            if parsed.records[k].kind == 1 {
+                cuts.push(starts[k] + 28 + parsed.records[k].len / 2);
+            }
+        }
+        for cut in cuts {
+            let got = read_archive(&mut &bytes[..cut as usize])
+                .unwrap_or_else(|e| panic!("cut at {cut}: {e}"));
+            assert_eq!(got.sector_size, parsed.sector, "cut at {cut}");
+            assert_eq!(got.source_size, parsed.size, "cut at {cut}");
+            assert_eq!(
+                got.whole_len, starts[k],
+                "cut at {cut}: the whole records' end"
+            );
+            assert_eq!(
+                got.torn_bytes,
+                cut - starts[k],
+                "cut at {cut}: the torn bytes"
+            );
+            assert_eq!(got.records.len(), k, "cut at {cut}: the whole records");
+            for (i, (r, want)) in got.records.iter().zip(&parsed.records).enumerate() {
+                assert_eq!(
+                    (r.position, r.offset, r.len, r.kind, r.class.code()),
+                    (starts[i], want.offset, want.len, want.kind, want.class),
+                    "cut at {cut}: record {i}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_whole_record_with_a_bad_checksum_is_refused_as_damage() {
+    let (mut bytes, parsed, starts) = cut_fixture();
+    let i = (parsed.records.len() / 2..parsed.records.len())
+        .find(|&i| parsed.records[i].kind == 1)
+        .expect("a data record in the archive's second half");
+    let at = starts[i] + 28 + parsed.records[i].len / 2;
+    bytes[at as usize] ^= 0x01;
+    let err = read_archive(&mut &bytes[..])
+        .expect_err("a flipped payload byte is damage, not an interruption");
+    assert!(
+        err.contains(&format!("archive byte {}", starts[i])),
+        "the refusal names the damaged record: {err}"
+    );
+    // Cut inside that record, the damage is a torn tail like any other.
+    let got = read_archive(&mut &bytes[..at as usize]).expect("the cut archive");
+    assert_eq!(got.records.len(), i);
 }

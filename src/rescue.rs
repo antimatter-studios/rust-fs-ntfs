@@ -606,6 +606,143 @@ fn write_header(archive: &mut File, sector_size: u32, size: u64) -> Result<(), S
         .map_err(|e| format!("write the archive header: {e}"))
 }
 
+/// One whole record read back from an archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchivedRecord {
+    /// Where the record's header starts in the archive.
+    pub position: u64,
+    /// The record's span of the source.
+    pub offset: u64,
+    pub len: u64,
+    /// [`KIND_DATA`] or [`KIND_UNREADABLE`].
+    pub kind: u32,
+    pub class: RangeClass,
+}
+
+/// An archive read back to its last whole record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveContents {
+    pub sector_size: u32,
+    pub source_size: u64,
+    /// Every whole record, in archive order.
+    pub records: Vec<ArchivedRecord>,
+    /// The archive's length up to the end of its last whole record: where a
+    /// resumed scan appends.
+    pub whole_len: u64,
+    /// Bytes past [`ArchiveContents::whole_len`]: a record an interruption
+    /// cut short. Zero when the archive ends on a whole record.
+    pub torn_bytes: u64,
+}
+
+/// Read an archive back to its last whole record, checking every CRC-32.
+///
+/// A record cut short at the end of the archive, in its header or its
+/// payload, was being written when the scan was interrupted: it is left
+/// out and its bytes counted in [`ArchiveContents::torn_bytes`]. A whole
+/// record that breaks a rule of `docs/rescue-archive.md` is damage and is
+/// refused, naming the archive byte its header starts at.
+pub fn read_archive<R: Read>(archive: &mut R) -> Result<ArchiveContents, String> {
+    let mut head = [0u8; HEADER_LEN];
+    let got = read_up_to(archive, &mut head)?;
+    if got < HEADER_LEN {
+        return Err(format!("the archive ends {got} bytes into its header"));
+    }
+    if head[0..8] != ARCHIVE_MAGIC {
+        return Err("the archive's magic is not NTRESCUE".into());
+    }
+    let version = le32(&head[8..12]);
+    if version != ARCHIVE_VERSION {
+        return Err(format!(
+            "the archive is version {version}; only version {ARCHIVE_VERSION} is read"
+        ));
+    }
+    if le32(&head[24..28]) != 0 {
+        return Err("the archive header's reserved bytes are not zero".into());
+    }
+    if le32(&head[28..32]) != crc32(&[&head[..28]]) {
+        return Err("the archive header fails its CRC-32".into());
+    }
+    let mut contents = ArchiveContents {
+        sector_size: le32(&head[12..16]),
+        source_size: u64::from_le_bytes(head[16..24].try_into().expect("8 bytes")),
+        records: Vec::new(),
+        whole_len: HEADER_LEN as u64,
+        torn_bytes: 0,
+    };
+    let mut payload = Vec::new();
+    loop {
+        let position = contents.whole_len;
+        let mut rh = [0u8; RECORD_HEADER_LEN];
+        let got = read_up_to(archive, &mut rh)?;
+        if got < RECORD_HEADER_LEN {
+            contents.torn_bytes = got as u64;
+            return Ok(contents);
+        }
+        let damaged = |why: String| format!("the record at archive byte {position} {why}");
+        let offset = u64::from_le_bytes(rh[0..8].try_into().expect("8 bytes"));
+        let len = u64::from_le_bytes(rh[8..16].try_into().expect("8 bytes"));
+        let kind = le32(&rh[16..20]);
+        let code = le32(&rh[20..24]);
+        let class = RangeClass::ALL
+            .into_iter()
+            .find(|c| c.code() == code)
+            .ok_or_else(|| damaged(format!("has class {code}")))?;
+        if len == 0 {
+            return Err(damaged("has a zero length".into()));
+        }
+        if offset
+            .checked_add(len)
+            .is_none_or(|end| end > contents.source_size)
+        {
+            return Err(damaged(format!(
+                "runs past the source's {} bytes",
+                contents.source_size
+            )));
+        }
+        let payload_len = match kind {
+            KIND_DATA if len <= MAX_CHUNK as u64 => len as usize,
+            KIND_DATA => return Err(damaged(format!("holds {len} bytes, past {MAX_CHUNK}"))),
+            KIND_UNREADABLE => 0,
+            _ => return Err(damaged(format!("has kind {kind}"))),
+        };
+        payload.resize(payload_len, 0);
+        let got = read_up_to(archive, &mut payload)?;
+        if got < payload_len {
+            contents.torn_bytes = (RECORD_HEADER_LEN + got) as u64;
+            return Ok(contents);
+        }
+        if le32(&rh[24..28]) != crc32(&[&rh[..24], &payload]) {
+            return Err(damaged(format!("for {offset}+{len} fails its CRC-32")));
+        }
+        contents.records.push(ArchivedRecord {
+            position,
+            offset,
+            len,
+            kind,
+            class,
+        });
+        contents.whole_len += (RECORD_HEADER_LEN + payload_len) as u64;
+    }
+}
+
+/// Read as many bytes as `r` has, up to `buf.len()`.
+fn read_up_to<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<usize, String> {
+    let mut n = 0;
+    while n < buf.len() {
+        match r.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(m) => n += m,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(format!("read the archive: {e}")),
+        }
+    }
+    Ok(n)
+}
+
+fn le32(b: &[u8]) -> u32 {
+    u32::from_le_bytes(b.try_into().expect("4 bytes"))
+}
+
 /// Make a newly created archive's directory entry durable, so a power cut
 /// cannot leave records in a file no directory names.
 fn sync_parent(archive: &Path) -> Result<(), String> {
