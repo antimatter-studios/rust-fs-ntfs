@@ -126,10 +126,41 @@ mkdir -p "$host_image_dir"
 # run into a wedged matrix). The lock records its owner pid, so a lock whose
 # owner is no longer alive is provably stale and is reclaimed automatically —
 # the same pid-liveness reasoning the runner uses to reap orphaned image dirs.
+#
+# The name is a readable prefix of the arguments plus the SHA-256 of the
+# whole list, NUL-separated. The arguments alone took the name past NAME_MAX
+# (255 bytes) whenever a filter or an --ssh-key or --vm-workdir path was
+# long, and mkdir could then never succeed (#1283). The hash keeps lists that
+# differ only past the prefix, or only in characters the prefix replaces,
+# on locks of their own: at most 17 + 64 + 1 + 64 = 146 bytes.
 lock_key="${forwarded_args[*]:-full}"
 lock_key="${lock_key//[^a-zA-Z0-9_-]/_}"
-scenario_lock="/tmp/ntfs-matrix-lock-${lock_key}"
-if ! mkdir "$scenario_lock" 2>/dev/null; then
+if command -v sha256sum >/dev/null 2>&1; then
+    lock_sha() { sha256sum; }
+elif command -v shasum >/dev/null 2>&1; then
+    lock_sha() { shasum -a 256; }
+else
+    echo "[run-matrix] fatal: neither sha256sum nor shasum is on PATH to name the lock" >&2
+    exit 1
+fi
+lock_hash="$(printf '%s\0' "${forwarded_args[@]+"${forwarded_args[@]}"}" | lock_sha)"
+lock_hash="${lock_hash%% *}"
+scenario_lock="/tmp/ntfs-matrix-lock-${lock_key:0:64}-${lock_hash}"
+
+# take_lock -- mkdir the lock directory. A mkdir that fails with no lock
+# there failed for some other reason (a full or read-only /tmp, a name the
+# filesystem refuses), which is reported as mkdir gave it rather than as a
+# stale lock.
+take_lock() {
+    local err
+    err="$(mkdir "$scenario_lock" 2>&1)" && return 0
+    if [ ! -d "$scenario_lock" ]; then
+        echo "[run-matrix] could not create lock ${scenario_lock}: ${err}" >&2
+        exit 1
+    fi
+    return 1
+}
+if ! take_lock; then
     existing_pid=$(cat "$scenario_lock/pid" 2>/dev/null || echo "")
     if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
         echo "[run-matrix] scenario filter '${lock_key}' is already running (pid ${existing_pid})" >&2
@@ -139,7 +170,7 @@ if ! mkdir "$scenario_lock" 2>/dev/null; then
     # once; mkdir atomicity still arbitrates if two runs race the reclaim.
     echo "[run-matrix] reclaiming stale lock ${scenario_lock} (owner pid ${existing_pid:-unknown} not alive)" >&2
     rm -rf "$scenario_lock"
-    if ! mkdir "$scenario_lock" 2>/dev/null; then
+    if ! take_lock; then
         echo "[run-matrix] could not acquire lock ${scenario_lock} after reclaiming stale lock" >&2
         exit 1
     fi
