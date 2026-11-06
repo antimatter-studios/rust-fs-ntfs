@@ -2036,9 +2036,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The harness pins each guest's box in a map, read here the way its
+          # ci-setup-linux.sh --box-cache-key reads it, so the box fetched is
+          # the one the cache key names. This repository's [vm] names no
+          # guest, so it boots debian-12.
           vagrantfile=../fs-linux-test-harness/vagrant/Vagrantfile
-          box="$(sed -n 's/^ *config\.vm\.box = "\(cloud-image[^"]*\)"$/\1/p' "$vagrantfile" | head -1)"
-          box_version="$(sed -n 's/^ *config\.vm\.box_version = "\([^"]*\)"$/\1/p' "$vagrantfile" | head -1)"
+          pin="$(grep -E '^ *"debian-12" => \["cloud-image/' "$vagrantfile" | head -1)"
+          box="$(sed -n 's/.*=> \["\(cloud-image[^"]*\)", "\([^"]*\)"\].*/\1/p' <<<"$pin")"
+          box_version="$(sed -n 's/.*=> \["\(cloud-image[^"]*\)", "\([^"]*\)"\].*/\2/p' <<<"$pin")"
           test -n "$box"
           test -n "$box_version"
           vagrant box add "$box" --box-version "$box_version" --provider libvirt --architecture amd64

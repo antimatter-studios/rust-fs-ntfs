@@ -68,7 +68,18 @@ vars:
   # The Linux test VM (fs-linux-test-harness): where Linux's own ntfs3
   # mounts what this crate writes, `chore test:kernel` (#486). Not a cargo
   # dependency; a tool the kernel tests invoke from ../fs-linux-test-harness.
-  LINUX_HARNESS_REF: v0.4.1
+  # v0.5.0 pins each guest's box in a map, which the box-cache job reads.
+  # v0.5.x: a slot is kept while a VM boots or restarts, and nothing in a
+  # macOS guest writes to the shares (harness #84). v0.5.9 runs a `vm.sh run`
+  # or `vm.sh exec` command through `bash -c`, with no stdin, which the kernel
+  # tests already give it. v0.6.1: the VM-free suite runs no real `sync` on
+  # the host (harness #191), suites can share one guest through
+  # FLTH_SHARED_ROOT (harness #153), and a macOS host needs
+  # vagrant-notify-forwarder-christhomas 0.7.7 or newer, which
+  # `chore vm:host:check` says (harness #164). v0.6.2: the stub engine runs no
+  # real `sync` whatever PATH a guard sets (harness #202), and CI setup moves
+  # off a stalled Ubuntu mirror (harness #200).
+  LINUX_HARNESS_REF: v0.6.2
 
   # The in-house VHD writer (rust-img-vhd) the Windows jobs build to wrap
   # a raw image for Windows. Not a cargo dependency, so this is the only
