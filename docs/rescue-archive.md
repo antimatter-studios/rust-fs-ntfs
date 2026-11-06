@@ -103,7 +103,13 @@ which a resumed archive's history records relax.
 
 ## Resuming an interrupted archive
 
-`rescue::resume` continues an interrupted scan in the same archive. It reads
+`rescue::resume` continues an interrupted scan in the same archive. Before it
+changes anything, it reads each whole data record's span from the source
+again and compares it with the record's payload. A sector that reads and
+differs refuses the resume, naming the sector's offset, with the archive
+byte-for-byte unchanged; because the boot sector is the first data record,
+another NTFS volume is refused this way too. A sector that no longer reads is
+not a difference. It then reads
 the archive back to its last whole record and cuts the torn record after it
 away; nothing before the cut is rewritten. It then runs the scan in the same
 order but reads only the ranges of the source no data record holds: the
@@ -111,12 +117,12 @@ ranges the interrupted pass never reached, and the spans it recorded as
 unreadable. A span that reads now gains a data record after the earlier
 unreadable record, which stays as history. The layout reads an NTFS scan
 starts with are served from the archive's data records where those hold the
-bytes, so no range already archived is read from the source again.
+bytes, so after the comparison no range already archived is read from the
+source again.
 
 A resumed archive's data records still never overlap one another, and
 together with the unreadable records of the last pass still tile the
 source; an earlier pass's unreadable record may overlap a later data record.
-Refusing a foreign or changed source on resume is #723.
 
 ## Tests
 
