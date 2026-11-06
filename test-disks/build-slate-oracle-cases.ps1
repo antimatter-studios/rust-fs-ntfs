@@ -90,7 +90,19 @@ foreach ($case in $cases) {
         New-WindowsFixture -ImagePath $image -Label $label `
             -AllocationUnitSize $case.Cluster -Populate {
                 param($root)
-                Resize-Partition -DriveLetter $root.Substring(0, 1) -Size 256MB -ErrorAction Stop
+                # Only a larger partition is resized: Windows refuses a resize
+                # to the size a partition already has ("The partition is
+                # already the requested size"), and a scratch partition comes
+                # with or without slack (#1284). A smaller one cannot hold the
+                # volume the comparison expects, so the run stops.
+                $letter = $root.Substring(0, 1)
+                $size = [uint64](Get-Partition -DriveLetter $letter -ErrorAction Stop).Size
+                if ($size -lt 256MB) {
+                    throw "the scratch partition on ${letter}: is $size bytes, smaller than the $(256MB) bytes the control needs"
+                }
+                if ($size -gt 256MB) {
+                    Resize-Partition -DriveLetter $letter -Size 256MB -ErrorAction Stop
+                }
             }
     } else {
         Remove-Item -LiteralPath $image -Force -ErrorAction SilentlyContinue
