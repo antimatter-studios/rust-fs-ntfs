@@ -1816,6 +1816,125 @@
       "image": "nfs-mac-format-mac-objid-win-chkdsk.img",
       "_notes": "An object id this crate writes is indexed in $Extend\\$ObjId:$O, by the id, with the file reference and birth ids as its data. chkdsk grades that the index has its entry (#478)."
     },
+    "mac-format-mac-write-streams-mac-reparse-mac-objid-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "LISTREPARSE",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "target.txt"
+        },
+        {
+          "op": "mac-write",
+          "path": "/target.txt",
+          "content": "target"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "listed.bin"
+        },
+        {
+          "op": "mac-write",
+          "path": "/listed.bin",
+          "content": "listed"
+        },
+        {
+          "op": "mac-write-streams",
+          "path": "/listed.bin",
+          "count": "60",
+          "size_bytes": "64",
+          "delete_every": "0"
+        },
+        {
+          "op": "mac-reparse",
+          "path": "/listed.bin",
+          "target": "target.txt"
+        },
+        {
+          "op": "mac-objid",
+          "path": "/listed.bin",
+          "object_id": "00112233445566778899aabbccddeeff"
+        },
+        {
+          "op": "mac-touch",
+          "parent": "/",
+          "basename": "cleared.bin"
+        },
+        {
+          "op": "mac-write",
+          "path": "/cleared.bin",
+          "content": "cleared"
+        },
+        {
+          "op": "mac-write-streams",
+          "path": "/cleared.bin",
+          "count": "60",
+          "size_bytes": "64",
+          "delete_every": "0"
+        },
+        {
+          "op": "mac-reparse",
+          "path": "/cleared.bin",
+          "target": "target.txt"
+        },
+        {
+          "op": "mac-objid",
+          "path": "/cleared.bin",
+          "object_id": "ffeeddccbbaa99887766554433221100"
+        },
+        {
+          "op": "mac-reparse-remove",
+          "path": "/cleared.bin"
+        },
+        {
+          "op": "mac-objid-remove",
+          "path": "/cleared.bin"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-verify-streams",
+          "path": "/cleared.bin",
+          "count": "60",
+          "size_bytes": "64",
+          "delete_every": "0",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-verify-reparse-objid",
+          "path": "/listed.bin",
+          "target": "target.txt",
+          "target_content": "target",
+          "object_id": "00112233445566778899aabbccddeeff",
+          "cleared": "/cleared.bin",
+          "cleared_content": "cleared",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-mac-format-mac-write-streams-mac-reparse-mac-objid-win-chkdsk.img",
+      "_notes": "Sixty 64-byte streams give each of two files an $ATTRIBUTE_LIST, so the symbolic link and the object id this crate sets on them go through it (#808, #809). The second file then loses both, so the list loses their entries. chkdsk grades the records, the list and the $Extend\\$Reparse:$R and $Extend\\$ObjId:$O entries. Windows must read the first file's link as a relative link to target.txt and follow it, read its object id back, find neither on the second file, and read back every one of the second file's streams (#810)."
+    },
     "win-format-mac-enumerate-empty": {
       "status": "passed-chore-matrix-46of46-2026-09-19-write-path",
       "volume_params": {
