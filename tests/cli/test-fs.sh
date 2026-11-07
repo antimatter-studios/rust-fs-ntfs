@@ -41,6 +41,12 @@ not_found ls /missing/f
 not_found read /missing
 not_found read /missing/f
 not_found export /missing "$SANDBOX/exported"
+not_found streams /missing
+not_found streams /missing/f
+not_found xattr /missing
+not_found xattr /missing user.absent
+not_found acl show /missing
+not_found acl show /missing/f
 check "export of a missing path writes no destination" test ! -e "$SANDBOX/exported"
 
 # read: the metafiles are files, and two of them can be checked against
