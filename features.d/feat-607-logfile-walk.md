@@ -1,0 +1,3 @@
+## Checking and recovery
+
+| `$LogFile` record walk (`logfile_replay::walk_records`): the records from the checkpoint start, or a given LSN, in LSN order to the newest, each with its header fields, byte offset and next LSN, read-only and bounded by a record count and a per-record byte budget; a record that cannot be read stops the walk with its reason and what came before kept | Partial: library only; graded on an LFS 2.0 Windows capture against strict lookup and the restart LSN Windows wrote; no CLI, provenance labels or independent decoder comparison of the whole walk yet | Unreleased (#607) | #607 | `src/logfile_replay.rs` (`record_view_tests`) |
