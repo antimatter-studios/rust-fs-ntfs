@@ -109,6 +109,34 @@ fn mkdir_rmdir_roundtrip_doesnt_leak_records() {
     assert_eq!(free_count_before, free_count_after, "MFT records leaked");
 }
 
+/// A directory's non-resident named stream gives its clusters back with
+/// the directory (#735): mkdir, a stream too large for the record, rmdir,
+/// and the volume bitmap holds as many free clusters as before, with
+/// check_io finding nothing the untouched fixture did not.
+#[test]
+fn rmdir_frees_a_directory_streams_clusters() {
+    use fs_ntfs::{bitmap, block_io::PathIo, fsck};
+    let img = working_copy("dirstream");
+    let free = || {
+        let bm = bitmap::locate_bitmap(Path::new(&img)).unwrap();
+        bitmap::count_free(Path::new(&img), &bm).unwrap()
+    };
+    let findings = || {
+        let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
+        fsck::check_io(&mut io).expect("check the volume").findings
+    };
+    let fixture = findings();
+    write::mkdir(Path::new(&img), "/Documents", "streamy").expect("mkdir");
+    let before = free();
+    let bytes: Vec<u8> = (0..20_000u32).map(|i| (i * 31 + 7) as u8).collect();
+    write::write_named_stream(Path::new(&img), "/Documents/streamy", "s", &bytes)
+        .expect("a directory holds a named stream");
+    assert!(free() < before, "a 20000-byte stream lives in clusters");
+    write::rmdir(Path::new(&img), "/Documents/streamy").expect("rmdir");
+    assert_eq!(free(), before, "rmdir left the stream's clusters allocated");
+    assert_eq!(findings(), fixture, "check_io finds what rmdir left");
+}
+
 fn count_free(img: &str, bm: &fs_ntfs::mft_bitmap::MftBitmap) -> u64 {
     let total = match &bm.layout {
         fs_ntfs::mft_bitmap::MftBitmapLayout::Resident { total_bits, .. } => *total_bits,

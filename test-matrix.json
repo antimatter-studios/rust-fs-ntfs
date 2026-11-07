@@ -560,6 +560,51 @@
       "image": "nfs-mac-format-mkdir-rmdir-win-chkdsk.img",
       "_notes": "Creates and removes an empty directory with the default 4 KiB cluster geometry, then requires Windows chkdsk to accept the retired record and parent index update as clean."
     },
+    "mac-format-mkdir-dir-stream-rmdir-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "DIRSTREAM",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-mkdir",
+          "parent": "/",
+          "basename": "streamy"
+        },
+        {
+          "op": "mac-write-streams",
+          "path": "/streamy",
+          "count": "1",
+          "size_bytes": "20000",
+          "delete_every": "0"
+        },
+        {
+          "op": "mac-rmdir",
+          "path": "/streamy"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-mac-format-mkdir-dir-stream-rmdir-win-chkdsk.img",
+      "_notes": "Creates a directory, gives it one named stream too large for its record so the stream lives in clusters, and removes the directory; Windows chkdsk must find no cluster left allocated to nothing (#735)."
+    },
     "mac-format-mkdir-rmdir-win-chkdsk-64k": {
       "status": "pending",
       "volume_params": {
