@@ -27,10 +27,21 @@ jq_check "every ls --all entry has typed fields" \
 jq_check "\$MFT is record 0 and \$Extend a directory" \
     'any(.[]; .name == "$MFT" and .record == 0 and .type == "file") and any(.[]; .name == "$Extend" and .type == "dir")' \
     "$SANDBOX/all.json"
-fs.ntfs "$img" ls /missing >"$SANDBOX/lsm.out" 2>"$SANDBOX/lsm.err"
-check "ls of a missing path exits 1" test $? -eq 1
-check "ls of a missing path prints nothing on stdout" test ! -s "$SANDBOX/lsm.out"
-jq_check "ls of a missing path says not found" '.code == 1 and (.error | test("not found"))' "$SANDBOX/lsm.err"
+# A path that is not there: status 1, nothing on stdout, and the shared
+# contract's `not_found` kind, which a script matches whatever the
+# message says. A missing parent is the same answer as a missing leaf.
+not_found() {
+    fs.ntfs "$img" "$@" >"$SANDBOX/nf.out" 2>"$SANDBOX/nf.err"
+    check "$* exits 1" test $? -eq 1
+    check "$* prints nothing on stdout" test ! -s "$SANDBOX/nf.out"
+    jq_check "$* reports the not_found kind" '.code == 1 and .kind == "not_found"' "$SANDBOX/nf.err"
+}
+not_found ls /missing
+not_found ls /missing/f
+not_found read /missing
+not_found read /missing/f
+not_found export /missing "$SANDBOX/exported"
+check "export of a missing path writes no destination" test ! -e "$SANDBOX/exported"
 
 # read: the metafiles are files, and two of them can be checked against
 # bytes that are not ours to interpret. $Boot's data is the volume's first
