@@ -679,6 +679,18 @@ jobs:
       - name: Build Windows-authored fixtures
         shell: pwsh
         run: pwsh -File test-disks/build-windows-native-read-fixtures.ps1
+      # A VHD always presents 512-byte sectors, so this one is not among the
+      # fixtures above: Windows formats a VHDX presenting 4096-byte logical
+      # sectors, and its partition is copied out to the raw image (#1150).
+      - name: Build the Windows 4096-byte sector fixture
+        shell: pwsh
+        run: pwsh -File test-disks/build-windows-4kn-fixture.ps1
+      # ntfs-4kn-read.img, Windows' own NTFS format of a disk presenting
+      # 4096-byte logical sectors, against what fsutil reported for the
+      # mounted volume and the file set of ntfs-cli-read.img (#1150).
+      - name: The 4096-byte sector fixture is the volume Windows formatted
+        shell: pwsh
+        run: cargo test --locked --test fixture_4kn_windows
       - name: Attribute-list entry mismatches agree with Windows chkdsk
         shell: pwsh
         env:
@@ -896,6 +908,9 @@ jobs:
             test-disks/ntfs-cli-read.ntfsinfo.txt
             test-disks/ntfs-cli-read.directory.json
             test-disks/ntfs-cli-read.sha256.tsv
+            test-disks/ntfs-4kn-read.img
+            test-disks/ntfs-4kn-read.ntfsinfo.txt
+            test-disks/ntfs-4kn-read.sha256.tsv
             test-disks/win32-name-verdicts.tsv
             test-disks/ntfs-ea.img
             test-disks/ntfs-ea.names.tsv
