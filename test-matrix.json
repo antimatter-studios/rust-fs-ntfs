@@ -4131,6 +4131,37 @@
       "image": "nfs-cli-rename-win-verify-chkdsk.img",
       "_notes": "fs.ntfs mv renames names within their directories (#645): the same length, longer, shorter, case only, a directory, a non-resident file, a Unicode name, and a seeded third of a directory filled past one index level, so entries move between index blocks. A move to another directory (exit 3) and a name already there, compared through $UpCase, are refused with every byte left as it was. Windows grades the result: every file reads back under its new name with the SHA-256 written before the rename (Get-FileHash), each parent lists each new name exactly so, no old name is found, and chkdsk finds the volume clean."
     },
+    "cli-import-win-verify-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "CLI IMPORT",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        { "op": "cli-mkfs" },
+        { "op": "cli-import" },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}.manifest",
+          "dest": "{vm.workdir}/{scenario.image}.manifest"
+        },
+        { "op": "win-cli-verify", "keep_image": "true" },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "keep_image": "false",
+          "verdict_shape": "Clean"
+        }
+      ],
+      "image": "nfs-cli-import-win-verify-chkdsk.img",
+      "_notes": "fs.ntfs import copies host files onto the volume (#1079, part of #845): one byte, a resident size, a cluster plus one, a Unicode name piped through stdin, and 64 MiB, each published by a same-directory rename with its reported SHA-256 checked, and a destination already there refused with every byte left as it was. Windows grades the result: every file reads back in place with the source's length and SHA-256 (Get-FileHash), a copy Windows makes off the volume has them too, and chkdsk finds the volume clean."
+    },
     "cli-link-win-verify-chkdsk": {
       "status": "pending",
       "volume_params": {
