@@ -1,0 +1,3 @@
+## Reading
+
+| `$Secure:$SDS` catalog walk: every primary and mirror copy with its physical and logical offset, security id, unpadded size and stored and computed hash; 256 KiB region rules, zero padding and located errors for truncated, short or region-crossing entries; a security id read from a verified primary, else its verified mirror, never an unverified copy | Partial: library and `fs.ntfs acl show` lookup; graded against the formatter's catalog and the documented layout, not yet against a Windows-authored multi-region catalog, and no C binding or catalog CLI yet | Unreleased (#606) | #606 | `src/sds.rs`, `src/cli/ntfs/acl.rs` |
