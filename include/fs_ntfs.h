@@ -1100,6 +1100,28 @@ int fs_ntfs_read_security_id(const char *image, const char *path,
                              uint32_t *out);
 
 /*
+ * The security descriptor `path` resolves to, as stored: its own
+ * $SECURITY_DESCRIPTOR attribute, else the $Secure:$SDS copy its
+ * security id names, a verified primary or else its verified mirror;
+ * never a copy whose hash or offset fails. The bytes are self-relative
+ * and undecoded.
+ *
+ * *out_len gets the descriptor's length whenever it is found, so callers
+ * can size-query (pass out_buf=NULL, out_buf_len=0).
+ *
+ * Returns:
+ *    1 — the descriptor was copied into out_buf[0..*out_len]
+ *    2 — out_buf_len is too small; nothing was written
+ *   -1 — error (see fs_ntfs_last_error)
+ *
+ * out_len must be non-NULL. out_buf may be NULL only when
+ * out_buf_len == 0.
+ */
+int fs_ntfs_read_security_descriptor(const char *image, const char *path,
+                                     void *out_buf, size_t out_buf_len,
+                                     size_t *out_len);
+
+/*
  * Full $STANDARD_INFORMATION value (MS-FSCC §2.4.2). The four
  * timestamps are NT 100-nanosecond intervals since 1601-01-01 UTC.
  * file_attributes is the FILE_ATTRIBUTE_* bitmask. The trailing
