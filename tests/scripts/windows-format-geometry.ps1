@@ -2,6 +2,7 @@
 # the hosted capture obtains expected filesystem fields from Windows itself.
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/../../scripts/windows-format-geometry.ps1"
+$collectorSource = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '../../scripts/windows-format-geometry.ps1'))
 $checks = 0
 function Assert-Geometry([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -13,6 +14,9 @@ function Assert-GeometryFailure([scriptblock]$Action, [string]$Message) {
     Assert-Geometry $failed $Message
 }
 $requests = @(Get-FormatGeometryRequests)
+Assert-Geometry ($collectorSource.Contains('LookupPrivilegeValueW(null, "SeBackupPrivilege"') -and
+    $collectorSource.IndexOf('EnableBackupPrivilege();') -ge 0 -and
+    $collectorSource.IndexOf('CreateFileW(target') -gt $collectorSource.IndexOf('EnableBackupPrivilege();')) 'protected metadata opens with SeBackupPrivilege enabled'
 Assert-Geometry ($requests.Count -eq 26) 'exactly 26 geometry requests'
 Assert-Geometry (($requests | Where-Object allocation_unit_bytes -eq 512).Count -eq 2) 'both 512-byte modes'
 Assert-Geometry (($requests | Where-Object allocation_unit_bytes -eq 2097152).Count -eq 2) 'both 2 MiB modes'
@@ -172,5 +176,5 @@ $diff = @(Compare-PhysicalSectorGeometryRows $row512n $row512e)
 Assert-Geometry (($diff -join ',') -eq 'boot.mft_lcn') 'the diff names each changed field and excludes the locked $LogFile'
 $row512e.partition_offset = 1048576
 Assert-Geometry (@(Compare-PhysicalSectorGeometryRows $row512n $row512e) -contains 'partition_offset') 'the diff names a moved partition'
-if ($checks -ne 59) { throw "only $checks geometry contracts executed, expected 59" }
-Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 59)"
+if ($checks -ne 60) { throw "only $checks geometry contracts executed, expected 60" }
+Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 60)"
