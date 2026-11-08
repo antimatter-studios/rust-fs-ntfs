@@ -128,6 +128,53 @@ fn created_records_reference_the_parent_security_descriptor() {
 }
 
 #[test]
+fn a_small_volume_places_its_mirror_after_metadata_and_reads_back_independently() {
+    let size = 8 * 1024 * 1024;
+    let plan = fs_ntfs::mkfs::plan_format(size, 4096, 1024, Some("SMALL"), Some(1005))
+        .expect("plan an 8 MiB volume");
+    assert!(plan.root_index_lcn + plan.root_index_clusters < plan.mftmirr_lcn);
+    assert!(plan.mftmirr_lcn + plan.mftmirr_clusters < plan.backup_boot_lcn);
+
+    let mut dev = MemDev::new(size);
+    fs_ntfs::mkfs::format_with_plan(&mut dev, &plan).expect("format an 8 MiB volume");
+    let boot_mirror = u64::from_le_bytes(dev.buf[0x38..0x40].try_into().unwrap());
+    assert_eq!(boot_mirror, plan.mftmirr_lcn);
+    let primary_offset = (plan.mft_lcn * u64::from(plan.cluster_size)) as usize;
+    let mirror_offset = (boot_mirror * u64::from(plan.cluster_size)) as usize;
+    let mirrored_bytes = (plan.mftmirr_records * u64::from(plan.mft_record_size)) as usize;
+    assert_eq!(
+        &dev.buf[primary_offset..primary_offset + mirrored_bytes],
+        &dev.buf[mirror_offset..mirror_offset + mirrored_bytes]
+    );
+
+    let mut cursor = std::io::Cursor::new(&dev.buf);
+    let mut ntfs = Ntfs::new(&mut cursor).expect("independent reader opens the small volume");
+    ntfs.read_upcase_table(&mut cursor)
+        .expect("independent reader reads $UpCase");
+    assert_eq!(ntfs.cluster_size(), 4096);
+    assert_eq!(ntfs.file_record_size(), 1024);
+    assert_eq!(
+        ntfs.volume_name(&mut cursor)
+            .expect("read $Volume")
+            .expect("volume label")
+            .name()
+            .to_string_lossy(),
+        "SMALL"
+    );
+    ntfs.root_directory(&mut cursor)
+        .expect("independent reader opens the root directory");
+}
+
+#[test]
+fn the_small_volume_layout_still_refuses_a_mirror_at_the_backup_boot_boundary() {
+    assert!(fs_ntfs::mkfs::plan_format(1084 * 4096, 4096, 1024, None, Some(1005)).is_err());
+    let plan = fs_ntfs::mkfs::plan_format(1085 * 4096, 4096, 1024, None, Some(1005))
+        .expect("the metadata, mirror and backup boot fit");
+    assert_eq!(plan.mftmirr_lcn, 1082);
+    assert_eq!(plan.backup_boot_lcn, 1084);
+}
+
+#[test]
 fn format_and_parse_back() {
     let mut dev = MemDev::new(VOL_SIZE);
     format_filesystem(
