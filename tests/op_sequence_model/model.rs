@@ -402,3 +402,20 @@ impl Model {
         Ok(())
     }
 }
+
+/// The reason the formatter must give for refusing a geometry, or `None`
+/// for one it formats (#1025). These are `plan_format`'s documented
+/// limits, not NTFS's: a refusal the model expects, never one the
+/// generator avoids.
+#[allow(dead_code)]
+pub fn format_refusal(size: u64, cluster: u32, record: u32) -> Option<&'static str> {
+    if !cluster.is_power_of_two() || !(512..=65536).contains(&cluster) {
+        Some("invalid cluster_size")
+    } else if !record.is_power_of_two() || !(512..=16384).contains(&record) {
+        Some("invalid mft_record_size")
+    } else if size / u64::from(cluster) < 1024 {
+        Some("volume too small")
+    } else {
+        None
+    }
+}

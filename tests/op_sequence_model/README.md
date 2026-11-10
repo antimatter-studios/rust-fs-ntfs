@@ -103,7 +103,11 @@ output budget, keeps the complete raw log and requires executed input stats.
 Artifacts retain the run seed/budgets, raw input, concrete JSON prefix,
 geometry, per-opcode counts, cumulative accepted/refused histogram, ntfs-3g
 reports and a failure image when available, on success and failure alike.
-Histogram arrays follow opcode order above, accepted first, refused second.
+Histogram arrays follow opcode order above, accepted first, refused second;
+a third value counts inputs whose geometry the formatter refused (#1025). A
+cluster byte of 255 asks for a 128 KiB cluster: the model expects that
+refusal with the formatter's reason, which `refusals.tsv` records, and
+nothing runs.
 Replay an uploaded raw input or `reproducer.json` from the repository root:
 
 ```sh
