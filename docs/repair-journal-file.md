@@ -234,7 +234,7 @@ every byte cut, a byte flip at every position in every complete record
 empty input, an open intent, append behind a torn tail, recovery by
 discarding that tail before reappending, a fixed version 2 byte stream,
 and refusal of version 1 framing. The original seven tests are unchanged.
-The quick pull-request CI runs these tests with `plan-file` enabled;
+The full pull-request CI runs these tests with `plan-file` enabled;
 `chore test:repair-journal` uses the same command.
 
 The fixed byte streams are generated independently of the Rust encoders

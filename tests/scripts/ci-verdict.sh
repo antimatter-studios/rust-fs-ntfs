@@ -8,8 +8,8 @@ pass=0
 fail=0
 
 check() {
-    local name="$1" mode="$2" want="$3" json="$4" code="${5:-}" got
-    CODE="$code" GATE_NEEDS_JSON="$json" bash "$ROOT/scripts/ci-verdict.sh" "$mode" >/dev/null 2>&1
+    local name="$1" mode="$2" want="$3" json="$4" code="${5:-}" event="${6-push}" ref="${7-refs/heads/main}" got
+    CODE="$code" EVENT="$event" REF="$ref" GATE_NEEDS_JSON="$json" bash "$ROOT/scripts/ci-verdict.sh" "$mode" >/dev/null 2>&1
     got=$?
     if { [ "$want" = pass ] && [ "$got" -eq 0 ]; } ||
        { [ "$want" = fail ] && [ "$got" -ne 0 ]; }; then
@@ -26,6 +26,9 @@ aggregate='{"test":{"result":"success"},"windows-native-read-fixtures":{"result"
 
 check windows-required-ran windows pass "$windows_true"
 check windows-unneeded-skipped windows pass "$windows_false"
+check windows-pull-request-skipped windows fail "$windows_false" true pull_request refs/pull/1/merge
+check windows-merge-queue-skipped windows fail "$windows_false" true merge_group refs/heads/gh-readonly-queue/main/pr-1-abc
+check windows-unknown-event-skipped windows fail "$windows_false" false '' ''
 check windows-required-skipped windows fail "$(jq -c '.["validate-mkfs-windows-run"].result="skipped"' <<< "$windows_true")"
 check windows-unneeded-failed windows fail "$(jq -c '.["validate-mkfs-windows-run"].result="failure"' <<< "$windows_false")"
 check windows-filter-failed windows fail "$(jq -c '.changes.result="failure"' <<< "$windows_true")"
@@ -42,9 +45,8 @@ for job in test windows-native-read-fixtures integration changes validate-mkfs-w
             "$(jq -c --arg job "$job" --arg result "$result" '.[$job].result=$result' <<< "$aggregate")" true
     done
 done
-# A change to documentation alone skips the Windows fixtures and what reads
-# them, and the kernel oracle. Their skip is green only when the changes job
-# said code is false.
+# A push to main skips the Windows fixtures and what reads them, and the
+# kernel oracle, because the merge queue already validated that tree.
 docs_only="$(jq -c '.["windows-native-read-fixtures"].result="skipped" | .integration.result="skipped" | .cli.result="skipped" | .kernel.result="skipped"' <<< "$aggregate")"
 check aggregate-docs-only-skips aggregate pass "$docs_only" false
 check aggregate-code-skips aggregate fail "$docs_only" true
@@ -63,7 +65,12 @@ check aggregate-invalid-json aggregate fail '{' true
 check aggregate-missing-plan aggregate fail "$aggregate"
 check aggregate-invalid-plan aggregate fail "$aggregate" maybe
 check aggregate-quick-green aggregate pass "$aggregate" false
-# A quick run (a pull request or a push to main) excuses only the full
+check aggregate-pull-request-quick-green aggregate fail "$aggregate" false pull_request refs/pull/1/merge
+check aggregate-pull-request-quick-skips aggregate fail "$docs_only" false pull_request refs/pull/1/merge
+check aggregate-merge-queue-quick-skips aggregate fail "$docs_only" false merge_group refs/heads/gh-readonly-queue/main/pr-1-abc
+check aggregate-other-branch-quick-skips aggregate fail "$docs_only" false push refs/heads/feature
+check aggregate-unknown-event-quick-skips aggregate fail "$docs_only" false '' ''
+# A quick run (only a push to main) excuses only the full
 # jobs' skip. A quick job skipped, and any job failed or cancelled, is red.
 for job in test changes validate-mkfs-windows semver; do
     check "aggregate-quick-$job-skipped" aggregate fail \
@@ -79,8 +86,8 @@ check aggregate-quick-extra-need-skipped aggregate fail "$(jq -c '.["new-job"].r
 check aggregate-quick-missing-kernel aggregate fail "$(jq -c 'del(.kernel)' <<< "$docs_only")" false
 check aggregate-full-run-skips aggregate fail "$docs_only" true
 # python-volume-info-windows reads the Windows-authored fixtures, so a quick
-# run skips it with them, as ci-ok saw on every pull request once it joined
-# `needs:`. python-abi is a quick job and is never excused a skip.
+# run on main skips it with them. python-abi is a quick job and is never
+# excused a skip.
 python_quick="$(jq -c '.["python-abi"].result="success" | .["python-volume-info-windows"].result="skipped"' <<< "$docs_only")"
 check aggregate-quick-python-windows-skipped aggregate pass "$python_quick" false
 check aggregate-full-python-windows-skipped aggregate fail "$(jq -c '.["python-volume-info-windows"].result="skipped"' <<< "$aggregate")" true

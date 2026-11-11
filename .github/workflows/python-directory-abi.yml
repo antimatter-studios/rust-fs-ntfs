@@ -2,9 +2,6 @@ name: Focused Python directory ABI
 
 on:
   pull_request:
-    paths:
-      - tests/python/test_dir_listing.py
-      - .github/workflows/python-directory-abi.yml
   workflow_dispatch:
 
 permissions:

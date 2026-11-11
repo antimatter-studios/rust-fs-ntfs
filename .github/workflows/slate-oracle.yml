@@ -12,23 +12,6 @@ name: Slate checker oracle (advisory)
 # measured run of reliability; until then it reports, it does not gate.
 on:
   pull_request:
-    paths:
-      - .github/workflows/slate-oracle.yml
-      - scripts/slate-oracle.sh
-      - tests/scripts/slate-oracle.sh
-      - tests/slate-disagreements.tsv
-      - tests/scripts/slate-writer-capture.sh
-      - scripts/fs-windows-test-harness/run-host-steps
-      - scripts/cli-oracle.sh
-      - fs-windows-test-harness.toml
-      - test-matrix.json
-      - test-disks/build-slate-oracle-cases.ps1
-      - test-disks/capture-slate-windows-manifest.ps1
-      - tests/scripts/slate-windows-manifest.ps1
-      - test-disks/capture-slate-windows-allocation.ps1
-      - tests/scripts/slate-windows-allocation.ps1
-      - chores.yml
-      - src/**
   schedule:
     - cron: '17 4 * * 1'
   workflow_dispatch:
