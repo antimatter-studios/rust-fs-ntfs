@@ -15,7 +15,10 @@ readme = "README.md"
 # already gzipped, so the .crate cannot compress them: with the wrapped-log
 # captures they made it 7.2 MB, against 3.3 MB for 0.7.0 and crates.io's
 # 10 MB limit. Nothing a consumer builds reads them.
-exclude = ["fuzz", "test-disks/*.gz", "test-disks/*.manifest"]
+#
+# vendor/ holds a test-only patched copy of a dev-dependency (see the
+# [patch.crates-io] below). Nothing a consumer builds reads it.
+exclude = ["fuzz", "test-disks/*.gz", "test-disks/*.manifest", "vendor"]
 
 # The name this crate had on crates.io: the semver check's baseline until
 # a release exists under the new one (rust-fs-core's semver-check.sh).
@@ -146,6 +149,10 @@ saphyr = "0.0.12"
 # read/write/fsck layers cross-check their decoded values against it. No
 # production code path links it anymore (Phase 6 demotion) — `#[cfg(test)]`
 # modules in read.rs / write.rs / fsck.rs are the sole users.
+#
+# It is patched below to vendor/ntfs: the published 0.4.0 with two changes,
+# accepting 512-byte records (#1296) and following index blocks smaller
+# than a cluster (#1298); vendor/ntfs/PATCHED.md describes both.
 ntfs = { version = "0.4", default-features = false, features = ["std"] }
 libtest-mimic = "0.7"
 # SHA-256 for tests/windows_interrupted_fixture.rs, which compares every
@@ -177,6 +184,15 @@ required-features = ["fn-fields-oracle"]
 [[bench]]
 name = "byte_decoders"
 harness = false
+
+# The independent test reader, ntfs 0.4.0 as published on crates.io with
+# two changes: a boot sector may declare 512-byte records, which this
+# crate's formatter writes and the 0.4.0 reader refused (#1296), and an
+# index block smaller than a cluster is found by a VCN in 512-byte units
+# (#1298). Dev-only: ntfs is a dev-dependency, and `cargo publish` drops
+# this table.
+[patch.crates-io]
+ntfs = { path = "vendor/ntfs" }
 
 [profile.release]
 lto = true

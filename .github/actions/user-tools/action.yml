@@ -1,0 +1,32 @@
+name: user tools
+description: >
+  Put the tools a job needs on PATH without root, from cache when it can.
+  The same script developers run as `chore tools`; see scripts/install-user-tools.sh.
+inputs:
+  tools:
+    description: Space-separated tools for scripts/install-user-tools.sh (chore pwsh ntfs-3g pyyaml cc)
+    required: true
+runs:
+  using: composite
+  steps:
+    # Keyed on the runner's environment as well as its OS and arch: a hosted
+    # runner, which preinstalls most of these, would otherwise save a
+    # near-empty cache under the key a self-hosted runner then restores.
+    - id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.local/user-tools
+        key: user-tools-${{ runner.environment }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tools }}-${{ hashFiles('scripts/install-user-tools.sh') }}
+    - shell: bash
+      env:
+        TOOLS: ${{ inputs.tools }}
+      # TOOLS is split into words on purpose.
+      run: bash scripts/install-user-tools.sh $TOOLS
+    # Saved here rather than at the end of the job: actions/cache saves only
+    # when the whole job passes, so one failing test would leave every later
+    # run to install from scratch.
+    - if: steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.local/user-tools
+        key: ${{ steps.restore.outputs.cache-primary-key }}
