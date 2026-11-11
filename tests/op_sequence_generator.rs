@@ -533,10 +533,11 @@ fn input_bytes_choose_a_volume_geometry_the_formatter_accepts() {
         }
     }
     assert_eq!(sizes.len(), 193, "every MiB from 64 to 256");
-    // Every cluster and MFT record size format_filesystem supports.
+    // Every cluster and MFT record size format_filesystem supports, and
+    // the one cluster size it refuses (#1025).
     assert_eq!(
         clusters.into_iter().collect::<Vec<_>>(),
-        [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+        [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
     );
     assert_eq!(
         records.into_iter().collect::<Vec<_>>(),
@@ -555,6 +556,54 @@ fn input_bytes_choose_a_volume_geometry_the_formatter_accepts() {
                     Some(geometry.serial),
                 )
                 .unwrap_or_else(|e| panic!("{geometry:?}: {e}"));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_geometry_the_formatter_refuses_is_an_expected_refusal_with_its_reason() {
+    let plan = |size, cluster, record| {
+        fs_ntfs::mkfs::plan_format(size, cluster, record, Some("OPSEQ"), Some(682))
+    };
+    // The model's reason is the formatter's own, for every limit it has.
+    for (size, cluster, record) in [
+        (64 << 20, 131072, 1024),
+        (64 << 20, 3000, 1024),
+        (64 << 20, 4096, 32768),
+        (1 << 20, 4096, 1024),
+    ] {
+        let reason = model::format_refusal(size, cluster, record)
+            .unwrap_or_else(|| panic!("the model expects {size}/{cluster}/{record} refused"));
+        let error = plan(size, cluster, record).expect_err("the formatter refuses it");
+        assert!(
+            error.to_string().contains(reason),
+            "{error} does not give {reason}"
+        );
+    }
+    // Header byte 255 asks for a 128 KiB cluster: input reaches the
+    // refusal rather than the generator avoiding it.
+    for a in [0, 192] {
+        let geometry = decode_geometry(&[a, 255, 0]).0;
+        assert_eq!(geometry.cluster, 128 * 1024, "{geometry:?}");
+        let reason = model::format_refusal(geometry.size, geometry.cluster, geometry.record)
+            .unwrap_or_else(|| panic!("the model expects {geometry:?} refused"));
+        let error = plan(geometry.size, geometry.cluster, geometry.record)
+            .expect_err("the formatter refuses it");
+        assert!(error.to_string().contains(reason), "{error}");
+    }
+    // Every other header the model expects formatted, and it is planned.
+    for b in (0..8).chain([254]) {
+        for c in (0..6).chain([255]) {
+            for a in [0, 192] {
+                let geometry = decode_geometry(&[a, b, c]).0;
+                assert_eq!(
+                    model::format_refusal(geometry.size, geometry.cluster, geometry.record),
+                    None,
+                    "{geometry:?}"
+                );
+                plan(geometry.size, geometry.cluster, geometry.record)
+                    .unwrap_or_else(|e| panic!("{geometry:?}: {e}"));
             }
         }
     }
