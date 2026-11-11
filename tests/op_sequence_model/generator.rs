@@ -204,6 +204,26 @@ pub struct Geometry {
     pub serial: u64,
 }
 
+/// Input bytes that choose a sequence's image, ahead of its operations.
+pub const GEOMETRY_HEADER: usize = 3;
+/// The image raw input bytes run on (#1024), and the bytes left for
+/// operations. Zero-padded header: volume size in MiB above 64 (to 256),
+/// then the cluster and MFT record sizes, each from the powers of two
+/// `format_filesystem` accepts. A zero header is the default image.
+pub fn decode_geometry(bytes: &[u8]) -> (Geometry, &[u8]) {
+    let mut h = [0; GEOMETRY_HEADER];
+    let n = bytes.len().min(h.len());
+    h[..n].copy_from_slice(&bytes[..n]);
+    let geometry = Geometry {
+        size: (64 + u64::from(h[0]) % 193) * 1024 * 1024,
+        cluster: 512 << ((u32::from(h[1]) + 3) % 8),
+        record: 512 << ((u32::from(h[2]) + 1) % 6),
+        label: "OPSEQ".into(),
+        serial: 682,
+    };
+    (geometry, &bytes[n..])
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Replay {

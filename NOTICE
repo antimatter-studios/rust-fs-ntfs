@@ -13,3 +13,9 @@ other upcase table, and Windows reads the log's restart area when it mounts a
 volume. The upcase table is also independently reproducible: its 65,536
 entries are identical to the table mkntfs generates on its own. Their origin
 and the measurements behind these statements are in docs/provenance.md.
+
+vendor/ntfs is a copy of the ntfs crate 0.4.0 by Colin Finck, licensed under
+the MIT license or the Apache License 2.0 (vendor/ntfs/LICENSE-MIT,
+vendor/ntfs/LICENSE-APACHE), with the changes described in
+vendor/ntfs/PATCHED.md. It is used only as an independent reader in this
+crate's tests and is not part of the published crate.

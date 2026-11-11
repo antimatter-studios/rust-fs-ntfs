@@ -4,8 +4,9 @@ mod generator;
 #[path = "op_sequence_model/model.rs"]
 mod model;
 use generator::{
-    decode, decode_regression, decode_replay, encode, encode_regression, Generator, Geometry, Op,
-    Regression, MAX_DATA, MAX_EA_VALUE, MAX_PATH, MAX_SIZE, MAX_STEPS,
+    decode, decode_geometry, decode_regression, decode_replay, encode, encode_regression,
+    Generator, Geometry, Op, Regression, GEOMETRY_HEADER, MAX_DATA, MAX_EA_VALUE, MAX_PATH,
+    MAX_SIZE, MAX_STEPS,
 };
 use model::{Error, Model, NEED_EA};
 
@@ -494,5 +495,67 @@ fn ea_operations_are_generated_on_files_bounded_and_replayable() {
     ] {
         let op: Op = serde_json::from_value(value).unwrap();
         assert!(encode(std::slice::from_ref(&op)).is_err(), "{op:?}");
+    }
+}
+
+#[test]
+fn input_bytes_choose_a_volume_geometry_the_formatter_accepts() {
+    const MIB: u64 = 1024 * 1024;
+    // A zero header is the default image every fixed-geometry test uses.
+    let (geometry, rest) = decode_geometry(&[0, 0, 0, 7]);
+    assert_eq!(
+        (geometry.size, geometry.cluster, geometry.record),
+        (64 * MIB, 4096, 1024)
+    );
+    assert_eq!(rest, &[7], "the operations start after the header");
+    // A short input still decodes, padded with zeros, and leaves nothing.
+    assert_eq!(decode_geometry(&[]).0, geometry);
+    assert!(decode_geometry(&[1, 2]).1.is_empty());
+    let mut clusters = std::collections::BTreeSet::new();
+    let mut records = std::collections::BTreeSet::new();
+    let mut sizes = std::collections::BTreeSet::new();
+    for header in 0..=u16::MAX {
+        let [a, b] = header.to_le_bytes();
+        for c in [0, 1, 2, 3, 4, 5, 6, 7, 128, 255] {
+            let input = [a, b, c, 0x55];
+            let (geometry, rest) = decode_geometry(&input);
+            // A pure function of the bytes: the same input, the same image.
+            assert_eq!(decode_geometry(&input).0, geometry);
+            assert_eq!(rest, &input[GEOMETRY_HEADER..]);
+            assert!(
+                (64 * MIB..=256 * MIB).contains(&geometry.size),
+                "{geometry:?}"
+            );
+            assert_eq!(geometry.size % MIB, 0, "{geometry:?}");
+            sizes.insert(geometry.size);
+            clusters.insert(geometry.cluster);
+            records.insert(geometry.record);
+        }
+    }
+    assert_eq!(sizes.len(), 193, "every MiB from 64 to 256");
+    // Every cluster and MFT record size format_filesystem supports.
+    assert_eq!(
+        clusters.into_iter().collect::<Vec<_>>(),
+        [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+    );
+    assert_eq!(
+        records.into_iter().collect::<Vec<_>>(),
+        [512, 1024, 2048, 4096, 8192, 16384]
+    );
+    // And the formatter plans each pairing at both ends of the size range.
+    for b in 0..8 {
+        for c in 0..6 {
+            for a in [0, 192] {
+                let geometry = decode_geometry(&[a, b, c]).0;
+                fs_ntfs::mkfs::plan_format(
+                    geometry.size,
+                    geometry.cluster,
+                    geometry.record,
+                    Some(&geometry.label),
+                    Some(geometry.serial),
+                )
+                .unwrap_or_else(|e| panic!("{geometry:?}: {e}"));
+            }
+        }
     }
 }
