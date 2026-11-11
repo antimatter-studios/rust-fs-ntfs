@@ -383,6 +383,14 @@ fn mftmirr_records(cluster_size: u32, mft_record_size: u32) -> u64 {
 /// Size of the root directory's index blocks, as the boot sector declares.
 const INDEX_BLOCK_SIZE: u32 = 4096;
 
+fn directory_index_block_size(cluster_size: u32, record_size: u32) -> u32 {
+    if record_size == 512 && cluster_size < INDEX_BLOCK_SIZE {
+        INDEX_BLOCK_SIZE / 2
+    } else {
+        INDEX_BLOCK_SIZE
+    }
+}
+
 /// The longest volume label, in UTF-16 code units: `$VOLUME_NAME` holds 64
 /// bytes, and Windows' formatter refuses a longer label.
 pub const MAX_LABEL_UNITS: usize = 32;
@@ -591,9 +599,11 @@ pub fn plan_format(
     // with (#436). Records large enough to hold them keep the resident
     // root, and this cluster stays free.
     let root_index_lcn = sds_mirror_lcn + 1;
-    let root_index_clusters: u64 = u64::from(INDEX_BLOCK_SIZE).div_ceil(cluster_size as u64);
+    let index_block_size = directory_index_block_size(cluster_size, mft_record_size);
+    let root_index_clusters: u64 = u64::from(index_block_size).div_ceil(cluster_size as u64);
 
-    let last_used_lcn = root_index_lcn + root_index_clusters;
+    let last_used_lcn =
+        root_index_lcn + u64::from(INDEX_BLOCK_SIZE).div_ceil(u64::from(cluster_size));
     let mftmirr_lcn = (cluster_count / 2).max(last_used_lcn + 1);
     if last_used_lcn >= mftmirr_lcn || mftmirr_lcn + mftmirr_clusters >= backup_boot_lcn {
         return Err(Error::io("volume too small for chosen layout"));
@@ -608,7 +618,7 @@ pub fn plan_format(
         sectors_per_cluster,
         cluster_size,
         mft_record_size,
-        index_block_size: INDEX_BLOCK_SIZE,
+        index_block_size,
         clusters: cluster_count,
         total_sectors,
         total_clusters: total_sectors / u64::from(sectors_per_cluster),
@@ -863,6 +873,7 @@ pub fn format_with_plan(dev: &mut dyn BlockIo, plan: &FormatPlan) -> Result<(), 
     };
 
     let mut mft_buf = vec![0u8; (mft_clusters * cluster_size as u64) as usize];
+    let mut secure_overflow = Vec::new();
 
     // Collected during rec 0..11 building so root's $I30 can carry an
     // INDEX_ENTRY per system file. Microsoft's reference root $I30
@@ -1392,6 +1403,10 @@ pub fn format_with_plan(dev: &mut dyn BlockIo, plan: &FormatPlan) -> Result<(), 
             &sii_entries,
         );
 
+        let mut attributes = vec![empty_data, sds_data, sdh_index_root, sii_index_root];
+        if rs == 512 {
+            secure_overflow = attributes.split_off(1);
+        }
         let rec_bytes = build_system_record(
             &mft_record_layout,
             rec::SECURE,
@@ -1399,7 +1414,7 @@ pub fn format_with_plan(dev: &mut dyn BlockIo, plan: &FormatPlan) -> Result<(), 
             false,
             0,
             0,
-            &[empty_data, sds_data, sdh_index_root, sii_index_root],
+            &attributes,
         )?;
         place_record(&mut mft_buf, rs, rec::SECURE, rec_bytes)?;
         sys_entries.push((
@@ -1475,7 +1490,6 @@ pub fn format_with_plan(dev: &mut dyn BlockIo, plan: &FormatPlan) -> Result<(), 
     // $Extend: $STD_INFO + $FILE_NAME + $I30 with entries for the
     // three children built immediately below.
     {
-        let index_block_size: u32 = 4096;
         let extend_ref = encode_file_reference(rec::EXTEND as u64, rec::EXTEND as u16);
         let mut extend_children: Vec<(u32, &str)> = vec![
             (
@@ -1516,16 +1530,18 @@ pub fn format_with_plan(dev: &mut dyn BlockIo, plan: &FormatPlan) -> Result<(), 
             entries_blob.extend_from_slice(&build_index_entry(child_ref, &stream, false));
         }
         entries_blob.extend_from_slice(&build_index_entry(0, &[], true));
-        let index_root =
-            build_populated_index_root_attr(3, index_block_size, cluster_size, &entries_blob);
-        let rec_bytes = build_system_record(
+        let extend_index_lcn = if cluster_size >= INDEX_BLOCK_SIZE {
+            8192u64.div_ceil(u64::from(cluster_size))
+        } else {
+            root_index_lcn + root_index_clusters
+        };
+        let rec_bytes = build_directory_record(
+            dev,
+            plan,
             &mft_record_layout,
             rec::EXTEND,
-            rec::name(rec::EXTEND, cluster_size).expect("known rec_num"),
-            true,
-            0,
-            0,
-            &[index_root],
+            &entries_blob,
+            extend_index_lcn,
         )?;
         place_record(&mut mft_buf, rs, rec::EXTEND, rec_bytes)?;
         sys_entries.push((
@@ -1644,7 +1660,6 @@ pub fn format_with_plan(dev: &mut dyn BlockIo, plan: &FormatPlan) -> Result<(), 
     // confirmed reference $I30 = 0x468 bytes (12 entries + LAST sentinel)
     // vs ours = 0x30 bytes (just the LAST sentinel).
     {
-        let index_block_size: u32 = INDEX_BLOCK_SIZE;
         sys_entries.push((
             rec::ROOT,
             rec::name(rec::ROOT, cluster_size).expect("known rec_num"),
@@ -1692,70 +1707,14 @@ pub fn format_with_plan(dev: &mut dyn BlockIo, plan: &FormatPlan) -> Result<(), 
         // LAST sentinel terminates the inline index.
         entries_blob.extend_from_slice(&build_index_entry(0, &[], true));
 
-        let index_root =
-            build_populated_index_root_attr(3, index_block_size, cluster_size, &entries_blob);
-        let rec_bytes = match build_system_record(
+        let rec_bytes = build_directory_record(
+            dev,
+            plan,
             &mft_record_layout,
             rec::ROOT,
-            ".",
-            true,
-            0,
-            0,
-            &[index_root],
-        ) {
-            Ok(rec_bytes) => rec_bytes,
-            // The entries do not fit a resident root in this record size
-            // (#436). Do what Windows does on a 1024-byte-record volume:
-            // the entries go to INDX block VCN 0, and the root keeps one
-            // LAST entry routing there.
-            Err(_) => {
-                let mut block =
-                    build_first_indx_block(&entries_blob, index_block_size as usize, bps)?;
-                apply_fixup_on_write_magic(&mut block, bps, b"INDX")?;
-                let block_bytes = root_index_clusters * cluster_size as u64;
-                block.resize(block_bytes as usize, 0);
-                dev.write_all_at(root_index_lcn * cluster_size as u64, &block)?;
-
-                for c in root_index_lcn..root_index_lcn + root_index_clusters {
-                    bitmap[(c / 8) as usize] |= 1u8 << (c % 8);
-                }
-                let first_byte = (root_index_lcn / 8) as usize;
-                let last_byte = ((root_index_lcn + root_index_clusters - 1) / 8) as usize;
-                dev.write_all_at(
-                    bitmap_lcn * cluster_size as u64 + first_byte as u64,
-                    &bitmap[first_byte..=last_byte],
-                )?;
-
-                let index_root = build_large_index_root_attr(3, index_block_size, cluster_size);
-                let mapping = encode_runs(&[DataRun {
-                    starting_vcn: 0,
-                    length: root_index_clusters,
-                    lcn: Some(root_index_lcn),
-                }])?;
-                let allocation = build_nonresident_attribute(
-                    ATTR_INDEX_ALLOCATION,
-                    Some(stream::I30),
-                    4,
-                    u64::from(index_block_size),
-                    block_bytes,
-                    u64::from(index_block_size),
-                    (root_index_clusters as i64) - 1,
-                    &mapping,
-                )?;
-                let i30 = stream::utf16(stream::I30);
-                let block_bitmap =
-                    build_resident_named(ATTR_BITMAP, 5, &i30, &[1, 0, 0, 0, 0, 0, 0, 0]);
-                build_system_record(
-                    &mft_record_layout,
-                    rec::ROOT,
-                    ".",
-                    true,
-                    0,
-                    0,
-                    &[index_root, allocation, block_bitmap],
-                )?
-            }
-        };
+            &entries_blob,
+            root_index_lcn,
+        )?;
         place_record(&mut mft_buf, rs, rec::ROOT, rec_bytes)?;
     }
 
@@ -1771,7 +1730,7 @@ pub fn format_with_plan(dev: &mut dyn BlockIo, plan: &FormatPlan) -> Result<(), 
     // formatted rather than zeroed, so the mirror's copy of each is a
     // record a repair can read (#481): Windows' mirror of a 64 KiB
     // cluster holds 64 `FILE` records.
-    for slot in 16..mftmirr_record_count.min(mft_records_capacity) as u32 {
+    for slot in (rec::QUOTA + 1)..mftmirr_record_count.min(mft_records_capacity) as u32 {
         let rec_bytes = build_free_record(&mft_record_layout, slot)?;
         place_record(&mut mft_buf, rs, slot, rec_bytes)?;
     }
@@ -1784,8 +1743,86 @@ pub fn format_with_plan(dev: &mut dyn BlockIo, plan: &FormatPlan) -> Result<(), 
     mirror[..mirror_size].copy_from_slice(&mft_buf[..mirror_size]);
     dev.write_all_at(mftmirr_lcn * cluster_size as u64, &mirror)?;
 
+    if !secure_overflow.is_empty() {
+        let mut secure = crate::attr_list::ListedFile::open(dev, u64::from(rec::SECURE))?;
+        for attribute in secure_overflow {
+            if let Err(error) = secure.add(dev, attribute) {
+                return Err(secure.abandon(dev, error));
+            }
+        }
+        secure.commit(dev)?;
+    }
+
     dev.sync()?;
     Ok(())
+}
+
+fn build_directory_record(
+    dev: &mut dyn BlockIo,
+    plan: &FormatPlan,
+    layout: &MftLayout,
+    record_number: u32,
+    entries: &[u8],
+    index_lcn: u64,
+) -> Result<Vec<u8>, Error> {
+    let name = rec::name(record_number, plan.cluster_size).expect("known directory record");
+    let index_root =
+        build_populated_index_root_attr(3, plan.index_block_size, plan.cluster_size, entries);
+    let resident = build_system_record(layout, record_number, name, true, 0, 0, &[index_root]);
+    if let Ok(record) = resident {
+        return Ok(record);
+    }
+    let mut block = build_first_indx_block(
+        entries,
+        plan.index_block_size as usize,
+        plan.bytes_per_sector,
+    )?;
+    apply_fixup_on_write_magic(&mut block, plan.bytes_per_sector, b"INDX")?;
+    let block_bytes = plan.root_index_clusters * u64::from(plan.cluster_size);
+    block.resize(block_bytes as usize, 0);
+    dev.write_all_at(index_lcn * u64::from(plan.cluster_size), &block)?;
+
+    let first_byte = index_lcn / 8;
+    let last_byte = (index_lcn + plan.root_index_clusters - 1) / 8;
+    let mut bitmap = vec![0u8; (last_byte - first_byte + 1) as usize];
+    let bitmap_offset = plan.bitmap_lcn * u64::from(plan.cluster_size) + first_byte;
+    dev.read_exact_at(bitmap_offset, &mut bitmap)?;
+    for cluster in index_lcn..index_lcn + plan.root_index_clusters {
+        bitmap[(cluster / 8 - first_byte) as usize] |= 1u8 << (cluster % 8);
+    }
+    dev.write_all_at(bitmap_offset, &bitmap)?;
+
+    let index_root = build_large_index_root_attr(3, plan.index_block_size, plan.cluster_size);
+    let mapping = encode_runs(&[DataRun {
+        starting_vcn: 0,
+        length: plan.root_index_clusters,
+        lcn: Some(index_lcn),
+    }])?;
+    let allocation = build_nonresident_attribute(
+        ATTR_INDEX_ALLOCATION,
+        Some(stream::I30),
+        4,
+        u64::from(plan.index_block_size),
+        block_bytes,
+        u64::from(plan.index_block_size),
+        plan.root_index_clusters as i64 - 1,
+        &mapping,
+    )?;
+    let block_bitmap = build_resident_named(
+        ATTR_BITMAP,
+        5,
+        &stream::utf16(stream::I30),
+        &[1, 0, 0, 0, 0, 0, 0, 0],
+    );
+    build_system_record(
+        layout,
+        record_number,
+        name,
+        true,
+        0,
+        0,
+        &[index_root, allocation, block_bitmap],
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1861,7 +1898,7 @@ fn build_boot_sector(
 
     // clusters_per_index_block (signed, same encoding). 4096-byte index
     // blocks; on a 4096-cluster volume that's 1.
-    let cpib_raw: u64 = 4096;
+    let cpib_raw = u64::from(directory_index_block_size(cluster_size, mft_record_size));
     let cpib: i8 = if cpib_raw >= cluster_size as u64 {
         (cpib_raw / cluster_size as u64) as i8
     } else {

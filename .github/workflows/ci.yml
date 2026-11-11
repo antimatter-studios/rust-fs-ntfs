@@ -174,7 +174,7 @@ jobs:
 
   test:
     name: test-${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'antimatter-vps-linux-x64' || matrix.os }}
     # A change to documentation alone runs only the ubuntu leg, which carries
     # fmt, clippy, the family checks and the shared-block check: lint is what
     # checks a documentation change. The ARM64 and macOS legs are dropped.
@@ -189,51 +189,19 @@ jobs:
         exclude: ${{ fromJSON(needs.changes.outputs.code == 'false' && '[{"os":"ubuntu-24.04-arm"},{"os":"macos-latest"}]' || '[]') }}
     steps:
       - uses: actions/checkout@v4
+      # Tools come from scripts/install-user-tools.sh, the script developers
+      # run as `chore tools`, so CI and a developer's machine set up the same
+      # way. It installs nothing as root: the self-hosted runners cannot sudo.
+      # What a runner already has is left alone, and the rest is cached.
+      - name: tools, without root
+        uses: ./.github/actions/user-tools
+        with:
+          tools: ${{ matrix.os == 'ubuntu-latest' && 'chore pwsh ntfs-3g pyyaml cc' || 'chore' }}
       - name: check out sibling repos
         # Replaces `submodules: recursive`. The pins live in chores.yml,
         # so CI and a developer's machine read the same declaration
         # instead of restating it in YAML.
-        #
-        # chore is fetched from its release tarball at a PINNED version.
-        # An unpinned installer would make this workflow's behaviour
-        # depend on whatever chore shipped that morning, which is the
-        # opposite of what pinning the siblings is for.
-        #
-        # WINDOWS RUNNERS FALL BACK TO PLAIN CLONES. chore publishes
-        # darwin and linux builds only, and `uname -s` under Git Bash
-        # reports MINGW64_NT-*, so there is nothing to install. The
-        # fallback re-states the pins, which is exactly the duplication
-        # `chore siblings` exists to remove -- so it reads them OUT OF
-        # chores.yml rather than hardcoding them, and the single
-        # declaration still holds.
-        shell: bash
-        run: |
-          set -euo pipefail
-          pin() { sed -n "s/^  $1: *//p" chores.yml | tr -d '\r'; }
-
-          case "$(uname -s)-$(uname -m)" in
-            Linux-x86_64)   asset="chore-0.11.0-linux-x86_64.tar.gz" ;;
-            Linux-aarch64)  asset="chore-0.11.0-linux-arm64.tar.gz" ;;
-            Darwin-arm64)   asset="chore-0.11.0-darwin-arm64.tar.gz" ;;
-            Darwin-x86_64)  asset="chore-0.11.0-darwin-x86_64.tar.gz" ;;
-            *)              asset="" ;;   # Windows: no chore build
-          esac
-
-          if [ -n "$asset" ]; then
-            curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 "https://github.com/antimatter-studios/chore/releases/download/v0.11.0/$asset" \
-              | sudo tar xz -C /usr/local/bin chore
-            chore siblings
-          else
-            core_ref="$(pin FS_CORE_REF)"
-            harness_ref="$(pin HARNESS_REF)"
-            echo "chore has no build for $(uname -s); cloning siblings directly"
-            echo "  rust-fs-core              $core_ref"
-            echo "  fs-windows-test-harness $harness_ref"
-            git clone --quiet --depth 1 --branch "$core_ref" \
-              https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
-            git clone --quiet --depth 1 --branch "$harness_ref" \
-              https://github.com/antimatter-studios/fs-windows-test-harness.git ../fs-windows-test-harness
-          fi
+        run: chore siblings
       - name: Install Rust
         # Keep in sync with rust-toolchain.toml. Explicit version here
         # guards against rust-toolchain.toml being deleted and silently
@@ -537,10 +505,7 @@ jobs:
       - name: Operation sequences against ntfs-3g
         if: matrix.os == 'ubuntu-latest'
         timeout-minutes: 10
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y ntfs-3g
-          chore test:op-sequence-oracle
+        run: chore test:op-sequence-oracle
 
       - name: Keep operation sequence reproducers and refusal statistics
         if: always() && matrix.os == 'ubuntu-latest'

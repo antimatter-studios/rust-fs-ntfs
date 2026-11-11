@@ -189,6 +189,15 @@ tasks:
       # consumer handed only fs_ntfs.h cannot compile.
       - 'cp "../rust-fs-core/include/fs_core.h" "{{.OUT}}/include/fs_core.h"'
 
+  tools:
+    desc: "Install the tools the tests need that this machine lacks, without root (chore, pwsh, ntfs-3g, PyYAML, cc)"
+    # The same script CI runs through .github/actions/user-tools, so a
+    # developer's machine and every runner set up the same way. A tool already
+    # on PATH (Homebrew's ntfs-3g, Xcode's cc) is left alone; the rest lands in
+    # ~/.local/user-tools, and the script prints the PATH line to add.
+    cmds:
+      - bash scripts/install-user-tools.sh chore pwsh ntfs-3g pyyaml cc
+
   siblings:
     desc: Check out the sibling repos this crate builds against, at their pinned tags
     # WHY THIS EXISTS, AND WHY IT IS NOT `git submodule update`.
@@ -552,7 +561,7 @@ tasks:
       - bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli,harness --no-fail-fast
 
   test:op-sequence-oracle:
-    desc: "Seeded and generated operation readback, graded by ntfs-3g (install ntfs-3g first)"
+    desc: "Seeded and generated operation readback, graded by ntfs-3g (`chore tools` installs it)"
     deps: [siblings:gate]
     cmds:
       - bash scripts/test-op-sequence-oracle.sh
