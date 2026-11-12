@@ -1,12 +1,6 @@
 name: Hard-link read-only index Windows observation
 on:
   pull_request:
-    paths:
-      - .github/workflows/hardlink-readonly-index-oracle.yml
-      - tests/scripts/hardlink-readonly-index-capture.ps1
-      - tests/scripts/hardlink-readonly-index-capture.legacy.ps1
-      - tests/scripts/hardlink-capture-lifecycle-controls.ps1
-      - tests/hardlink_readonly_index_windows.rs
   workflow_dispatch:
 permissions:
   contents: read

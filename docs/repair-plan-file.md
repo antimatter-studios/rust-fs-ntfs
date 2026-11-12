@@ -191,7 +191,7 @@ the source, and checks that the copy fails with no name left at the target or
 beside it, that the source is unchanged and that a retry succeeds. It also
 copy-repairs sources with modes 0600 and 0644 under umask 022 and checks that
 each target has mode 0600.
-The quick pull-request CI runs this file; `chore test:repair-plan-copy` uses the
+The full pull-request CI runs this file; `chore test:repair-plan-copy` uses the
 same command.
 
 `a_copy_repair_reaches_what_windows_recovered_and_never_writes_its_source`

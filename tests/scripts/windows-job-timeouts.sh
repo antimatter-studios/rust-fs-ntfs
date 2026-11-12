@@ -46,6 +46,15 @@ unbounded_windows_jobs() {
     jobs_of "$1" | awk '$2 == 1 && $3 == "-" { print $1 }'
 }
 
+oracle_budget_covers_work() {
+    jobs_of "$1" | awk -v minimum_minutes=120 '
+        $1 == "validate-mkfs-windows-run" && $2 == 1 && $3 >= minimum_minutes {
+            sufficient = 1
+        }
+        END { exit !sufficient }
+    '
+}
+
 # A control: the parser must see Windows jobs at all, or the check below
 # passes by finding nothing. ci.yml has two and release.yml two.
 for wf in ci.yml release.yml; do
@@ -65,6 +74,12 @@ for wf in "${workflows[@]}"; do
     fi
 done
 
+if oracle_budget_covers_work "$ROOT/.github/workflows/ci.yml"; then
+    ok
+else
+    bad "ci.yml: Windows oracle needs at least 120 minutes: 70 before CLI, 30 for CLI, 20 for trailing checks and runner variance"
+fi
+
 # The check must fail on the case it exists for: a Windows job with no bound.
 sandbox="$(mktemp -d)"
 trap 'rm -rf "$sandbox"' EXIT
@@ -83,6 +98,16 @@ EOF
 if [ "$(unbounded_windows_jobs "$sandbox/unbounded.yml")" = hung ]; then ok; else bad "an unbounded Windows job was not caught (a step's text must not count as the job's bound)"; fi
 sed 's/^    name: a Windows job$/    timeout-minutes: 30/' "$sandbox/unbounded.yml" > "$sandbox/bounded.yml"
 if [ -z "$(unbounded_windows_jobs "$sandbox/bounded.yml")" ]; then ok; else bad "a bounded Windows job was reported as unbounded"; fi
+
+for timeout_minutes in 85 119 120 180; do
+    fixture="$sandbox/oracle-$timeout_minutes.yml"
+    printf 'jobs:\n  validate-mkfs-windows-run:\n    runs-on: windows-latest\n    timeout-minutes: %s\n' "$timeout_minutes" > "$fixture"
+    if oracle_budget_covers_work "$fixture"; then
+        if [ "$timeout_minutes" -ge 120 ]; then ok; else bad "the insufficient $timeout_minutes-minute oracle budget was accepted"; fi
+    else
+        if [ "$timeout_minutes" -lt 120 ]; then ok; else bad "the sufficient $timeout_minutes-minute oracle budget was rejected"; fi
+    fi
+done
 
 if [ "$fail" -gt 0 ]; then
     echo "windows-job-timeouts: $pass passed, $fail failed"

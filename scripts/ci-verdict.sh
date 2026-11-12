@@ -5,8 +5,9 @@
 # `continue-on-error: true` and is declared non-gating to ci-gate.
 #
 # CODE is the changes job's `code` output, decided by scripts/ci-plan.sh. It
-# must be `true` (the full pipeline) or `false` (a quick run: a pull request
-# or a push to main); anything else, an absent decision included, is red.
+# must be `true` (the full pipeline) or `false` (only a push to main);
+# anything else, an absent decision included, is red. EVENT and REF bind the
+# quick-run exception to that event, never a pull request or merge group.
 # Only on a quick run is a skipped job expected rather than red, and only one
 # of the full jobs named below: the Windows fixtures, the jobs that read
 # them, and the kernel oracle. A quick job is never excused a skip.
@@ -17,7 +18,8 @@ case "${1:-}" in
         filter='(.changes.result == "success") and
             ((.changes.outputs.mkfs == "true" and
               .["validate-mkfs-windows-run"].result == "success") or
-             (.changes.outputs.mkfs == "false" and
+             ($event == "push" and $ref == "refs/heads/main" and
+              .changes.outputs.mkfs == "false" and
               .["validate-mkfs-windows-run"].result == "skipped"))'
         ;;
     aggregate)
@@ -32,7 +34,9 @@ case "${1:-}" in
             def ok($job): .result == "success" or
                 ($code == "false" and .result == "skipped" and
                  (full | index($job)) != null);
-            ($code == "true" or $code == "false") and
+            ($code == "true" or
+                ($code == "false" and $event == "push" and
+                 $ref == "refs/heads/main")) and
             (.changes.result == "success") and
             (to_entries | all(.value | type == "object") and
                 all(.value as $v | .key as $k | $v | ok($k))) and
@@ -47,7 +51,7 @@ case "${1:-}" in
         ;;
 esac
 
-if ! printf '%s' "${GATE_NEEDS_JSON:-}" | jq -e --arg code "${CODE:-}" ". as \$needs | $filter" >/dev/null; then
+if ! printf '%s' "${GATE_NEEDS_JSON:-}" | jq -e --arg code "${CODE:-}" --arg event "${EVENT:-}" --arg ref "${REF:-}" ". as \$needs | $filter" >/dev/null; then
     echo "CI $1 verdict failed: a required job failed, was cancelled, or was unexpectedly skipped" >&2
     exit 1
 fi

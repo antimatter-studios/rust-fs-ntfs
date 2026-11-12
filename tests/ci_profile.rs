@@ -838,7 +838,7 @@ fn ci_ok_covers_every_gating_job_and_preserves_windows_filter() {
         field(job("changes"), "outputs")
             .and_then(|o| field(o, "mkfs"))
             .and_then(Yaml::as_str),
-        Some("${{ steps.filter.outputs.mkfs || steps.unfiltered.outputs.mkfs }}")
+        Some("${{ steps.code.outputs.code }}")
     );
     assert_eq!(needs(job("validate-mkfs-windows-run")), ["changes"]);
     assert!(field(job("validate-mkfs-windows-run"), "if")
