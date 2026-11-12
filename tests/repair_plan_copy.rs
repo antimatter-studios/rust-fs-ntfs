@@ -24,6 +24,7 @@ fn write(offset: u64, fill: u8) -> PlannedWrite {
 /// Three units: two writes, two writes, one write, all over zeroed bytes.
 fn plan() -> SavedPlan {
     SavedPlan {
+        clear_dirty_from: None,
         source_size: SIZE as u64,
         volume_serial: SERIAL,
         units: vec![
@@ -270,6 +271,7 @@ fn a_copy_repair_that_fails_while_copying_leaves_no_target_and_a_retry_succeeds(
     pristine[SERIAL_OFFSET..SERIAL_OFFSET + 8].copy_from_slice(&SERIAL.to_le_bytes());
     std::fs::write(&source, &pristine).unwrap();
     let plan = SavedPlan {
+        clear_dirty_from: None,
         source_size: pristine.len() as u64,
         volume_serial: SERIAL,
         units: vec![PlanUnit {

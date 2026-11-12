@@ -46,6 +46,7 @@ fn source_and_plan() -> (ReadOnlySource, SavedPlan) {
     let plan = SavedPlan {
         source_size: source.size(),
         volume_serial: serial,
+        clear_dirty_from: None,
         units: vec![
             PlanUnit {
                 writes: vec![

@@ -19,12 +19,13 @@ All integers are little-endian.
 | offset | size | field |
 |---|---|---|
 | 0 | 8 | magic, the ASCII bytes `NTFSPLAN` |
-| 8 | 4 | format version, `1` |
+| 8 | 4 | format version, `2` |
 | 12 | 4 | unit count |
 | 16 | 8 | file length in bytes, including the trailer |
 | 24 | 8 | source size in bytes |
 | 32 | 8 | volume serial number: the source's boot sector bytes `0x48..0x50` |
-| 40 | ... | the units, in the order they are applied |
+| 40 | 4 | the first clear-dirty unit: the unit count when no unit clears the dirty flag |
+| 44 | ... | the units, in the order they are applied |
 | length - 32 | 32 | SHA-256 of every byte before it |
 
 Each unit, one per durable boundary of the repair (the writes between two
@@ -39,6 +40,14 @@ flushes):
 | per write: `n` | before-image: what the volume holds there at this write's turn |
 | per write: `n` | after-image: what the write leaves there |
 
+The clear-dirty units (#1132) are the writes that clear the volume's dirty
+flag, `$Volume`'s flags and then its `$MFTMirr` copy, which an in-place
+plan asked to clear the flag ends with. They run from the unit the field
+names to the last; the in-place apply audits the volume before them.
+
+A version 1 file has no clear-dirty field: its units start at offset 40,
+and none of them clears the flag. A reader still loads it.
+
 ## What a reader must refuse
 
 A reader refuses the whole file, and applies none of it, when:
@@ -46,6 +55,7 @@ A reader refuses the whole file, and applies none of it, when:
 - it does not start with the magic (`not a repair plan file`);
 - the version is not one it knows, including any newer version
   (`plan file format version N is not supported`);
+- the first clear-dirty unit is past the last unit (`plan file malformed`);
 - it is shorter than its file-length field says, or than a header
   (`plan file truncated`);
 - it is longer than its file-length field says (`plan file has trailing
@@ -124,7 +134,17 @@ target takes the access its directory gives new files.
 
 `apply_plan_units` writes each unit's writes in order and then flushes the
 device: a flush at every unit boundary and none inside a unit, so the
-device holds whole units whenever a flush has returned.
+device holds whole units whenever a flush has returned. Before the first
+unit, `check_device_identity` checks the device being written, not only the
+source: its size in bytes and the volume serial number at boot-sector bytes
+`0x48..0x50` must be the plan's. A short copy, or another device behind the
+path, is refused naming the size or serial, with nothing of the plan
+written. Immediately before
+a unit is written, it is checked on the device with `check_unit_on_device`.
+A unit whose ranges do not hold their before-images stops the apply before
+it: every earlier unit stays written and flushed, nothing of the refused
+unit is written, and the refusal names the unit, the write and its byte
+range.
 
 A copy that fails removes its hidden file and leaves nothing at the target
 path, so the copy-repair can be run again. A process killed during the copy
@@ -150,7 +170,15 @@ interrupted capture, loads it back, applies it by its own writes and
 compares the result with Windows' own restart. It computes the section
 boundaries from this layout, independently of the reader, truncates the
 file at each one and one byte past it, flips a byte in every section, and
-writes a version 2 header, and checks that each is refused.
+writes a version 3 header, and checks that each is refused.
+
+`an_in_place_plan_ends_with_marked_clear_dirty_units_only_when_asked`
+plans an in-place repair of each Windows capture with and without
+`clear_dirty`. Asked, the plan must end with exactly the writes
+`clear_dirty_io` makes, marked, with no earlier unit clearing the flag;
+not asked, it must mark nothing and leave the flag set. The mark must load
+back, a mark past the last unit must be refused, and the same plan
+rewritten as a version 1 file must load with no mark.
 
 `a_loaded_plan_is_checked_against_its_source_and_refused_on_the_first_mismatch`
 checks a plan from each Windows capture against that capture, then against
@@ -207,3 +235,18 @@ refused check leaves no target.
 from each Windows capture to a counting target and checks that every
 unit's writes arrive in order with one flush after them and none among
 them.
+
+`applying_a_plan_rechecks_each_unit_on_the_target_and_stops_with_earlier_units_intact`
+applies a plan from each Windows capture to a target that changes one
+byte, which no earlier write of the same unit covers, inside the first, a
+middle and the last unit's ranges after the previous unit's flush. It
+checks that each apply is refused naming that unit and range, that the
+target holds exactly the earlier units' writes and the changed byte, that
+the capture keeps its SHA-256, and that a plan made again from the target
+as it now stands applies without refusal.
+
+`applying_a_plan_refuses_a_target_of_another_size_or_serial_before_the_first_unit`
+applies a plan from each Windows capture to a copy one sector short and to
+a copy whose boot-sector volume serial changed after the copy. It checks
+that each apply is refused naming the size or the serial, that no write or
+flush reaches the target, and that the capture keeps its SHA-256.
