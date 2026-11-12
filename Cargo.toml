@@ -62,6 +62,10 @@ name = "rust-fs-ntfs"
 path = "src/cli/main.rs"
 required-features = ["cli"]
 
+[[example]]
+name = "split_extent_holes"
+test = true
+
 # WHAT THE RELEASE TARBALL SHIPS, read by rust-fs-core's package-cli
 # (`../rust-fs-core/scripts/package-cli.sh`, run by core's release-cli workflow and by
 # the pull-request `cli` job). Every dotted name the binary answers to, with
