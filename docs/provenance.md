@@ -140,6 +140,18 @@ below those a `0xFF`-filled log left on the volume (#649, merge-queue run
 
 ## What verifies each layout
 
+The extension-record checker (#820, Windows grading in #826) changes one
+extension record's base reference to the root, bumps its sequence number,
+or clears its in-use flag in three disposable copies of Windows'
+`ntfs-attrlist.img`. CI retains `check_io`'s findings, record identities and
+image SHA-256 values, then grades each exact copy and an untouched control
+with read-only `chkdsk`. It uses the harness's `Clean` shape with `readonly`
+to avoid the `Damaged` shape's repair passes. The evidence consumer requires
+four complete raw verdicts and records Windows' actual clean/damaged answer
+in `attribute-list-record-checks/comparisons.json`; disagreement fails the
+check without changing `check_io`. These Windows verdicts are pending CI,
+not measured locally.
+
 The attribute-list checker (#821) changes one entry field at a time in
 disposable copies of Windows' `ntfs-attrlist.img`: type, UTF-16 name,
 lowest VCN or instance. The Windows-native fixture job runs `check_io`
@@ -150,6 +162,31 @@ The reverse check (#822) also removes one entry or every entry naming one
 extension record, retaining the attributes themselves unchanged. The same
 Windows job requires damage on these exact copies and retains both verdicts;
 the untouched Windows volume remains the clean control.
+
+The self-entry check (#1040, part of #823) inserts an entry for the list
+itself between `$STANDARD_INFORMATION` and the following type, preserving
+every existing entry and the list's allocation. Its type, base reference,
+sequence, lowest VCN and instance identify the actual list attribute. The
+same Windows job requires `chkdsk` to report this exact copy damaged and
+retains both verdicts; no Windows VM is run during local development.
+
+The type-order check (#1043, part of #1041) follows Microsoft's
+`ATTRIBUTE_LIST_ENTRY` devnote's ordering by attribute type. Its regression
+exchanges the complete `$STANDARD_INFORMATION` and `$FILE_NAME` entries in
+a disposable copy of Windows' `ntfs-attrlist.img`; all entry fields and the
+referenced attributes remain unchanged. Windows CI grades that exact copy
+with `chkdsk` and retains the findings alongside the untouched clean control.
+The Windows verdict has not been measured locally. Name collation (#1044)
+and same-name lowest-VCN order (#1045) are separate, pending checks; this
+change makes no assumption about Windows' attribute-name collation.
+
+The name-collation measurement (#1047, part of #1044) asks Windows rather
+than a specification. Windows writes one file's named `$DATA` streams into an
+`$ATTRIBUTE_LIST`, with names chosen so ordinal UTF-16, upcase-folded,
+length-first and code-point ordering each give a different sequence. CI keeps
+the order Windows wrote and `chkdsk`'s verdict on that untouched list; it
+judges neither. Inversion verdicts (#1048) and the checker comparison (#1049)
+follow the retained measurement.
 
 The listed-directory cycle (#818) uses Windows' own enumeration, EA query,
 stream readback and `chkdsk` to grade the grown and folded indexes. Directory
