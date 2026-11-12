@@ -113,13 +113,13 @@ impl PathIo {
     /// for a device that is mounted or otherwise held.
     ///
     /// Only the in-place repair path of the standalone fsck CLI opens a
-    /// device this way. Every other caller, the FSKit extension included,
+    /// device this way, and its journal the same way (#936). Every other caller, the FSKit extension included,
     /// keeps the cooperative in-process lock and opens through
     /// [`PathIo::open_rw`], [`PathIo::open_ro`] or a callback transport.
     pub fn open_exclusive(path: &Path) -> Result<Self, String> {
         let held = || {
             format!(
-                "open exclusive '{}': the device is held by another process",
+                "open exclusive '{}': it is held by another process",
                 path.display()
             )
         };

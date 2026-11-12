@@ -1711,7 +1711,10 @@ fn attrs(rec: &[u8]) -> Vec<(usize, u32, bool)> {
 
 impl Image {
     fn read(path: &str) -> Image {
-        let bytes = std::fs::read(path).unwrap();
+        Image::of(std::fs::read(path).unwrap())
+    }
+
+    fn of(bytes: Vec<u8>) -> Image {
         let cluster = le(&bytes, 0x0B, 2) * le(&bytes, 0x0D, 1);
         let c = bytes[0x40] as i8;
         let record = if c > 0 { c as u64 * cluster } else { 1 << -c };
@@ -2604,8 +2607,8 @@ fn a_dry_run_plans_the_writes_that_reach_what_windows_recovered_and_makes_none()
 /// the units' starts, then the trailer's, then the file's end.
 fn plan_file_sections(units: &[fs_ntfs::repair_plan::PlanUnit]) -> (Vec<usize>, usize, usize) {
     // Header: magic, version, unit count, file length. Identity: source
-    // size, volume serial number.
-    let mut at = 8 + 4 + 4 + 8 + 8 + 8;
+    // size, volume serial number. Then the first clear-dirty unit (#1132).
+    let mut at = 8 + 4 + 4 + 8 + 8 + 8 + 4;
     let mut starts = Vec::new();
     for unit in units {
         starts.push(at);
@@ -2739,10 +2742,159 @@ fn a_saved_plan_loads_back_to_what_windows_recovered_and_only_when_intact() {
             refused(&format!("{section} byte {at} flipped"), &flipped, "");
         }
         let mut newer = saved.clone();
-        newer[8..12].copy_from_slice(&2u32.to_le_bytes());
+        newer[8..12].copy_from_slice(&3u32.to_le_bytes());
         let sum = Sha256::digest(&newer[..trailer]);
         newer[trailer..].copy_from_slice(&sum);
-        refused("format version 2", &newer, "version 2");
+        refused("format version 3", &newer, "version 3");
+
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn an_in_place_plan_ends_with_marked_clear_dirty_units_only_when_asked() {
+    // An in-place repair clears the dirty flag only when the caller asks
+    // (#1132): the plan then ends with the writes clear_dirty_io makes,
+    // marked as its clear-dirty units, and no earlier unit clears the
+    // flag. The plan file keeps the mark; a mark past the last unit is
+    // refused, and a version 1 file, which has no mark, still loads.
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
+    let dirty = |k: &str, bytes: &[u8]| {
+        let mut v = RecordedRepair {
+            bytes: bytes.to_vec(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        fsck::is_dirty_io(&mut v).unwrap_or_else(|e| panic!("{k}: dirty flag: {e}"))
+    };
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let mut volume = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+
+        let asked = fsck::FsckOptions { clear_dirty: true };
+        let plan = plan_in_place_io(&mut volume, asked)
+            .unwrap_or_else(|e| panic!("{k}: plan with clear_dirty: {e}"));
+        assert!(
+            volume.bytes == pristine,
+            "{k}: planning wrote to the volume"
+        );
+        let from = plan
+            .clear_dirty_from
+            .unwrap_or_else(|| panic!("{k}: asked to clear the flag, the plan marks no unit"));
+        assert!(
+            from < plan.units.len(),
+            "{k}: the mark {from} names no unit"
+        );
+        let mut copy = pristine.clone();
+        let mut set = false;
+        for (u, unit) in plan.units[..from].iter().enumerate() {
+            apply_plan(k, &mut copy, std::slice::from_ref(unit));
+            let now = dirty(k, &copy);
+            assert!(
+                !set || now,
+                "{k}: unit {u}, before the clear-dirty units, cleared the flag"
+            );
+            set |= now;
+        }
+        assert!(
+            set,
+            "{k}: the units before the clear-dirty units left the flag clear"
+        );
+        let mut clearing = RecordedRepair {
+            bytes: copy.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        assert!(
+            fsck::clear_dirty_io(&mut clearing).unwrap_or_else(|e| panic!("{k}: clear: {e}")),
+            "{k}: clear_dirty_io found the flag clear"
+        );
+        fs_ntfs::block_io::BlockIo::sync(&mut clearing).unwrap();
+        let marked: Vec<Vec<PlannedWrite>> = plan.units[from..]
+            .iter()
+            .map(|unit| {
+                unit.writes
+                    .iter()
+                    .map(|w| {
+                        (
+                            w.offset,
+                            w.after.len() as u64,
+                            hex_sha256(&w.before),
+                            hex_sha256(&w.after),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            marked, clearing.units,
+            "{k}: the clear-dirty units are not clear_dirty_io's writes"
+        );
+        apply_plan(k, &mut copy, &plan.units[from..]);
+        assert!(!dirty(k, &copy), "{k}: the whole plan left the flag set");
+
+        let saved = save_plan(&plan, &mut volume).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        assert!(
+            loaded.units == plan.units,
+            "{k}: the units loaded back differ"
+        );
+        assert_eq!(
+            loaded.clear_dirty_from,
+            Some(from),
+            "{k}: the mark loaded back"
+        );
+
+        let trailer = saved.len() - 32;
+        let mut past = saved.clone();
+        past[40..44].copy_from_slice(&(plan.units.len() as u32 + 1).to_le_bytes());
+        let sum = Sha256::digest(&past[..trailer]);
+        past[trailer..].copy_from_slice(&sum);
+        match load_plan(&past) {
+            Ok(_) => panic!("{k}: a mark past the last unit loaded"),
+            Err(e) => assert!(
+                e.to_string().contains("malformed"),
+                "{k}: a mark past the last unit refused as {e:?}"
+            ),
+        }
+
+        let mut old = [&saved[..40], &saved[44..trailer]].concat();
+        old[8..12].copy_from_slice(&1u32.to_le_bytes());
+        let length = (old.len() + 32) as u64;
+        old[16..24].copy_from_slice(&length.to_le_bytes());
+        let sum = Sha256::digest(&old);
+        old.extend_from_slice(&sum);
+        let v1 = load_plan(&old).unwrap_or_else(|e| panic!("{k}: a version 1 file: {e}"));
+        assert!(
+            v1.units == plan.units,
+            "{k}: a version 1 file's units differ"
+        );
+        assert_eq!(
+            v1.clear_dirty_from, None,
+            "{k}: a version 1 file has no mark"
+        );
+
+        let plan = plan_in_place_io(&mut volume, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        assert_eq!(
+            plan.clear_dirty_from, None,
+            "{k}: not asked, the plan marks a unit"
+        );
+        let mut copy = pristine.clone();
+        apply_plan(k, &mut copy, &plan.units);
+        assert!(dirty(k, &copy), "{k}: not asked, the plan cleared the flag");
+        let saved = save_plan(&plan, &mut volume).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        assert_eq!(
+            loaded.clear_dirty_from, None,
+            "{k}: not asked, the loaded plan marks a unit"
+        );
 
         std::fs::remove_file(&src).unwrap();
     }
@@ -2859,6 +3011,22 @@ fn uncovered_in_unit(unit: &fs_ntfs::repair_plan::PlanUnit, w: usize) -> Option<
         !unit.writes[..w]
             .iter()
             .any(|e| (e.offset..e.offset + e.after.len() as u64).contains(&b))
+    })
+}
+
+/// Like `uncovered_in_unit`, but from the middle of write `w`, and never in
+/// the last two bytes of a sector, where an update sequence number sits:
+/// a byte whose change leaves the record or index block around it still
+/// reading as one, so a volume holding it can be planned for again.
+#[cfg(feature = "plan-file")]
+fn uncovered_mid_unit(unit: &fs_ntfs::repair_plan::PlanUnit, w: usize) -> Option<u64> {
+    let me = &unit.writes[w];
+    let end = me.offset + me.before.len() as u64;
+    (me.offset + me.before.len() as u64 / 2..end).find(|&b| {
+        b % 512 < 510
+            && !unit.writes[..w]
+                .iter()
+                .any(|e| (e.offset..e.offset + e.after.len() as u64).contains(&b))
     })
 }
 
@@ -3144,6 +3312,230 @@ fn a_copy_repair_syncs_after_every_unit_and_never_inside_one() {
     );
 }
 
+/// A target that changes one byte once it has seen `after` syncs, that
+/// is between unit `after - 1` and unit `after`; with `after` 0 the byte
+/// is changed before anything is written.
+#[cfg(feature = "plan-file")]
+struct ChangingTarget {
+    bytes: Vec<u8>,
+    syncs: usize,
+    after: usize,
+    at: usize,
+}
+
+#[cfg(feature = "plan-file")]
+impl ChangingTarget {
+    fn new(bytes: Vec<u8>, after: usize, at: usize) -> Self {
+        let mut t = ChangingTarget {
+            bytes,
+            syncs: 0,
+            after,
+            at,
+        };
+        if after == 0 {
+            t.bytes[at] ^= 0xff;
+        }
+        t
+    }
+}
+
+#[cfg(feature = "plan-file")]
+impl fs_ntfs::block_io::BlockIo for ChangingTarget {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        let at = offset as usize;
+        let there = self
+            .bytes
+            .get(at..at + buf.len())
+            .ok_or("read past the end")?;
+        buf.copy_from_slice(there);
+        Ok(())
+    }
+
+    fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
+        let at = offset as usize;
+        self.bytes
+            .get_mut(at..at + buf.len())
+            .ok_or("write past the end")?
+            .copy_from_slice(buf);
+        Ok(())
+    }
+
+    fn size(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn sync(&mut self) -> Result<(), String> {
+        self.syncs += 1;
+        if self.syncs == self.after {
+            self.bytes[self.at] ^= 0xff;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn applying_a_plan_rechecks_each_unit_on_the_target_and_stops_with_earlier_units_intact() {
+    // Each unit is re-checked on the target immediately before it is
+    // written (#914). One byte of the first, a middle or the last unit's
+    // ranges changed on the target after the previous unit's sync must
+    // stop the apply before that unit, naming the unit and the range: the
+    // earlier units stay written and synced, nothing of the refused unit
+    // is written, and the source keeps its SHA-256. A plan made again from
+    // the target as it now stands applies without refusal.
+    use fs_ntfs::repair_plan::{apply_plan_units, load_plan, plan_fsck_io, save_plan};
+    let volume = |bytes: Vec<u8>| RecordedRepair {
+        bytes,
+        units: Vec::new(),
+        open: Vec::new(),
+    };
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let pristine_sha = hex_sha256(&pristine);
+        let mut v = volume(pristine.clone());
+        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        let n = loaded.units.len();
+        assert!(n > 0, "{k}: a log holding work planned nothing");
+
+        let mut positions = vec![0, n / 2, n - 1];
+        positions.dedup();
+        for u in positions {
+            let unit = &loaded.units[u];
+            let (w, at) = (0..unit.writes.len())
+                .find_map(|w| uncovered_mid_unit(unit, w).map(|b| (w, b as usize)))
+                .unwrap_or_else(|| panic!("{k}: unit {u} has no byte its own writes do not cover"));
+            let write = &unit.writes[w];
+            let range = format!(
+                "{}..{}",
+                write.offset,
+                write.offset + write.before.len() as u64
+            );
+            let mut target = ChangingTarget::new(pristine.clone(), u, at);
+            match apply_plan_units(&loaded, &mut target) {
+                Ok(()) => panic!("{k}: unit {u}: byte {at} changed on the target, applied anyway"),
+                Err(e) => {
+                    let e = e.to_string();
+                    assert!(
+                        e.contains(&format!("unit {u} write {w}")) && e.contains(&range),
+                        "{k}: unit {u}: byte {at} changed, refused as {e}, not naming unit {u} \
+                         write {w} and bytes {range}"
+                    );
+                }
+            }
+            assert_eq!(
+                target.syncs, u,
+                "{k}: unit {u} refused after {} syncs, not one per earlier unit",
+                target.syncs
+            );
+            let mut expected = pristine.clone();
+            apply_plan(k, &mut expected, &loaded.units[..u]);
+            expected[at] ^= 0xff;
+            assert!(
+                target.bytes == expected,
+                "{k}: unit {u} refused: the target holds other bytes than the earlier units \
+                 and the changed byte, so the refused unit was written or an earlier one lost"
+            );
+            assert_eq!(
+                hex_sha256(&std::fs::read(&src).unwrap()),
+                pristine_sha,
+                "{k}: unit {u}: the source changed"
+            );
+
+            // A plan made again from the target as it now stands applies.
+            let mut now = volume(target.bytes.clone());
+            let again = plan_fsck_io(&mut now, fsck::FsckOptions::default())
+                .unwrap_or_else(|e| panic!("{k}: unit {u}: planning again: {e}"));
+            let again = save_plan(&again, &mut now)
+                .unwrap_or_else(|e| panic!("{k}: unit {u}: saving again: {e}"));
+            let again =
+                load_plan(&again).unwrap_or_else(|e| panic!("{k}: unit {u}: loading again: {e}"));
+            let mut retry = ChangingTarget {
+                bytes: target.bytes.clone(),
+                syncs: 0,
+                after: usize::MAX,
+                at,
+            };
+            apply_plan_units(&again, &mut retry)
+                .unwrap_or_else(|e| panic!("{k}: unit {u}: the plan made again was refused: {e}"));
+        }
+
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn applying_a_plan_refuses_a_target_of_another_size_or_serial_before_the_first_unit() {
+    // The device about to be written is checked against the plan's source
+    // identity before the first unit (#915), not only the source before
+    // the copy. A copy one sector short, and a copy whose boot-sector
+    // serial at bytes 0x48..0x50 changed after the copy, must each be
+    // refused naming size or serial, with no write of any unit reaching
+    // the target, and the source keeping its SHA-256.
+    use fs_ntfs::repair_plan::{apply_plan_units, load_plan, plan_fsck_io, save_plan};
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let pristine_sha = hex_sha256(&pristine);
+        let mut v = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        assert!(
+            !loaded.units.is_empty(),
+            "{k}: a log holding work planned nothing"
+        );
+
+        let sector = u16::from_le_bytes([pristine[0x0b], pristine[0x0c]]) as usize;
+        let short = pristine[..pristine.len() - sector].to_vec();
+        let mut reserialled = pristine.clone();
+        reserialled[0x48] ^= 0xff;
+        let serial = u64::from_le_bytes(reserialled[0x48..0x50].try_into().unwrap());
+        for (what, copy, named) in [
+            ("size", short, format!("{}", pristine.len() - sector)),
+            ("serial", reserialled, format!("{serial:#018x}")),
+        ] {
+            let mut target = CountingTarget {
+                bytes: copy.clone(),
+                events: Vec::new(),
+            };
+            match apply_plan_units(&loaded, &mut target) {
+                Ok(()) => panic!("{k}: a target of another {what} was applied to"),
+                Err(e) => {
+                    let e = e.to_string();
+                    assert!(
+                        e.contains(what) && e.contains(&named),
+                        "{k}: a target of another {what} refused as {e}, not naming its {what} \
+                         {named}"
+                    );
+                }
+            }
+            assert!(
+                target.events.is_empty() && target.bytes == copy,
+                "{k}: a target of another {what} was refused after {} writes and syncs reached \
+                 it",
+                target.events.len()
+            );
+        }
+        assert_eq!(
+            hex_sha256(&std::fs::read(&src).unwrap()),
+            pristine_sha,
+            "{k}: the source changed"
+        );
+
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
 #[cfg(feature = "plan-file")]
 #[test]
 fn a_repair_journal_reads_back_to_its_last_whole_record_and_refuses_the_rest() {
@@ -3306,14 +3698,14 @@ fn a_repair_journal_reads_back_to_its_last_whole_record_and_refuses_the_rest() {
 /// that file and the capture's bytes.
 #[cfg(feature = "plan-file")]
 fn saved_plan(k: &str, src: &str) -> (fs_ntfs::repair_plan::SavedPlan, [u8; 32], Vec<u8>) {
-    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
     let pristine = std::fs::read(src).unwrap();
     let mut v = RecordedRepair {
         bytes: pristine.clone(),
         units: Vec::new(),
         open: Vec::new(),
     };
-    let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+    let plan = plan_in_place_io(&mut v, fsck::FsckOptions::default())
         .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
     let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
     let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
@@ -3322,6 +3714,27 @@ fn saved_plan(k: &str, src: &str) -> (fs_ntfs::repair_plan::SavedPlan, [u8; 32],
         "{k}: a log holding work planned nothing"
     );
     (loaded, Sha256::digest(&saved).into(), pristine)
+}
+
+/// An in-place-repaired `device` as Windows' recovery is compared with
+/// it. An in-place repair leaves the volume dirty until it is audited
+/// (#716), and Windows' recovery leaves it clean, so the flag must be set
+/// and is cleared on a copy in memory before the comparison: `$Volume`'s
+/// `VOLUME_IS_DIRTY` bit, and its `$MFTMirr` copy, are the only bytes that
+/// differ from the device (#1127).
+#[cfg(feature = "plan-file")]
+fn in_place_image(k: &str, device: &str) -> Image {
+    let mut v = RecordedRepair {
+        bytes: std::fs::read(device).unwrap(),
+        units: Vec::new(),
+        open: Vec::new(),
+    };
+    assert!(
+        fsck::is_dirty_io(&mut v).unwrap_or_else(|e| panic!("{k}: dirty flag: {e}")),
+        "{k}: the in-place repair left the dirty flag clear"
+    );
+    fsck::clear_dirty_io(&mut v).unwrap_or_else(|e| panic!("{k}: clear dirty: {e}"));
+    Image::of(v.bytes)
 }
 
 #[cfg(feature = "plan-file")]
@@ -3396,7 +3809,7 @@ fn an_in_place_repair_reaches_what_windows_recovered_and_equals_the_copy_repair(
         oracle::same_metadata_as_windows(
             k,
             &Image::read(&src),
-            &Image::read(&device),
+            &in_place_image(k, &device),
             &Image::read(&recovered),
             log_end,
         );
@@ -3547,6 +3960,8 @@ fn an_in_place_repair_makes_each_unit_durable_in_the_journal_before_writing_it()
     // back before the applied record is written and flushed; and no device
     // write falls between units. The expected order is built here from the
     // plan, one unit at a time, and must be exactly what reached the pair.
+    // After the last unit's applied record, the audit (#941) reads the
+    // device and does nothing else: no write and no sync on either side.
     use fs_ntfs::repair_journal::apply_in_place;
     use IoEvent::{Read, Sync, Write};
     const J: bool = true;
@@ -3571,11 +3986,15 @@ fn an_in_place_repair_makes_each_unit_durable_in_the_journal_before_writing_it()
         let got = log.borrow().clone();
         let first = got.iter().zip(&want).position(|(a, b)| a != b);
         assert!(
-            got == want,
-            "{k}: {} events reached the device and journal, {} expected; first difference at \
-             event {first:?}",
+            got.len() > want.len() && got[..want.len()] == want[..],
+            "{k}: {} events reached the device and journal, the units' {} expected first and \
+             the audit's after them; first difference at event {first:?}",
             got.len(),
             want.len()
+        );
+        assert!(
+            got[want.len()..].iter().all(|&e| e == (D, Read)),
+            "{k}: the audit after the last unit did more than read the device"
         );
         let mut expected = pristine.clone();
         apply_plan(k, &mut expected, &loaded.units);
@@ -3585,6 +4004,91 @@ fn an_in_place_repair_makes_each_unit_durable_in_the_journal_before_writing_it()
         );
         std::fs::remove_file(&src).unwrap();
     }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn a_completed_in_place_apply_returns_an_audit_finding_only_the_dirty_flag() {
+    // After the last unit (#941), an in-place apply and a resume run the
+    // read-only check over the whole repaired device and return its report.
+    // The repair leaves the dirty flag set, so the report's flag is set and
+    // nothing else is found; the device still reads dirty afterwards.
+    use fs_ntfs::repair_journal::{apply_in_place, resume_in_place};
+    for (k, _) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+        let (mut device, mut journal, _) = recording_pair(&pristine, None);
+        let audit = apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+            .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+        assert!(audit.dirty, "{k}: the audit read the dirty flag clear");
+        assert!(
+            audit.findings.is_empty(),
+            "{k}: the audit found more than the dirty flag: {:?}",
+            audit.findings
+        );
+        assert!(
+            fsck::is_dirty_io(&mut device).unwrap_or_else(|e| panic!("{k}: dirty flag: {e}")),
+            "{k}: the in-place repair left the dirty flag clear"
+        );
+        let audit = resume_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+            .unwrap_or_else(|e| panic!("{k}: resuming the finished repair: {e}"));
+        assert!(
+            audit.dirty && audit.findings.is_empty(),
+            "{k}: the resume's audit: dirty {}, findings {:?}",
+            audit.dirty,
+            audit.findings
+        );
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn an_in_place_apply_audit_reports_a_mirror_record_changed_outside_every_plan_range() {
+    // A byte of a `$MFTMirr` record that no unit writes is changed on the
+    // device before the apply (#941). The units never read it, so only an
+    // audit that reads the device rather than the planned bytes can see it:
+    // the report names the mirror mismatch, and the flag stays set.
+    use fs_ntfs::repair_journal::apply_in_place;
+    let (k, _) = captures_holding_work()[0];
+    let src = unpack(&format!("windows-interrupted-{k}"));
+    let (loaded, plan_sha256, mut pristine) = saved_plan(k, &src);
+    let sector = u64::from(u16::from_le_bytes([pristine[0x0B], pristine[0x0C]]));
+    let cluster = sector * u64::from(pristine[0x0D]);
+    let mirror_lcn = u64::from_le_bytes(pristine[0x38..0x40].try_into().unwrap());
+    let record_size = match pristine[0x40] as i8 {
+        n if n < 0 => 1u64 << -n,
+        n => n as u64 * cluster,
+    };
+    let planned = |at: u64| {
+        loaded.units.iter().any(|u| {
+            u.writes
+                .iter()
+                .any(|w| (w.offset..w.offset + w.after.len() as u64).contains(&at))
+        })
+    };
+    let (record, at) = [1u64, 2, 0, 3]
+        .into_iter()
+        .map(|r| (r, mirror_lcn * cluster + r * record_size + 0x100))
+        .find(|&(_, at)| !planned(at))
+        .unwrap_or_else(|| panic!("{k}: the plan writes every mirror record's byte 0x100"));
+    pristine[at as usize] ^= 0xFF;
+    let (mut device, mut journal, _) = recording_pair(&pristine, None);
+    let audit = apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+        .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+    assert!(
+        audit
+            .findings
+            .contains(&fsck::CheckFinding::MirrorMismatch { record }),
+        "{k}: the audit did not report mirror record {record}: {:?}",
+        audit.findings
+    );
+    assert!(audit.dirty, "{k}: the audit read the dirty flag clear");
+    assert!(
+        fsck::is_dirty_io(&mut device).unwrap_or_else(|e| panic!("{k}: dirty flag: {e}")),
+        "{k}: the in-place repair left the dirty flag clear"
+    );
+    std::fs::remove_file(&src).unwrap();
 }
 
 #[cfg(feature = "plan-file")]
@@ -3607,7 +4111,7 @@ fn an_in_place_repair_stops_at_a_unit_the_device_reads_back_wrong_and_never_mark
         );
         let (mut device, mut journal, _) = recording_pair(&pristine, Some(first_of_last));
         match apply_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
-            Ok(()) => panic!("{k}: unit {last}'s first write was dropped, the apply went ahead"),
+            Ok(_) => panic!("{k}: unit {last}'s first write was dropped, the apply went ahead"),
             Err(e) => {
                 let e = e.to_string();
                 assert!(
@@ -3863,7 +4367,7 @@ fn an_in_place_repair_stopped_after_any_write_resumes_to_the_uninterrupted_volum
         oracle::same_metadata_as_windows(
             k,
             &Image::read(&src),
-            &Image::read(&device),
+            &in_place_image(k, &device),
             &Image::read(&recovered),
             log_end,
         );
@@ -4025,7 +4529,7 @@ fn an_in_place_repair_cancelled_anywhere_stops_after_a_whole_unit_and_resumes() 
             ) {
                 Err(InPlaceError::Cancelled { applied })
                     if *want < units && applied as usize == *want => {}
-                Ok(()) if *want == units => {}
+                Ok(_) if *want == units => {}
                 other => {
                     let expected = if *want < units {
                         format!("cancelled after {want} units")
@@ -4131,7 +4635,7 @@ fn an_in_place_repair_cancelled_anywhere_stops_after_a_whole_unit_and_resumes() 
         oracle::same_metadata_as_windows(
             k,
             &Image::read(&src),
-            &Image::read(&device),
+            &in_place_image(k, &device),
             &Image::read(&recovered),
             log_end,
         );
@@ -4186,7 +4690,7 @@ fn a_c_abi_in_place_repair_cancelled_by_its_callback_resumes_through_the_c_abi()
     // uninterrupted apply, and the files and metadata Windows' own restart
     // reached. Progress must rise to the stop, then from there to the end.
     use fs_ntfs::repair_journal::apply_in_place;
-    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
     use fs_ntfs::{
         fs_ntfs_repair_apply_in_place, fs_ntfs_repair_resume_in_place, FS_NTFS_REPAIR_CANCELLED,
     };
@@ -4198,7 +4702,7 @@ fn a_c_abi_in_place_repair_cancelled_by_its_callback_resumes_through_the_c_abi()
             units: Vec::new(),
             open: Vec::new(),
         };
-        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+        let plan = plan_in_place_io(&mut v, fsck::FsckOptions::default())
             .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
         let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
         let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
@@ -4293,7 +4797,7 @@ fn a_c_abi_in_place_repair_cancelled_by_its_callback_resumes_through_the_c_abi()
         oracle::same_metadata_as_windows(
             k,
             &Image::read(&src),
-            &Image::read(&device),
+            &in_place_image(k, &device),
             &Image::read(&recovered),
             log_end,
         );
@@ -4825,7 +5329,7 @@ fn a_torn_journal_tail_resumes_only_as_a_prefix_of_the_record_the_plan_expects_n
             let (mut device, mut journal, _) = recording_pair(held, None);
             journal.bytes = bytes.clone();
             match resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
-                Ok(()) => bad.push(format!("{what}: the resume reported success")),
+                Ok(_) => bad.push(format!("{what}: the resume reported success")),
                 Err(InPlaceError::Journal(e))
                     if e.record == record && e.fault == JournalFault::TornTailDiffers =>
                 {
@@ -4866,7 +5370,7 @@ fn a_torn_journal_tail_resumes_only_as_a_prefix_of_the_record_the_plan_expects_n
             let (mut device, mut journal, _) = recording_pair(held, None);
             journal.bytes = bytes.clone();
             match resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
-                Ok(()) => bad.push(format!("{what}: the resume reported success")),
+                Ok(_) => bad.push(format!("{what}: the resume reported success")),
                 Err(InPlaceError::Journal(e))
                     if e.record == record && e.fault == JournalFault::ChecksumMismatch =>
                 {
@@ -4904,14 +5408,200 @@ fn a_torn_journal_tail_resumes_only_as_a_prefix_of_the_record_the_plan_expects_n
             let (mut device, mut journal, _) = recording_pair(held, None);
             journal.bytes = bytes;
             match resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
-                Ok(()) if device.bytes == whole => {}
-                Ok(()) => bad.push(format!(
+                Ok(_) if device.bytes == whole => {}
+                Ok(_) => bad.push(format!(
                     "{what}: the device holds other bytes than an uninterrupted apply"
                 )),
                 Err(e) => bad.push(format!("{what}: the resume refused: {e}")),
             }
         }
         assert!(bad.is_empty(), "{k}:\n{}", bad.join("\n"));
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
+#[cfg(feature = "plan-file")]
+#[test]
+fn a_resume_refuses_a_corrupt_or_foreign_journal_with_nothing_written() {
+    // While an in-place apply is stopped, its journal can be damaged or
+    // swapped for the journal of another repair (#935). At every stop of
+    // each capture's cut apply, a byte flipped in the header, in an intent
+    // and in an applied record, and the journal another capture's apply
+    // left, must each refuse the resume, naming the record and the reason,
+    // before anything is written: no write reaches the device or the
+    // journal, and the journal holds the bytes it was given. Resumed
+    // afterwards from an intact copy of the journal, the device reaches
+    // the uninterrupted apply, and so the files and metadata Windows' own
+    // restart reached.
+    use fs_ntfs::repair_journal::{
+        apply_in_place, read_journal, resume_in_place, InPlaceError, JournalBinding, JournalError,
+        JournalFault, JournalRecord,
+    };
+    let captures = captures_holding_work();
+    // The journal each capture's whole apply leaves, which no other
+    // capture's plan may resume from.
+    let finished: Vec<Vec<u8>> = captures
+        .iter()
+        .map(|&(k, _)| {
+            let src = unpack(&format!("windows-interrupted-{k}"));
+            let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+            let (mut device, mut journal, _) = recording_pair(&pristine, None);
+            apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+                .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+            std::fs::remove_file(&src).unwrap();
+            journal.bytes
+        })
+        .collect();
+    for (i, &(k, log_end)) in captures.iter().enumerate() {
+        let foreign = &finished[(i + 1) % finished.len()];
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let (loaded, plan_sha256, pristine) = saved_plan(k, &src);
+        let (mut device, mut journal, log) = recording_pair(&pristine, None);
+        apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
+            .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
+        let whole = device.bytes;
+        let writes = log
+            .borrow()
+            .iter()
+            .filter(|(_, e)| *e == IoEvent::Write)
+            .count();
+        let binding = JournalBinding {
+            plan_sha256,
+            source_size: loaded.source_size,
+            volume_serial: loaded.volume_serial,
+        };
+        let kinds = ["header", "intent", "applied record"];
+
+        let mut bad = Vec::new();
+        let mut flipped = [0usize; 3];
+        let mut resumed = None;
+        for stop in 0..writes {
+            let (mut device, mut journal, log) = recording_pair(&pristine, None);
+            cut_pair(&mut device, &mut journal, Some(stop));
+            if apply_in_place(&loaded, plan_sha256, &mut device, &mut journal).is_ok() {
+                bad.push(format!("stop after {stop}: the cut apply reported success"));
+                continue;
+            }
+            cut_pair(&mut device, &mut journal, None);
+            let intact = journal.bytes.clone();
+            let read = match read_journal(&intact, &binding) {
+                Ok(read) => read,
+                Err(e) => {
+                    bad.push(format!(
+                        "stop after {stop}: the cut journal reads back as {e}"
+                    ));
+                    continue;
+                }
+            };
+            // The first whole record of each kind: its index, where it
+            // starts and its length (type, payload length, the frame's
+            // sum, payload, the record's sum).
+            let mut first = [None; 3];
+            let mut at = 0usize;
+            for (n, record) in read.records.iter().enumerate() {
+                let kind = match record {
+                    JournalRecord::Header(_) => 0,
+                    JournalRecord::Intent { .. } => 1,
+                    JournalRecord::Applied { .. } => 2,
+                };
+                let payload = u32::from_le_bytes(intact[at + 4..at + 8].try_into().unwrap());
+                let length = 4 + 4 + 32 + payload as usize + 32;
+                first[kind].get_or_insert((n, at, length));
+                at += length;
+            }
+
+            let mut cases = Vec::new();
+            for (kind, what) in kinds.iter().enumerate() {
+                let Some((record, offset, length)) = first[kind] else {
+                    continue;
+                };
+                let mut bytes = intact.clone();
+                bytes[offset + length / 2] ^= 0xff;
+                flipped[kind] += 1;
+                let want = JournalError {
+                    record,
+                    offset: offset as u64,
+                    fault: JournalFault::ChecksumMismatch,
+                };
+                cases.push((format!("a byte flipped in the first {what}"), bytes, want));
+            }
+            let want = JournalError {
+                record: 0,
+                offset: 0,
+                fault: JournalFault::OtherPlan,
+            };
+            cases.push((
+                "another capture's journal".to_string(),
+                foreign.clone(),
+                want,
+            ));
+
+            for (what, bytes, want) in cases {
+                journal.bytes = bytes.clone();
+                let from = log.borrow().len();
+                match resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
+                    Err(InPlaceError::Journal(e)) if e == want => {}
+                    other => bad.push(format!(
+                        "stop after {stop}: {what}: the resume gave {other:?}, not {want}"
+                    )),
+                }
+                let wrote = log.borrow()[from..]
+                    .iter()
+                    .filter(|(_, e)| *e == IoEvent::Write)
+                    .count();
+                if wrote > 0 || journal.bytes != bytes {
+                    bad.push(format!(
+                        "stop after {stop}: {what}: the refused resume made {wrote} writes"
+                    ));
+                }
+            }
+
+            journal.bytes = intact;
+            if let Err(e) = resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
+                bad.push(format!(
+                    "stop after {stop}: from an intact copy, the resume refused: {e}"
+                ));
+                continue;
+            }
+            if device.bytes != whole {
+                bad.push(format!(
+                    "stop after {stop}: from an intact copy, the device holds other bytes than \
+                     an uninterrupted apply"
+                ));
+                continue;
+            }
+            resumed = Some(device.bytes);
+        }
+        for (kind, what) in kinds.iter().enumerate() {
+            assert!(flipped[kind] > 0, "{k}: no stop left a whole {what}");
+        }
+        assert!(
+            bad.is_empty(),
+            "{k}: of {writes} stops, {} did not refuse or resume as they must:\n{}",
+            bad.len(),
+            bad.iter().take(6).cloned().collect::<Vec<_>>().join("\n")
+        );
+
+        let device = format!("{src}.resumed");
+        std::fs::write(&device, resumed.expect("no stop resumed")).unwrap();
+        let want = manifest(k);
+        let got = walk(&device);
+        assert!(
+            got == want,
+            "{k}: {} files after the resumed repair, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+        let recovered = unpack(&format!("windows-interrupted-{k}.recovered"));
+        oracle::same_metadata_as_windows(
+            k,
+            &Image::read(&src),
+            &in_place_image(k, &device),
+            &Image::read(&recovered),
+            log_end,
+        );
+        std::fs::remove_file(&recovered).unwrap();
+        std::fs::remove_file(&device).unwrap();
         std::fs::remove_file(&src).unwrap();
     }
 }
@@ -5329,7 +6019,7 @@ fn fsck_apply_in_place_repairs_a_copy_through_an_external_journal() {
     // library (#905) until `--dry-run --plan FILE` (#906) writes it from the
     // CLI.
     use fs_ntfs::repair_journal::{progress, read_journal, JournalBinding};
-    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
     use std::path::Path;
     for (k, _) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
@@ -5340,7 +6030,7 @@ fn fsck_apply_in_place_repairs_a_copy_through_an_external_journal() {
             units: Vec::new(),
             open: Vec::new(),
         };
-        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+        let plan = plan_in_place_io(&mut v, fsck::FsckOptions::default())
             .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
         let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
         let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
@@ -5588,7 +6278,7 @@ fn fsck_apply_in_place_resume_finishes_a_stopped_repair_from_its_journal() {
         apply_in_place_observed, progress, read_journal, ApplyObserver, InPlaceError,
         JournalBinding,
     };
-    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
     use std::path::Path;
 
     /// Asks for a stop once `stop` units have begun.
@@ -5611,7 +6301,7 @@ fn fsck_apply_in_place_resume_finishes_a_stopped_repair_from_its_journal() {
             units: Vec::new(),
             open: Vec::new(),
         };
-        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+        let plan = plan_in_place_io(&mut v, fsck::FsckOptions::default())
             .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
         let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
         let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
@@ -5709,7 +6399,7 @@ fn fsck_apply_in_place_resume_finishes_a_stopped_repair_from_its_journal() {
         oracle::same_metadata_as_windows(
             k,
             &Image::read(&src),
-            &Image::read(&device),
+            &in_place_image(k, &device),
             &Image::read(&recovered),
             log_end,
         );
@@ -5746,15 +6436,30 @@ fn apply_progress_lines(said: &str) -> Vec<(u64, u64)> {
 fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
     // `fsck.ntfs --apply PLAN --in-place --journal FILE` (#964) reports
     // its progress on stderr and stops on SIGINT at the next unit
-    // boundary. The harness build's FSCK_NTFS_HOLD_AFTER_UNITS holds the
-    // apply after that many units until a signal arrives, so this test
-    // sends a real SIGINT at a known point. The apply must exit with
-    // fsck(8)'s operational status (8), name the units applied, and leave
-    // a journal that `--resume` finishes into what Windows' own restart
-    // produced. Progress lines must rise, and a finished apply's last one
-    // must name the plan's total.
+    // boundary.
+    apply_in_place_stops_at_a_unit_boundary_on(libc::SIGINT, "sigint");
+}
+
+#[cfg(all(unix, feature = "cli", feature = "harness"))]
+#[test]
+fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigterm() {
+    // SIGTERM, what a service manager, a shutdown or timeout(1) sends,
+    // stops the apply at the next unit boundary just as SIGINT does (#967).
+    apply_in_place_stops_at_a_unit_boundary_on(libc::SIGTERM, "sigterm");
+}
+
+/// Applies a plan in place on every Windows interrupted capture holding
+/// work and sends `signal` mid-apply. The harness build's
+/// FSCK_NTFS_HOLD_AFTER_UNITS holds the apply after that many units until a
+/// signal arrives, so the signal is real and lands at a known point. The
+/// apply must exit with fsck(8)'s operational status (8), name the units
+/// applied, and leave a journal that `--resume` finishes into what Windows'
+/// own restart produced. Progress lines must rise, and a finished apply's
+/// last one must name the plan's total.
+#[cfg(all(unix, feature = "cli", feature = "harness"))]
+fn apply_in_place_stops_at_a_unit_boundary_on(signal: libc::c_int, name: &str) {
     use fs_ntfs::repair_journal::{progress, read_journal, JournalBinding};
-    use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
     use std::io::BufRead;
 
     for (k, log_end) in captures_holding_work() {
@@ -5765,19 +6470,19 @@ fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
             units: Vec::new(),
             open: Vec::new(),
         };
-        let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
+        let plan = plan_in_place_io(&mut v, fsck::FsckOptions::default())
             .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
         let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
         let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
         let units = loaded.units.len() as u64;
         assert!(units > 0, "{k}: a log holding work planned nothing");
-        let plan_file = format!("{src}.sigint.plan");
+        let plan_file = format!("{src}.{name}.plan");
         std::fs::write(&plan_file, &saved).unwrap();
-        let journal_dir = format!("{src}.sigint.d");
+        let journal_dir = format!("{src}.{name}.d");
         let _ = std::fs::remove_dir_all(&journal_dir);
         std::fs::create_dir(&journal_dir).unwrap();
         let journal = format!("{journal_dir}/repair.journal");
-        let device = format!("{src}.sigint.img");
+        let device = format!("{src}.{name}.img");
         std::fs::write(&device, &pristine).unwrap();
         drop(pristine);
 
@@ -5812,14 +6517,14 @@ fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
             }
         }
         // SAFETY: kill(2) on the child this test spawned and has not reaped.
-        let sent = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
-        assert_eq!(sent, 0, "{k}: SIGINT: {}", std::io::Error::last_os_error());
+        let sent = unsafe { libc::kill(child.id() as libc::pid_t, signal) };
+        assert_eq!(sent, 0, "{k}: {name}: {}", std::io::Error::last_os_error());
         stderr.read_to_string(&mut said).unwrap();
         let status = child.wait().unwrap();
         assert_eq!(
             status.code(),
             Some(8),
-            "{k}: the interrupted apply exited {status}: {said}"
+            "{k}: the apply interrupted by {name} exited {status}: {said}"
         );
         assert!(
             said.contains(&format!("stopped after {hold} of {units} units")),
@@ -5880,7 +6585,7 @@ fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
         oracle::same_metadata_as_windows(
             k,
             &Image::read(&src),
-            &Image::read(&device),
+            &in_place_image(k, &device),
             &Image::read(&recovered),
             log_end,
         );
@@ -5890,5 +6595,321 @@ fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
         std::fs::remove_file(&plan_file).unwrap();
         std::fs::remove_file(&device).unwrap();
         std::fs::remove_file(&src).unwrap();
+    }
+}
+
+#[cfg(all(unix, feature = "cli", feature = "harness"))]
+#[test]
+fn fsck_a_second_resume_of_a_journal_another_holds_is_refused_and_the_first_completes() {
+    // `fsck.ntfs --apply PLAN --in-place --resume --journal FILE` (#936)
+    // holds the journal for the whole resume. A resume stopped halfway
+    // through a Windows interrupted capture's plan is resumed and held by
+    // the harness build's FSCK_NTFS_HOLD_AFTER_UNITS; a second resume of the
+    // same journal, on a copy of the stopped volume and on the volume
+    // itself, must be refused naming the journal, with the journal, the
+    // copy and the volume unchanged. Released by SIGUSR1, the first resume
+    // must reach the files and metadata Windows' own restart reached.
+    use fs_ntfs::block_io::PathIo;
+    use fs_ntfs::repair_journal::{
+        apply_in_place_observed, progress, read_journal, ApplyObserver, InPlaceError,
+        JournalBinding,
+    };
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
+    use std::io::BufRead;
+    use std::path::Path;
+
+    /// Asks for a stop once `stop` units have begun.
+    struct StopAt {
+        asked: usize,
+        stop: usize,
+    }
+    impl ApplyObserver for StopAt {
+        fn cancel_requested(&mut self) -> bool {
+            self.asked += 1;
+            self.asked > self.stop
+        }
+    }
+
+    for (k, log_end) in captures_holding_work() {
+        let src = unpack(&format!("windows-interrupted-{k}"));
+        let pristine = std::fs::read(&src).unwrap();
+        let mut v = RecordedRepair {
+            bytes: pristine.clone(),
+            units: Vec::new(),
+            open: Vec::new(),
+        };
+        let plan = plan_in_place_io(&mut v, fsck::FsckOptions::default())
+            .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+        let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+        let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+        let units = loaded.units.len();
+        assert!(units > 0, "{k}: a log holding work planned nothing");
+        let plan_file = format!("{src}.held.plan");
+        std::fs::write(&plan_file, &saved).unwrap();
+        let journal_dir = format!("{src}.held.d");
+        let _ = std::fs::remove_dir_all(&journal_dir);
+        std::fs::create_dir(&journal_dir).unwrap();
+        let journal = format!("{journal_dir}/repair.journal");
+        let device = format!("{src}.held.img");
+        std::fs::write(&device, &pristine).unwrap();
+        drop(pristine);
+
+        let stop = units / 2;
+        std::fs::write(&journal, b"").unwrap();
+        {
+            let mut io = PathIo::open_rw(Path::new(&device)).unwrap();
+            let mut jrn = PathIo::open_rw(Path::new(&journal)).unwrap();
+            let sha: [u8; 32] = Sha256::digest(&saved).into();
+            match apply_in_place_observed(
+                &loaded,
+                sha,
+                &mut io,
+                &mut jrn,
+                &mut StopAt { asked: 0, stop },
+            ) {
+                Err(InPlaceError::Cancelled { applied }) => {
+                    assert_eq!(applied as usize, stop, "{k}: units applied before the stop")
+                }
+                other => panic!("{k}: the apply stopped at {stop} of {units} gave {other:?}"),
+            }
+        }
+        let other = format!("{src}.held.other.img");
+        std::fs::copy(&device, &other).unwrap();
+
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rust-fs-ntfs"))
+            .args([
+                "fsck",
+                "--apply",
+                &plan_file,
+                "--in-place",
+                "--resume",
+                "--journal",
+                &journal,
+                &device,
+            ])
+            .env("FSCK_NTFS_HOLD_AFTER_UNITS", stop.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn fsck.ntfs");
+        let mut stderr = std::io::BufReader::new(child.stderr.take().unwrap());
+        let mut said = String::new();
+        loop {
+            let mut line = String::new();
+            let read = stderr.read_line(&mut line).unwrap();
+            assert!(
+                read > 0,
+                "{k}: the first resume ended before reporting {stop} units applied: {said}"
+            );
+            said.push_str(&line);
+            if apply_progress_lines(&line).first().map(|p| p.0) == Some(stop as u64) {
+                break;
+            }
+        }
+
+        let journal_sha = hex_sha256(&std::fs::read(&journal).unwrap());
+        for (what, target) in [("a copy", &other), ("the held volume", &device)] {
+            let target_sha = hex_sha256(&std::fs::read(target).unwrap());
+            let (code, second) = fsck_cli(&[
+                "--apply",
+                &plan_file,
+                "--in-place",
+                "--resume",
+                "--journal",
+                &journal,
+                target,
+            ]);
+            assert_ne!(
+                code, 0,
+                "{k}: a second resume of the held journal on {what} went ahead: {second}"
+            );
+            assert!(
+                second.contains(&journal) && second.contains("held by another process"),
+                "{k}: a second resume on {what} was refused without naming the held journal: \
+                 {second}"
+            );
+            assert_eq!(
+                hex_sha256(&std::fs::read(target).unwrap()),
+                target_sha,
+                "{k}: a second resume of the held journal changed {what}"
+            );
+            assert_eq!(
+                hex_sha256(&std::fs::read(&journal).unwrap()),
+                journal_sha,
+                "{k}: a second resume on {what} changed the held journal"
+            );
+        }
+
+        // SAFETY: kill(2) on the child this test spawned and has not reaped.
+        let sent = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGUSR1) };
+        assert_eq!(sent, 0, "{k}: SIGUSR1: {}", std::io::Error::last_os_error());
+        stderr.read_to_string(&mut said).unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "{k}: the first resume, released, exited {status}: {said}"
+        );
+        let binding = JournalBinding::of(&saved).unwrap();
+        let read = read_journal(&std::fs::read(&journal).unwrap(), &binding)
+            .unwrap_or_else(|e| panic!("{k}: the journal read back refused: {e:?}"));
+        let done = progress(&read, &loaded).unwrap_or_else(|e| panic!("{k}: progress: {e:?}"));
+        assert_eq!(
+            (done.applied as usize, done.open),
+            (units, None),
+            "{k}: the first resume's journal does not mark every unit applied"
+        );
+        let want = manifest(k);
+        let got = walk(&device);
+        assert!(
+            got == want,
+            "{k}: {} files after the first resume, {} in Windows' manifest",
+            got.len(),
+            want.len()
+        );
+        let recovered = unpack(&format!("windows-interrupted-{k}.recovered"));
+        oracle::same_metadata_as_windows(
+            k,
+            &Image::read(&src),
+            &in_place_image(k, &device),
+            &Image::read(&recovered),
+            log_end,
+        );
+
+        std::fs::remove_file(&recovered).unwrap();
+        std::fs::remove_dir_all(&journal_dir).unwrap();
+        std::fs::remove_file(&plan_file).unwrap();
+        std::fs::remove_file(&other).unwrap();
+        std::fs::remove_file(&device).unwrap();
+        std::fs::remove_file(&src).unwrap();
+    }
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn fsck_apply_in_place_reports_the_post_repair_audit() {
+    // `fsck.ntfs --apply PLAN --in-place --journal FILE TARGET` prints the
+    // audit the library makes of the repaired volume (#943). Over every
+    // capture holding work it finds only the dirty flag, which an in-place
+    // repair leaves set, and exits 0. A byte of a `$MFTMirr` record that no
+    // unit writes, changed before the apply, is a finding the audit reads off
+    // the device: the report names it, the flag stays set and the exit
+    // status is fsck(8)'s 4.
+    use fs_ntfs::repair_plan::{load_plan, plan_in_place_io, save_plan};
+    for (k, _) in captures_holding_work() {
+        for outside in [false, true] {
+            let src = unpack(&format!("windows-interrupted-{k}"));
+            let mut pristine = std::fs::read(&src).unwrap();
+            let mut v = RecordedRepair {
+                bytes: pristine.clone(),
+                units: Vec::new(),
+                open: Vec::new(),
+            };
+            let plan = plan_in_place_io(&mut v, fsck::FsckOptions::default())
+                .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
+            let saved = save_plan(&plan, &mut v).unwrap_or_else(|e| panic!("{k}: save: {e}"));
+            let loaded = load_plan(&saved).unwrap_or_else(|e| panic!("{k}: load: {e}"));
+            let plan_file = format!("{src}.plan");
+            std::fs::write(&plan_file, &saved).unwrap();
+            let journal = format!("{src}.journal");
+            let _ = std::fs::remove_file(&journal);
+
+            let mut record = None;
+            if outside {
+                let sector = u64::from(u16::from_le_bytes([pristine[0x0B], pristine[0x0C]]));
+                let cluster = sector * u64::from(pristine[0x0D]);
+                let mirror_lcn = u64::from_le_bytes(pristine[0x38..0x40].try_into().unwrap());
+                let record_size = match pristine[0x40] as i8 {
+                    n if n < 0 => 1u64 << -n,
+                    n => n as u64 * cluster,
+                };
+                let planned = |at: u64| {
+                    loaded.units.iter().any(|u| {
+                        u.writes
+                            .iter()
+                            .any(|w| (w.offset..w.offset + w.after.len() as u64).contains(&at))
+                    })
+                };
+                let (r, at) = [1u64, 2, 0, 3]
+                    .into_iter()
+                    .map(|r| (r, mirror_lcn * cluster + r * record_size + 0x100))
+                    .find(|&(_, at)| !planned(at))
+                    .unwrap_or_else(|| {
+                        panic!("{k}: the plan writes every mirror record's byte 0x100")
+                    });
+                pristine[at as usize] ^= 0xFF;
+                std::fs::write(&src, &pristine).unwrap();
+                record = Some(r);
+            }
+            drop(pristine);
+
+            let (code, said) = fsck_cli(&[
+                "--apply",
+                &plan_file,
+                "--in-place",
+                "--journal",
+                &journal,
+                &src,
+            ]);
+            // The report is one JSON value, over as many lines as it prints
+            // on, from the first line that opens it; stderr follows it.
+            let start = said
+                .lines()
+                .find(|l| l.starts_with('{'))
+                .map(|l| l.as_ptr() as usize - said.as_ptr() as usize)
+                .unwrap_or_else(|| panic!("{k}: no JSON report: {said}"));
+            let report: serde_json::Value = serde_json::Deserializer::from_str(&said[start..])
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| panic!("{k}: no JSON report: {said}"))
+                .unwrap_or_else(|e| panic!("{k}: the report is not JSON ({e}): {said}"));
+            let audit = &report["audit"];
+            assert_eq!(
+                audit["dirty"],
+                serde_json::Value::Bool(true),
+                "{k}: the audit does not report the dirty flag set: {said}"
+            );
+            let kinds: Vec<&str> = audit["findings"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{k}: the report has no audit findings: {said}"))
+                .iter()
+                .map(|f| f["kind"].as_str().unwrap_or(""))
+                .collect();
+            match record {
+                None => {
+                    assert_eq!(code, 0, "{k}: a clean audit exited {code}: {said}");
+                    assert_eq!(
+                        kinds,
+                        vec!["dirty"],
+                        "{k}: the audit found more than the dirty flag: {said}"
+                    );
+                }
+                Some(r) => {
+                    assert_eq!(
+                        code, 4,
+                        "{k}: an audit with a finding exited {code}: {said}"
+                    );
+                    assert!(
+                        audit["findings"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|f| f["kind"] == "mft_mirror_mismatch" && f["record"] == r),
+                        "{k}: the audit does not name mirror record {r}: {said}"
+                    );
+                }
+            }
+            assert!(
+                fsck::is_dirty_io(
+                    &mut fs_ntfs::block_io::PathIo::open_rw(std::path::Path::new(&src)).unwrap()
+                )
+                .unwrap_or_else(|e| panic!("{k}: dirty flag: {e}")),
+                "{k}: the in-place apply left the dirty flag clear"
+            );
+
+            std::fs::remove_file(&journal).unwrap();
+            std::fs::remove_file(&plan_file).unwrap();
+            std::fs::remove_file(&src).unwrap();
+        }
     }
 }

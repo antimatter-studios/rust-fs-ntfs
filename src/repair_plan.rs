@@ -19,7 +19,9 @@
 
 use crate::block_io::BlockIo;
 use crate::error::Error;
-use crate::fsck::{fsck_io_with, set_dirty_io, FsckOptions, FsckReport};
+use crate::fsck::{
+    clear_dirty_io, fsck_io_with, is_dirty_io, set_dirty_io, FsckOptions, FsckReport,
+};
 
 /// One write a repair would make.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +45,9 @@ pub struct PlanUnit {
 pub struct RepairPlan {
     /// In the order the repair makes them; empty when it writes nothing.
     pub units: Vec<PlanUnit>,
+    /// The first of the units that clear the dirty flag, which run to the
+    /// plan's end (#1132); `None` when no unit clears it.
+    pub clear_dirty_from: Option<usize>,
     /// What the repair would report once every unit is applied.
     pub report: FsckReport,
 }
@@ -64,6 +69,7 @@ pub fn plan_fsck_io<T: BlockIo + ?Sized>(
     planning.close_unit();
     Ok(RepairPlan {
         units: planning.units,
+        clear_dirty_from: None,
         report,
     })
 }
@@ -73,6 +79,13 @@ pub fn plan_fsck_io<T: BlockIo + ?Sized>(
 /// `$MFTMirr` copy -- each a unit of its own, flushed before the repair's
 /// first write (#939). On a volume whose flag is already set nothing is
 /// added. Writes nothing.
+///
+/// When `options` asks for the dirty flag to be cleared, the repair's own
+/// units leave it set, and the plan ends with the writes [`clear_dirty_io`]
+/// makes -- `$Volume`'s flags, then its `$MFTMirr` copy -- each a unit of
+/// its own, marked by [`RepairPlan::clear_dirty_from`] (#1132). The
+/// in-place apply audits the volume before them. Without it the plan
+/// clears nothing.
 ///
 /// An in-place repair keeps the volume dirty until it has been audited
 /// (#716), so a cut at any unit leaves a volume Windows checks at its next
@@ -91,10 +104,20 @@ pub fn plan_in_place_io<T: BlockIo + ?Sized>(
     };
     set_dirty_io(&mut planning)?;
     planning.close_unit();
-    let report = fsck_io_with(&mut planning, options, None)?;
+    let repair = FsckOptions { clear_dirty: false };
+    let mut report = fsck_io_with(&mut planning, repair, None)?;
     planning.close_unit();
+    let mut clear_dirty_from = None;
+    if options.clear_dirty {
+        let from = planning.units.len();
+        report.dirty_cleared = clear_dirty_io(&mut planning)?;
+        planning.close_unit();
+        report.dirty = is_dirty_io(&mut planning)?;
+        clear_dirty_from = (planning.units.len() > from).then_some(from);
+    }
     Ok(RepairPlan {
         units: planning.units,
+        clear_dirty_from,
         report,
     })
 }
@@ -205,6 +228,9 @@ pub struct SavedPlan {
     /// The volume serial number from the source's boot sector.
     pub volume_serial: u64,
     pub units: Vec<PlanUnit>,
+    /// The first of the units that clear the dirty flag, which run to the
+    /// plan's end (#1132); `None` when no unit clears it.
+    pub clear_dirty_from: Option<usize>,
 }
 
 /// Why a plan file was refused.
@@ -256,7 +282,7 @@ impl std::error::Error for PlanFileError {}
 
 /// The plan file format this reader writes and reads.
 #[cfg(feature = "plan-file")]
-pub const PLAN_FILE_VERSION: u32 = 1;
+pub const PLAN_FILE_VERSION: u32 = 2;
 
 /// The first bytes of every plan file.
 #[cfg(feature = "plan-file")]
@@ -293,6 +319,9 @@ pub fn save_plan<T: BlockIo + ?Sized>(
     out.extend_from_slice(&0u64.to_le_bytes()); // the file length, below
     out.extend_from_slice(&source.size().to_le_bytes());
     out.extend_from_slice(&serial);
+    let from = plan.clear_dirty_from.map_or(Ok(units), u32::try_from);
+    let from = from.map_err(|_| "a clear-dirty mark past the units")?;
+    out.extend_from_slice(&from.to_le_bytes());
     for unit in &plan.units {
         let writes =
             u32::try_from(unit.writes.len()).map_err(|_| "too many writes in a plan unit")?;
@@ -352,13 +381,15 @@ pub fn load_plan(bytes: &[u8]) -> Result<SavedPlan, PlanFileError> {
     }
     r.at = 8;
     let version = r.u32().ok_or(truncated(PLAN_FILE_PREFIX + SHA256_LEN))?;
-    if version != PLAN_FILE_VERSION {
+    if version != 1 && version != PLAN_FILE_VERSION {
         return Err(PlanFileError::UnsupportedVersion(version));
     }
     let units = r.u32().ok_or(truncated(PLAN_FILE_PREFIX + SHA256_LEN))?;
     let length = r.u64().ok_or(truncated(PLAN_FILE_PREFIX + SHA256_LEN))?;
     let expected = usize::try_from(length).map_err(|_| truncated(usize::MAX))?;
-    if expected < PLAN_FILE_PREFIX + SHA256_LEN {
+    // A version 2 header carries the first clear-dirty unit after the prefix.
+    let header = PLAN_FILE_PREFIX + if version == 1 { 0 } else { 4 };
+    if expected < header + SHA256_LEN {
         return Err(PlanFileError::Malformed(
             "file length shorter than its header",
         ));
@@ -383,6 +414,17 @@ pub fn load_plan(bytes: &[u8]) -> Result<SavedPlan, PlanFileError> {
     };
     let source_size = r.u64().ok_or(malformed.clone())?;
     let volume_serial = r.u64().ok_or(malformed.clone())?;
+    // A version 1 file has no mark: none of its units clears the flag.
+    let from = if version == 1 {
+        units
+    } else {
+        r.u32().ok_or(malformed.clone())?
+    };
+    if from > units {
+        return Err(PlanFileError::Malformed(
+            "the first clear-dirty unit is past the last unit",
+        ));
+    }
     let mut loaded = Vec::new();
     for unit in 0..units as usize {
         let writes = r.u32().ok_or(malformed.clone())?;
@@ -413,6 +455,7 @@ pub fn load_plan(bytes: &[u8]) -> Result<SavedPlan, PlanFileError> {
         source_size,
         volume_serial,
         units: loaded,
+        clear_dirty_from: (from < units).then_some(from as usize),
     })
 }
 
@@ -424,6 +467,12 @@ pub enum PlanSourceError {
     Size { source: u64, plan: u64 },
     /// The source's volume serial number is not the plan's.
     Serial { source: u64, plan: u64 },
+    /// The device about to receive the first unit is not the size the
+    /// plan's source was.
+    DeviceSize { device: u64, plan: u64 },
+    /// The device about to receive the first unit does not hold the plan's
+    /// volume serial number.
+    DeviceSerial { device: u64, plan: u64 },
     /// The source does not hold a write's before-image at its turn.
     BeforeImage {
         unit: usize,
@@ -455,6 +504,15 @@ impl std::fmt::Display for PlanSourceError {
             Self::Serial { source, plan } => write!(
                 f,
                 "source volume serial is {source:#018x}, the plan was made from {plan:#018x}"
+            ),
+            Self::DeviceSize { device, plan } => write!(
+                f,
+                "device size is {device} bytes, the plan was made from {plan}: no unit written"
+            ),
+            Self::DeviceSerial { device, plan } => write!(
+                f,
+                "device volume serial is {device:#018x}, the plan was made from {plan:#018x}: \
+                 no unit written"
             ),
             Self::BeforeImage {
                 unit,
@@ -501,11 +559,7 @@ pub fn check_plan_source<T: BlockIo + ?Sized>(
             plan: plan.source_size,
         });
     }
-    let mut serial = [0u8; 8];
-    source
-        .read_exact_at(VOLUME_SERIAL_OFFSET, &mut serial)
-        .map_err(PlanSourceError::Read)?;
-    let serial = u64::from_le_bytes(serial);
+    let serial = volume_serial(source)?;
     if serial != plan.volume_serial {
         return Err(PlanSourceError::Serial {
             source: serial,
@@ -526,6 +580,44 @@ pub fn check_plan_source<T: BlockIo + ?Sized>(
         }
     }
     Ok(())
+}
+
+/// Check that `device`, about to receive `plan`'s first unit, is the
+/// volume the plan was made from, reading only: its size in bytes and the
+/// volume serial number in its boot sector must be the plan's source's.
+/// [`check_plan_source`] checks the source before a copy; this checks the
+/// device written after it, so a short copy or another device behind the
+/// path is refused before anything of the plan is written.
+#[cfg(feature = "plan-file")]
+pub fn check_device_identity<T: BlockIo + ?Sized>(
+    plan: &SavedPlan,
+    device: &mut T,
+) -> Result<(), PlanSourceError> {
+    let size = device.size();
+    if size != plan.source_size {
+        return Err(PlanSourceError::DeviceSize {
+            device: size,
+            plan: plan.source_size,
+        });
+    }
+    let serial = volume_serial(device)?;
+    if serial != plan.volume_serial {
+        return Err(PlanSourceError::DeviceSerial {
+            device: serial,
+            plan: plan.volume_serial,
+        });
+    }
+    Ok(())
+}
+
+/// The volume serial number in `device`'s boot sector.
+#[cfg(feature = "plan-file")]
+fn volume_serial<T: BlockIo + ?Sized>(device: &mut T) -> Result<u64, PlanSourceError> {
+    let mut serial = [0u8; 8];
+    device
+        .read_exact_at(VOLUME_SERIAL_OFFSET, &mut serial)
+        .map_err(PlanSourceError::Read)?;
+    Ok(u64::from_le_bytes(serial))
 }
 
 /// Check unit `unit` of `plan` against the `device` about to receive it,
@@ -571,6 +663,11 @@ pub enum CopyRepairError {
     Source(PlanSourceError),
     /// Something already exists at the target path; it is left as it was.
     TargetExists(std::path::PathBuf),
+    /// The target is not the plan's volume by size or serial, and nothing
+    /// is written; or a unit's ranges on the target did not hold their
+    /// before-images at its turn: the earlier units are written and
+    /// synced, nothing of this one is.
+    Target(PlanSourceError),
     /// Opening, copying, moving, writing or flushing failed.
     Io(String),
 }
@@ -579,7 +676,7 @@ pub enum CopyRepairError {
 impl std::fmt::Display for CopyRepairError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Source(e) => write!(f, "{e}"),
+            Self::Source(e) | Self::Target(e) => write!(f, "{e}"),
             Self::TargetExists(path) => {
                 write!(f, "the target '{}' already exists", path.display())
             }
@@ -736,8 +833,12 @@ const COPY_CHUNK: usize = 1 << 20;
 /// inside a unit. A write or sync that fails stops the apply there and
 /// undoes nothing: every earlier unit is whole and flushed, the failing
 /// unit's earlier writes stay on `target` with no sync after them, and no
-/// later unit is written. `target` must already hold what the plan was made
-/// from; its contents are not checked here.
+/// later unit is written. Before the first unit, `target` is checked with
+/// [`check_device_identity`]; a target of another size or serial is refused
+/// with nothing written. Immediately before it is written, each unit is
+/// checked on `target` with [`check_unit_on_device`]; a unit whose ranges
+/// do not hold their before-images stops the apply there, the earlier
+/// units written and synced and nothing of it written.
 ///
 /// A target whose [`BlockIo::can_sync`] is false is refused before any
 /// write or flush, because the unit boundaries require ordered writes
@@ -754,7 +855,9 @@ pub fn apply_plan_units<T: BlockIo + ?Sized>(
                 .into(),
         ));
     }
+    check_device_identity(plan, target).map_err(CopyRepairError::Target)?;
     for (u, unit) in plan.units.iter().enumerate() {
+        check_unit_on_device(plan, u, target).map_err(CopyRepairError::Target)?;
         for (w, write) in unit.writes.iter().enumerate() {
             target
                 .write_all_at(write.offset, &write.after)

@@ -20,8 +20,9 @@ const SERIAL: u64 = 0x1122_3344_5566_7788;
 /// Where each field of a two-unit file sits, from the documented layout.
 const UNIT_COUNT_AT: usize = 12;
 const LENGTH_AT: usize = 16;
-const FIRST_UNIT_AT: usize = 40;
-const HEADER_AND_TRAILER: usize = 40 + 32;
+const CLEAR_DIRTY_FROM_AT: usize = 40;
+const FIRST_UNIT_AT: usize = 44;
+const HEADER_AND_TRAILER: usize = 44 + 32;
 
 struct MemDev(Vec<u8>);
 
@@ -95,8 +96,21 @@ fn sealed(mut body: Vec<u8>) -> Vec<u8> {
     body
 }
 
-/// The unsealed bytes of a version 1 file holding `units`.
+/// The unsealed bytes of a version 2 file holding `units`, none of which
+/// clears the dirty flag: its first clear-dirty unit is the unit count.
 fn body_of(units: &[PlanUnit]) -> Vec<u8> {
+    let mut out = body_of_version_1(&[]);
+    out[8..12].copy_from_slice(&2u32.to_le_bytes());
+    out[UNIT_COUNT_AT..UNIT_COUNT_AT + 4].copy_from_slice(&(units.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(units.len() as u32).to_le_bytes());
+    for unit in units {
+        out.extend_from_slice(&unit_bytes(unit));
+    }
+    out
+}
+
+/// The unsealed bytes of a version 1 file, which has no clear-dirty field.
+fn body_of_version_1(units: &[PlanUnit]) -> Vec<u8> {
     let mut out = b"NTFSPLAN".to_vec();
     out.extend_from_slice(&1u32.to_le_bytes());
     out.extend_from_slice(&(units.len() as u32).to_le_bytes());
@@ -144,6 +158,11 @@ fn save_plan_writes_the_documented_layout_and_load_plan_reads_it_back() {
         assert_eq!(loaded.source_size, VOLUME_SIZE);
         assert_eq!(loaded.volume_serial, SERIAL);
         assert_eq!(loaded.units, units);
+        assert_eq!(loaded.clear_dirty_from, None);
+
+        let old = load_plan(&sealed(body_of_version_1(&units))).expect("load version 1");
+        assert_eq!(old.units, units, "{} units: a version 1 file", units.len());
+        assert_eq!(old.clear_dirty_from, None);
     }
     assert_eq!(
         sealed(body_of(&[])).len(),
@@ -205,7 +224,7 @@ fn a_file_that_is_not_the_length_or_version_it_says_is_refused() {
     longer.push(0);
     refused_naming("a byte past its length", &longer, "trailing bytes");
 
-    for version in [0u32, 2, u32::MAX] {
+    for version in [0u32, 3, u32::MAX] {
         let mut other = body_of(&two_units());
         other[8..12].copy_from_slice(&version.to_le_bytes());
         refused_naming(
@@ -250,13 +269,22 @@ fn a_file_whose_checksum_holds_and_whose_structure_does_not_is_refused() {
             "runs past the end",
         );
     }
-    for count in [0, 1] {
+    for count in [0u32, 1] {
+        let fewer = edited(&|b: &mut Vec<u8>| {
+            b[UNIT_COUNT_AT..UNIT_COUNT_AT + 4].copy_from_slice(&count.to_le_bytes());
+            b[CLEAR_DIRTY_FROM_AT..CLEAR_DIRTY_FROM_AT + 4].copy_from_slice(&count.to_le_bytes());
+        });
         refused_naming(
             &format!("{count} of its 2 units"),
-            &set_u32(UNIT_COUNT_AT, count),
+            &fewer,
             "bytes between the last unit and the checksum",
         );
     }
+    refused_naming(
+        "a clear-dirty unit past the last",
+        &set_u32(CLEAR_DIRTY_FROM_AT, 3),
+        "clear-dirty unit is past the last unit",
+    );
     refused_naming(
         "a write count past the end",
         &set_u32(write_count_at, u32::MAX),
