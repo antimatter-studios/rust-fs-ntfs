@@ -38,6 +38,8 @@ to one `[ops.win-*]` entry in `fs-windows-test-harness.toml`.
   scan
 - `win-quota-enforce.ps1` — turn quota enforcement on, set an owner's hard
   limit and record what Windows does with a write past it
+- `win-link-attr-list.ps1` — hard-link a file past what its base record
+  holds and record which attributes Windows moves to extension records
 - `win-quota-verify.ps1` — compare each owner's quota usage with what
   Windows counts when it scans the volume again
 
