@@ -866,7 +866,8 @@ fn ci_ok_covers_every_gating_job_and_preserves_windows_filter() {
             "semver",
             "interrupted-bootstrap",
             "python-abi",
-            "python-volume-info-windows"
+            "python-volume-info-windows",
+            "op-sequence-chkdsk"
         ]
     );
     assert_eq!(
