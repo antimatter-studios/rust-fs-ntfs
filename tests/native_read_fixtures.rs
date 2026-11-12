@@ -9,8 +9,10 @@
 mod common;
 
 use fs_ntfs::attr_io::AttrType;
-use fs_ntfs::block_io::PathIo;
-use fs_ntfs::read::{parse_attribute_list, read_attribute_value, resolve_path};
+use fs_ntfs::block_io::{BlockIo, PathIo};
+use fs_ntfs::read::{
+    parse_attribute_list, read_attribute_range, read_attribute_value, resolve_path,
+};
 use ntfs::{Ntfs, NtfsAttributeFlags, NtfsReadSeek};
 use std::io::BufReader;
 use std::path::Path;
@@ -150,4 +152,95 @@ fn compressed_data_decompresses_to_known_content() {
 
     assert_eq!(native.len(), expected.len(), "decompressed length");
     assert_eq!(native, expected, "decompressed content mismatch");
+}
+
+/// Counts the bytes a read pulls from the device, so a ranged read of a
+/// compressed stream is held to the compression units its window overlaps.
+struct CountingIo {
+    inner: PathIo,
+    read: u64,
+}
+
+impl BlockIo for CountingIo {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), String> {
+        self.read += buf.len() as u64;
+        self.inner.read_exact_at(offset, buf)
+    }
+    fn write_all_at(&mut self, _offset: u64, _buf: &[u8]) -> Result<(), String> {
+        Err("CountingIo is read-only".into())
+    }
+    fn size(&self) -> u64 {
+        self.inner.size()
+    }
+}
+
+/// The 64 KiB compression unit Windows uses at the fixture's 4 KiB clusters.
+const UNIT: u64 = 65536;
+
+/// The size Windows recorded for `item` in ntfs-compressed.sha256.tsv.
+fn windows_size(item: &str) -> u64 {
+    let tsv = std::fs::read_to_string("test-disks/ntfs-compressed.sha256.tsv").expect(
+        "missing test-disks/ntfs-compressed.sha256.tsv; run build-windows-native-read-fixtures.ps1",
+    );
+    tsv.lines()
+        .find_map(|line| {
+            let mut cols = line.split('\t');
+            (cols.next() == Some(item)).then(|| cols.next().expect("size").parse().expect("size"))
+        })
+        .unwrap_or_else(|| panic!("{item} is not in ntfs-compressed.sha256.tsv"))
+}
+
+#[test]
+fn compressed_ranged_reads_rebuild_the_windows_stream() {
+    let mut io = open_fixture(COMPRESSED_IMG);
+    let rec = resolve_path(&mut io, "/mixed.bin").expect("resolve /mixed.bin");
+    let size = windows_size("/mixed.bin");
+    assert!(
+        size > 6 * UNIT,
+        "fixture must span several compression units"
+    );
+    let whole = read_attribute_value(&mut io, rec, AttrType::Data, None).expect("whole read");
+    assert_eq!(whole.len() as u64, size, "whole read has Windows' size");
+
+    // Windows that start mid-unit and cross unit boundaries, ending in the
+    // partial last unit, must reassemble the stream byte for byte.
+    let mut rebuilt = Vec::new();
+    let mut offset = 0u64;
+    while offset < size {
+        let chunk = read_attribute_range(&mut io, rec, AttrType::Data, None, offset, 40_000)
+            .expect("ranged compressed read");
+        assert!(!chunk.is_empty(), "short read at {offset}");
+        rebuilt.extend_from_slice(&chunk);
+        offset += chunk.len() as u64;
+    }
+    assert_eq!(rebuilt.len(), whole.len(), "ranged reads cover the stream");
+    assert!(rebuilt == whole, "ranged reads match the whole read");
+    assert!(
+        whole[UNIT as usize..2 * UNIT as usize]
+            .iter()
+            .all(|&b| b == 0),
+        "the deallocated unit reads as zeros"
+    );
+}
+
+#[test]
+fn compressed_ranged_read_touches_one_compression_unit() {
+    let mut io = CountingIo {
+        inner: open_fixture(COMPRESSED_IMG),
+        read: 0,
+    };
+    let rec = resolve_path(&mut io, "/mixed.bin").expect("resolve /mixed.bin");
+    // A window inside the fourth unit, which holds random bytes Windows
+    // stores raw. The whole stream has three such units, so a reader that
+    // decompresses everything pulls more than three units from the device.
+    io.read = 0;
+    let window = read_attribute_range(&mut io, rec, AttrType::Data, None, 3 * UNIT + 100, 4096)
+        .expect("ranged compressed read");
+    assert_eq!(window.len(), 4096);
+    let metadata_slack = 16 * 1024;
+    assert!(
+        io.read <= UNIT + metadata_slack,
+        "a 4 KiB window read {} bytes, more than one compression unit plus metadata",
+        io.read
+    );
 }
