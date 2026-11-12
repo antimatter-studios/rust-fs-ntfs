@@ -176,5 +176,38 @@ $diff = @(Compare-PhysicalSectorGeometryRows $row512n $row512e)
 Assert-Geometry (($diff -join ',') -eq 'boot.mft_lcn') 'the diff names each changed field and excludes the locked $LogFile'
 $row512e.partition_offset = 1048576
 Assert-Geometry (@(Compare-PhysicalSectorGeometryRows $row512n $row512e) -contains 'partition_offset') 'the diff names a moved partition'
-if ($checks -ne 60) { throw "only $checks geometry contracts executed, expected 60" }
-Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 60)"
+# The index VCN unit (#704): one unit dividing every later block's offset.
+$vcnBlocks = @([pscustomobject]@{ offset = 0; vcn = 0 }, [pscustomobject]@{ offset = 4096; vcn = 8 },
+    [pscustomobject]@{ offset = 8192; vcn = 16 })
+Assert-Geometry ((Measure-IndexVcnUnit $vcnBlocks) -eq 512) 'blocks 4096 bytes apart at VCNs 8 apart measure a 512-byte unit'
+$clusterBlocks = @([pscustomobject]@{ offset = 0; vcn = 0 }, [pscustomobject]@{ offset = 65536; vcn = 1 },
+    [pscustomobject]@{ offset = 131072; vcn = 2 })
+Assert-Geometry ((Measure-IndexVcnUnit $clusterBlocks) -eq 65536) 'blocks a cluster apart at consecutive VCNs measure a cluster unit'
+Assert-GeometryFailure { Measure-IndexVcnUnit @($vcnBlocks[0], $vcnBlocks[1], $clusterBlocks[2]) } 'blocks disagreeing on the unit fail'
+Assert-GeometryFailure { Measure-IndexVcnUnit @($vcnBlocks[0], $vcnBlocks[1]) } 'one block past the first measures nothing'
+Assert-GeometryFailure { Measure-IndexVcnUnit @($vcnBlocks[1], $vcnBlocks[2]) } 'no block at offset 0 fails'
+Assert-GeometryFailure { Measure-IndexVcnUnit @($vcnBlocks[0], [pscustomobject]@{ offset = 4096; vcn = 3 },
+    [pscustomobject]@{ offset = 8192; vcn = 6 }) } 'a VCN that does not divide its offset fails'
+# The smallest volume Windows formats (#961): the sizes asked for, chkdsk's
+# report of the live $LogFile, fsutil's cluster count, and the rows' shape.
+Assert-Geometry (((Get-SmallVolumeRequests) -join ',') -eq '1,2,3,4,5,6,7,8,12,16') 'small volumes from 1 to 16 MiB, ascending'
+$chkdskL = @('The type of the file system is NTFS.', 'The current log file size is 2048 KB.',
+    'The default log file size for this volume is 2048 KB.')
+Assert-Geometry ((ConvertFrom-ChkdskLogSize $chkdskL) -eq 2097152) 'chkdsk /L reports the current log size in KB'
+Assert-GeometryFailure { ConvertFrom-ChkdskLogSize @($chkdskL[0], $chkdskL[2]) } 'a report without the current size fails'
+Assert-Geometry ((Get-NtfsInfoField @('Total Clusters :                  0x0000000000000800') 'Total Clusters') -eq 2048) 'fsutil total clusters in hex'
+Assert-Geometry ((Get-NtfsInfoField @('Total Clusters    :                    1,535  (  6.0 MB)') 'Total Clusters') -eq 1535) 'fsutil total clusters with separators and a decimal size'
+function New-SmallRow([int]$Mib, [bool]$Accepted) {
+    [pscustomobject][ordered]@{ size_mib = $Mib; accepted = $Accepted; log_bytes = $(if ($Accepted) { 1048576 });
+        mft_lcn = $(if ($Accepted) { 4 }); mftmirr_lcn = $(if ($Accepted) { 255 }); total_clusters = $(if ($Accepted) { 511 }) }
+}
+$smallRows = @((New-SmallRow 1 $false), (New-SmallRow 2 $true), (New-SmallRow 3 $true))
+Assert-Geometry ((Assert-SmallVolumeRows $smallRows) -eq 2) 'the smallest accepted size is reported'
+Assert-GeometryFailure { Assert-SmallVolumeRows @((New-SmallRow 1 $false), (New-SmallRow 2 $false)) } 'no accepted size fails'
+Assert-GeometryFailure { Assert-SmallVolumeRows @((New-SmallRow 2 $true), (New-SmallRow 1 $false)) } 'rows out of order fail'
+$unmeasured = New-SmallRow 4 $true
+$unmeasured.log_bytes = $null
+Assert-GeometryFailure { Assert-SmallVolumeRows @((New-SmallRow 1 $false), $unmeasured) } 'an accepted size without its $LogFile size fails'
+Assert-GeometryFailure { Assert-SmallVolumeRows @() } 'no rows fail'
+if ($checks -ne 76) { throw "only $checks geometry contracts executed, expected 76" }
+Write-Host "windows-format-geometry.ps1: all checks passed ($checks; floor 76)"
