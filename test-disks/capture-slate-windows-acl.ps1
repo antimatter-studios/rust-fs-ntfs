@@ -4,6 +4,7 @@
 # its mounted copy. Get-Acl reads each descriptor through Windows, and
 # Windows' own SDDL parser (RawSecurityDescriptor) splits its DACL into ACEs,
 # so no locale-dependent account name is recorded or parsed.
+. "$PSScriptRoot\slate-windows-links.ps1"
 function Get-SlateWindowsAcl {
     param(
         [Parameter(Mandatory=$true)] [string]$Root,
@@ -31,11 +32,16 @@ function Get-SlateWindowsAcl {
         foreach ($item in $children) {
             $relative = '/' + $item.FullName.Substring($base.Length).TrimStart('\', '/').Replace('\', '/')
             if ($directory -eq $rootItem.FullName -and $excluded -contains $item.Name) { continue }
-            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                throw "Windows ACL manifest does not follow reparse point $relative"
-            }
+            try { $kind = Get-SlateWindowsEntryKind $item $relative 'ACL' }
+            catch { throw "Windows cannot classify ${relative}: $($_.Exception.Message)" }
             try {
-                $acl = Get-Acl -LiteralPath $item.FullName -ErrorAction Stop
+                if ($kind -ceq 'symlink') {
+                    # The link's own descriptor; Get-Acl would follow it to its target's.
+                    $acl = [Security.AccessControl.FileSecurity]::new()
+                    $acl.SetSecurityDescriptorSddlForm([SlateWindowsLinks]::Sddl($item.FullName))
+                } else {
+                    $acl = Get-Acl -LiteralPath $item.FullName -ErrorAction Stop
+                }
                 $sddl = $acl.GetSecurityDescriptorSddlForm('Owner, Group, Access')
                 $raw = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
                 if ($null -eq $raw.Owner -or $null -eq $raw.Group) { throw 'the descriptor has no owner or no group' }
@@ -55,7 +61,7 @@ function Get-SlateWindowsAcl {
                 }
                 $entry = [ordered]@{
                     path = $relative
-                    kind = if ($item.PSIsContainer) { 'directory' } else { 'file' }
+                    kind = $kind
                     owner = $acl.GetOwner($sid).Value
                     group = $acl.GetGroup($sid).Value
                     sddl = $sddl
@@ -65,7 +71,7 @@ function Get-SlateWindowsAcl {
                 }
             } catch { throw "Windows cannot read the security descriptor of ${relative}: $($_.Exception.Message)" }
             $entries.Add($relative, $entry)
-            if ($item.PSIsContainer) { $pending.Push($item.FullName) }
+            if ($kind -ceq 'directory') { $pending.Push($item.FullName) }
         }
     }
     [string[]]$paths = @($entries.Keys)
@@ -82,7 +88,7 @@ function Get-SlateWindowsAcl {
             sids = 'SIDs only; account names depend on the machine that reads them'
             aces = "every DACL ACE in order; a null aces is a null DACL; sid and access_mask are null for an ACE Windows cannot attribute to one SID"
             unreadable = 'a descriptor Windows refuses to return fails by path; never omitted'
-            reparse_points = 'fail by path; never followed or silently omitted'
+            reparse_points = "a symbolic link's own descriptor, read through a handle that does not follow it; any other reparse point fails by path"
             root_entry = "implicit directory; the root's descriptor is outside this manifest"
         }
         entries = @($paths | ForEach-Object { $entries[$_] })

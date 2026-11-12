@@ -25,7 +25,8 @@
 #   slate-oracle.sh write WRITES IMAGES WRITER OUT FLOOR
 #       Slate's copy-only writer on copies (#863). WRITES is a header and then
 #       one `case source root_file offset expected_hex replacement_hex` row
-#       per write (tab-separated). WRITER runs as ntfs-write-lab does,
+#       per write (tab-separated), optionally followed by `direct` (default)
+#       or `journaled`; the latter passes `--journaled`. WRITER otherwise runs as ntfs-write-lab does,
 #       `WRITER SOURCE NEW ROOT_FILE OFFSET EXPECTED REPLACEMENT`, but SOURCE
 #       is a read-only copy of IMAGES/<source>, so the image itself is never
 #       handed to it. The copy must keep the source's SHA-256, the writer must
@@ -187,9 +188,10 @@ write() {
     printf 'case\tsource\tsource_sha256\twritten_sha256\twriter_exit\tresult\n' >"$out/slate-writes.tsv"
 
     local rows=0 written=0 problems=0
-    local name source root_file offset expected replacement
-    while IFS=$'\t' read -r name source root_file offset expected replacement; do
+    local name source root_file offset expected replacement mode
+    while IFS=$'\t' read -r name source root_file offset expected replacement mode; do
         replacement="${replacement%$'\r'}"
+        mode="${mode%$'\r'}"
         [ "$name" = case ] && continue
         [ -n "$name" ] || continue
         rows=$((rows + 1))
@@ -206,7 +208,13 @@ write() {
             if ! cp "$original" "$staged" || ! chmod 0444 "$staged"; then
                 die "cannot make a read-only copy of $original"
             fi
-            "$writer" "$staged" "$new" "$root_file" "$offset" "$expected" "$replacement" </dev/null >"$report" 2>&1
+            local writer_args=()
+            case "${mode:-direct}" in
+                direct) ;;
+                journaled) writer_args+=(--journaled) ;;
+                *) die "$name: unknown writer mode '$mode'" ;;
+            esac
+            "$writer" "${writer_args[@]}" "$staged" "$new" "$root_file" "$offset" "$expected" "$replacement" </dev/null >"$report" 2>&1
             status=$?
             [ -f "$new" ] && after="$(sha "$new")"
             if [ "$(sha "$original")" != "$digest" ] || [ "$(sha "$staged")" != "$digest" ]; then

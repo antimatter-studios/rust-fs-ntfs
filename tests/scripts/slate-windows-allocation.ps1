@@ -59,6 +59,10 @@ try {
             $captured.rejectedRoot = $false
             try { Get-SlateWindowsAllocation -Root "${root}dir" -Case 'contract' -ImageSha256 $digest | Out-Null }
             catch { $captured.rejectedRoot = $true }
+            # A symbolic link is recorded, never followed to its target (#1357).
+            New-Item -ItemType SymbolicLink -Path "${root}big-link" -Value 'dir\big.bin' | Out-Null
+            $captured.linked = Get-SlateWindowsAllocation -Root $root -Case 'contract' -ImageSha256 $digest
+            [IO.File]::Delete("${root}big-link")
             New-Item -ItemType Junction -Path "${root}link" -Target "${root}dir" | Out-Null
             $captured.reparseFailure = ''
             try { Get-SlateWindowsAllocation -Root $root -Case 'contract' -ImageSha256 $digest | Out-Null }
@@ -100,9 +104,11 @@ try {
         ($again | ConvertTo-Json -Depth 10 -Compress)) 'repeated capture is deterministic'
     Assert-Allocation $rejectedSha 'an invalid image binding fails'
     Assert-Allocation $rejectedRoot 'a root that is not a volume root fails'
-    Assert-Allocation ($reparseFailure -match 'link') 'a reparse point fails by path'
-    if ($checks -lt 14) { throw "only $checks allocation contracts executed, floor 14" }
-    Write-Host "slate-windows-allocation.ps1: all checks passed ($checks; floor 14)"
+    $link = @($captured.linked.entries | Where-Object path -CEQ '/big-link')[0]
+    Assert-Allocation ($link.kind -ceq 'symlink' -and $link.streams.Count -eq 0) 'a symbolic link is recorded without its target allocation'
+    Assert-Allocation ($reparseFailure -match 'link') 'a junction still fails by path'
+    if ($checks -lt 15) { throw "only $checks allocation contracts executed, floor 15" }
+    Write-Host "slate-windows-allocation.ps1: all checks passed ($checks; floor 15)"
 } finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction Stop
 }

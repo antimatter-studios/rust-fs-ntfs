@@ -121,10 +121,21 @@ grep -qF $'win\t/dir/ünï\tads\tnamed streams' "$WORK/out/excluded.tsv" 2>/dev/
 CAPS="$WORK/caps.tsv" run "$(drop 'e[2]["streams"][0]["size"]=6')"
 [ "$?" -eq 1 ] && ok || bad "an exclusion for one stream does not excuse another"
 
+# A symbolic link is compared by the target each side reports, never by
+# the bytes it leads to (#1357).
+FILES="$REFERENCE"
+REFERENCE="$(drop 'e.append({"path":"/link","kind":"symlink","target":"dir\\empty","streams":[]})')"
+run "$REFERENCE"
+[ "$?" -eq 0 ] && ok || bad "an agreeing symbolic link: $(cat "$WORK/log")"
+fails_with "a link target Slate reads differently" \
+    "$(drop 'e[3]["target"]="dir\\other"')" $'win\t/link\t\ttarget'
+fails_with "a link Slate reads as a file" "$(drop 'e[3]["kind"]="file"')" $'win\t/link\t\tkind'
+REFERENCE="$FILES"
+
 python3 "$ROOT/scripts/slate-read-compare.py" >"$WORK/log" 2>&1
 [ "$?" -eq 2 ] && ok || bad "no arguments is a usage error"
 
-FLOOR=27
+FLOOR=32
 if [ $((pass + fail)) -lt "$FLOOR" ]; then
     bad "ran $((pass + fail)) checks, below the floor of $FLOOR"
 fi

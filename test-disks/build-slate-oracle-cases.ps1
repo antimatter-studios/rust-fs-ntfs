@@ -49,6 +49,7 @@ param(
     [string]$OutDir = 'tmp/slate-oracle',
     [string]$WriterCases,
     [string]$WriterImages,
+    [string]$LabSource,
     [string]$SlateWrites,
     [string]$SlateWriteImages
 )
@@ -64,7 +65,7 @@ $ErrorActionPreference = 'Stop'
 if ([bool]$SlateWrites -ne [bool]$SlateWriteImages) {
     throw 'SlateWrites and SlateWriteImages must be supplied together'
 }
-if ($SlateWrites -and ($Cli -or $WriterCases)) {
+if ($SlateWrites -and ($Cli -or $WriterCases -or $LabSource)) {
     throw 'SlateWrites grades Slate-written copies only; it formats no cases'
 }
 if (-not $SlateWrites -and -not $Cli) { throw 'Cli is required to format the cases' }
@@ -173,6 +174,23 @@ if ($WriterCases) {
 # The copies Slate's copy-only writer left (#864). Each is checked against
 # the SHA-256 the writer recorded before Windows sees it. A writer row that
 # left no copy is still a row, so none disappears from the graded table.
+if ($LabSource) {
+    if (-not $WriterCases) { throw 'LabSource requires the original WriterCases' }
+    $receipt = Get-Content -Raw -LiteralPath "$LabSource.json" | ConvertFrom-Json
+    $original = Join-Path $images 'cli-write-at-win-verify-chkdsk.img'
+    if ($receipt.schema -ne 1 -or $receipt.source_case -ne 'cli-write-at-win-verify-chkdsk' -or
+        $receipt.source_sha256 -ne (Get-Sha256 $original) -or
+        $receipt.lab_source_sha256 -ne (Get-Sha256 $LabSource) -or
+        $receipt.source_sha256 -eq $receipt.lab_source_sha256) {
+        throw 'LabSource does not match its original capture and preparation receipt'
+    }
+    $labImage = Join-Path $images 'slate-write-lab-source.img'
+    Copy-Item -LiteralPath $LabSource -Destination $labImage
+    if ((Get-Sha256 $labImage) -ne $receipt.lab_source_sha256) { throw 'Copy changed LabSource' }
+    Copy-Item -LiteralPath "$LabSource.json" -Destination (Join-Path $out 'lab-source.json')
+    $cases += @{ Name = 'slate-write-lab-source'; Origin = 'ntfscp-lab:cli-write-at-win-verify-chkdsk' }
+}
+
 $slateRows = @("case`timage`tsha256`twindows_verdict`twindows_exit")
 $defects = @()
 if ($SlateWrites) {
@@ -273,6 +291,14 @@ foreach ($case in $cases) {
             [Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllText($manifestPath, ($capture.Read | ConvertTo-Json -Depth 10),
             [Text.UTF8Encoding]::new($false))
+        if ($case.Name -eq 'slate-write-lab-source') {
+            $originalManifest = Get-Content -Raw -LiteralPath (Join-Path $manifests 'cli-write-at-win-verify-chkdsk.json') | ConvertFrom-Json
+            $originalEntries = ConvertTo-Json -InputObject @($originalManifest.entries) -Depth 10 -Compress
+            $labEntries = ConvertTo-Json -InputObject @($capture.Read.entries) -Depth 10 -Compress
+            if (-not $passed -or $originalEntries -ne $labEntries) {
+                throw 'LabSource is not clean or changed the user namespace and stream bytes Windows observed'
+            }
+        }
     }
 
     if ($case.Slate) {

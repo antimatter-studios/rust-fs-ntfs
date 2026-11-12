@@ -74,7 +74,7 @@ call_complaints() {
         || echo "toolchain is '$toolchain', but rust-toolchain.toml's channel is '$want_toolchain'"
 
     for grant in 'contents: write' 'id-token: write' 'attestations: write'; do
-        printf '%s\n' "$job" | grep -qE "^      $grant[[:space:]]*$" \
+        printf '%s\n' "$job" | grep -E "^      $grant[[:space:]]*$" >/dev/null \
             || echo "the calling job does not grant '$grant', which the attach job needs"
     done
 
@@ -141,10 +141,12 @@ expect() { # expect WORKFLOW-TEXT WANT-SUBSTRING-OR-EMPTY WHAT
     fi
 }
 expect "$(good_call)" "" "a sound call"
+expect "$(good_call; printf '    # %070000d\n' 0)" "" "a sound call larger than a pipe buffer"
 expect "$(good_call v0.2.23)" "not a commit SHA" "a call pinned to a tag"
 expect "$(good_call 0f7714910080f5f2a080ed6032cccf19bc338064 v0.2.18)" "FS_CORE_REF" "a core-ref chores.yml does not pin"
 expect "$(good_call 0f7714910080f5f2a080ed6032cccf19bc338064 v0.2.23 stable)" "rust-toolchain.toml" "a floating toolchain"
 expect "$(good_call | grep -v 'attestations: write')" "attestations: write" "a call without the attestation grant"
+expect "$(good_call | grep -v 'attestations: write'; printf '    # %070000d\n' 0)" "attestations: write" "a large call without the attestation grant"
 expect "$(good_call | sed 's/needs: \[crates-test, validate-windows\]/needs: [crates-test]/')" "validate-windows" "a call not gated on chkdsk"
 expect "$(good_call | grep -v 'uses:')" "no job calls" "no call at all"
 

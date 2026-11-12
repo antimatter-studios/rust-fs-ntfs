@@ -50,12 +50,22 @@ disposable mount; the manifest binds to the original raw image's SHA-256.
 No additional Slate implementation source was read for this capture.
 
 The Slate tier's `write` step (#863, part of #690) runs Slate's copy-only
-writer, `ntfs-write-lab`, from the MIT tools crate at the pinned commit. Only
-the argument list and exit status of `src/tools/bin/ntfs-write-lab.rs` (MIT)
-were read, to call it: `SOURCE NEW ROOT_FILENAME OFFSET EXPECTED_HEX
-REPLACEMENT_HEX`, exit 0 on success and 1 on failure. The writer only ever
-receives a read-only copy of a source image, and nothing it writes is a
-source of this crate's knowledge of NTFS.
+writer, `ntfs-write-lab`, from the MIT tools crate at the pinned commit.
+After verifying the pinned license and both crates' MIT metadata, the lab's
+admission and overwrite interfaces were inspected to diagnose #1373 and #1374. The
+direct mode accepts nonresident overwrites on an uninitialized log; resident
+overwrites use `--journaled`. Neither mode is a general-purpose writer.
+
+Production formatting deliberately writes a Windows-clean initialized log.
+`scripts/slate-lab-source.sh` therefore prepares a separate fixture: ntfs-3g's
+probe must accept the original for writing, and `ntfscp` replaces only the
+copy's `$LogFile` with uninitialized pages. The receipt binds both image
+hashes; Windows grades this derived source as an additional case before
+Slate receives it. All sixteen original checker cases, their original
+bytes and the three write cases remain. The resident case may leave a
+committed transaction for Windows to recover, which the subsequent Windows
+grading checks. The writer receives only a read-only copy, and nothing it
+writes is a source of this crate's knowledge of NTFS.
 
 The allocation manifests for the Slate tier (#875, part of #692) call
 Windows' own

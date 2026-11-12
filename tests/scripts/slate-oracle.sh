@@ -556,6 +556,23 @@ pins "$(git -C "$src" rev-parse HEAD)" "$licence"
 fetch
 [ "$?" -ne 0 ] && ok || bad "a tools crate that does not declare MIT alone: exit 0, want a failure"
 
+cat >"$WORK/journaled-writer" <<'SH'
+#!/usr/bin/env bash
+[ "$1" = --journaled ] || exit 16
+shift
+exec "$(dirname "$0")/writer" "$@"
+SH
+chmod +x "$WORK/journaled-writer"
+writes 'journaled copy.img'
+printf 'journaled\tcopy.img\ttarget.bin\t8\t00ff\tabcd\tjournaled\n' >"$WORK/journaled.tsv"
+bash "$ROOT/scripts/slate-oracle.sh" write "$WORK/journaled.tsv" "$WORK/images" \
+    "$WORK/journaled-writer" "$WORK/journaled-out" 1 >"$WORK/log" 2>&1
+[ "$?" -eq 0 ] && ok || bad "journaled mode is passed explicitly to Slate: $(cat "$WORK/log")"
+printf 'bad-mode\tcopy.img\ttarget.bin\t8\t00ff\tabcd\tunknown\n' >"$WORK/bad-mode.tsv"
+bash "$ROOT/scripts/slate-oracle.sh" write "$WORK/bad-mode.tsv" "$WORK/images" \
+    "$WORK/writer" "$WORK/bad-mode-out" 1 >"$WORK/log" 2>&1
+[ "$?" -ne 0 ] && ok || bad 'an unknown write mode was accepted'
+
 if [ "$fail" -gt 0 ]; then
     echo "slate-oracle.sh: $fail of $((pass + fail)) checks failed"
     exit 1

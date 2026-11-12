@@ -1,4 +1,4 @@
-case	source	root_file	offset	expected_hex	replacement_hex
-slate-write-resident	cli-write-at-win-verify-chkdsk.img	resident	2	515151	535353
-slate-write-inside	cli-write-at-win-verify-chkdsk.img	inside	20	515151	535353
-slate-write-boundary	cli-write-at-win-verify-chkdsk.img	boundary	4095	515151	535353
+case	source	root_file	offset	expected_hex	replacement_hex	mode
+slate-write-resident	slate-write-lab-source.img	resident	2	515151	535353	journaled
+slate-write-inside	slate-write-lab-source.img	inside	20	515151	535353	direct
+slate-write-boundary	slate-write-lab-source.img	boundary	4095	515151	535353	direct

@@ -1045,6 +1045,42 @@ pub(crate) fn set_index_entry_readonly(
     Ok(old & bit != 0)
 }
 
+/// Set or clear `FILE_ATTRIBUTE_REPARSE_POINT` in the duplicated file
+/// attributes of the `$FILE_NAME` key of the entry at `entry` in `buf`, and
+/// write `word` after them: the reparse tag while the bit is set, the packed
+/// EA size otherwise (#1357). Returns whether that changed anything.
+pub(crate) fn set_index_entry_reparse(
+    buf: &mut [u8],
+    entry: &IndexEntryLocation,
+    reparse: bool,
+    word: u32,
+) -> Result<bool, Error> {
+    const ATTRIBUTES: usize = 0x38;
+    const REPARSE_POINT: u32 = 0x400;
+    let start = entry.record_offset + IE_KEY_START + ATTRIBUTES;
+    let end = start + 8;
+    if entry.key_length < ATTRIBUTES + 8 || end > buf.len() {
+        return Err(Error::io(format!(
+            "index entry at {} has a {}-byte key, too short to hold a $FILE_NAME's reparse tag",
+            entry.record_offset, entry.key_length
+        )));
+    }
+    let old = u32::from_le_bytes(buf[start..start + 4].try_into().unwrap());
+    let attributes = if reparse {
+        old | REPARSE_POINT
+    } else {
+        old & !REPARSE_POINT
+    };
+    let mut fields = [0u8; 8];
+    fields[..4].copy_from_slice(&attributes.to_le_bytes());
+    fields[4..].copy_from_slice(&word.to_le_bytes());
+    if buf[start..end] == fields {
+        return Ok(false);
+    }
+    buf[start..end].copy_from_slice(&fields);
+    Ok(true)
+}
+
 /// Write `allocated` and `data_size` into the duplicated information of
 /// the `$FILE_NAME` key of the entry at `entry` in `buf` (#506). Returns
 /// whether that changed anything, so a caller can skip writing back an

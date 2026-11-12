@@ -209,6 +209,16 @@ record_size() {
     if [ "$n" -lt 128 ]; then echo $((n * $(cluster_size "$1"))); else echo $((1 << (256 - n))); fi
 }
 poke() { printf "$3" | dd of="$1" bs=1 seek="$2" conv=notrunc 2>/dev/null; }
+# flip IMAGE OFFSET LENGTH: complement LENGTH bytes at OFFSET. A constant
+# written there is already in place when the bytes hold it, and the image
+# does not change (#1361); a complement always differs.
+flip() {
+    local byte i
+    for ((i = 0; i < $3; i++)); do
+        byte="$(u8 "$1" $(($2 + i)))"
+        poke "$1" $(($2 + i)) "$(printf '\\%03o' $((255 - byte)))"
+    done
+}
 sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 random() { if [ "$2" -gt 0 ]; then head -c "$2" /dev/urandom >"$1"; else : >"$1"; fi; }
 
@@ -297,11 +307,13 @@ case "$step" in
         record="$(record_size "$image")"
         case "$1" in
             # One byte of $MFTMirr's copy of record 0 ($MFT), well inside
-            # the record: the mirror (+0x38) no longer agrees with $MFT.
-            mirror) poke "$image" $(($(u64 "$image" 56) * cluster + 200)) '\x5a' ;;
+            # the record, complemented: the mirror (+0x38) no longer agrees
+            # with $MFT, whatever the byte was.
+            mirror) flip "$image" $(($(u64 "$image" 56) * cluster + 200)) 1 ;;
             # The FILE signature of record 13, a reserved record mkfs.ntfs
-            # marks in use: $MFT (+0x30) is one run on a fresh volume.
-            signature) poke "$image" $(($(u64 "$image" 48) * cluster + 13 * record)) 'XXXX' ;;
+            # marks in use, complemented: $MFT (+0x30) is one run on a fresh
+            # volume.
+            signature) flip "$image" $(($(u64 "$image" 48) * cluster + 13 * record)) 4 ;;
             *) die "corrupt: '$1' is not mirror or signature" ;;
         esac
         ;;

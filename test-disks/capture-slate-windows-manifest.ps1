@@ -1,6 +1,7 @@
 # Windows' filesystem is the read oracle, independently of either NTFS reader.
 # Dot-sourcing only defines the capture function. The caller owns the mount,
 # and supplies the SHA-256 of the untouched raw image, not its mounted copy.
+. "$PSScriptRoot\slate-windows-links.ps1"
 function Get-SlateWindowsManifest {
     param(
         [Parameter(Mandatory=$true)] [string]$Root,
@@ -27,8 +28,14 @@ function Get-SlateWindowsManifest {
         foreach ($item in $children) {
             $relative = '/' + $item.FullName.Substring($base.Length).TrimStart('\', '/').Replace('\', '/')
             if ($directory -eq $rootItem.FullName -and $excluded -contains $item.Name) { continue }
-            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                throw "Windows manifest does not follow reparse point $relative"
+            try { $kind = Get-SlateWindowsEntryKind $item $relative 'read' }
+            catch { throw "Windows cannot classify ${relative}: $($_.Exception.Message)" }
+            if ($kind -ceq 'symlink') {
+                # Recorded by the target Windows reports; opening it would follow it.
+                $target = $item.LinkTarget
+                if (-not $target) { throw "Windows reports no target for symbolic link $relative" }
+                $entries.Add($relative, [ordered]@{ path = $relative; kind = 'symlink'; target = $target; streams = @() })
+                continue
             }
             $streams = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
             try {
@@ -53,7 +60,7 @@ function Get-SlateWindowsManifest {
             [Array]::Sort($names, [StringComparer]::Ordinal)
             $entries.Add($relative, [ordered]@{
                 path = $relative
-                kind = if ($item.PSIsContainer) { 'directory' } else { 'file' }
+                kind = $kind
                 streams = @($names | ForEach-Object { $streams[$_] })
             })
             if ($item.PSIsContainer) { $pending.Push($item.FullName) }
@@ -69,7 +76,7 @@ function Get-SlateWindowsManifest {
         capabilities = [ordered]@{
             excluded_root_names = $excluded
             exclusion_reason = 'NTFS metadata and Windows mount lifecycle entries'
-            reparse_points = 'fail by path; never followed or silently omitted'
+            reparse_points = "a symbolic link is a 'symlink' entry with the target Windows reports and no streams, never followed; any other reparse point fails by path"
             root_entry = 'implicit directory; root streams are outside this manifest'
         }
         entries = @($paths | ForEach-Object { $entries[$_] })
