@@ -1018,6 +1018,11 @@ pub struct ExportReport {
     /// offset: written as zeros and listed in the error manifest at
     /// [`export_manifest_path`]. Empty for a complete image.
     pub missing: Vec<(u64, u64)>,
+    /// For each span of [`missing`](Self::missing), the MFT record numbers
+    /// whose bytes it covers, ascending. Empty for a span outside every
+    /// `$MFT` run, and for every span when the image's `$MFT` record is
+    /// itself missing or unreadable: no owner is guessed.
+    pub mft_records: Vec<Vec<u64>>,
     /// For an incomplete image, whether its `$Volume` dirty flag was set,
     /// so Windows checks the volume before trusting it: `Err` names why it
     /// could not be (the `$Volume` record missing or not NTFS), and the
@@ -1064,8 +1069,10 @@ pub fn export_manifest_path(destination: &Path) -> std::path::PathBuf {
 /// An archive with any source byte no data record holds is refused before
 /// anything is created, naming the first missing span. Otherwise the image
 /// is written to [`export_temp_path`], flushed, read back against every
-/// data record, and only then renamed into place. An existing destination
-/// is refused, and the archive is only ever read.
+/// data record, and only then moved into place by a rename that refuses an
+/// existing destination, so a file created there during the export is
+/// never replaced. An existing destination is refused, and the archive is
+/// only ever read.
 pub fn export_to_path(archive: &Path, destination: &Path) -> Result<ExportReport, String> {
     export_with(archive, destination, ExportOptions::default())
 }
@@ -1124,8 +1131,9 @@ pub fn export_with(
         .open(&temp)
         .map_err(|e| format!("create '{}': {e}", temp.display()))?;
     let written =
-        write_image(&input, &held, &gaps, &mut out, contents.source_size).and_then(|report| {
+        write_image(&input, &held, &gaps, &mut out, contents.source_size).and_then(|mut report| {
             drop(out);
+            report.mft_records = mft_records_of(&temp, &report.missing);
             if destination.symlink_metadata().is_ok() {
                 return Err(format!(
                     "the destination '{}' appeared during the export",
@@ -1138,11 +1146,23 @@ pub fn export_with(
             if !report.is_complete() {
                 write_manifest(&manifest, &report)?;
             }
-            std::fs::rename(&temp, destination).map_err(|e| {
+            BEFORE_EXPORT_RENAME.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().as_mut() {
+                    hook(destination);
+                }
+            });
+            rename_no_replace(&temp, destination).map_err(|e| {
                 if !report.is_complete() {
                     let _ = std::fs::remove_file(&manifest);
                 }
-                format!("rename into '{}': {e}", destination.display())
+                if e.kind() == io::ErrorKind::AlreadyExists {
+                    format!(
+                        "the destination '{}' appeared during the export; an export never replaces a file",
+                        destination.display()
+                    )
+                } else {
+                    format!("rename into '{}': {e}", destination.display())
+                }
             })?;
             Ok(report)
         });
@@ -1158,12 +1178,92 @@ pub fn export_with(
     }
 }
 
+/// For each of `gaps`, the MFT records whose bytes it covers in the image
+/// at `image`, placed through the runs of the image's own `$MFT` record.
+/// Every list is empty when that record lies in a gap or cannot be read:
+/// an owner is never guessed.
+fn mft_records_of(image: &Path, gaps: &[(u64, u64)]) -> Vec<Vec<u64>> {
+    let mut owners = vec![Vec::new(); gaps.len()];
+    let layout = FileSource::open(image)
+        .ok()
+        .and_then(|mut source| mft_layout(&mut source, gaps));
+    let Some((runs, cluster, record)) = layout else {
+        return owners;
+    };
+    for (owned, &(offset, len)) in owners.iter_mut().zip(gaps) {
+        for run in &runs {
+            let Some(lcn) = run.lcn else { continue };
+            let start = lcn * cluster;
+            let (a, b) = (
+                offset.max(start),
+                (offset + len).min(start + run.length * cluster),
+            );
+            if a >= b {
+                continue;
+            }
+            let base = run.starting_vcn * cluster;
+            owned.extend((base + (a - start)) / record..=(base + (b - 1 - start)) / record);
+        }
+        owned.sort_unstable();
+        owned.dedup();
+    }
+    owners
+}
+
+/// The `$MFT` runs, cluster size and record size of the NTFS volume in
+/// `source`, read from its boot sector and `$MFT` record. `None` when it is
+/// not NTFS, or when any byte of the `$MFT` record lies in one of `gaps`,
+/// whose zeros would place records wrongly.
+fn mft_layout<S: RescueSource + ?Sized>(
+    source: &mut S,
+    gaps: &[(u64, u64)],
+) -> Option<(Vec<DataRun>, u64, u64)> {
+    let mut boot = [0u8; 512];
+    if source.size() < boot.len() as u64 {
+        return None;
+    }
+    source.read_at(0, &mut boot).ok()?;
+    if &boot[3..11] != b"NTFS    " {
+        return None;
+    }
+    let params = crate::mft_io::parse_boot_params_from_bytes(&boot).ok()?;
+    let cluster = params.cluster_size;
+    let record = params.file_record_size;
+    let clusters = params.volume_bytes().min(source.size()) / cluster;
+    let at = params.mft_lcn.checked_mul(cluster)?;
+    if record == 0 || gaps.iter().any(|&(o, l)| o < at + record && at < o + l) {
+        return None;
+    }
+    let mut mft = vec![0u8; usize::try_from(record).ok()?];
+    source.read_at(at, &mut mft).ok()?;
+    let runs = unnamed_data_runs(&mut mft, params.bytes_per_sector, clusters)?;
+    Some((runs, cluster, record))
+}
+
+/// A hook [`set_before_export_rename`] installs.
+#[doc(hidden)]
+pub type ExportRenameHook = Box<dyn FnMut(&Path)>;
+
+thread_local! {
+    static BEFORE_EXPORT_RENAME: std::cell::RefCell<Option<ExportRenameHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `hook` with the destination on this thread's next exports, after
+/// their last check of the destination and immediately before the image
+/// is moved into place; `None` removes it. A test hook: it lets a test
+/// create the destination inside the window a check cannot close.
+#[doc(hidden)]
+pub fn set_before_export_rename(hook: Option<ExportRenameHook>) {
+    BEFORE_EXPORT_RENAME.with(|slot| *slot.borrow_mut() = hook);
+}
+
 /// Write `report`'s missing spans to the error manifest at `path` through a
 /// flushed temporary file, refusing to replace one that exists.
 fn write_manifest(path: &Path, report: &ExportReport) -> Result<(), String> {
     let total: u64 = report.missing.iter().map(|&(_, len)| len).sum();
     let mut text = format!(
-        "# rescue export error manifest: {} spans, {total} of {} image bytes held by no data record, written as zeros\n# offset length\n",
+        "# rescue export error manifest: {} spans, {total} of {} image bytes held by no data record, written as zeros\n# offset length [records=N,...: the MFT records the span covers, absent when none can be named]\n",
         report.missing.len(),
         report.bytes
     );
@@ -1177,8 +1277,13 @@ fn write_manifest(path: &Path, report: &ExportReport) -> Result<(), String> {
         )),
         None => {}
     }
-    for &(offset, len) in &report.missing {
-        text.push_str(&format!("{offset} {len}\n"));
+    for (i, &(offset, len)) in report.missing.iter().enumerate() {
+        text.push_str(&format!("{offset} {len}"));
+        if let Some(records) = report.mft_records.get(i).filter(|r| !r.is_empty()) {
+            let names: Vec<String> = records.iter().map(u64::to_string).collect();
+            text.push_str(&format!(" records={}", names.join(",")));
+        }
+        text.push('\n');
     }
     let temp = export_temp_path(path);
     let written = OpenOptions::new()
@@ -1197,13 +1302,62 @@ fn write_manifest(path: &Path, report: &ExportReport) -> Result<(), String> {
                     path.display()
                 ));
             }
-            std::fs::rename(&temp, path)
+            rename_no_replace(&temp, path)
                 .map_err(|e| format!("rename into '{}': {e}", path.display()))
         });
     if written.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
     written
+}
+
+/// Move `from` to `to` in one step that fails with
+/// [`io::ErrorKind::AlreadyExists`] when anything is at `to`, however late
+/// it appeared: `renameat2(RENAME_NOREPLACE)` on Linux, `renamex_np`
+/// with `RENAME_EXCL` on Apple platforms, and otherwise, or where the
+/// filesystem lacks those, a hard link to `to` followed by removing
+/// `from`. Where none of them works the move fails; it never falls back
+/// to a rename that replaces.
+fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = |p: &Path| {
+            CString::new(p.as_os_str().as_bytes())
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+        };
+        let (from_c, to_c) = (c_path(from)?, c_path(to)?);
+        // SAFETY: both arguments are NUL-terminated paths that outlive the call.
+        #[cfg(target_os = "linux")]
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                from_c.as_ptr(),
+                libc::AT_FDCWD,
+                to_c.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        // SAFETY: as above.
+        #[cfg(target_vendor = "apple")]
+        let rc = unsafe { libc::renamex_np(from_c.as_ptr(), to_c.as_ptr(), libc::RENAME_EXCL) };
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        // Only a kernel or filesystem without the flag falls through to
+        // the link: every other failure, `EEXIST` included, is the answer.
+        if !matches!(
+            err.raw_os_error(),
+            Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::ENOTSUP)
+        ) {
+            return Err(err);
+        }
+    }
+    std::fs::hard_link(from, to)?;
+    std::fs::remove_file(from)
 }
 
 /// Write each data record of `archive` into `out` at its offset, leaving
@@ -1289,6 +1443,7 @@ fn write_image(
         bytes: size,
         sha256: hash.finalize().into(),
         missing: gaps.to_vec(),
+        mft_records: vec![Vec::new(); gaps.len()],
         dirty_flag,
     })
 }
