@@ -1319,16 +1319,12 @@ jobs:
   validate-mkfs-windows-run:
     name: Windows chkdsk execution
     runs-on: windows-latest
-    # Run 38738194039 at d8d8d9c hit the 40-minute job limit while the CLI
-    # matrix was still progressing (12/22 done). Earlier scenarios and builds
-    # took 32 minutes before the CLI matrix even started. Allow the expanded
-    # oracle suite and trailing chkdsk/round-trip checks to finish, while
-    # retaining a finite bound for a hung runner (#388).
-    # Measured: 75.6 minutes in run 41570159887, stopped by the old limit of
-    # 75 inside "Validate the command-line tools on Windows", and 73.4 in run
-    # 41530819216. No test had failed. Neither run held the quota limit
-    # measurement, whose step took 1.7 minutes in run 41558177459 (#867).
-    timeout-minutes: 85
+    # Run 43117610604 hit the 85-minute limit with the CLI matrix still
+    # progressing (last heartbeat: 26/34 complete), without a failed scenario.
+    # Earlier steps took 69.6 minutes before CLI validation started. Budget
+    # 70 before CLI, 30 for CLI, and 20 for trailing chkdsk/round-trip checks
+    # and runner variance, retaining a finite hung-runner bound (#388).
+    timeout-minutes: 120
     needs: [changes]
     if: needs.changes.outputs.mkfs == 'true'
     # Every run-matrix.sh step replaces test-diagnostics/matrix/, so each one
