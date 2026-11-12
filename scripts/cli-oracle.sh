@@ -61,9 +61,11 @@
 #                                    same length, longer, shorter, case only, a
 #                                    directory, data that is not resident, a
 #                                    Unicode name, and a third of a directory
-#                                    filled past one index level. A move to
-#                                    another directory and a name already there
-#                                    are refused with every byte left as it was.
+#                                    filled past one index level; a file moved
+#                                    into another directory. A directory moved
+#                                    to another directory and a name already
+#                                    there are refused with every byte left as
+#                                    it was.
 #                                    IMAGE.manifest lists every file's SHA-256
 #                                    under its new name, the exact case of each
 #                                    new name and each old name now absent
@@ -419,6 +421,8 @@ case "$step" in
         put /d/sub/inner.bin 1048576
         put /naive.txt 7
         put /e/stay.txt 9
+        put /e/carried.txt 300
+        put /e/moved.bin 70000
         # 300 names of varying length: past one index level in 4 KiB blocks.
         for i in $(seq 1 300); do
             printf 'name-%03d-%s\n' "$i" "$(printf '%*s' $((i % 23)) '' | tr ' ' x)"
@@ -434,6 +438,8 @@ case "$step" in
         renamed /naive.txt "/na$(printf '\303\257')ve-$(printf '\346\227\245\346\234\254').txt"
         # A seeded third of /big: case only, longer (sorting last) and
         # shorter (sorting first), so entries move between index blocks.
+        # sed, not head: head stops reading after its hundredth line, and
+        # under pipefail a cut still writing then dies of SIGPIPE (exit 141).
         awk 'BEGIN { srand(645) } { print rand() "\t" $0 }' "$work/names" | sort | cut -f2 | sed -n '1,100p' >"$work/order"
         n=0
         while read -r name; do
@@ -445,12 +451,15 @@ case "$step" in
             esac
             renamed "/big/$name" "/big/$new"
         done <"$work/order"
+        # A file moved into another directory (#600): under its own name,
+        # then, with data that is not resident, under a new one deeper down.
+        renamed /e/carried.txt /docs/carried.txt
+        renamed /e/moved.bin /docs/sub/arrived.bin
 
-        # Refusals, each leaving every byte as it was: another directory
-        # (a move this driver cannot make, exit 3), and the volume's state
-        # refusing it (exit 4, #1182): a name already there as Windows
-        # compares names, and a new name under a file.
-        refused 3 /omega.bin /docs/omega.bin
+        # Refusals, each leaving every byte as it was: a directory into
+        # another directory (a move this driver cannot make, exit 3), and the
+        # volume's state refusing it (exit 4, #1182): a name already there as
+        # Windows compares names, and a new name under a file.
         refused 3 /docs/sub /e/sub
         refused 4 /x.dat /OMEGA.BIN
         refused 4 /e/stay.txt /e/STAY.TXT/x

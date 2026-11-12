@@ -394,6 +394,17 @@ impl Filesystem {
         write::rename(&self.image, old_path, new_basename).map_err(Error::from)
     }
 
+    /// Move the regular file at `old_path` to `new_parent/new_basename`,
+    /// perhaps in another directory; see [`write::move_to`].
+    pub fn move_to(
+        &self,
+        old_path: &str,
+        new_parent: &str,
+        new_basename: &str,
+    ) -> Result<(), Error> {
+        write::move_to(&self.image, old_path, new_parent, new_basename).map_err(Error::from)
+    }
+
     pub fn rename_same_length(&self, old_path: &str, new_name: &str) -> Result<(), Error> {
         write::rename_same_length(&self.image, old_path, new_name).map_err(Error::from)
     }

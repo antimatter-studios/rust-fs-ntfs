@@ -560,6 +560,51 @@
       "image": "nfs-mac-format-mkdir-rmdir-win-chkdsk.img",
       "_notes": "Creates and removes an empty directory with the default 4 KiB cluster geometry, then requires Windows chkdsk to accept the retired record and parent index update as clean."
     },
+    "mac-format-mkdir-dir-stream-rmdir-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "DIRSTREAM",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "mac-format"
+        },
+        {
+          "op": "mac-mkdir",
+          "parent": "/",
+          "basename": "streamy"
+        },
+        {
+          "op": "mac-write-streams",
+          "path": "/streamy",
+          "count": "1",
+          "size_bytes": "20000",
+          "delete_every": "0"
+        },
+        {
+          "op": "mac-rmdir",
+          "path": "/streamy"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-mac-format-mkdir-dir-stream-rmdir-win-chkdsk.img",
+      "_notes": "Creates a directory, gives it one named stream too large for its record so the stream lives in clusters, and removes the directory; Windows chkdsk must find no cluster left allocated to nothing (#735)."
+    },
     "mac-format-mkdir-rmdir-win-chkdsk-64k": {
       "status": "pending",
       "volume_params": {
@@ -2730,6 +2775,49 @@
       "image": "nfs-win-format-win-quota-enforce-win-chkdsk.img",
       "_notes": "Windows turns quota tracking and enforcement on, gives a file's owner a hard limit 64 KiB above what it is charged, and writes 1 MiB to the file. The diagnostics record what Windows does with a write past the limit: the error it returns, the file's length afterwards, the owner's usage before and after, and fsutil's view of the volume before and after. The step fails when the write is not refused, when it fails with anything but the status Windows returned when measured, or when the owner is charged more than the limit afterwards (#1244). The image goes back to the host, where run-matrix.sh --keep-images keeps it; CI keeps only the text (#867, part of #679)."
     },
+    "win-format-win-link-attr-list-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 127,
+        "label": "LINKS",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        {
+          "op": "init-image"
+        },
+        {
+          "op": "ship-to-vm",
+          "src": "{image_dir}/{run_id}/{scenario.image}",
+          "dest": "{vm.workdir}/{scenario.image}"
+        },
+        {
+          "op": "win-format",
+          "label": "{scenario.volume_params.label}",
+          "keep_image": "true"
+        },
+        {
+          "op": "win-link-attr-list",
+          "path": "/many.txt",
+          "link_dir": "/e",
+          "links": "40",
+          "keep_image": "true"
+        },
+        {
+          "op": "ship-to-host",
+          "src": "{vm.workdir}/{scenario.image}",
+          "dest": "{image_dir}/{run_id}/{scenario.image}"
+        },
+        {
+          "op": "win-chkdsk",
+          "modes": "readonly,/scan",
+          "verdict_shape": "Clean",
+          "keep_image": "false"
+        }
+      ],
+      "image": "nfs-win-format-win-link-attr-list-win-chkdsk.img",
+      "_notes": "Windows creates /many.txt (64 bytes) and hard-links it forty times as /e/many-0.txt onwards, the names the cli-link recipe gives it, where fs.ntfs ln refuses the 33rd because the base record has no room left for its $ATTRIBUTE_LIST (#1067). After every link the op reads the base record through FSCTL_GET_NTFS_FILE_RECORD; at the end it reads the $ATTRIBUTE_LIST, resident or not, and every extension record it names. attr-list.txt in the diagnostics records which attributes Windows moved out of the base record and when. The step fails when Windows leaves the file without an $ATTRIBUTE_LIST. The image Windows leaves is kept as the fixture the driver's 33rd link is checked against (#1069, part of #1067). Not yet run: its first outcome is recorded here."
+    },
     "win-format-win-quota-mac-delete-win-chkdsk": {
       "status": "pending",
       "volume_params": {
@@ -3965,7 +4053,7 @@
         }
       ],
       "image": "nfs-cli-rename-win-verify-chkdsk.img",
-      "_notes": "fs.ntfs mv renames names within their directories (#645): the same length, longer, shorter, case only, a directory, a non-resident file, a Unicode name, and a seeded third of a directory filled past one index level, so entries move between index blocks. A move to another directory (exit 3) and a name already there, compared through $UpCase, are refused with every byte left as it was. Windows grades the result: every file reads back under its new name with the SHA-256 written before the rename (Get-FileHash), each parent lists each new name exactly so, no old name is found, and chkdsk finds the volume clean."
+      "_notes": "fs.ntfs mv renames names within their directories (#645): the same length, longer, shorter, case only, a directory, a non-resident file, a Unicode name, and a seeded third of a directory filled past one index level, so entries move between index blocks; and a file moved into another directory, under its own name and under a new one (#600). A directory moved to another directory (exit 3) and a name already there, compared through $UpCase, are refused with every byte left as it was. Windows grades the result: every file reads back under its new name with the SHA-256 written before the rename (Get-FileHash), each parent lists each new name exactly so, no old name is found, and chkdsk finds the volume clean."
     },
     "cli-import-win-verify-chkdsk": {
       "status": "pending",
