@@ -393,6 +393,25 @@ pub fn read_indx_block_io<T: BlockIo + ?Sized>(
     ia: &IndexAllocation,
     vcn: u64,
 ) -> Result<Vec<u8>, Error> {
+    read_indx_block_mapped_io(io, ia, vcn).map(|(block, _)| block)
+}
+
+/// One contiguous piece of an INDX block on the device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BlockExtent {
+    /// Offset of the piece from the start of the block.
+    pub block_offset: usize,
+    pub device_offset: u64,
+    pub length: usize,
+}
+
+/// [`read_indx_block_io`], also returning where the block's bytes were read
+/// from: one extent per run the block crosses, in block order.
+pub(crate) fn read_indx_block_mapped_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    ia: &IndexAllocation,
+    vcn: u64,
+) -> Result<(Vec<u8>, Vec<BlockExtent>), Error> {
     let (mut buf, chunks) = read_raw_indx_block_io(io, ia, vcn)?;
     if &buf[0..4] != b"INDX" {
         return Err(Error::io(format!(
@@ -402,7 +421,15 @@ pub fn read_indx_block_io<T: BlockIo + ?Sized>(
         )));
     }
     apply_fixup_on_read_magic(&mut buf, ia.params.bytes_per_sector, b"INDX")?;
-    Ok(buf)
+    let extents = chunks
+        .iter()
+        .map(|c| BlockExtent {
+            block_offset: c.cursor,
+            device_offset: c.disk_offset,
+            length: c.len,
+        })
+        .collect();
+    Ok((buf, extents))
 }
 
 /// Read-modify-write an INDX block. `mutate` sees the clean (post-fixup)
