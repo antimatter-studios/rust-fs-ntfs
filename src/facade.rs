@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 // volume_info, and the per-path read methods all use the native read layer.
 use crate::attr_io::AttrType;
 use crate::block_io::PathIo;
+pub use crate::unix_metadata::UnixMetadata;
 use crate::{fsck, read, write};
 
 /// Generic facade error. Wraps the underlying string error from the
@@ -444,6 +445,16 @@ impl Filesystem {
 
     pub fn remove_ea(&self, path: &str, name: &[u8]) -> Result<(), Error> {
         write::remove_ea(&self.image, path, name).map_err(Error::from)
+    }
+
+    /// The Linux owner, group and mode in the file's WSL attributes.
+    pub fn unix_metadata(&self, path: &str) -> Result<UnixMetadata, Error> {
+        write::read_unix_metadata(&self.image, path).map_err(Error::from)
+    }
+
+    /// Store the Linux owner, group and mode in the file's WSL attributes.
+    pub fn set_unix_metadata(&self, path: &str, meta: &UnixMetadata) -> Result<(), Error> {
+        write::set_unix_metadata(&self.image, path, meta).map_err(Error::from)
     }
 
     pub fn write_reparse_point(&self, path: &str, tag: u32, data: &[u8]) -> Result<(), Error> {
