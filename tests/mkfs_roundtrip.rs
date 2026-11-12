@@ -69,7 +69,24 @@ fn raw_attribute(dev: &MemDev, record_number: u64, attr_type: u32, name: &str) -
     let mft_lcn = u64::from_le_bytes(dev.buf[0x30..0x38].try_into().unwrap());
     let record_size = 4096usize;
     let record_at = (mft_lcn * cluster_size) as usize + record_number as usize * record_size;
-    let record = &dev.buf[record_at..record_at + record_size];
+    let mut record = dev.buf[record_at..record_at + record_size].to_vec();
+    // Undo the update sequence array, as a reader does before parsing: the
+    // last two bytes of every 512-byte stride hold the sequence number on
+    // disk, and the bytes they replaced are saved in the array.
+    let usa_off = u16::from_le_bytes(record[0x04..0x06].try_into().unwrap()) as usize;
+    let usa_count = u16::from_le_bytes(record[0x06..0x08].try_into().unwrap()) as usize;
+    let usn = [record[usa_off], record[usa_off + 1]];
+    for i in 1..usa_count {
+        let end = i * 512 - 2;
+        assert_eq!(
+            record[end..end + 2],
+            usn,
+            "record {record_number}: stride {i} lacks the update sequence number"
+        );
+        let saved = usa_off + 2 * i;
+        record[end] = record[saved];
+        record[end + 1] = record[saved + 1];
+    }
     let mut at = u16::from_le_bytes(record[0x14..0x16].try_into().unwrap()) as usize;
 
     loop {
@@ -1059,7 +1076,35 @@ fn quota_default_policy_is_present_for_every_supported_cluster_size() {
         assert_eq!(i64::from_le_bytes(control[24..32].try_into().unwrap()), -1);
         assert_eq!(i64::from_le_bytes(control[32..40].try_into().unwrap()), -1);
 
-        let last = &entry[entry_len..];
+        // Windows formats the default owner's entry next: OwnerID 0x100,
+        // the same control fields, then BUILTIN\Administrators' SID (#862).
+        let owner = &entry[entry_len..];
+        let owner_len = u16::from_le_bytes(owner[8..10].try_into().unwrap()) as usize;
+        assert_eq!(
+            u32::from_le_bytes(owner[16..20].try_into().unwrap()),
+            0x100,
+            "{cluster_size}: default owner id"
+        );
+        let owner_data_off = u16::from_le_bytes(owner[0..2].try_into().unwrap()) as usize;
+        let owner_data_len = u16::from_le_bytes(owner[2..4].try_into().unwrap()) as usize;
+        assert_eq!(
+            owner_data_len,
+            48 + 16,
+            "{cluster_size}: owner entry length"
+        );
+        let owner_data = &owner[owner_data_off..owner_data_off + owner_data_len];
+        assert_eq!(
+            owner_data[..48],
+            control[..],
+            "{cluster_size}: owner control"
+        );
+        assert_eq!(
+            owner_data[48..],
+            [1, 2, 0, 0, 0, 0, 0, 5, 0x20, 0, 0, 0, 0x20, 2, 0, 0],
+            "{cluster_size}: owner SID is S-1-5-32-544"
+        );
+
+        let last = &owner[owner_len..];
         assert_eq!(
             u32::from_le_bytes(last[12..16].try_into().unwrap()) & 2,
             2,
