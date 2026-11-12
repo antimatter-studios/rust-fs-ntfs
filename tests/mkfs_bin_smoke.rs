@@ -284,3 +284,70 @@ fn mkfs_ntfs_version_names_the_tool_and_the_crate_version() {
         }
     }
 }
+
+/// `fs.ntfs acl catalog` lists the formatter's `$Secure:$SDS` copy by copy
+/// (#606): its one descriptor, security id 256, at offset 0 and again in
+/// the mirror region 256 KiB on, both copies verified and agreeing, and
+/// each descriptor decoded. `--id` selects copies by security id, and
+/// `--jsonl` prints the same copies one per line.
+#[test]
+fn acl_catalog_lists_the_formatters_descriptor_and_its_mirror() {
+    let img = common::temp_image_path("acl_catalog_img");
+    {
+        let f = std::fs::File::create(&img).expect("create img");
+        f.set_len(SIZE_BYTES).expect("set_len");
+    }
+    let out = Command::new(rust_ntfs())
+        .args(["format", "-L", TEST_LABEL, &img])
+        .output()
+        .expect("spawn rust-ntfs format");
+    assert!(
+        out.status.success(),
+        "rust-ntfs format: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let entry = env!("CARGO_BIN_EXE_rust-fs-ntfs");
+    let run = |args: &[&str]| {
+        let out = Command::new(entry)
+            .args(["fs", &img, "acl", "catalog"])
+            .args(args)
+            .output()
+            .expect("spawn fs.ntfs acl catalog");
+        assert!(
+            out.status.success(),
+            "acl catalog {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).expect("UTF-8 report")
+    };
+    let all = run(&[]);
+    for (needle, count) in [
+        ("\"security_id\": 256", 2),
+        ("\"copy\": \"primary\"", 1),
+        ("\"copy\": \"mirror\"", 1),
+        ("\"physical\": 0,", 1),
+        ("\"physical\": 262144,", 1),
+        ("\"logical\": 0,", 2),
+        ("\"hash_verified\": true", 2),
+        ("\"offset_verified\": true", 2),
+        ("\"mirror\": \"same\"", 1),
+        ("\"mirror\": null", 1),
+        ("\"owner\": \"S-1-5-", 2),
+    ] {
+        assert_eq!(all.matches(needle).count(), count, "{needle} in:\n{all}");
+    }
+    assert!(!all.contains("\"error\""), "{all}");
+    assert_eq!(run(&["--id", "256"]), all, "the only id selects every copy");
+    assert_eq!(run(&["--id", "257"]).trim_end(), "[]");
+    let jsonl = run(&["--jsonl"]);
+    let lines: Vec<&str> = jsonl.lines().collect();
+    assert_eq!(lines.len(), 2, "{jsonl}");
+    for (line, physical) in lines
+        .iter()
+        .zip(["\"physical\": 0,", "\"physical\": 262144,"])
+    {
+        assert!(line.starts_with('{') && line.ends_with('}'), "{line}");
+        assert!(line.contains(physical), "{line}");
+        assert!(line.contains("\"hash_verified\": true"), "{line}");
+    }
+}
