@@ -23,6 +23,7 @@ use fs_core::cli::Json;
 use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::error::{Error, Kind};
 use fs_ntfs::read;
+use fs_ntfs::sds::{mirror_state, CatalogEntry, CatalogError, MirrorState, SdsCopy};
 use fs_ntfs::security_descriptor::{Acl, SecurityDescriptor, Sid};
 
 use super::device::Device;
@@ -32,8 +33,6 @@ const SE_SACL_PRESENT: u16 = 0x0010;
 
 /// $Secure is a fixed system record on every NTFS 3.x volume.
 const SECURE_RECORD: u64 = 9;
-/// An $SDS entry header: hash, security id, offset, length.
-const SDS_HEADER: usize = 20;
 
 /// A SID in the `S-R-A-S1-...` form Windows prints.
 pub fn sid_string(sid: Sid<'_>) -> String {
@@ -198,45 +197,71 @@ pub fn descriptor_json(bytes: &[u8]) -> Result<Json, String> {
 }
 
 /// The descriptor bytes a file resolves to: its own $SECURITY_DESCRIPTOR
-/// attribute when it carries one, else the $Secure:$SDS entry its
-/// $STANDARD_INFORMATION security id names.
+/// attribute when it carries one, else the $Secure:$SDS copy its
+/// $STANDARD_INFORMATION security id names, through the library's checked
+/// lookup, which the C ABI shares (#606).
 pub fn file_descriptor(dev: &mut Device, path: &str) -> Result<Vec<u8>, Error> {
-    let record = read::resolve_path(dev, path)?;
-    if let Some(own) =
-        read::read_attribute_value_if_present(dev, record, AttrType::SecurityDescriptor, None)?
-    {
-        return Ok(own);
-    }
-    let Some(id) = fs_ntfs::write::read_security_id_io(dev, path)? else {
-        return Err(Error::new(
-            Kind::NotFound,
-            format!("{path}: no $SECURITY_DESCRIPTOR and no security id"),
-        ));
-    };
-    let sds =
-        read::read_attribute_value_if_present(dev, SECURE_RECORD, AttrType::Data, Some("$SDS"))?
-            .ok_or_else(|| Error::new(Kind::NotFound, "$Secure has no $SDS stream"))?;
-    sds_lookup(&sds, id)
-        .ok_or_else(|| Error::new(Kind::NotFound, format!("security id {id} not in $SDS")))
+    fs_ntfs::sds::file_descriptor_io(dev, path)
 }
 
-/// Walks $SDS entries (16-byte aligned) for the one carrying `id`.
-fn sds_lookup(sds: &[u8], id: u32) -> Option<Vec<u8>> {
-    let mut at = 0usize;
-    while at + SDS_HEADER <= sds.len() {
-        let field = |o: usize| u32::from_le_bytes(sds[at + o..at + o + 4].try_into().unwrap());
-        let entry_id = field(4);
-        let len = field(16) as usize;
-        if len < SDS_HEADER || at + len > sds.len() {
-            at = (at + 16) & !15;
+/// The volume's $Secure:$SDS stream.
+fn sds_stream(dev: &mut Device) -> Result<Vec<u8>, Error> {
+    read::read_attribute_value_if_present(dev, SECURE_RECORD, AttrType::Data, Some("$SDS"))?
+        .ok_or_else(|| Error::new(Kind::NotFound, "$Secure has no $SDS stream"))
+}
+
+/// `acl catalog`: every copy in $SDS in stream order, as JSON, with the
+/// error that stopped the walk if one did. `id` keeps only that security
+/// id's copies.
+pub fn catalog(
+    dev: &mut Device,
+    id: Option<u32>,
+) -> Result<(Vec<Json>, Option<CatalogError>), Error> {
+    let sds = sds_stream(dev)?;
+    let mut rows = Vec::new();
+    for entry in fs_ntfs::sds::catalog(&sds) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => return Ok((rows, Some(e))),
+        };
+        if id.is_some_and(|id| id != entry.security_id) {
             continue;
         }
-        if entry_id == id {
-            return Some(sds[at + SDS_HEADER..at + len].to_vec());
-        }
-        at = (at + len + 15) & !15;
+        rows.push(catalog_json(&sds, &entry));
     }
-    None
+    Ok((rows, None))
+}
+
+/// One catalog copy as reported: where it is, what its header claims,
+/// both verdicts, its mirror's agreement for a primary, and its
+/// descriptor decoded, or why it does not decode.
+fn catalog_json(sds: &[u8], e: &CatalogEntry<'_>) -> Json {
+    let (copy, mirror) = match e.copy {
+        SdsCopy::Primary => (
+            "primary",
+            Json::from(match mirror_state(sds, e) {
+                MirrorState::Same => "same",
+                MirrorState::Different => "different",
+                MirrorState::Missing => "missing",
+            }),
+        ),
+        SdsCopy::Mirror => ("mirror", Json::Null),
+    };
+    let descriptor = descriptor_json(e.descriptor)
+        .unwrap_or_else(|error| Json::object([("error", Json::from(error))]));
+    Json::object([
+        ("copy", Json::from(copy)),
+        ("physical", Json::from(e.physical)),
+        ("logical", Json::from(e.logical)),
+        ("security_id", Json::from(u64::from(e.security_id))),
+        ("size", Json::from(u64::from(e.declared_len))),
+        ("stored_hash", Json::from(u64::from(e.stored_hash))),
+        ("computed_hash", Json::from(u64::from(e.computed_hash))),
+        ("hash_verified", Json::from(e.hash_verified())),
+        ("offset_verified", Json::from(e.offset_verified())),
+        ("mirror", mirror),
+        ("descriptor", descriptor),
+    ])
 }
 
 #[cfg(test)]
@@ -411,23 +436,5 @@ mod tests {
             descriptor_json(&descriptor(SE_DACL_PRESENT, Some(&acl(&[padded.clone()])))).unwrap();
         assert_eq!(ace_field(&json, 0, "sid"), Json::from("S-1-1-0"));
         assert_eq!(ace_field(&json, 0, "bytes"), Json::from(hex(&padded)));
-    }
-
-    #[test]
-    fn sds_lookup_finds_the_entry_by_security_id() {
-        let sd = descriptor(0, None);
-        let mut sds = Vec::new();
-        for (id, body) in [(0x100u32, vec![0u8; 8]), (0x101, sd.clone())] {
-            let start = sds.len();
-            let len = (SDS_HEADER + body.len()) as u32;
-            sds.extend_from_slice(&0u32.to_le_bytes());
-            sds.extend_from_slice(&id.to_le_bytes());
-            sds.extend_from_slice(&(start as u64).to_le_bytes());
-            sds.extend_from_slice(&len.to_le_bytes());
-            sds.extend_from_slice(&body);
-            sds.resize((sds.len() + 15) & !15, 0);
-        }
-        assert_eq!(sds_lookup(&sds, 0x101), Some(sd));
-        assert_eq!(sds_lookup(&sds, 0x102), None);
     }
 }

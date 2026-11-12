@@ -40,7 +40,7 @@ jobs:
           if-no-files-found: error
   acl-show-oracle:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -60,18 +60,30 @@ jobs:
           ./tests/scripts/acl-show-windows-oracle.ps1
           -Cli target/release/rust-fs-ntfs.exe
           -OutDir tmp/acl-oracle
-      - name: The oracle image was deleted and only JSON is retained
+      # #606: Windows fills $Secure:$SDS past one 256 KiB region, and every
+      # descriptor it stored must be in the CLI's catalog, every copy verified.
+      - name: Compare fs acl catalog with Windows on a catalog past one 256 KiB region
+        if: always()
+        shell: pwsh
+        run: >-
+          ./tests/scripts/acl-catalog-windows-oracle.ps1
+          -Cli target/release/rust-fs-ntfs.exe
+          -OutDir tmp/acl-catalog-oracle
+      - name: The oracle images were deleted and only JSON is retained
         if: always()
         shell: bash
         run: |
           test ! -e tmp/acl-oracle/acl-oracle.vhd
           test -z "$(find tmp/acl-oracle -type f ! -name '*.json')"
+          test ! -e tmp/acl-catalog-oracle/acl-catalog.vhd
+          test -z "$(find tmp/acl-catalog-oracle -type f ! -name '*.json')"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: acl-show-windows-${{ github.sha }}
           path: |
             tmp/acl-oracle/*.json
+            tmp/acl-catalog-oracle/*.json
           if-no-files-found: error
   filename-fields-capture:
     # Issue #629: runs the six-step FILE_NAME producer on an elevated hosted
