@@ -67,6 +67,15 @@
 #                                    IMAGE.manifest lists every file's SHA-256
 #                                    under its new name, the exact case of each
 #                                    new name and each old name now absent
+#   import IMAGE                     fs.ntfs import copies host files onto the
+#                                    volume: one byte, a resident size, a cluster
+#                                    plus one and 64 MiB from host paths, and a
+#                                    Unicode name through stdin, each report's
+#                                    SHA-256 the source's. A destination already
+#                                    there is refused with every byte left as it
+#                                    was. IMAGE.manifest lists each file's size and
+#                                    SHA-256, read in place and copied off the
+#                                    volume, for win-cli-verify.ps1 (#1079)
 #   link IMAGE                       fs.ntfs ln adds hard links -- in the same
 #                                    directory, in others, to data that is not
 #                                    resident, and to one file past the names its
@@ -431,12 +440,13 @@ case "$step" in
         done <"$work/order"
 
         # Refusals, each leaving every byte as it was: another directory
-        # (a move this driver cannot make, exit 3), a name already there as
-        # Windows compares names, and a new name under a file.
+        # (a move this driver cannot make, exit 3), and the volume's state
+        # refusing it (exit 4, #1182): a name already there as Windows
+        # compares names, and a new name under a file.
         refused 3 /omega.bin /docs/omega.bin
         refused 3 /docs/sub /e/sub
-        refused 1 /x.dat /OMEGA.BIN
-        refused 1 /e/stay.txt /e/STAY.TXT/x
+        refused 4 /x.dat /OMEGA.BIN
+        refused 4 /e/stay.txt /e/STAY.TXT/x
 
         printf 'dir\t%s\n' /docs /docs/sub /e /big >>"$manifest"
         while IFS="$(printf '\t')" read -r path size key; do
@@ -527,12 +537,12 @@ case "$step" in
         symlinked ../d/sub/A-DEEP.TXT /e/deep.txt a    # relative, across the tree
         symlinked /d/f.txt /e/abs.txt f                # from the volume's root
 
-        # Refusals, each leaving every byte as it was: a directory, a name
-        # already there as Windows compares names, and a directory that is
-        # not there.
+        # Refusals, each leaving every byte as it was: a directory (exit 1),
+        # and the volume's state refusing it (exit 4, #1182): a name already
+        # there as Windows compares names, and a directory that is not there.
         refused 1 /d /d-link
-        refused 1 /f-up.txt /A-ALSO.TXT
-        refused 1 /a-also.txt /nowhere/x.txt
+        refused 4 /f-up.txt /A-ALSO.TXT
+        refused 4 /a-also.txt /nowhere/x.txt
 
         printf 'dir\t%s\n' /d /d/sub /e >>"$manifest"
         printf 'absent\t%s\n' /a.txt >>"$manifest"
@@ -914,15 +924,17 @@ case "$step" in
             [ "$out" = "$1 exists; nothing created" ] || die "fs.ntfs mkdir -p $1 reported: $out"
             [ "$(sha "$image")" = "$before" ] || die "fs.ntfs mkdir -p $1, already there, wrote to the volume"
         }
-        # refused PATTERN PATH: fs.ntfs mkdir -p PATH exits 1 naming PATTERN
-        # and writes nothing, so no part of the chain is left behind.
+        # refused STATUS PATTERN PATH: fs.ntfs mkdir -p PATH exits STATUS
+        # naming PATTERN and writes nothing, so no part of the chain is left
+        # behind. The volume's state refusing it is exit 4 (#1182); a name
+        # this driver will not make is exit 1.
         refused() {
             local before
             before="$(sha "$image")"
-            run fs "$image" mkdir -p "$2"
-            [ "$status" -eq 1 ] && grep -qi -- "$1" "$image.cli-err" ||
-                die "fs.ntfs mkdir -p $2 exited $status, not 1 for '$1': $(cat "$image.cli-err")"
-            [ "$(sha "$image")" = "$before" ] || die "the refused fs.ntfs mkdir -p $2 wrote to the volume"
+            run fs "$image" mkdir -p "$3"
+            [ "$status" -eq "$1" ] && grep -qi -- "$2" "$image.cli-err" ||
+                die "fs.ntfs mkdir -p $3 exited $status, not $1 for '$2': $(cat "$image.cli-err")"
+            [ "$(sha "$image")" = "$before" ] || die "the refused fs.ntfs mkdir -p $3 wrote to the volume"
         }
 
         made /Chain/One/Two /Chain /Chain/One /Chain/One/Two
@@ -959,15 +971,15 @@ case "$step" in
         [ "$status" -eq 0 ] || die "fs.ntfs write /files/f.txt exited $status: $(cat "$image.cli-err")"
         for path in /files/f.txt/x/y /FILES/F.TXT/x /files/f.txt; do
             case "$path" in
-                */x*) refused 'not a directory' "$path" ;;
-                *) refused 'already exists' "$path" ;;
+                */x*) refused 4 'not a directory' "$path" ;;
+                *) refused 4 'already exists' "$path" ;;
             esac
             printf 'refuse\t%s\n' "$path" >>"$manifest"
         done
-        refused 'cannot address' '/fresh/a:b/c'
-        refused 'trailing space or period' /fresh/x./y
+        refused 1 'cannot address' '/fresh/a:b/c'
+        refused 1 'trailing space or period' /fresh/x./y
         # shellcheck disable=SC2016 # \$Extend is the metafile's name, not a variable.
-        refused 'metafile' '/$Extend/fresh'
+        refused 1 'metafile' '/$Extend/fresh'
 
         printf 'file\t/files/f.txt\t500\t%s\n' "$(sha "$work/f")" >>"$manifest"
         printf 'absent\t%s\n' /Chain/x /fresh >>"$manifest"
@@ -1128,6 +1140,45 @@ case "$step" in
         done
         run fsck "$image"
         [ "$status" -eq 0 ] || die "fsck.ntfs after the writes exited $status: $out"
+        ;;
+    import)
+        [ $# -eq 0 ] || die "import IMAGE"
+        manifest="$image.manifest"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        : >"$manifest"
+        # A host path as the native binary takes it: Git Bash's own path is
+        # not one Windows opens, and MSYS_NO_PATHCONV leaves it unconverted.
+        host_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else echo "$1"; fi; }
+        run fs "$image" mkdir /d
+        [ "$status" -eq 0 ] || die "fs.ntfs mkdir /d exited $status: $(cat "$image.cli-err")"
+        printf 'dir\t/d\n' >>"$manifest"
+        unicode="/d/na$(printf '\303\257')ve-$(printf '\346\227\245\346\234\254').txt"
+        # path:size; the Unicode name comes through stdin, the rest by path.
+        for spec in /one.bin:1 /resident.bin:500 /cluster-plus-one.bin:4097 \
+            "$unicode:42" /d/big.bin:67108864; do
+            path="${spec%:*}"
+            size="${spec##*:}"
+            random "$work/src" "$size"
+            want="$(sha "$work/src")"
+            if [ "$path" = "$unicode" ]; then
+                run fs "$image" import - "$path" <"$work/src"
+            else
+                run fs "$image" import "$(host_path "$work/src")" "$path"
+            fi
+            [ "$status" -eq 0 ] || die "fs.ntfs import $path ($size bytes) exited $status: $(cat "$image.cli-err")"
+            has "\"sha256\": \"$want\"" || die "fs.ntfs import $path did not report the source's SHA-256 $want: $out"
+            printf 'file\t%s\t%s\t%s\n' "$path" "$size" "$want" >>"$manifest"
+            printf 'copy-out\t%s\t%s\t%s\n' "$path" "$size" "$want" >>"$manifest"
+        done
+        # A destination already there is refused, writing nothing.
+        random "$work/again" 7
+        before="$(sha "$image")"
+        run fs "$image" import "$(host_path "$work/again")" /one.bin
+        [ "$status" -eq 1 ] || die "fs.ntfs import onto /one.bin exited $status, not 1: $out"
+        [ "$(sha "$image")" = "$before" ] || die "the refused import onto /one.bin changed the image"
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the imports exited $status: $out"
         ;;
     *)
         die "unknown step '$step'"

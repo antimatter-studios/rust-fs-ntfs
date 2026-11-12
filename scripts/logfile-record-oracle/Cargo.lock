@@ -79,9 +79,9 @@ dependencies = [
 
 [[package]]
 name = "rust-fs-core"
-version = "0.3.14"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bbaddc2c8464b3c5e9cee1992a4c4b89e29de35fcaed934c02038733a67b797"
+checksum = "99cba8c4b7edb9f69654c0220c8064d938dcd1c929fbd3cb026b7d1578950cbc"
 
 [[package]]
 name = "rust-fs-ntfs"
