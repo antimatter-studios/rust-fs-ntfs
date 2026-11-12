@@ -22,6 +22,8 @@ mod test_scratch;
 #[allow(unused_imports)]
 pub use test_scratch::temp_image_path;
 
+pub mod fn_fields_windows;
+
 pub fn open(path: &str) -> (Ntfs, Reader) {
     let f = File::open(path).unwrap_or_else(|e| {
         panic!("open {path}: {e} (did you run test-disks/build-ntfs-feature-images.sh?)")
