@@ -1058,6 +1058,14 @@ pub enum CheckFinding {
     /// The volume's `$Extend\$Quota:$Q` could not be read, so no owner's
     /// usage was compared.
     QuotaUnreadable { reason: String },
+    /// The hard-link count in this base record's header is `links`, and
+    /// the record holds `names` `$FILE_NAME` attributes a link counts: every
+    /// one but a DOS-namespace name, which shares its link with the Win32
+    /// name it shortens (#583). chkdsk recounts the names and reports the
+    /// same. A file with an `$ATTRIBUTE_LIST`, whose names may live in
+    /// extension records, and a record with no `$FILE_NAME` at all are not
+    /// compared.
+    LinkCountDrift { record: u64, links: u16, names: u16 },
 }
 
 /// What [`check_io`] read, and what it found.
@@ -1129,7 +1137,8 @@ pub fn logfile_state_io<T: FsckIo>(io: &mut T) -> Result<LogfileState, Error> {
 /// (#820), each entry's attribute identity (#821), every extension
 /// attribute's presence in its base record's list (#822), and, on a volume
 /// tracking quotas, each owner's usage in `$Extend\$Quota:$Q` against what
-/// its files are charged (#678).
+/// its files are charged (#678), and each base record's hard-link count
+/// against its `$FILE_NAME` attributes (#583).
 ///
 /// NOT A STRUCTURAL CHECKER. It does not follow indexes; a volume this calls clean is one on
 /// which none of THESE is wrong, and Windows' chkdsk remains the authority.
@@ -1188,6 +1197,7 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
                 }
                 check_list_records(io, &bitmap, record, &rec, &mut findings);
                 check_extension_list(io, record, &rec, &mut findings);
+                check_link_count(record, &rec, &mut findings);
             }
         }
     }
@@ -1242,6 +1252,47 @@ pub fn check_io<T: FsckIo>(io: &mut T) -> Result<CheckReport, Error> {
         clusters_scanned,
         findings,
     })
+}
+
+/// The hard-link count in base record `record`'s header against the
+/// `$FILE_NAME` attributes it holds, every one but a DOS-namespace name
+/// (#583). `rec` is fixed up and its attributes walk. An extension record,
+/// a file with an `$ATTRIBUTE_LIST`, and a record with no `$FILE_NAME` are
+/// not compared: see [`CheckFinding::LinkCountDrift`].
+fn check_link_count(record: u64, rec: &[u8], findings: &mut Vec<CheckFinding>) {
+    const FILE_NAME_NAMESPACE: usize = 0x41;
+    const NAMESPACE_DOS: u8 = 2;
+    if u64_le(rec, REC_BASE_REFERENCE) != 0 {
+        return;
+    }
+    let mut names = 0u16;
+    let mut any_name = false;
+    for loc in crate::attr_io::iter_attributes(rec) {
+        if loc.type_code == AttrType::AttributeList as u32 {
+            return;
+        }
+        if loc.type_code != AttrType::FileName as u32 {
+            continue;
+        }
+        any_name = true;
+        let namespace = crate::attr_io::resident_value_start(&loc)
+            .and_then(|value| rec.get(value + FILE_NAME_NAMESPACE));
+        match namespace {
+            Some(&NAMESPACE_DOS) => {}
+            Some(_) => names = names.saturating_add(1),
+            // A non-resident or truncated $FILE_NAME is a malformed record,
+            // which the attribute walk reports; its links are not counted.
+            None => return,
+        }
+    }
+    let links = u16::from_le_bytes([rec[REC_LINK_COUNT], rec[REC_LINK_COUNT + 1]]);
+    if any_name && links != names {
+        findings.push(CheckFinding::LinkCountDrift {
+            record,
+            links,
+            names,
+        });
+    }
 }
 
 /// On a volume tracking quotas, each owner's usage in `$Extend\$Quota:$Q`
@@ -1377,6 +1428,8 @@ const LIST_ENTRY_MIN: usize = 0x1A;
 /// in use, whose sequence number is not the entry's, or whose base
 /// reference names another file; or an entry identifies no attribute in
 /// that record by type, exact UTF-16 name, lowest VCN and instance (#821).
+/// An entry for the list itself is invalid even when it matches (#1040).
+/// Descending attribute type codes identify the out-of-order entry (#1043).
 /// `rec` is the fixed-up base record. A record with no list, or an
 /// extension record, is left alone.
 fn check_list_records<T: FsckIo>(
@@ -1403,6 +1456,7 @@ fn check_list_records<T: FsckIo>(
     };
     let mut references: Vec<u64> = Vec::new();
     let mut entries = Vec::new();
+    let mut previous_type = None;
     let mut at = 0;
     while at + LIST_ENTRY_MIN <= value.len() {
         let length = u16::from_le_bytes([
@@ -1414,6 +1468,21 @@ fn check_list_records<T: FsckIo>(
                 "its $ATTRIBUTE_LIST entry at {at} has length {length}, which the list's {} \
                  bytes cannot hold",
                 value.len()
+            ));
+        }
+        let ty = u32::from_le_bytes(value[at..at + 4].try_into().expect("type"));
+        if let Some((previous_at, previous)) = previous_type {
+            if ty < previous {
+                report(format!(
+                    "its $ATTRIBUTE_LIST entry at {at} has type {ty:#x}, out of type order \
+                     after entry at {previous_at} with type {previous:#x}"
+                ));
+            }
+        }
+        previous_type = Some((at, ty));
+        if ty == AttrType::AttributeList as u32 {
+            report(format!(
+                "its $ATTRIBUTE_LIST entry at {at} has type 0x20 and lists itself"
             ));
         }
         let reference = u64_le(&value, at + LIST_ENTRY_REFERENCE);
@@ -1610,6 +1679,7 @@ fn u64_le(bytes: &[u8], at: usize) -> u64 {
 /// Record-header and attribute-header offsets the walk below reads.
 const REC_ATTRS_OFFSET: usize = 0x14;
 const REC_BYTES_IN_USE: usize = 0x18;
+const REC_LINK_COUNT: usize = 0x12;
 const REC_BASE_REFERENCE: usize = 0x20;
 const REC_NEXT_ATTRIBUTE_ID: usize = 0x28;
 const ATTR_END: u32 = 0xFFFF_FFFF;
@@ -2909,6 +2979,124 @@ mod check_tests {
             report.logfile,
             LogfileState::Clean(crate::logfile::CleanBecause::MarkedClean)
         );
+    }
+
+    #[test]
+    fn an_attribute_list_type_inversion_is_reported() {
+        let mut dev = fresh();
+        let base = crate::write::create_file_io(&mut dev, "/", "listed").unwrap();
+        for i in 0..16 {
+            crate::write::write_named_stream_io(
+                &mut dev,
+                "/listed",
+                &format!("stream{i:02}"),
+                &[42; 400],
+            )
+            .unwrap();
+        }
+        let before = dev.0.clone();
+        assert!(check_io(&mut dev).unwrap().findings.is_empty());
+        assert_eq!(dev.0, before, "checking the sorted control must not write");
+        let mut list =
+            crate::read::read_attribute_value(&mut dev, base, AttrType::AttributeList, None)
+                .unwrap();
+        let first = u16::from_le_bytes([list[4], list[5]]) as usize;
+        let second = u16::from_le_bytes([list[first + 4], list[first + 5]]) as usize;
+        assert_eq!(
+            u32::from_le_bytes(list[..4].try_into().unwrap()),
+            AttrType::StandardInformation as u32
+        );
+        assert_eq!(
+            u32::from_le_bytes(list[first..first + 4].try_into().unwrap()),
+            AttrType::FileName as u32
+        );
+        // Exchange complete entries: both still identify their original
+        // attributes, and no length, name, VCN, reference or instance changes.
+        list[..first + second].rotate_left(first);
+        crate::mft_io::update_mft_record_io(&mut dev, base, |record| {
+            let loc =
+                crate::attr_io::find_attribute(record, AttrType::AttributeList, None).unwrap();
+            assert!(loc.is_resident);
+            let at = loc.attr_offset + loc.resident_value_offset.unwrap() as usize;
+            record[at..at + list.len()].copy_from_slice(&list);
+            Ok(())
+        })
+        .unwrap();
+        let before = dev.0.clone();
+        let report = check_io(&mut dev).unwrap();
+        assert_eq!(report.findings.len(), 1, "{report:#?}");
+        assert!(
+            report.findings.iter().any(|f| matches!(f,
+                CheckFinding::BadAttributeList { record, reason }
+                    if *record == base && reason.contains(&format!("entry at {second}"))
+                        && reason.contains("out of type order")
+                        && reason.contains("0x10") && reason.contains("0x30")
+            )),
+            "{report:#?}"
+        );
+        assert_eq!(dev.0, before, "checking must not write");
+    }
+
+    #[test]
+    fn an_attribute_list_entry_for_itself_is_reported() {
+        let mut dev = fresh();
+        let base = crate::write::create_file_io(&mut dev, "/", "listed").unwrap();
+        for i in 0..16 {
+            crate::write::write_named_stream_io(
+                &mut dev,
+                "/listed",
+                &format!("stream{i:02}"),
+                &[42; 400],
+            )
+            .unwrap();
+        }
+        assert!(check_io(&mut dev).unwrap().findings.is_empty());
+        let mut list =
+            crate::read::read_attribute_value(&mut dev, base, AttrType::AttributeList, None)
+                .unwrap();
+        let (_, record) = crate::mft_io::read_mft_record_io(&mut dev, base).unwrap();
+        let loc = crate::attr_io::find_attribute(&record, AttrType::AttributeList, None).unwrap();
+        assert!(loc.is_resident);
+        // Insert after $STANDARD_INFORMATION, preserving type order and every
+        // existing entry. Every field identifies the actual list attribute.
+        let at = u16::from_le_bytes([list[4], list[5]]) as usize;
+        assert_eq!(
+            u32::from_le_bytes(list[..4].try_into().unwrap()),
+            AttrType::StandardInformation as u32
+        );
+        assert!(
+            u32::from_le_bytes(list[at..at + 4].try_into().unwrap())
+                > AttrType::AttributeList as u32
+        );
+        let mut entry = [0u8; 32];
+        entry[..4].copy_from_slice(&(AttrType::AttributeList as u32).to_le_bytes());
+        entry[4..6].copy_from_slice(&32u16.to_le_bytes());
+        entry[7] = LIST_ENTRY_MIN as u8;
+        let sequence = u16::from_le_bytes([record[REC_SEQUENCE], record[REC_SEQUENCE + 1]]);
+        let reference = base | (u64::from(sequence) << 48);
+        entry[16..24].copy_from_slice(&reference.to_le_bytes());
+        entry[24..26].copy_from_slice(&loc.attribute_id.to_le_bytes());
+        list.splice(at..at, entry);
+        crate::mft_io::update_mft_record_io(&mut dev, base, |record| {
+            crate::attr_resize::resize_resident_value(record, loc.attr_offset, list.len() as u32)?;
+            let value_at = loc.attr_offset + loc.resident_value_offset.unwrap() as usize;
+            record[value_at..value_at + list.len()].copy_from_slice(&list);
+            Ok(())
+        })
+        .unwrap();
+        let before = dev.0.clone();
+        let report = check_io(&mut dev).unwrap();
+        assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+        assert!(
+            report.findings.iter().any(|f| matches!(f,
+                CheckFinding::BadAttributeList { record, reason }
+                    if *record == base && reason.contains(&format!("entry at {at}"))
+                        && reason.contains("lists itself") && reason.contains("0x20")
+            )),
+            "{:?}",
+            report.findings
+        );
+        assert_eq!(dev.0, before, "checking must not write");
     }
 
     #[test]
