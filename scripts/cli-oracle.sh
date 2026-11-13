@@ -856,10 +856,12 @@ case "$step" in
             die "$cluster-byte clusters: a one-cluster file would stay resident and leave no hole"
         # One-cluster holes the free space is cut into, and the stream's
         # length in clusters: one run per hole, many more mapping pairs than
-        # one MFT record holds, fewer than there are holes (#799).
-        # The record size sets how many runs outgrow it: three bytes a run.
-        clusters=$(($(record_size "$image") / 3 + 200))
-        holes=$((clusters + 100))
+        # one MFT record holds, fewer than there are holes (#799). They
+        # follow the record size, so the run list outgrows this volume's
+        # record however large it is (#1190).
+        plan="$(bash "$REPO/scripts/split-extents-plan.sh" "$(record_size "$image")" "$cluster" \
+            "$(wc -c <"$image" | tr -d ' ')")" || die "no split-extents plan fits $image"
+        read -r holes clusters <<<"$plan"
         # A one-cluster run two clusters from the last takes at least three
         # bytes of mapping pairs, so the run list outgrows the record.
         [ $((clusters * 3)) -gt "$(record_size "$image")" ] ||
@@ -903,7 +905,15 @@ case "$step" in
         # write_at AT BYTES: BYTES random bytes are written at AT.
         write_at() {
             random "$work/patch" "$2"
-            dd if="$work/patch" of="$work/model" bs=1 seek="$1" conv=notrunc 2>/dev/null
+            local have
+            have="$(wc -c <"$work/model" | tr -d ' ')"
+            {
+                head -c "$1" "$work/model"
+                if [ "$1" -gt "$have" ]; then head -c $(($1 - have)) /dev/zero; fi
+                cat "$work/patch"
+                if [ $(($1 + $2)) -lt "$have" ]; then tail -c $((have - $1 - $2)) "$work/model"; fi
+            } >"$work/next"
+            cat "$work/next" >"$work/model"
             set +e
             out="$("$BIN" fs "$image" write --at "$1" /split.dat <"$work/patch" 2>"$image.cli-err")"
             status=$?
@@ -965,21 +975,8 @@ case "$step" in
         # have to grow past resident (#1346), and that is not what this
         # scenario grades. The holes and the clusters they cut are the same
         # either way.
-        per_dir=500
-        hole_file() { echo "/c/$(($1 / per_dir))/$1"; }
-        run fs "$image" mkdir /c
-        [ "$status" -eq 0 ] || die "fs.ntfs mkdir /c exited $status: $(cat "$image.cli-err")"
-        for d in $(seq 0 $((2 * holes / per_dir))); do
-            run fs "$image" mkdir "/c/$d"
-            [ "$status" -eq 0 ] || die "fs.ntfs mkdir /c/$d exited $status: $(cat "$image.cli-err")"
-        done
-        # LC_ALL=C: under a UTF-8 locale macOS tr writes \305 as two bytes,
-        # and each file would take two clusters, not one.
-        head -c "$cluster" /dev/zero | LC_ALL=C tr '\000' '\305' >"$work/one"
-        for i in $(seq 1 $((2 * holes))); do
-            run fs "$image" write "$(hole_file "$i")" <"$work/one"
-            [ "$status" -eq 0 ] || die "fs.ntfs write $(hole_file "$i") exited $status: $(cat "$image.cli-err")"
-        done
+        cargo run --quiet --release --manifest-path "$REPO/Cargo.toml" --example split_extent_holes -- \
+            "$image" create "$holes" "$cluster" || die "creating the split-extents holes failed"
         run fs "$image" get free_bytes --text
         [ "$status" -eq 0 ] || die "fs.ntfs get free_bytes exited $status: $(cat "$image.cli-err")"
         # What is left after the filler is less than the stream, so the
@@ -989,10 +986,8 @@ case "$step" in
         head -c $((out - spare * cluster)) /dev/zero | tr '\000' '\074' >"$work/fill"
         run fs "$image" write /fill <"$work/fill"
         [ "$status" -eq 0 ] || die "fs.ntfs write /fill exited $status: $(cat "$image.cli-err")"
-        for i in $(seq 2 2 $((2 * holes))); do
-            run fs "$image" rm "$(hole_file "$i")"
-            [ "$status" -eq 0 ] || die "fs.ntfs rm $(hole_file "$i") exited $status: $(cat "$image.cli-err")"
-        done
+        cargo run --quiet --release --manifest-path "$REPO/Cargo.toml" --example split_extent_holes -- \
+            "$image" remove "$holes" "$cluster" || die "removing the split-extents holes failed"
 
         # The stream grows past its end over the holes, then is patched
         # inside, rewritten whole, cut and extended again (#800). Each of

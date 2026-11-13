@@ -4174,12 +4174,11 @@ pub fn write_reparse_point_io<T: BlockIo + ?Sized>(
         set_si_file_attributes_bit(record, FILE_ATTRIBUTE_REPARSE_POINT, true)?;
         Ok(())
     };
-    // A file with an $ATTRIBUTE_LIST, or whose base record has no room
-    // for the attribute, takes it through the list (#808).
-    let is_directory =
-        crate::mft_io::record_flags(&before) & crate::mft_io::MFT_FLAG_DIRECTORY != 0;
+    // A file or directory with an $ATTRIBUTE_LIST, or whose base record
+    // has no room for the attribute, takes it through the list (#808,
+    // #1212); a directory's $INDEX_ROOT stays in its base record.
     let listed = attr_io::find_attribute(&before, AttrType::AttributeList, None).is_some();
-    if !is_directory && (listed || set_attribute(&mut before.clone()).is_err()) {
+    if listed || set_attribute(&mut before.clone()).is_err() {
         return write_listed_reparse_point_io(io, rec, file_ref, reparse_tag, data);
     }
     // $Extend\$Reparse:$R gains the entry for the new tag and loses the
@@ -4683,9 +4682,7 @@ pub fn remove_reparse_point_io<T: BlockIo + ?Sized>(
     refuse_metafile_io(io, rec, &format!("remove_reparse_point {file_path}"))?;
     let (_, before) = read_mft_record_io(io, rec)?;
     let file_ref = file_reference_of(rec, &before);
-    let is_directory =
-        crate::mft_io::record_flags(&before) & crate::mft_io::MFT_FLAG_DIRECTORY != 0;
-    if !is_directory && attr_io::find_attribute(&before, AttrType::AttributeList, None).is_some() {
+    if attr_io::find_attribute(&before, AttrType::AttributeList, None).is_some() {
         return remove_listed_reparse_point_io(io, rec, file_ref);
     }
     let tag = reparse_tag_of(&before).ok_or_else(|| Error::io("no $REPARSE_POINT to remove"))?;
