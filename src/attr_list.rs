@@ -848,6 +848,24 @@ impl ListedFile {
         Ok(())
     }
 
+    /// Every `$FILE_NAME` of the file, from whichever record holds each,
+    /// base or extension.
+    pub(crate) fn file_names(&self) -> Result<Vec<crate::write::FileNameRecord>, Error> {
+        let mut out = Vec::new();
+        for segment in &self.segments {
+            out.extend(crate::write::file_names_in_record(&segment.bytes)?);
+        }
+        Ok(out)
+    }
+
+    /// The namespace of the file's `$FILE_NAME` called `name`, in whichever
+    /// record holds it, base or extension (#785).
+    pub(crate) fn file_name_namespace(&self, name: &str) -> Option<u8> {
+        self.segments.iter().find_map(|segment| {
+            crate::write::find_file_name_by_name(&segment.bytes, name).map(|(_, ns)| ns)
+        })
+    }
+
     /// Rename the `$FILE_NAME`s that name the file `old` with `rename`, in
     /// whichever record holds each (#780). Windows keeps names in extension
     /// records too, so every record the list names is searched. A name its
