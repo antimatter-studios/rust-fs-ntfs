@@ -752,6 +752,44 @@ impl<T: BlockIo + ?Sized> BlockIo for Replayed<'_, T> {
     }
 }
 
+/// Keep the dirty flag set through a replay that rewrites `$Volume`.
+///
+/// The log can hold `$Volume`'s own record (the `freed` capture, #1231):
+/// its redo puts back the flags Windows logged, which never carry a dirty
+/// bit set outside the log. The flag is cleared only when the caller asks
+/// (#519), and an in-place repair sets it first and keeps it set until it
+/// is audited (#716), so no write may clear it on the way. When the volume
+/// is dirty and the replayed flags are not, the planned bytes of the flags
+/// get the bit back, in the same write; nothing else changes.
+fn keep_dirty_through_replay<T: FsckIo>(
+    io: &mut T,
+    writes: &mut std::collections::BTreeMap<u64, Vec<u8>>,
+) -> Result<(), Error> {
+    if !is_dirty_io(io)? {
+        return Ok(());
+    }
+    let (at, flags) = locate_volume_flags_io(&mut Replayed {
+        io: &mut *io,
+        writes: &*writes,
+    })?;
+    if flags & VOLUME_IS_DIRTY != 0 {
+        return Ok(());
+    }
+    for (i, byte) in (flags | VOLUME_IS_DIRTY)
+        .to_le_bytes()
+        .into_iter()
+        .enumerate()
+    {
+        let pos = at + i as u64;
+        if let Some((&start, bytes)) = writes.range_mut(..=pos).next_back() {
+            if let Some(b) = bytes.get_mut((pos - start) as usize) {
+                *b = byte;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Why a replay or a dirty-flag repair is refused on `io`, when its writes
 /// cannot be ordered (#518): the replayed metadata must be on the disk
 /// before the log stops saying there is work to do, and a backend whose
@@ -788,7 +826,7 @@ pub fn replay_logfile_io<T: FsckIo>(io: &mut T) -> Result<ReplayReport, Error> {
     io.read_exact_at(log_offset, &mut log)
         .map_err(|e| format!("read $LogFile: {e}"))?;
     let params = crate::mft_io::read_boot_params_io(io)?;
-    let plan = crate::logfile_replay::plan(&log, &params, &mut |at, buf| {
+    let mut plan = crate::logfile_replay::plan(&log, &params, &mut |at, buf| {
         io.read_exact_at(at, buf)
             .map_err(|e| Error::io(format!("read byte {at:#x}: {e}")))
     })?;
@@ -819,6 +857,7 @@ pub fn replay_logfile_io<T: FsckIo>(io: &mut T) -> Result<ReplayReport, Error> {
             )));
         }
     }
+    keep_dirty_through_replay(io, &mut plan.writes)?;
     for (&at, bytes) in &plan.writes {
         io.write_all_at(at, bytes)
             .map_err(|e| format!("replay $LogFile: write byte {at:#x}: {e}"))?;
@@ -1058,14 +1097,6 @@ pub enum CheckFinding {
     /// The volume's `$Extend\$Quota:$Q` could not be read, so no owner's
     /// usage was compared.
     QuotaUnreadable { reason: String },
-    /// The hard-link count in this base record's header is `links`, and
-    /// the record holds `names` `$FILE_NAME` attributes a link counts: every
-    /// one but a DOS-namespace name, which shares its link with the Win32
-    /// name it shortens (#583). chkdsk recounts the names and reports the
-    /// same. A file with an `$ATTRIBUTE_LIST`, whose names may live in
-    /// extension records, and a record with no `$FILE_NAME` at all are not
-    /// compared.
-    LinkCountDrift { record: u64, links: u16, names: u16 },
     /// On a volume tracking quotas, the file whose base record is `record`
     /// is `charged` in its `$STANDARD_INFORMATION`, but its allocation is
     /// `due`: its record plus each non-resident `$DATA` stream's allocated
@@ -1074,6 +1105,14 @@ pub enum CheckFinding {
     /// are not compared: what Windows charges them is still being measured
     /// (#1089, #1093, #1098).
     QuotaChargeDrift { record: u64, charged: u64, due: u64 },
+    /// The hard-link count in this base record's header is `links`, and
+    /// the record holds `names` `$FILE_NAME` attributes a link counts: every
+    /// one but a DOS-namespace name, which shares its link with the Win32
+    /// name it shortens (#583). chkdsk recounts the names and reports the
+    /// same. A file with an `$ATTRIBUTE_LIST`, whose names may live in
+    /// extension records, and a record with no `$FILE_NAME` at all are not
+    /// compared.
+    LinkCountDrift { record: u64, links: u16, names: u16 },
 }
 
 /// What [`check_io`] read, and what it found.

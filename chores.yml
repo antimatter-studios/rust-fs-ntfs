@@ -535,6 +535,12 @@ tasks:
     cmds:
       - bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --release --locked --features cli,harness --test repair_plan_copy
 
+  test:undo-index-compare:
+    desc: Undo index observer sizing against a Windows-authored index block
+    deps: [siblings:gate]
+    cmds:
+      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --locked --test undo_index_compare
+
   test:unit:debug:
     desc: 'Unit tests (src/), debug, overflow checks armed -- ci.yml "unit tests (debug, ...)"'
     deps: [siblings:gate]
