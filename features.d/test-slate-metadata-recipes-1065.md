@@ -1,0 +1,3 @@
+## Interfaces
+
+| Slate object ID, timestamp and security descriptor write oracle (test support) | Experimental: matrix recipes write object IDs (`rust-ntfs objid`), the four `$STANDARD_INFORMATION` times (`rust-ntfs times`) and a security id pointing at another descriptor already in `$Secure` (`rust-ntfs security-id`, on a volume Windows formatted); Windows reads each back through `FSCTL_GET_OBJECT_ID`, `FILE_BASIC_INFO` and `Get-Acl`, read-only chkdsk grades each volume, and the advisory checker tier captures each before Windows mounts it, comparing Slate with Windows over sixteen cases | Unreleased (#1222) | #1065, #688 | `tests/scripts/slate-metadata-recipes.sh`, `scripts/cli-oracle.sh`, `scripts/fs-windows-test-harness/win-cli-verify.ps1` |

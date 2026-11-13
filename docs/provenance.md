@@ -67,6 +67,15 @@ controls, with the buffer layouts Microsoft documents for
 extent is observed through Windows on a disposable mount; no Slate
 implementation source was read for this capture.
 
+The security descriptor manifests for the Slate tier (#876, part of #692)
+read each descriptor with Windows'
+[`Get-Acl`](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/get-acl)
+and split its DACL with .NET's
+[`RawSecurityDescriptor`](https://learn.microsoft.com/en-us/dotnet/api/system.security.accesscontrol.rawsecuritydescriptor),
+which parses SDDL through Windows. Each descriptor is observed through
+Windows on a disposable mount; no Slate implementation source was read for
+this capture.
+
 To locate the `InvalidSecurity` finding on a fresh volume (#837), the
 conditions of Slate's MIT-licensed `src/ondisk/security_store.rs` at
 `579dfeb` were read: it refuses a `$Secure` stream whose attribute carries any
