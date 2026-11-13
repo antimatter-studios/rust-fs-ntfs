@@ -691,9 +691,10 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     # The expanded producer took 14m46s in run 39483906221 and exceeded the
-    # old 15-minute limit in run 39540070558 (#1156). Allow cold Rust builds
-    # and every native capture while keeping the whole job bounded.
-    timeout-minutes: 30
+    # old 15-minute limit in run 39540070558 (#1156). Run 43228476645 then hit
+    # the 30-minute limit at step 28 of 34. Allow cold Rust builds and every
+    # native capture while keeping the whole job bounded.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -1019,6 +1020,7 @@ jobs:
             test-disks/ntfs-attrlist-names.img
             test-disks/ntfs-attrlist-names.names.tsv
             test-disks/ntfs-compressed.img
+            test-disks/ntfs-compressed.sha256.tsv
             test-disks/ntfs-symlink.img
             test-disks/ntfs-symlink.targets.tsv
             test-disks/ntfs-cli-read.img

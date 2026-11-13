@@ -112,13 +112,13 @@ refused 3 'not implemented.*director' /e/taken.txt /taken.txt
 refused 3 'not implemented.*director' /docs /e/docs
 # A name already there, as Windows compares names: through $UpCase, so
 # case does not tell two names apart.
-refused 1 'already exists' /S.TXT /large-renamed.bin
-refused 1 'already exists' /S.TXT /LARGE-RENAMED.BIN
-refused 1 'already exists' /docs /E
+refused 4 'already exists' /S.TXT /large-renamed.bin
+refused 4 'already exists' /S.TXT /LARGE-RENAMED.BIN
+refused 4 'already exists' /docs /E
 # What is not there, and a parent that is not a directory.
-refused 1 'not found' /missing.txt /other.txt
-refused 1 'not found' /S.TXT /nowhere/S.TXT
-refused 1 'not a directory' /S.TXT /S.TXT/x
+refused 4 'not found' /missing.txt /other.txt
+refused 4 'not found' /S.TXT /nowhere/S.TXT
+refused 4 'not a directory' /S.TXT /S.TXT/x
 # Names Windows cannot address.
 refused 1 'cannot address' /S.TXT '/a:b'
 refused 1 'cannot address' /S.TXT '/a*b'
@@ -132,8 +132,8 @@ refused 1 'cannot be renamed' /S.TXT /docs/..
 # shellcheck disable=SC2016 # \$MFT is the metafile's name, not a variable.
 refused 1 'metafile' '/$MFT' /x
 # A trailing `/` says the name is a directory.
-refused 1 'not a directory' /S.TXT/ /T.TXT
-refused 1 'not a directory' /S.TXT /T.TXT/
+refused 4 'not a directory' /S.TXT/ /T.TXT
+refused 4 'not a directory' /S.TXT /T.TXT/
 
 # A directory named with a trailing `/` is still itself.
 fs.ntfs "$img" mv /docs/ /docs2/ >"$SANDBOX/slash.json" 2>"$SANDBOX/slash.err"

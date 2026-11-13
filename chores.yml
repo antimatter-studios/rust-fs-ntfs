@@ -55,7 +55,7 @@ vars:
   # equal. Cargo.toml, Cargo.lock and fuzz/Cargo.lock take the registry
   # rust-fs-core at the same version; no build here path-depends on this
   # checkout, which supplies the family scripts.
-  FS_CORE_REF: v0.3.14
+  FS_CORE_REF: v0.4.2
 
   # The Windows-VM test harness. Not a cargo dependency — a tool this
   # repo's scripts invoke — so nothing but this pin governs which
@@ -678,8 +678,10 @@ tasks:
     # checks, damaged-data cleanup and source immutability, counted from
     # passing paths: 843 + 120 sets the floor to 963.
     # #669's import scenario adds 21: 963 + 21 sets the floor to 984.
+    # #845 adds four for --verify on the 64 MiB import: 984 + 4 sets the
+    # floor to 988.
     cmds:
-      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=984 scripts/test-cli.sh'
+      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-oracle -- env CLI_TESTS=tests/cli-oracle CLI_FLOOR=988 scripts/test-cli.sh'
 
   test:cli:host:
     desc: 'The host half of the cli scenarios in the Windows matrix, without the VM: every step each runs before its first Windows step (scripts/cli-oracle.sh)'
@@ -693,10 +695,10 @@ tasks:
     # 25 with the three format-plan scenarios (#698); 26 with the rename
     # scenario (#645); 27 with the link scenario (#646); 28 with the
     # mkdir --parents scenario (#647); 29 with truncate (#655);
-    # 30 with positioned writes (#656).
+    # 30 with positioned writes (#656); 31 with import (#1079).
     deps: [cli:install]
     cmds:
-      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-host -- python3 scripts/fs-windows-test-harness/run-host-steps --group cli --floor 30'
+      - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-host -- python3 scripts/fs-windows-test-harness/run-host-steps --group cli --floor 31'
 
   test:ignored:
     desc: 'The #[ignore]d tests: known defects, run so a fix cannot go unnoticed'

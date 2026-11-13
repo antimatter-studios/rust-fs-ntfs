@@ -55,6 +55,15 @@ oracle_budget_covers_work() {
     '
 }
 
+native_fixture_budget_covers_work() {
+    jobs_of "$1" | awk -v minimum_minutes=45 '
+        $1 == "windows-native-read-fixtures" && $2 == 1 && $3 >= minimum_minutes {
+            sufficient = 1
+        }
+        END { exit !sufficient }
+    '
+}
+
 # A control: the parser must see Windows jobs at all, or the check below
 # passes by finding nothing. ci.yml has two and release.yml two.
 for wf in ci.yml release.yml; do
@@ -78,6 +87,12 @@ if oracle_budget_covers_work "$ROOT/.github/workflows/ci.yml"; then
     ok
 else
     bad "ci.yml: Windows oracle needs at least 120 minutes: 70 before CLI, 30 for CLI, 20 for trailing checks and runner variance"
+fi
+
+if native_fixture_budget_covers_work "$ROOT/.github/workflows/ci.yml"; then
+    ok
+else
+    bad "ci.yml: windows-native-read-fixtures needs at least 45 minutes: run 43228476645 hit 30 at step 28 of 34"
 fi
 
 # The check must fail on the case it exists for: a Windows job with no bound.
@@ -106,6 +121,16 @@ for timeout_minutes in 85 119 120 180; do
         if [ "$timeout_minutes" -ge 120 ]; then ok; else bad "the insufficient $timeout_minutes-minute oracle budget was accepted"; fi
     else
         if [ "$timeout_minutes" -lt 120 ]; then ok; else bad "the sufficient $timeout_minutes-minute oracle budget was rejected"; fi
+    fi
+done
+
+for timeout_minutes in 30 44 45 60; do
+    fixture="$sandbox/native-$timeout_minutes.yml"
+    printf 'jobs:\n  windows-native-read-fixtures:\n    runs-on: windows-latest\n    timeout-minutes: %s\n' "$timeout_minutes" > "$fixture"
+    if native_fixture_budget_covers_work "$fixture"; then
+        if [ "$timeout_minutes" -ge 45 ]; then ok; else bad "the insufficient $timeout_minutes-minute native fixture budget was accepted"; fi
+    else
+        if [ "$timeout_minutes" -lt 45 ]; then ok; else bad "the sufficient $timeout_minutes-minute native fixture budget was rejected"; fi
     fi
 done
 
