@@ -110,6 +110,13 @@
 #                                    pairs outgrow the attribute, which grows into its
 #                                    record and moves the named stream after it.
 #                                    IMAGE.manifest lists each file's size and SHA-256
+#   attrlist-split-extents IMAGE     rust-ntfs stream and ea give /split.dat an
+#                                    $ATTRIBUTE_LIST; fs.ntfs cuts the free space
+#                                    into one-cluster holes and writes, patches,
+#                                    rewrites and truncates /split.dat's unnamed
+#                                    stream over them, so its run list is split
+#                                    into extents the list names. IMAGE.manifest
+#                                    lists the file's final size and SHA-256
 #   mkdir-parents IMAGE              fs.ntfs mkdir -p makes missing chains: three
 #                                    levels, under existing directories through
 #                                    names in another case, through `.` and `..`,
@@ -824,6 +831,182 @@ case "$step" in
         [ "$status" -eq 0 ] || die "fsck.ntfs after the unnamed stream's writes exited $status: $out"
         run fs "$image" get dirty --text
         [ "$status" -eq 0 ] && [ "$out" = false ] || die "the unnamed stream's writes left the volume dirty"
+        ;;
+    attrlist-split-extents)
+        [ $# -eq 0 ] || die "attrlist-split-extents IMAGE"
+        manifest="$image.manifest"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        : >"$manifest"
+        HARNESS="${RUST_NTFS:-$REPO/target/release/rust-ntfs}"
+        [ -x "$HARNESS" ] || [ -x "$HARNESS.exe" ] ||
+            die "no $HARNESS: build it with \`cargo build --release --locked --features harness --bin rust-ntfs\`"
+        cluster="$(cluster_size "$image")"
+        # A one-cluster file has to be non-resident to leave a hole behind.
+        [ "$cluster" -ge "$(record_size "$image")" ] ||
+            die "$cluster-byte clusters: a one-cluster file would stay resident and leave no hole"
+        # One-cluster holes the free space is cut into, and the stream's
+        # length in clusters: one run per hole, many more mapping pairs than
+        # one MFT record holds, fewer than there are holes (#799).
+        # The record size sets how many runs outgrow it: three bytes a run.
+        clusters=$(($(record_size "$image") / 3 + 200))
+        holes=$((clusters + 100))
+        # A one-cluster run two clusters from the last takes at least three
+        # bytes of mapping pairs, so the run list outgrows the record.
+        [ $((clusters * 3)) -gt "$(record_size "$image")" ] ||
+            die "$clusters runs fit in one $(record_size "$image")-byte record: the run list would not split"
+        # extents: the unnamed $DATA extents /split.dat's list names.
+        extents() {
+            cargo run --quiet --release --manifest-path "$REPO/Cargo.toml" --example listed_data_extents -- \
+                "$image" /split.dat >"$work/extents" || die "listed_data_extents $image /split.dat failed"
+            wc -l <"$work/extents" | tr -d ' '
+        }
+        # streams_kept: every named stream still holds what was written.
+        streams_kept() {
+            local i
+            for i in $(seq 1 "$streams"); do
+                run fs "$image" read --stream "s$i" /split.dat
+                [ "$status" -eq 0 ] || die "fs.ntfs read --stream s$i /split.dat exited $status: $(cat "$image.cli-err")"
+                [ "$out" = "$(cat "$work/s$i")" ] || die "/split.dat:s$i changed under the unnamed stream's writes: $out"
+            done
+        }
+        # same: the unnamed stream reads back as the host's model of it,
+        # and the list still names more than one extent of it whenever its
+        # one-cluster runs, three bytes of mapping pairs each, are more than
+        # one record holds. Cut to half on a 4096-byte record, the stream's
+        # runs fit one record, and the list may name one extent of it.
+        same() {
+            set +e
+            "$BIN" fs "$image" read /split.dat >"$work/back" 2>"$image.cli-err"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] || die "fs.ntfs read /split.dat exited $status: $(cat "$image.cli-err")"
+            cmp -s "$work/back" "$work/model" || die "/split.dat does not read back as written ($1)"
+            streams_kept
+            n="$(extents)"
+            runs=$(($(wc -c <"$work/model" | tr -d ' ') / cluster))
+            if [ $((runs * 3)) -gt "$(record_size "$image")" ]; then
+                [ "$n" -gt 1 ] || die "/split.dat's list names $n unnamed \$DATA extents after $1, not a split run list"
+            else
+                [ "$n" -ge 1 ] || die "/split.dat's list names no unnamed \$DATA extent after $1"
+            fi
+        }
+        # write_at AT BYTES: BYTES random bytes are written at AT.
+        write_at() {
+            random "$work/patch" "$2"
+            dd if="$work/patch" of="$work/model" bs=1 seek="$1" conv=notrunc 2>/dev/null
+            set +e
+            out="$("$BIN" fs "$image" write --at "$1" /split.dat <"$work/patch" 2>"$image.cli-err")"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] || die "fs.ntfs write --at $1 /split.dat exited $status: $(cat "$image.cli-err")"
+            same "write --at $1"
+        }
+        # split_resized SIZE: the unnamed stream is truncated or zero-extended.
+        split_resized() {
+            local have
+            have="$(wc -c <"$work/model" | tr -d ' ')"
+            if [ "$1" -eq 0 ]; then
+                : >"$work/next"
+            elif [ "$1" -le "$have" ]; then
+                head -c "$1" "$work/model" >"$work/next"
+            else
+                { cat "$work/model"; head -c $(($1 - have)) /dev/zero; } >"$work/next"
+            fi
+            cat "$work/next" >"$work/model"
+            run fs "$image" truncate /split.dat "$1"
+            [ "$status" -eq 0 ] && has "\"size\": $1" || die "fs.ntfs truncate /split.dat $1: $out $(cat "$image.cli-err")"
+            same "truncate $1"
+        }
+
+        # /split.dat: eight resident bytes, a 64-byte EA and 120-byte named
+        # streams, twelve for a 1024-byte record and more for a larger one,
+        # so its base record fills and it gains a list (#663).
+        streams=$(($(record_size "$image") / 128 + 4))
+        printf 'contents' >"$work/model"
+        run fs "$image" write /split.dat <"$work/model"
+        [ "$status" -eq 0 ] || die "fs.ntfs write /split.dat exited $status: $(cat "$image.cli-err")"
+        set +e
+        "$HARNESS" ea "$image" /split.dat USER.TAG --content "$(printf 'e%.0s' $(seq 1 64))" \
+            >/dev/null 2>"$image.cli-err"
+        status=$?
+        set -e
+        [ "$status" -eq 0 ] || die "rust-ntfs ea /split.dat USER.TAG exited $status: $(cat "$image.cli-err")"
+        for i in $(seq 1 "$streams"); do
+            { printf 's%02d of /split.dat ' "$i"; head -c 120 /dev/zero | tr '\000' "$(printf '%x' $((i % 16)))"; } |
+                head -c 120 >"$work/s$i"
+            set +e
+            "$HARNESS" stream "$image" /split.dat "s$i" --content "$(cat "$work/s$i")" >/dev/null 2>"$image.cli-err"
+            status=$?
+            set -e
+            [ "$status" -eq 0 ] || die "rust-ntfs stream /split.dat s$i exited $status: $(cat "$image.cli-err")"
+        done
+        set +e
+        cargo run --quiet --release --manifest-path "$REPO/Cargo.toml" --example listed_data_extents -- \
+            "$image" /split.dat >/dev/null
+        status=$?
+        set -e
+        [ "$status" -eq 0 ] || die "/split.dat's base record never filled: it has no \$ATTRIBUTE_LIST (exit $status)"
+
+        # Cut the free space into one-cluster holes: 2 * holes one-cluster
+        # files, a filler over all that is left but a few clusters, then
+        # every second one-cluster file removed. The files are spread over
+        # directories of $per_dir entries each, /c/0, /c/1, ...: one
+        # directory stops near 1,500 entries, where its index bitmap would
+        # have to grow past resident (#1346), and that is not what this
+        # scenario grades. The holes and the clusters they cut are the same
+        # either way.
+        per_dir=500
+        hole_file() { echo "/c/$(($1 / per_dir))/$1"; }
+        run fs "$image" mkdir /c
+        [ "$status" -eq 0 ] || die "fs.ntfs mkdir /c exited $status: $(cat "$image.cli-err")"
+        for d in $(seq 0 $((2 * holes / per_dir))); do
+            run fs "$image" mkdir "/c/$d"
+            [ "$status" -eq 0 ] || die "fs.ntfs mkdir /c/$d exited $status: $(cat "$image.cli-err")"
+        done
+        # LC_ALL=C: under a UTF-8 locale macOS tr writes \305 as two bytes,
+        # and each file would take two clusters, not one.
+        head -c "$cluster" /dev/zero | LC_ALL=C tr '\000' '\305' >"$work/one"
+        for i in $(seq 1 $((2 * holes))); do
+            run fs "$image" write "$(hole_file "$i")" <"$work/one"
+            [ "$status" -eq 0 ] || die "fs.ntfs write $(hole_file "$i") exited $status: $(cat "$image.cli-err")"
+        done
+        run fs "$image" get free_bytes --text
+        [ "$status" -eq 0 ] || die "fs.ntfs get free_bytes exited $status: $(cat "$image.cli-err")"
+        # What is left after the filler is less than the stream, so the
+        # stream cannot sit in one run there.
+        spare=$((clusters / 4))
+        [ "$((out / cluster))" -gt "$spare" ] || die "only $out bytes free after the one-cluster files"
+        head -c $((out - spare * cluster)) /dev/zero | tr '\000' '\074' >"$work/fill"
+        run fs "$image" write /fill <"$work/fill"
+        [ "$status" -eq 0 ] || die "fs.ntfs write /fill exited $status: $(cat "$image.cli-err")"
+        for i in $(seq 2 2 $((2 * holes))); do
+            run fs "$image" rm "$(hole_file "$i")"
+            [ "$status" -eq 0 ] || die "fs.ntfs rm $(hole_file "$i") exited $status: $(cat "$image.cli-err")"
+        done
+
+        # The stream grows past its end over the holes, then is patched
+        # inside, rewritten whole, cut and extended again (#800). Each of
+        # those after the growth reuses the clusters the stream has and
+        # asks only for those it grows by, so the holes left beside it are
+        # enough (#1347).
+        size=$((clusters * cluster))
+        write_at 8 $((size - 8))
+        write_at $((size / 3)) $((5 * cluster + 7))
+        random "$work/model" $((size - 3 * cluster))
+        set +e
+        out="$("$BIN" fs "$image" write /split.dat <"$work/model" 2>"$image.cli-err")"
+        status=$?
+        set -e
+        [ "$status" -eq 0 ] || die "fs.ntfs write /split.dat exited $status: $(cat "$image.cli-err")"
+        same "the rewrite"
+        split_resized $((size / 2 + 100))
+        split_resized $((size - 2 * cluster))
+        printf 'file\t/split.dat\t%s\t%s\n' "$(wc -c <"$work/model" | tr -d ' ')" "$(sha "$work/model")" >>"$manifest"
+        run fsck "$image"
+        [ "$status" -eq 0 ] || die "fsck.ntfs after the split stream's writes exited $status: $out"
+        run fs "$image" get dirty --text
+        [ "$status" -eq 0 ] && [ "$out" = false ] || die "the split stream's writes left the volume dirty"
         ;;
     write-at)
         [ $# -eq 0 ] || die "write-at IMAGE"

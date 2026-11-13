@@ -1820,15 +1820,8 @@ fn write_at(target: &OsString, offset: u64, path: &str, at: u64) -> Result<Outco
     if st.file_attributes & fs_ntfs::write::file_attr::READONLY != 0 {
         return Err(CliError::failed(format!("{path}: file is read-only")));
     }
-    let (_, record_bytes) =
-        fs_ntfs::mft_io::read_mft_record_io(&mut dev, record).map_err(|e| state_error(path, e))?;
-    let attr = attr_io::find_attribute(&record_bytes, AttrType::Data, None).ok_or_else(|| {
-        CliError::not_implemented(format!(
-            "{path}: no unnamed $DATA in the base record to patch"
-        ))
-    })?;
-    let flags = attr_io::attribute_flags(&record_bytes, &attr)
-        .ok_or_else(|| CliError::failed(format!("{path}: truncated $DATA flags")))?;
+    let flags = unnamed_data_flags(&mut dev, path, record)?
+        .ok_or_else(|| CliError::not_implemented(format!("{path}: no unnamed $DATA to patch")))?;
     if flags & attr_io::attr_flags::TRANSFORMED != 0 {
         return Err(CliError::not_implemented(format!(
             "{path}: write --at cannot patch {} data",
@@ -1877,6 +1870,47 @@ fn write_at(target: &OsString, offset: u64, path: &str, at: u64) -> Result<Outco
         .with_text(format!("{path}: wrote {bytes} bytes at {at}, size {size}")))
 }
 
+/// The flags of `record`'s unnamed `$DATA`, from the record that holds its
+/// first extent: the base record, or for a file with an `$ATTRIBUTE_LIST`
+/// the record the list names for VCN 0. A base record full of other
+/// attributes moves the whole `$DATA` into an extension record when it goes
+/// non-resident, and the driver writes and resizes it there through the
+/// list (#789, #800), so looking in the base record alone refused a file
+/// the driver handles. `None` when the file has no unnamed `$DATA`.
+fn unnamed_data_flags<T: BlockIo + ?Sized>(
+    dev: &mut T,
+    path: &str,
+    record: u64,
+) -> Result<Option<u16>, CliError> {
+    let flags_in = |dev: &mut T, number: u64| -> Result<Option<u16>, CliError> {
+        let (_, bytes) =
+            fs_ntfs::mft_io::read_mft_record_io(dev, number).map_err(|e| state_error(path, e))?;
+        match attr_io::find_attribute(&bytes, AttrType::Data, None) {
+            Some(data) => attr_io::attribute_flags(&bytes, &data)
+                .map(Some)
+                .ok_or_else(|| CliError::failed(format!("{path}: truncated $DATA flags"))),
+            None => Ok(None),
+        }
+    };
+    if let Some(flags) = flags_in(dev, record)? {
+        return Ok(Some(flags));
+    }
+    let Some(list) =
+        read::read_attribute_value_if_present(dev, record, AttrType::AttributeList, None)
+            .map_err(|e| state_error(path, e))?
+    else {
+        return Ok(None);
+    };
+    let entries = read::parse_attribute_list(&list).map_err(|e| state_error(path, e))?;
+    let first = entries
+        .iter()
+        .find(|e| e.type_code == AttrType::Data as u32 && e.name.is_none() && e.starting_vcn == 0);
+    match first {
+        Some(entry) if entry.record_number != record => flags_in(dev, entry.record_number),
+        _ => Ok(None),
+    }
+}
+
 /// Rehearse the complete resize over a read-only open, including mount
 /// preparation. Unsupported data shapes and all predictable failures are
 /// refused before a writable open, even if growth would allocate and then
@@ -1898,15 +1932,8 @@ fn truncate(target: &OsString, offset: u64, path: &str, size: u64) -> Result<Out
     if st.is_dir || path.ends_with('/') {
         return Err(CliError::failed(format!("{path}: not a regular file")));
     }
-    let (_, bytes) =
-        fs_ntfs::mft_io::read_mft_record_io(&mut dev, record).map_err(|e| state_error(path, e))?;
-    let data = attr_io::find_attribute(&bytes, AttrType::Data, None).ok_or_else(|| {
-        CliError::not_implemented(format!(
-            "{path}: no unnamed $DATA in the base record to resize"
-        ))
-    })?;
-    let flags = attr_io::attribute_flags(&bytes, &data)
-        .ok_or_else(|| CliError::failed(format!("{path}: truncated $DATA flags")))?;
+    let flags = unnamed_data_flags(&mut dev, path, record)?
+        .ok_or_else(|| CliError::not_implemented(format!("{path}: no unnamed $DATA to resize")))?;
     if flags & attr_io::attr_flags::TRANSFORMED != 0 {
         return Err(CliError::not_implemented(format!(
             "{path}: truncate cannot resize {} data",
