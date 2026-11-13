@@ -65,6 +65,7 @@ pub mod index_io;
 mod index_slack;
 pub mod logfile;
 pub mod logfile_replay;
+pub mod logfile_write;
 pub mod mft_bitmap;
 pub mod mft_inventory;
 pub mod mft_io;
