@@ -367,3 +367,96 @@ fn a_split_stream_keeps_its_extents_true_through_writes_and_truncates() {
     expected.resize(long, 0);
     file_is_true(&img, rec, &expected, "extending it");
 }
+
+fn free_clusters(img: &str) -> u64 {
+    let mut io = PathIo::open_ro(Path::new(img)).expect("open_ro");
+    let bm = bitmap::locate_bitmap_io(&mut io).expect("locate $Bitmap");
+    bitmap::count_free_io(&mut io, &bm).expect("count free clusters")
+}
+
+/// A split stream is written inside, rewritten whole, cut short and
+/// extended with less free space on the volume than the stream holds
+/// (#1347). Each change reused the clusters the stream already has and
+/// asks the volume only for what it grows by; the rewrite used to copy the
+/// whole stream into new clusters before it freed the old ones, so a
+/// write of a few bytes to a large listed file needed free space the size
+/// of the file.
+#[test]
+fn a_split_stream_is_written_with_less_free_space_than_it_holds() {
+    let (img, rec) = volume_with_a_listed_file("in_place");
+    fragment_free_space(&img);
+    let cluster = CLUSTER as usize;
+    let mut expected = pattern(STREAM_CLUSTERS * cluster - 100);
+    let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
+    write::write_file_contents_io(&mut io, "/f", &expected)
+        .unwrap_or_else(|e| panic!("write {} bytes to /f: {e}", expected.len()));
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
+    drop(io);
+    let extents = file_is_true(&img, rec, &expected, "the first write");
+    assert!(extents > 1, "the stream is in {extents} extent, not split");
+    let free = free_clusters(&img);
+    assert!(
+        free < STREAM_CLUSTERS as u64,
+        "{free} free clusters hold a second copy of the {STREAM_CLUSTERS}-cluster stream"
+    );
+
+    // A write inside it takes no clusters.
+    let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
+    let patch = vec![0xA5u8; 3 * cluster];
+    let at = 150 * cluster + 7;
+    write::write_at_io(&mut io, "/f", at as u64, &patch)
+        .unwrap_or_else(|e| panic!("write {} bytes at {at} of /f: {e}", patch.len()));
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
+    drop(io);
+    expected[at..at + patch.len()].copy_from_slice(&patch);
+    let extents = file_is_true(&img, rec, &expected, "a write inside it");
+    assert!(extents > 1, "the patched stream is in {extents} extent");
+    assert_eq!(
+        free_clusters(&img),
+        free,
+        "a write inside the stream took clusters"
+    );
+
+    // A whole rewrite three clusters shorter gives those three back.
+    let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
+    expected = pattern(expected.len() - 3 * cluster)
+        .iter()
+        .map(|b| b ^ 0x5A)
+        .collect();
+    write::write_file_contents_io(&mut io, "/f", &expected)
+        .unwrap_or_else(|e| panic!("rewrite /f: {e}"));
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
+    drop(io);
+    let extents = file_is_true(&img, rec, &expected, "a shorter rewrite");
+    assert!(extents > 1, "the rewritten stream is in {extents} extent");
+    assert_eq!(
+        free_clusters(&img),
+        free + 3,
+        "a rewrite three clusters shorter did not give exactly three back"
+    );
+
+    // Cut to half, then extended past where it was: the extension asks
+    // only for the clusters it adds.
+    let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
+    let half = STREAM_CLUSTERS / 2 * cluster + 100;
+    write::truncate_io(&mut io, "/f", half as u64)
+        .unwrap_or_else(|e| panic!("truncate /f to {half}: {e}"));
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
+    drop(io);
+    expected.truncate(half);
+    file_is_true(&img, rec, &expected, "cutting it to half");
+    let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
+    let long = (STREAM_CLUSTERS + 2) * cluster;
+    write::truncate_io(&mut io, "/f", long as u64)
+        .unwrap_or_else(|e| panic!("extend /f to {long}: {e}"));
+    <PathIo as BlockIo>::sync(&mut io).expect("sync");
+    drop(io);
+    expected.resize(long, 0);
+    let extents = file_is_true(&img, rec, &expected, "extending it past its first length");
+    assert!(extents > 1, "the extended stream is in {extents} extent");
+    assert_eq!(
+        free_clusters(&img),
+        free - 2,
+        "the stream grew by two clusters past its first length and the volume lost a different count"
+    );
+}

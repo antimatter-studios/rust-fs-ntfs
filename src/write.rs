@@ -1092,17 +1092,10 @@ pub fn truncate_io<T: BlockIo + ?Sized>(
     //
     // Its unnamed `$DATA` may be in an extension record, where the base
     // record's walk calls it missing, and its base record may have no room
-    // for the stream to grow (#790, part of #663). The stream is read
-    // through the list, cut short or extended with zeros, and rewritten
-    // where the list keeps it, as `write_at` does (#789); the clusters past
-    // the new end are freed once the records no longer name them.
+    // for the stream to grow (#790, part of #663). The record-number entry
+    // point resizes it through the list (#796).
     if listed_regular_file_io(io, rec)? {
-        let size = usize::try_from(new_size).map_err(|_| Error::io("size too large"))?;
-        let mut value = crate::read::read_attribute_value(io, rec, AttrType::Data, None)?;
-        value.resize(size, 0);
-        write_listed_unnamed_data_io(io, rec, &value)?;
-        finish_data_write_io(io, rec)?;
-        return Ok(new_size);
+        return truncate_by_record_number_io(io, rec, new_size);
     }
     // A resident value is resized and written back whole: cut short, or
     // extended with zeros, promoted if it outgrows the record (#500).
@@ -1116,6 +1109,21 @@ pub fn truncate_io<T: BlockIo + ?Sized>(
     let size = truncate_by_record_number_io(io, rec, new_size)?;
     finish_data_write_io(io, rec)?;
     Ok(size)
+}
+
+/// Resize the unnamed `$DATA` of a file with an `$ATTRIBUTE_LIST`: the
+/// stream is read through the list, cut short or extended with zeros, and
+/// rewritten where the list keeps it, as `write_at` does (#789); the
+/// clusters past the new end are freed once the records no longer name them.
+fn truncate_listed_unnamed_data_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    new_size: u64,
+) -> Result<(), Error> {
+    let size = usize::try_from(new_size).map_err(|_| Error::io("size too large"))?;
+    let mut value = crate::read::read_attribute_value(io, rec, AttrType::Data, None)?;
+    value.resize(size, 0);
+    write_listed_unnamed_data_io(io, rec, &value).map(|_| ())
 }
 
 /// Attribute-header offsets for non-resident lengths (Microsoft's ATTRIBUTE_RECORD_HEADER devnote).
@@ -1139,6 +1147,14 @@ pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
     new_size: u64,
 ) -> Result<u64, Error> {
     refuse_metafile_io(io, record_number, "truncate")?;
+    // A FILE WITH AN $ATTRIBUTE_LIST IS RESIZED THROUGH IT, whichever entry
+    // point reached it: the base record alone may not hold the unnamed
+    // `$DATA` at all (#796, the record-number half of #790).
+    if listed_regular_file_io(io, record_number)? {
+        truncate_listed_unnamed_data_io(io, record_number, new_size)?;
+        finish_data_write_io(io, record_number)?;
+        return Ok(new_size);
+    }
     let (params, record) = read_mft_record_io(io, record_number)?;
     let cluster_size = params.cluster_size;
 
@@ -3870,11 +3886,21 @@ where
     F: Fn(&mut Vec<crate::ea_io::Ea>) -> Result<(), Error>,
 {
     let mut file = crate::attr_list::ListedFile::open(io, rec)?;
-    let found = file.find(AttrType::ExtendedAttribute, "")?;
-    let (old_runs, was_nonresident) = match &found {
-        Some(found) => (file.runs(found)?, !found.loc.is_resident),
-        None => (Vec::new(), false),
-    };
+    // A SPLIT `$EA` IS REWRITTEN WHOLE.
+    //
+    // #803 can split a non-resident `$EA`'s run list into extents; the
+    // write went through `find`, which refuses an attribute split across
+    // records, so changing the EAs of such a file was refused (#1058).
+    // The old extents' clusters are all freed once the records no longer
+    // name them; every extent but the first goes with its entry, and the
+    // first takes the new `$EA`, split again if its run list needs it.
+    let extents = file.extents(AttrType::ExtendedAttribute, "")?;
+    let mut old_runs = Vec::new();
+    for extent in &extents {
+        old_runs.extend(file.runs(extent)?);
+    }
+    let found = extents.into_iter().next();
+    let was_nonresident = found.as_ref().is_some_and(|f| !f.loc.is_resident);
     let mut eas = match found {
         None => Vec::new(),
         // The reader refuses a compressed or encrypted value, so a
@@ -3898,6 +3924,7 @@ where
         }
     };
     change(&mut eas)?;
+    file.remove_continuations(AttrType::ExtendedAttribute, "")?;
     if let Err(e) = place_listed_eas_io(io, &mut file, &eas, was_nonresident) {
         return Err(file.abandon(io, e));
     }
@@ -4724,10 +4751,32 @@ pub fn read_reparse_point_io<T: BlockIo + ?Sized>(
     file_path: &str,
 ) -> Result<Option<ReparsePoint>, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
-    let (_, record) = read_mft_record_io(io, rec)?;
-    let Some(loc) = attr_io::find_attribute(&record, AttrType::ReparsePoint, None) else {
+    let (_, base) = read_mft_record_io(io, rec)?;
+    // A file with an $ATTRIBUTE_LIST may keep its $REPARSE_POINT in an
+    // extension record, so it is found through the list (#812).
+    if attr_io::find_attribute(&base, AttrType::AttributeList, None).is_some() {
+        let file = crate::attr_list::ListedFile::open(io, rec)?;
+        return match file.find(AttrType::ReparsePoint, "")? {
+            Some(found) => {
+                let attr = file.attribute_bytes(&found);
+                // `attribute_bytes` starts at the attribute, so `found.loc`
+                // is rebased onto it.
+                let mut loc = found.loc;
+                loc.attr_offset = 0;
+                decode_reparse_point(attr, &loc).map(Some)
+            }
+            None => Ok(None),
+        };
+    }
+    let Some(loc) = attr_io::find_attribute(&base, AttrType::ReparsePoint, None) else {
         return Ok(None);
     };
+    decode_reparse_point(&base, &loc).map(Some)
+}
+
+/// The tag and tag-specific data of the resident `$REPARSE_POINT` that
+/// `loc` locates in `record`.
+fn decode_reparse_point(record: &[u8], loc: &attr_io::AttrLocation) -> Result<ReparsePoint, Error> {
     if !loc.is_resident {
         return Err(Error::io(
             "$REPARSE_POINT is non-resident (not yet supported)",
@@ -4764,7 +4813,7 @@ pub fn read_reparse_point_io<T: BlockIo + ?Sized>(
         )));
     }
     let data = buf[data_start..data_start + data_len].to_vec();
-    Ok(Some(ReparsePoint { reparse_tag, data }))
+    Ok(ReparsePoint { reparse_tag, data })
 }
 
 /// The substitute name, print name and relative flag a symlink to
@@ -6442,11 +6491,24 @@ fn write_listed_named_stream_io<T: BlockIo + ?Sized>(
     data: &[u8],
 ) -> Result<(), Error> {
     let mut file = crate::attr_list::ListedFile::open(io, rec)?;
-    let found = file.find(AttrType::Data, stream_name)?;
-    let (old_runs, was_nonresident) = match &found {
-        Some(found) => (file.runs(found)?, !found.loc.is_resident),
-        None => (Vec::new(), false),
-    };
+    // A SPLIT NAMED STREAM IS REWRITTEN WHOLE.
+    //
+    // #800 moved the extents of a split unnamed `$DATA` on a rewrite;
+    // a named stream split the same way (#799) went through `find`,
+    // which refuses an attribute split across records, so its rewrite
+    // was refused (#805). The old extents' clusters are all freed once
+    // the records no longer name them; every extent but the first goes
+    // with its entry, and the first takes the new stream, split again if
+    // its run list needs it.
+    let extents = file.extents(AttrType::Data, stream_name)?;
+    let found = extents.first();
+    let mut old_runs = Vec::new();
+    for extent in &extents {
+        old_runs.extend(file.runs(extent)?);
+    }
+    let was_nonresident = found.is_some_and(|f| !f.loc.is_resident);
+    let exists = found.is_some();
+    file.remove_continuations(AttrType::Data, stream_name)?;
     let resident = crate::record_build::build_named_resident_data_attribute(0, stream_name, data)?;
     let extents = if !was_nonresident && resident.len() <= file.max_attribute_len() {
         vec![resident]
@@ -6462,14 +6524,7 @@ fn write_listed_named_stream_io<T: BlockIo + ?Sized>(
             Err(e) => return Err(file.abandon(io, e)),
         }
     };
-    let placed = place_listed_extents(
-        io,
-        &mut file,
-        AttrType::Data,
-        stream_name,
-        found.is_some(),
-        extents,
-    );
+    let placed = place_listed_extents(io, &mut file, AttrType::Data, stream_name, exists, extents);
     if let Err(e) = placed {
         return Err(file.abandon(io, e));
     }
@@ -6521,9 +6576,23 @@ fn listed_nonresident_attribute_io<T: BlockIo + ?Sized>(
     name: Option<&str>,
     data: &[u8],
 ) -> Result<Vec<Vec<u8>>, Error> {
+    // AN EMPTY STREAM HOLDS NO CLUSTERS.
+    //
+    // A stream in clusters truncated to zero kept one cluster allocated
+    // for no bytes, where Windows frees them all (#795). It stays
+    // non-resident with no runs, the form a truncate to zero leaves on a
+    // file without a list: allocated length zero, highest VCN -1, and
+    // mapping pairs that are only the terminator.
+    if data.is_empty() {
+        let mapping = data_runs::encode_runs(&[])?;
+        let attr = crate::record_build::build_nonresident_attribute(
+            ty as u32, name, 0, 0, 0, 0, -1, &mapping,
+        )?;
+        return Ok(vec![attr]);
+    }
     let params = *file.params();
     let size = data.len() as u64;
-    let clusters = size.div_ceil(params.cluster_size).max(1);
+    let clusters = size.div_ceil(params.cluster_size);
     let bm = bitmap::locate_bitmap_io(io)?;
     // ONE RUN WHEN ONE FREE RUN HOLDS THE STREAM, ELSE AS MANY AS IT TAKES.
     //
@@ -6544,12 +6613,6 @@ fn listed_nonresident_attribute_io<T: BlockIo + ?Sized>(
     for &(lcn, count) in &runs {
         bitmap::allocate_io(io, &bm, lcn, count)?;
         file.adopt_clusters(lcn, count);
-        let len = count * params.cluster_size;
-        let at = crate::mft_io::cluster_span(&params, lcn, 0, 0, len, io.size())
-            .map_err(|e| e.context("write data"))?;
-        let from = (vcn * params.cluster_size) as usize;
-        io.write_all_at(at, &bytes[from..from + len as usize])
-            .map_err(|e| Error::io(format!("write data: {e}")))?;
         mapped.push(DataRun {
             starting_vcn: vcn,
             length: count,
@@ -6557,7 +6620,44 @@ fn listed_nonresident_attribute_io<T: BlockIo + ?Sized>(
         });
         vcn += count;
     }
+    write_runs_io(io, &params, &mapped, &bytes)?;
+    split_into_extents(file, ty, name, &mapped, size, allocated)
+}
+
+/// Write `bytes`, a whole number of clusters, into the clusters `runs`
+/// map in VCN order, then sync.
+fn write_runs_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    params: &crate::mft_io::BootParams,
+    runs: &[DataRun],
+    bytes: &[u8],
+) -> Result<(), Error> {
+    for run in runs {
+        let lcn = run
+            .lcn
+            .ok_or_else(|| Error::io("a run to write maps no clusters"))?;
+        let len = run.length * params.cluster_size;
+        let at = crate::mft_io::cluster_span(params, lcn, 0, 0, len, io.size())
+            .map_err(|e| e.context("write data"))?;
+        let from = (run.starting_vcn * params.cluster_size) as usize;
+        io.write_all_at(at, &bytes[from..from + len as usize])
+            .map_err(|e| Error::io(format!("write data: {e}")))?;
+    }
     io.sync()?;
+    Ok(())
+}
+
+/// The attributes that map `mapped`, a stream of `size` bytes in
+/// `allocated`, split into as many extents as one record each holds.
+fn split_into_extents(
+    file: &crate::attr_list::ListedFile,
+    ty: AttrType,
+    name: Option<&str>,
+    mapped: &[DataRun],
+    size: u64,
+    allocated: u64,
+) -> Result<Vec<Vec<u8>>, Error> {
+    let params = *file.params();
     // A RUN LIST TOO LONG FOR ONE RECORD IS SPLIT INTO EXTENTS.
     //
     // Fragmented free space gives a stream a run per hole, and its mapping
@@ -7250,6 +7350,15 @@ pub fn replace_file_contents_io<T: BlockIo + ?Sized>(
 ) -> Result<u64, Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     refuse_metafile_io(io, rec, &format!("replace_file_contents {file_path}"))?;
+    // A FILE WITH AN $ATTRIBUTE_LIST IS REPLACED THROUGH IT.
+    //
+    // Its unnamed `$DATA` may be held only in an extension record, and the
+    // base record's walk below called it missing, so `fs.ntfs write`
+    // refused the file (#1347). The listed writer replaces it where the
+    // list keeps it, as a whole rewrite does (#788).
+    if listed_regular_file_io(io, rec)? {
+        return write_file_contents_io(io, file_path, new_data);
+    }
     let (_, record) = crate::mft_io::read_mft_record_io(io, rec)?;
     let loc = attr_io::find_attribute(&record, AttrType::Data, None)
         .ok_or_else(|| Error::io(format!("{file_path} has no unnamed $DATA")))?;
@@ -7420,23 +7529,168 @@ fn write_listed_unnamed_data_io<T: BlockIo + ?Sized>(
         old_runs.extend(file.runs(extent)?);
     }
     let was_nonresident = !found.loc.is_resident;
-    file.remove_continuations(AttrType::Data, "")?;
-    let resident =
-        crate::record_build::build_resident_unnamed_attribute(AttrType::Data as u32, 0, data)?;
-    let extents = if !was_nonresident && resident.len() <= file.max_attribute_len() {
-        vec![resident]
+    // A STREAM IN CLUSTERS IS REWRITTEN IN THE CLUSTERS IT HAS.
+    //
+    // The new value went into new clusters before the old ones were freed,
+    // so a write of a few bytes into a listed stream needed free space the
+    // size of the whole stream, and was refused on a volume without it
+    // (#1347). The clusters the stream already maps now take the new value,
+    // in VCN order; the volume is asked only for the clusters it grows by,
+    // and those past a shorter end are freed. A stream whose runs cannot be
+    // reused as they are -- a hole among them, or extents that do not
+    // cover it end to end -- is still copied whole. A failure after the
+    // clusters are written leaves the records as they were, naming the same
+    // clusters, which then hold the bytes written, as a write at an offset
+    // into a file without a list does.
+    let in_place = if was_nonresident && !data.is_empty() {
+        reusable_runs(&file, &extents)?
     } else {
-        match listed_nonresident_attribute_io(io, &mut file, AttrType::Data, None, data) {
-            Ok(extents) => extents,
+        None
+    };
+    file.remove_continuations(AttrType::Data, "")?;
+    let (extents, freed) = if let Some(old) = in_place {
+        match listed_rewrite_in_place_io(io, &mut file, AttrType::Data, None, &old, data) {
+            Ok(done) => done,
             Err(e) => return Err(file.abandon(io, e)),
         }
+    } else {
+        let resident =
+            crate::record_build::build_resident_unnamed_attribute(AttrType::Data as u32, 0, data)?;
+        let extents = if !was_nonresident && resident.len() <= file.max_attribute_len() {
+            vec![resident]
+        } else {
+            match listed_nonresident_attribute_io(io, &mut file, AttrType::Data, None, data) {
+                Ok(extents) => extents,
+                Err(e) => return Err(file.abandon(io, e)),
+            }
+        };
+        (extents, old_runs)
     };
     if let Err(e) = place_listed_extents(io, &mut file, AttrType::Data, "", true, extents) {
         return Err(file.abandon(io, e));
     }
     file.commit(io)?;
-    free_old_runs_io(io, "the unnamed $DATA", "rewritten", old_runs)?;
+    free_old_runs_io(io, "the unnamed $DATA", "rewritten", freed)?;
     Ok(data.len() as u64)
+}
+
+/// The runs of a non-resident attribute held in `extents`, in VCN order,
+/// when they can take a new value where they are: every run maps
+/// clusters, and each extent starts at the VCN the one before it ended.
+/// `None` when they cannot.
+fn reusable_runs(
+    file: &crate::attr_list::ListedFile,
+    extents: &[crate::attr_list::Found],
+) -> Result<Option<Vec<DataRun>>, Error> {
+    let mut runs = Vec::new();
+    let mut vcn = 0u64;
+    for extent in extents {
+        if extent.loc.is_resident {
+            return Ok(None);
+        }
+        let attr = file.attribute_bytes(extent);
+        let Some(lowest) = attr
+            .get(16..24)
+            .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+        else {
+            return Ok(None);
+        };
+        if lowest != vcn {
+            return Ok(None);
+        }
+        let Some(mpo) = extent
+            .loc
+            .non_resident_mapping_pairs_offset
+            .map(usize::from)
+        else {
+            return Ok(None);
+        };
+        let Some(mapping) = attr.get(mpo..) else {
+            return Ok(None);
+        };
+        for run in data_runs::decode_runs(mapping)? {
+            if run.lcn.is_none() || run.length == 0 {
+                return Ok(None);
+            }
+            runs.push(DataRun {
+                starting_vcn: vcn,
+                ..run
+            });
+            vcn += run.length;
+        }
+    }
+    Ok(Some(runs))
+}
+
+/// The extents that map a stream rewritten in place, and the old clusters
+/// past its new end, as `(lcn, count)`.
+type InPlaceRewrite = (Vec<Vec<u8>>, Vec<(u64, u64)>);
+
+/// Write `data` into the clusters `old` maps, as far as they go, then into
+/// as many new clusters as it needs past them (#1347). Returns the extents
+/// that map the result and the old clusters past its end, to be freed once
+/// the records no longer name them.
+fn listed_rewrite_in_place_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    file: &mut crate::attr_list::ListedFile,
+    ty: AttrType,
+    name: Option<&str>,
+    old: &[DataRun],
+    data: &[u8],
+) -> Result<InPlaceRewrite, Error> {
+    let params = *file.params();
+    let size = data.len() as u64;
+    let clusters = size.div_ceil(params.cluster_size);
+    let mut mapped: Vec<DataRun> = Vec::with_capacity(old.len());
+    let mut freed = Vec::new();
+    let mut vcn = 0u64;
+    for run in old {
+        let lcn = run
+            .lcn
+            .ok_or_else(|| Error::io("a reused run maps no clusters"))?;
+        let keep = run.length.min(clusters - vcn);
+        if keep > 0 {
+            mapped.push(DataRun {
+                starting_vcn: vcn,
+                length: keep,
+                lcn: Some(lcn),
+            });
+            vcn += keep;
+        }
+        if keep < run.length {
+            freed.push((lcn + keep, run.length - keep));
+        }
+    }
+    if vcn < clusters {
+        let more = clusters - vcn;
+        let bm = bitmap::locate_bitmap_io(io)?;
+        let runs = match bitmap::find_free_run_io(io, &bm, more, params.mft_lcn)? {
+            Some(lcn) => vec![(lcn, more)],
+            None => bitmap::find_free_runs_io(io, &bm, more, params.mft_lcn)?
+                .ok_or_else(|| Error::no_space(format!("no {more} free clusters")))?,
+        };
+        for (lcn, count) in runs {
+            bitmap::allocate_io(io, &bm, lcn, count)?;
+            file.adopt_clusters(lcn, count);
+            match mapped.last_mut() {
+                Some(last) if last.lcn.map(|l| l + last.length) == Some(lcn) => {
+                    last.length += count
+                }
+                _ => mapped.push(DataRun {
+                    starting_vcn: vcn,
+                    length: count,
+                    lcn: Some(lcn),
+                }),
+            }
+            vcn += count;
+        }
+    }
+    let allocated = clusters * params.cluster_size;
+    let mut bytes = data.to_vec();
+    bytes.resize(allocated as usize, 0);
+    write_runs_io(io, &params, &mapped, &bytes)?;
+    let extents = split_into_extents(file, ty, name, &mapped, size, allocated)?;
+    Ok((extents, freed))
 }
 
 /// Generalized non-resident promotion for any attribute type + optional
