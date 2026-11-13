@@ -63,6 +63,9 @@ cli = [
   "cli-truncate-win-verify-chkdsk",
   "cli-write-at-win-verify-chkdsk",
   "cli-import-win-verify-chkdsk",
+  "cli-objid-win-verify-chkdsk",
+  "cli-times-win-verify-chkdsk",
+  "cli-windows-1-security-id-win-verify-chkdsk",
   "cli-windows-interrupted-1-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-6-fsck-replay-win-verify-chkdsk",
   "cli-windows-interrupted-1-write-after-replay-win-verify-chkdsk",
@@ -504,6 +507,35 @@ host = "host"
 command = "bash scripts/cli-oracle.sh attrlist-split-extents {image_dir}/{run_id}/{scenario.image}"
 expect_exit = 0
 
+[ops.cli-objid]
+# rust-ntfs objid gives a random object id to a resident file, a
+# non-resident one, a directory and 24 empty files, fs.ntfs stat reading
+# each back; then a clean fsck.ntfs. Writes <image>.manifest: each path's
+# id, for win-cli-verify to read through FSCTL_GET_OBJECT_ID (#1065).
+host = "host"
+command = "bash scripts/cli-oracle.sh objid {image_dir}/{run_id}/{scenario.image}"
+expect_exit = 0
+
+[ops.cli-times]
+# rust-ntfs times sets the four $STANDARD_INFORMATION times of a resident
+# file, a non-resident one and a directory, one before 1970 and one past
+# 2100, then only one time of one file, fs.ntfs stat reading each back;
+# then a clean fsck.ntfs. Writes <image>.manifest: each path's final
+# FILETIMEs, for win-cli-verify to read through FILE_BASIC_INFO (#1065).
+host = "host"
+command = "bash scripts/cli-oracle.sh times {image_dir}/{run_id}/{scenario.image}"
+expect_exit = 0
+
+[ops.cli-security-id]
+# What Windows recovered from the same capture: rust-ntfs security-id
+# points a file at a directory's descriptor and a directory at a file's,
+# fs.ntfs acl show reading each pair alike after and not before; then a
+# clean fsck.ntfs. Writes <image>.manifest: Windows' listing plus each
+# pair, for win-cli-verify to compare through Get-Acl (#1065).
+host = "host"
+command = "bash scripts/cli-oracle.sh security-id {image_dir}/{run_id}/{scenario.image} {step.snapshot}"
+expect_exit = 0
+
 [ops.cli-mkdir-parents]
 # fs.ntfs mkdir -p makes missing chains -- three levels, under existing
 # directories through names in another case, through `.` and `..`, twelve
@@ -827,6 +859,23 @@ expect_exit = 0
 #   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
 host = "vm"
 command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write-sparse.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Files '{step.files}' -Mode '{step.mode}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
+expect_exit = 0
+
+[ops.win-write-compressed]
+# Mode `write`: Windows writes each file of `files` -- space-separated
+# `/name@bytes` entries of compressible content -- whole and compresses it
+# with `compact /c`, so how it is stored and what a tracked volume charges
+# for it is Windows' own answer. Mode `verify`: each file must read back
+# through ntfs.sys as exactly that content and be marked compressed. Either
+# way, `compact /q` and `fsutil file layout` for every file are kept as
+# evidence (#1097).
+#
+# Step fields:
+#   files        — space-separated `/name@bytes` entries
+#   mode         — `write` or `verify`
+#   keep_image?  — `true` keeps .img + .vhd for a follow-on op (default `false`)
+host = "vm"
+command = "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{vm.workdir}/scripts/fs-windows-test-harness/win-write-compressed.ps1' -ImagePath '{vm.workdir}/{scenario.image}' -Files '{step.files}' -Mode '{step.mode}' -KeepImage '{step.keep_image?}' -Diag '{vm.workdir}/diag/{scenario_name}'"
 expect_exit = 0
 
 [ops.win-quota-track]

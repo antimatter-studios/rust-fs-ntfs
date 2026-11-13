@@ -1,0 +1,3 @@
+## Interfaces
+
+| Windows grades of Slate-written copies (test support) | Experimental: a Windows job of the advisory Slate workflow grades every copy Slate's copy-only writer left with read-only chkdsk and captures the read manifest, bound to the copy's SHA-256, only for a copy Windows accepts; `slate-writes-graded.tsv` holds one row per writer row (`accepted`, `slate-defect` or `not-written`), and a rejected copy is named in the job summary as a Slate writer defect, kept with its chkdsk log and never used to grade our reader; our reader's comparison remains #865 | Unreleased | #864, #690, #580 | `tests/scripts/slate-write-grading.sh`, `test-disks/build-slate-oracle-cases.ps1`, `.github/workflows/slate-oracle.yml` |

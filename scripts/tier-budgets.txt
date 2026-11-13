@@ -22,7 +22,7 @@
 #   suite       2,919 / 148,548 (CI Linux, release run 38450689361) 3,900 / 198,000
 #   kernel      243 / 10,875 (CI Linux, cold, run 38233380518)    325 / 14,500
 #   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
-#   scripts     167 / 6,128 (41 shell tests, Mac, 2026-11-04)     220 / 8,000
+#   scripts     214 / 8,156 (CI Linux, run 43296761823)           285 / 10,900
 #   matrix      1,381 / 100,339 green (72 cases, 2026-10-10)       1,850 / 135,000
 #   cli         27 / 1,035 (estimate: CI's 5-file run + test-docs)  36 / 1,380
 #   cli-oracle  21 / 955 (CI Linux, 2026-10-21, 4 files)         21 / 990
@@ -82,6 +82,14 @@
 # 3b697a9f8e5ea628fbab0885018f90128f14d193061f744f155a207ca4cdd0eb.
 # The new caps are about 30% over that measurement. No output or assertion is
 # removed.
+
+# THE SCRIPTS ROW MOVED ON 2026-11-13 for #1321, from 220/8,000 to
+# 285/10,900. The Slate layer adds ten shell guards (66 script tests where
+# the layer below ran 56), and the passing tier printed 214 lines / 8,156
+# bytes on GitHub's ubuntu-latest runner (run 43296761823, job
+# 131507477097), which exited 65 on the byte cap with every guard passing.
+# The new caps are about a third over that measurement. No output or
+# assertion is removed.
 
 # THE SEMVER ROW is rust-fs-ext4's measurement of the same script: 11 lines /
 # 489 bytes passing with the baseline's rustdoc cached, one line more when it
@@ -239,7 +247,7 @@ mkfs          160    5200
 suite        3900  198000
 kernel        325    14500
 asan         1100   72000
-scripts       220    8000
+scripts       285   10900
 semver         40    4000
 matrix       1850  135000
 cli            54    1784

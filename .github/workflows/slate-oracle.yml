@@ -12,8 +12,10 @@ name: Slate checker oracle (advisory)
 # measured run of reliability; until then it reports, it does not gate.
 on:
   pull_request:
+  # Daily, so #694's reliability window fills in days rather than weeks;
+  # scheduled runs are always on main (#883).
   schedule:
-    - cron: '17 4 * * 1'
+    - cron: '17 4 * * *'
   workflow_dispatch:
 permissions:
   contents: read
@@ -29,14 +31,35 @@ jobs:
           toolchain: 1.95.0
       - name: Build the release CLI
         run: cargo build --locked --release --features cli --bin rust-fs-ntfs
-      - name: Capture the existing data mutation recipes
+      # cli-oracle.sh writes named streams and EAs through the harness
+      # binary: fs.ntfs reads them but has no writer.
+      - name: Build the harness binary
+        run: cargo build --locked --release --features harness --bin rust-ntfs
+      # Data writes (#827), then one recipe per namespace family (#828):
+      # mkdir -p, mv, rm of a hard link, and rm then rmdir; the link recipe
+      # also writes the symbolic link, a reparse point. Then the stream and
+      # metadata writes (#829): twelve named streams and an EA spilling into
+      # an $ATTRIBUTE_LIST, and a split $DATA with its own streams and EA.
+      # Then one recipe each for object IDs, timestamps and a security
+      # descriptor (#1065), the last on a volume Windows formatted, since
+      # ours carries only one descriptor to point a file at.
+      - name: Capture the existing data, namespace and stream mutation recipes
         run: |
           mkdir -p tmp/logs
           python3 scripts/fs-windows-test-harness/run-host-steps \
             --scenario cli-populate-win-verify-chkdsk \
             --scenario cli-write-at-win-verify-chkdsk \
             --scenario cli-truncate-win-verify-chkdsk \
-            --capture-dir tmp/slate-writer --floor 3 \
+            --scenario cli-mkdir-parents-win-verify-chkdsk \
+            --scenario cli-rename-win-verify-chkdsk \
+            --scenario cli-link-win-verify-chkdsk \
+            --scenario cli-empty-directory-win-verify-chkdsk \
+            --scenario cli-attrlist-data-win-verify-chkdsk \
+            --scenario cli-attrlist-split-extents-win-verify-chkdsk \
+            --scenario cli-objid-win-verify-chkdsk \
+            --scenario cli-times-win-verify-chkdsk \
+            --scenario cli-windows-1-security-id-win-verify-chkdsk \
+            --capture-dir tmp/slate-writer --floor 12 \
             >tmp/logs/slate-writer-capture.log 2>&1
       - uses: actions/upload-artifact@v4
         if: always()
@@ -51,7 +74,7 @@ jobs:
     name: Windows formats and chkdsk grades the cases
     needs: writer-cases
     runs-on: windows-latest
-    # Seven 256 MiB images, two Windows formats and seven read-only chkdsk
+    # Sixteen images of up to 256 MiB, two Windows formats and sixteen read-only chkdsk
     # passes. A bound, so a hung mount fails by name (#388).
     timeout-minutes: 30
     steps:
@@ -77,6 +100,9 @@ jobs:
       - name: Windows cluster allocation contracts (floor 14)
         shell: pwsh
         run: ./tests/scripts/slate-windows-allocation.ps1
+      - name: Windows security descriptor contracts (floor 16)
+        shell: pwsh
+        run: ./tests/scripts/slate-windows-acl.ps1
       - name: Build the release CLI
         shell: bash
         env:
@@ -102,6 +128,7 @@ jobs:
             tmp/slate-oracle/chkdsk/
             tmp/slate-oracle/windows-read/
             tmp/slate-oracle/windows-alloc/
+            tmp/slate-oracle/windows-acl/
             tmp/slate-oracle/windows-read-diag/
           if-no-files-found: error
           retention-days: 7
@@ -132,17 +159,103 @@ jobs:
             printf 'rustc\t%s\n' "$(rustc --version)"
             printf 'source_head\t%s\n' "${{ github.event.pull_request.head.sha || github.sha }}"
           } >tmp/slate-oracle/out/provenance.tsv
-      # Four format controls plus populate, write-at and truncate from the
-      # existing Windows matrix (#827): seven cases, never fewer silently.
+      # Four format controls plus populate, write-at and truncate (#827),
+      # mkdir, rename, unlink and rmdir (#828), the named-stream and EA
+      # recipes (#829), and the object ID, timestamp and security
+      # descriptor recipes (#1065) from the existing Windows matrix:
+      # sixteen cases, never fewer silently.
       - name: Compare Slate's verdicts with Windows chkdsk's
         run: >-
           bash scripts/slate-oracle.sh compare
           tmp/slate-oracle/cases.tsv tmp/slate-oracle/images
-          "$SLATE_CHECKER" tmp/slate-oracle/out 7
+          "$SLATE_CHECKER" tmp/slate-oracle/out 16
+      # Every writer mutation family keeps an executed case (#830): one
+      # that loses its last case fails here by name, whatever the floor
+      # above says, and a duplicate or ungraded row covers no family.
+      - name: Every writer mutation family has an executed case
+        if: ${{ !cancelled() }}
+        run: >-
+          bash scripts/slate-oracle.sh families tests/slate-writer-families.tsv tmp/slate-oracle/out/verdicts.tsv
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: slate-oracle-verdicts-${{ github.sha }}
           path: tmp/slate-oracle/out/
+          if-no-files-found: error
+          # Longer than a window takes to collect, so its earliest runs are
+          # still there when slate-oracle.sh window reads them (#883).
+          retention-days: 30
+      # Slate's copy-only writer (#863): each row of tests/slate-writes.tsv
+      # patches bytes the write-at recipe left in one root file, on a copy
+      # of the captured image, and the source must keep its SHA-256. Runs
+      # whether or not the comparison agreed: they grade different things.
+      - name: Build Slate's MIT copy-only writer
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          writer="$(bash scripts/slate-oracle.sh build "$RUNNER_TEMP/slate-ntfs" ntfs-write-lab)"
+          echo "SLATE_WRITER=$writer" >>"$GITHUB_ENV"
+      - name: Slate writes copies of the write-at image, never the source
+        if: ${{ !cancelled() && env.SLATE_WRITER != '' }}
+        run: >-
+          bash scripts/slate-oracle.sh write
+          tests/slate-writes.tsv tmp/slate-oracle/images
+          "$SLATE_WRITER" tmp/slate-oracle/writes 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: slate-oracle-writes-${{ github.sha }}
+          path: |
+            tmp/slate-oracle/images/cli-write-at-win-verify-chkdsk.img
+            tmp/slate-oracle/writes/
+          if-no-files-found: error
+          retention-days: 14
+  # Windows grades every Slate-written copy (#864): read-only chkdsk on a
+  # scratch copy of each, and the read manifest only for a copy it accepts.
+  # A copy chkdsk rejects is a Slate writer defect: named in the summary,
+  # kept with its chkdsk log, never used to grade our reader, and not a
+  # failure of this job. Runs even when the comparison disagreed.
+  slate-writes-windows:
+    name: Windows grades each Slate-written copy
+    needs: slate-check
+    if: ${{ !cancelled() }}
+    runs-on: windows-latest
+    # Three 256 MiB copies, each one read-only chkdsk and one read capture.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: slate-oracle-writes-${{ github.sha }}
+          path: tmp/slate-writes-input
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - name: Install rust-img-vhd
+        shell: pwsh
+        run: |
+          $vhd = (Select-String -Path chores.yml -Pattern '^\s*IMG_VHD_REF:\s*(\S+)').Matches[0].Groups[1].Value
+          if (-not $vhd) { throw 'IMG_VHD_REF is missing from chores.yml' }
+          git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
+          cargo install --locked --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
+      - name: Grade each Slate-written copy with read-only Windows chkdsk
+        shell: pwsh
+        run: >-
+          ./test-disks/build-slate-oracle-cases.ps1
+          -OutDir tmp/slate-write-grades
+          -SlateWrites tmp/slate-writes-input/writes/slate-writes.tsv
+          -SlateWriteImages tmp/slate-writes-input/writes/images
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: slate-oracle-write-grades-${{ github.sha }}
+          path: |
+            tmp/slate-write-grades/slate-writes-graded.tsv
+            tmp/slate-write-grades/images/*.img
+            tmp/slate-write-grades/chkdsk/
+            tmp/slate-write-grades/windows-read/
+            tmp/slate-write-grades/windows-alloc/
+            tmp/slate-write-grades/windows-acl/
+            tmp/slate-write-grades/windows-read-diag/
           if-no-files-found: error
           retention-days: 14
