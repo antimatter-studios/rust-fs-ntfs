@@ -32,6 +32,7 @@ offset="$(jq -er .partition_offset "$dir/layout.json")"
 out="$dir/classification.tsv"
 printf 'snapshot\tlog\toutcome\treason\n' >"$out"
 
+damaged=0
 shopt -s nullglob
 pres=("$dir"/pre-*.vhd)
 [ "${#pres[@]}" -gt 0 ] || {
@@ -49,12 +50,18 @@ for pre in "${pres[@]}"; do
     status=$?
     set -e
     rm -f "$work"
-    if [ "$status" -eq 1 ]; then
+    replay_ran="$(jq -r '[.findings[] | select(.kind == "logfile") | .repaired] | first // false' <<<"$report" 2>/dev/null || echo false)"
+    remaining_findings="$(jq -r '[.findings[] | select(.kind != "logfile" and .kind != "dirty") | (if .record then "record \(.record): " else "" end) + (.why // .kind)] | .[:3] | join("; ")' <<<"$report" 2>/dev/null || echo "")"
+    if [ "$status" -eq 1 ] || { [ "$replay_ran" = true ] && [ -z "$remaining_findings" ]; }; then
         outcome="replayed"
         reason="$(jq -r '[.findings[] | select(.kind == "logfile") | .replayed] | first // "" | "\(.) redo operations"' <<<"$report" 2>/dev/null || echo "")"
     elif [ "$status" -eq 0 ]; then
         outcome="nothing-to-replay"
         reason=""
+    elif [ "$replay_ran" = true ]; then
+        outcome="damaged"
+        damaged=1
+        reason="$(jq -r '[.findings[] | select(.kind == "logfile") | .replayed] | first // ""' <<<"$report") redo operations, then $remaining_findings"
     else
         outcome="refused"
         reason="$(jq -r '[.findings[] | select(.kind == "logfile") | .why] | first // .error // ""' <<<"$report" 2>/dev/null || printf '%s' "$report" | head -c 300)"
@@ -63,3 +70,7 @@ for pre in "${pres[@]}"; do
 done
 sort -n -o "$out" "$out"
 cat "$out"
+if [ "$damaged" -ne 0 ]; then
+    echo "classify: a replay left findings on the volume it wrote (damaged above)" >&2
+    exit 1
+fi

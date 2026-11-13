@@ -26,7 +26,7 @@
 #   matrix      1,381 / 100,339 green (72 cases, 2026-10-10)       1,850 / 135,000
 #   cli         27 / 1,035 (estimate: CI's 5-file run + test-docs)  36 / 1,380
 #   cli-oracle  21 / 955 (CI Linux, 2026-10-21, 4 files)         21 / 990
-#   cli-host    21 / 1,569 (arm64 Pi, 2026-10-12, 20 scenarios)   28 / 2,100
+#   cli-host    39 / 2,834 (CI Linux, run 43405682707)            52 / 3,780
 #
 # THE CLIPPY ROW MOVED ON 2026-09-19, from 150/5,000 to 260/11,500. Adding
 # tests/fuzz_decoders.rs gave `--all-targets` another target to lint, and a
@@ -240,6 +240,14 @@
 # scenario makes 27, so 28 lines and 1,973 bytes (computed from the group,
 # each recipe's host steps and the line format), which met the old row
 # exactly; the new row is that plus a third.
+# THE CLI-HOST ROW MOVED for #1307, from 37/2,630 to 52/3,780: the
+# undo-stopped and open-at-checkpoint-stopped replay scenarios joined the
+# cli group, one more line each. CI run 43405682707, job 131849977039
+# (cli, the installed tools, on PATH), ran every host step and exited 65
+# at 39 lines / 2,834 bytes. Raised to that plus a third, as the other
+# rows are; no output is suppressed.
+# Evidence: https://github.com/antimatter-studios/rust-fs-ntfs/actions/runs/43405682707/job/131849977039
+#
 clippy        260   11500
 unit         1330   85500
 unit-debug   1330   85500
@@ -252,4 +260,4 @@ semver         40    4000
 matrix       1850  135000
 cli            54    1784
 cli-oracle     39    1640
-cli-host       37    2630
+cli-host       52    3780
