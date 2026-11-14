@@ -73,8 +73,8 @@ fn mkfs_bin_formats_a_pre_sized_file_and_parses_clean() {
     // our crate's read path and the FSKit extension use. Anything that
     // works through this parser is something Windows would also accept,
     // modulo deeper chkdsk-style checks.
-    let bytes = std::fs::read(&img).expect("read formatted image");
-    let mut cursor = std::io::Cursor::new(&bytes);
+    let mut cursor =
+        std::io::BufReader::new(std::fs::File::open(&img).expect("open formatted image"));
     let ntfs = Ntfs::new(&mut cursor).expect("Ntfs::new on freshly formatted volume");
 
     assert_eq!(
@@ -121,8 +121,8 @@ fn mkfs_bin_create_size_creates_then_formats() {
     );
 
     // Result must parse as NTFS via the upstream crate.
-    let bytes = std::fs::read(&img).expect("read formatted image");
-    let mut cursor = std::io::Cursor::new(&bytes);
+    let mut cursor =
+        std::io::BufReader::new(std::fs::File::open(&img).expect("open formatted image"));
     let ntfs = Ntfs::new(&mut cursor).expect("Ntfs::new on --create-size output");
     assert_eq!(ntfs.serial_number(), TEST_SERIAL);
 }
@@ -132,8 +132,14 @@ fn mkfs_bin_dry_run_does_not_modify_file() {
     let bin = rust_ntfs();
     let img = common::temp_image_path("mkfs_bin_dryrun");
 
-    let pattern = vec![0xAAu8; SIZE_BYTES as usize];
-    std::fs::write(&img, &pattern).expect("seed pattern");
+    let pattern = vec![0xAAu8; common::IMAGE_CHUNK_SIZE];
+    let mut file = std::fs::File::create(&img).expect("create image");
+    use std::io::Write;
+    for _ in 0..SIZE_BYTES / pattern.len() as u64 {
+        file.write_all(&pattern).expect("seed pattern");
+    }
+    drop(file);
+    let before = common::snapshot_image(&img).expect("snapshot pattern");
 
     let out = Command::new(bin)
         .args(["format", "-n", "-L", "DRYRUN", &img])
@@ -145,13 +151,7 @@ fn mkfs_bin_dry_run_does_not_modify_file() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let after = std::fs::read(&img).expect("read after dry-run");
-    assert_eq!(
-        after.len(),
-        pattern.len(),
-        "dry-run must not change file size"
-    );
-    assert!(after == pattern, "dry-run must not modify file contents");
+    common::assert_images_equal(&img, before.path(), "image contents");
 }
 
 #[test]

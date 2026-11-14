@@ -11,6 +11,20 @@
 use std::fs::File;
 use std::io::BufReader;
 
+#[cfg(test)]
+mod image;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub use image::*;
+#[cfg(test)]
+mod image_bytes;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub use image_bytes::{ImageBytes, TestDigest};
+mod small_file;
+#[allow(unused_imports)]
+pub use small_file::{read_small_file, IMAGE_CHUNK_SIZE};
+
 use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::structured_values::NtfsFileNamespace;
 use ntfs::{Ntfs, NtfsFile, NtfsReadSeek};

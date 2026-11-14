@@ -35,18 +35,18 @@ impl Lcg {
 fn corrupt_copy(tag: &str, seed: u64, flips: usize) -> String {
     let dst = common::temp_image_path(format!("corrupt_{tag}"));
     std::fs::copy(BASIC_IMG, &dst).expect("copy");
-    let mut bytes = std::fs::read(&dst).unwrap();
+    let length = std::fs::metadata(&dst).unwrap().len();
     let mut rng = Lcg::new(seed);
     // Leave the boot sector (first 512 bytes) mostly intact so the
     // initial parse usually succeeds; we want corruption in MFT-
     // reachable regions more often than not, but also some boot-sector
     // fuzz is interesting. Mix both.
     for _ in 0..flips {
-        let pos = (rng.next() % bytes.len() as u64) as usize;
+        let pos = rng.next() % length;
         let bit = (rng.next() % 8) as u8;
-        bytes[pos] ^= 1 << bit;
+        let byte = common::read_image_region(&dst, pos, 1).unwrap()[0] ^ (1 << bit);
+        common::write_image_region(&dst, pos, &[byte]).unwrap();
     }
-    std::fs::write(&dst, &bytes).unwrap();
     dst
 }
 
@@ -76,9 +76,8 @@ fn single_bit_flip_boot_region_does_not_panic() {
     let img = corrupt_copy("boot_1flip", 0x1111_2222_3333_4444, 1);
     // Override: truncate the seeded random position to fall in [0..2048)
     // by using a fresh copy + manual flip.
-    let mut bytes = std::fs::read(&img).unwrap();
-    bytes[1024] ^= 0x01;
-    std::fs::write(&img, &bytes).unwrap();
+    let byte = common::read_image_region(&img, 1024, 1).unwrap()[0] ^ 0x01;
+    common::write_image_region(&img, 1024, &[byte]).unwrap();
     assert_no_panic(&img);
 }
 
@@ -111,11 +110,7 @@ fn wiped_first_sector_does_not_panic() {
     // Deliberately destroy the boot sector entirely.
     let dst = common::temp_image_path("corrupt_wiped_boot");
     std::fs::copy(BASIC_IMG, &dst).unwrap();
-    let mut bytes = std::fs::read(&dst).unwrap();
-    for byte in bytes.iter_mut().take(512) {
-        *byte = 0;
-    }
-    std::fs::write(&dst, &bytes).unwrap();
+    common::write_image_region(&dst, 0, &[0; 512]).unwrap();
     assert_no_panic(&dst);
 }
 
@@ -123,8 +118,11 @@ fn wiped_first_sector_does_not_panic() {
 fn truncated_image_does_not_panic() {
     let dst = common::temp_image_path("corrupt_truncated");
     std::fs::copy(BASIC_IMG, &dst).unwrap();
-    let bytes = std::fs::read(&dst).unwrap();
-    // Truncate to 64 KiB.
-    std::fs::write(&dst, &bytes[..65536]).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&dst)
+        .unwrap()
+        .set_len(65536)
+        .unwrap();
     assert_no_panic(&dst);
 }

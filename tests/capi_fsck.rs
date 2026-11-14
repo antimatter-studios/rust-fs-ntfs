@@ -256,25 +256,25 @@ fn fsck_leaves_the_dirty_flag_unless_asked() {
 fn fsck_refuses_an_unknown_flag() {
     let img = dirty_copy("fsck_unknown_flag", true, false);
     empty_logfile(&img);
-    let before = std::fs::read(&img).expect("snapshot image");
+    let before = common::snapshot_image(&img).expect("snapshot image");
     let c = CString::new(img.as_str()).unwrap();
     let rc = unsafe { fs_ntfs_fsck(c.as_ptr(), std::ptr::null_mut(), 0x80) };
     assert_eq!(rc, -1);
     assert!(last_error().contains("unknown flags"), "{}", last_error());
-    assert_eq!(std::fs::read(&img).expect("read image"), before);
+    common::assert_images_equal(&img, before.path(), "image contents");
 }
 
 #[test]
 fn fsck_rejects_dirty_nonempty_log_without_writing_or_out_params() {
     let img = dirty_copy("refuse_pending", true, true);
-    let before = std::fs::read(&img).expect("snapshot image");
+    let before = common::snapshot_image(&img).expect("snapshot image");
     let c = CString::new(img.as_str()).expect("CString");
     let mut cleared = 9_u8;
     let rc = fs_ntfs_fsck(c.as_ptr(), &mut cleared, FS_NTFS_FSCK_CLEAR_DIRTY);
     assert_eq!(rc, -1);
     assert!(last_error().contains("$LogFile"));
     assert_eq!(cleared, 9);
-    assert_eq!(std::fs::read(&img).expect("read image"), before);
+    common::assert_images_equal(&img, before.path(), "image contents");
 }
 
 #[test]

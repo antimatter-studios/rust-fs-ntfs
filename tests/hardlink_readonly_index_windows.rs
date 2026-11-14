@@ -9,7 +9,7 @@
 
 use ntfs::structured_values::NtfsFileName;
 use ntfs::{Ntfs, NtfsAttributeType, NtfsFile};
-use sha2::{Digest, Sha256};
+mod common;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -160,8 +160,8 @@ fn hardlink_readonly_index_copies_are_observed_from_windows_images() {
     let mut record_by_stage = Vec::new();
     for image in rows.iter().filter(|r| r[0] == "image") {
         let (stage, file, want) = (image[1], image[2], image[3]);
-        let bytes = std::fs::read(root.join(file)).expect("stage image missing");
-        assert_eq!(hex(&Sha256::digest(&bytes)), want, "{stage} image SHA-256");
+        let digest = common::image_digest(root.join(file)).expect("digest stage image");
+        assert_eq!(hex(&digest), want, "{stage} image SHA-256");
         let mut fs = Offset {
             inner: BufReader::new(File::open(root.join(file)).expect("open image")),
             base: offset,

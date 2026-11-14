@@ -59,13 +59,12 @@ fn refused(id: u32, got: Result<(), fs_ntfs::error::Error>) {
 #[test]
 fn an_id_with_no_descriptor_is_refused_and_nothing_is_written() {
     let (img, mut io) = fresh_volume("refused");
-    let before = std::fs::read(&img).expect("read image");
+    let before = common::snapshot_image(&img).expect("snapshot image");
     for id in [0, 1, 9999, 0x200, 0xffff_ffff] {
         refused(id, write::set_security_id_io(&mut io, "/f", id));
     }
     <PathIo as BlockIo>::sync(&mut io).expect("sync");
-    let after = std::fs::read(&img).expect("read image");
-    let first_change = before.iter().zip(&after).position(|(a, b)| a != b);
+    let first_change = common::first_image_difference(before.path(), &img).expect("compare images");
     assert!(
         first_change.is_none(),
         "a refused set_security_id changed the image, first at byte {first_change:?}"

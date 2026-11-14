@@ -319,7 +319,7 @@ fn a_stream_in_an_extension_record_is_rewritten_and_the_list_follows() {
 fn a_write_through_the_list_that_is_refused_changes_nothing() {
     let (img, _) = volume_with_a_file("refused");
     write_streams(&img, "/f", 1..=8, 64);
-    let before = std::fs::read(&img).expect("read image");
+    let before = common::snapshot_image(&img).expect("snapshot image");
     let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
     let got =
         write::write_named_stream_io(&mut io, "/f", "huge", &vec![1u8; 2 * VOL_SIZE as usize]);
@@ -329,8 +329,7 @@ fn a_write_through_the_list_that_is_refused_changes_nothing() {
     );
     <PathIo as BlockIo>::sync(&mut io).expect("sync");
     drop(io);
-    let after = std::fs::read(&img).expect("read image");
-    let first = before.iter().zip(&after).position(|(a, b)| a != b);
+    let first = common::first_image_difference(before.path(), &img).expect("compare images");
     assert!(
         first.is_none(),
         "a refused write changed the image, first at byte {first:?}"
