@@ -324,9 +324,8 @@ fn a_byte_changed_behind_the_comparison_fails_it() {
             data_runs::decode_runs(&rec[start..loc.attr_offset + loc.attr_length]).expect("runs");
         runs[0].lcn.expect("allocated") * params.cluster_size + 1000
     };
-    let mut bytes = std::fs::read(&img).unwrap();
-    bytes[at as usize] ^= 0xFF;
-    std::fs::write(&img, &bytes).unwrap();
+    let byte = common::read_image_region(&img, at, 1).unwrap()[0] ^ 0xFF;
+    common::write_image_region(&img, at, &[byte]).unwrap();
 
     let mut want = Expected::default();
     want.file("f.bin", &data);

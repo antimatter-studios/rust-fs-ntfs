@@ -102,7 +102,7 @@ fn an_attribute_list_type_inversion_is_reported() {
     );
     write_list(&mut io, base, &list);
     drop(io);
-    let before = std::fs::read(&img).unwrap();
+    let before = common::snapshot_image(&img).expect("snapshot image");
     let mut io = PathIo::open_ro(&img).unwrap();
     let report = fsck::check_io(&mut io).unwrap();
     if std::env::var_os("NTFS_LIST_CHECK_IMAGES").is_some() {
@@ -118,11 +118,7 @@ fn an_attribute_list_type_inversion_is_reported() {
         )),
         "{report:#?}"
     );
-    assert_eq!(
-        std::fs::read(&img).unwrap(),
-        before,
-        "checking must not write"
-    );
+    common::assert_images_equal(&img, before.path(), "image contents");
 }
 
 #[test]
@@ -170,7 +166,7 @@ fn an_attribute_list_that_lists_itself_is_reported() {
     .unwrap();
     <PathIo as BlockIo>::sync(&mut io).unwrap();
     drop(io);
-    let before = std::fs::read(&img).unwrap();
+    let before = common::snapshot_image(&img).expect("snapshot image");
     let mut io = PathIo::open_ro(&img).unwrap();
     let report = fsck::check_io(&mut io).unwrap();
     if std::env::var_os("NTFS_LIST_CHECK_IMAGES").is_some() {
@@ -185,11 +181,7 @@ fn an_attribute_list_that_lists_itself_is_reported() {
         )),
         "{report:#?}"
     );
-    assert_eq!(
-        std::fs::read(&img).unwrap(),
-        before,
-        "checking must not write"
-    );
+    common::assert_images_equal(&img, before.path(), "image contents");
 }
 
 #[test]
@@ -291,7 +283,7 @@ fn remove_extension_entries(whole_record: bool) {
     .unwrap();
     <PathIo as BlockIo>::sync(&mut io).unwrap();
     drop(io);
-    let before = std::fs::read(&img).unwrap();
+    let before = common::snapshot_image(&img).expect("snapshot image");
     let mut io = PathIo::open_ro(&img).unwrap();
     let report = fsck::check_io(&mut io).unwrap();
     if std::env::var_os("NTFS_LIST_CHECK_IMAGES").is_some() {
@@ -310,11 +302,7 @@ fn remove_extension_entries(whole_record: bool) {
         )),
         "{report:#?}"
     );
-    assert_eq!(
-        std::fs::read(&img).unwrap(),
-        before,
-        "checking must not write"
-    );
+    common::assert_images_equal(&img, before.path(), "image contents");
 }
 
 #[test]

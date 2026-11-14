@@ -6,6 +6,9 @@
 
 mod ntfs;
 #[cfg(test)]
+#[path = "../test_image.rs"]
+mod test_image;
+#[cfg(test)]
 #[path = "../test_scratch.rs"]
 mod test_scratch;
 

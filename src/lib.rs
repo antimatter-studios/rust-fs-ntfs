@@ -85,6 +85,8 @@ pub mod view_index;
 pub mod write;
 
 #[cfg(test)]
+mod test_image;
+#[cfg(test)]
 mod test_scratch;
 
 /// Make a volume ready for a read-write mount, and refuse a dirty volume or

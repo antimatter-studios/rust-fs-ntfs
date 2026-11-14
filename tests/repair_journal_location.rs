@@ -20,7 +20,6 @@ use fs_ntfs::repair_journal::{
     bsd_device_record, check_journal_location, device_relation, directory_on_target,
     sysfs_device_record, DeviceRecord, DeviceRelation, JournalLocationError, LocationStat,
 };
-use sha2::{Digest, Sha256};
 
 /// Unpack a `test-disks/` image to a scratch path.
 fn unpack(name: &str) -> String {
@@ -39,7 +38,7 @@ fn unpack(name: &str) -> String {
 }
 
 fn sha256(path: &Path) -> Vec<u8> {
-    Sha256::digest(std::fs::read(path).expect("read image")).to_vec()
+    common::image_digest(path).expect("digest image").to_vec()
 }
 
 /// A fresh scratch directory beside the unpacked image.

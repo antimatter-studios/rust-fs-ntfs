@@ -501,8 +501,8 @@ mod windows_capture {
 
     #[test]
     fn complete_native_nodes_keep_attested_entries_and_exclude_terminal_overlaps() {
-        let manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(env_path("NTFS_I30_SLACK_MANIFEST")).expect("manifest readable"),
+        let manifest: serde_json::Value = serde_json::from_reader(
+            std::fs::File::open(env_path("NTFS_I30_SLACK_MANIFEST")).expect("manifest readable"),
         )
         .expect("manifest is JSON");
         let observations = manifest["raw_name_observations"].as_array().unwrap();
@@ -554,8 +554,8 @@ mod windows_capture {
 
     #[test]
     fn fsutil_ids_match_independent_live_handle_ids() {
-        let manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(env_path("NTFS_I30_SLACK_MANIFEST")).expect("manifest readable"),
+        let manifest: serde_json::Value = serde_json::from_reader(
+            std::fs::File::open(env_path("NTFS_I30_SLACK_MANIFEST")).expect("manifest readable"),
         )
         .expect("manifest is JSON");
         let check = |identity: &serde_json::Value, expected: u64| {
@@ -627,8 +627,8 @@ mod windows_capture {
 
     #[test]
     fn candidates_match_the_windows_manifest() {
-        let manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(env_path("NTFS_I30_SLACK_MANIFEST")).expect("manifest readable"),
+        let manifest: serde_json::Value = serde_json::from_reader(
+            std::fs::File::open(env_path("NTFS_I30_SLACK_MANIFEST")).expect("manifest readable"),
         )
         .expect("manifest is JSON");
         let directory_id = manifest["directory_file_id"]

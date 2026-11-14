@@ -53,7 +53,7 @@ fn last_error() -> String {
 fn fs_core_dirty_volume_mounts_ro_but_refuses_rw_without_writes() {
     let img = copy_fixture("dirty_refuse");
     fsck::set_dirty(&img).expect("mark dirty");
-    let before = std::fs::read(&img).expect("snapshot image");
+    let before = common::snapshot_image(&img).expect("snapshot image");
     let c_path = CString::new(img.as_str()).expect("CString");
     let dev = unsafe { fs_core::ffi::fs_core_file_open(c_path.as_ptr(), true) };
     assert!(!dev.is_null(), "open fs-core device");
@@ -65,7 +65,7 @@ fn fs_core_dirty_volume_mounts_ro_but_refuses_rw_without_writes() {
     assert!(rw.is_null(), "dirty read-write mount must fail");
     assert!(last_error().contains("dirty"));
     unsafe { fs_core::ffi::fs_core_device_close(dev) };
-    assert_eq!(std::fs::read(&img).expect("read image"), before);
+    common::assert_images_equal(&img, before.path(), "image contents");
 }
 
 #[test]

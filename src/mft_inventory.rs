@@ -458,9 +458,9 @@ mod tests {
     #[test]
     fn inventory_leaves_the_volume_bytes_unchanged() {
         let path = image("readonly");
-        let before = std::fs::read(&path).expect("read");
+        let before = crate::test_image::snapshot_image(&path).expect("snapshot image");
         let _ = full_scan(&path, 5);
-        assert_eq!(before, std::fs::read(&path).expect("read"));
+        crate::test_image::assert_images_equal(&path, before.path(), "inventory must not write");
         let _ = std::fs::remove_file(&path);
     }
 }

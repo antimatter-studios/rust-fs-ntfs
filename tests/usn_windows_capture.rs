@@ -5,11 +5,13 @@
 //! Windows CI job. A missing capture fails, naming that script.
 #![cfg(windows)]
 
+mod common;
+
 use fs_ntfs::usn::decode_usn_record_v2;
 
 #[test]
 fn windows_usn_v2_records_match_fsutil() {
-    let bin = std::fs::read("test-disks/usn-v2-capture.bin")
+    let bin = common::read_small_file("test-disks/usn-v2-capture.bin")
         .expect("test-disks/usn-v2-capture.bin: run test-disks/capture-usn-v2-records.ps1");
     let manifest = std::fs::read_to_string("test-disks/usn-v2-capture.tsv")
         .expect("test-disks/usn-v2-capture.tsv: run test-disks/capture-usn-v2-records.ps1");

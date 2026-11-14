@@ -271,7 +271,7 @@ fn fsck_with_callbacks_refuses_to_clear_dirty_without_a_flush() {
     // device with a flush callback clears it (capi_fsck_fs_core_device.rs).
     let img = dirty_copy("cb_full", true, false);
     empty_logfile(&img);
-    let before = std::fs::read(&img).expect("snapshot image");
+    let before = common::snapshot_image(&img).expect("snapshot image");
     let (ctx, size) = make_ctx(&img);
     let cfg = FsNtfsBlockdevCfg {
         read: read_cb,
@@ -298,7 +298,7 @@ fn fsck_with_callbacks_refuses_to_clear_dirty_without_a_flush() {
     );
     assert_eq!(cleared, 0);
     drop(ctx);
-    assert_eq!(std::fs::read(&img).expect("read image"), before);
+    common::assert_images_equal(&img, before.path(), "image contents");
     assert!(read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
     assert!(read_logfile_first_page(&img).iter().all(|&b| b == 0xFF));
 }
@@ -306,7 +306,7 @@ fn fsck_with_callbacks_refuses_to_clear_dirty_without_a_flush() {
 #[test]
 fn fsck_with_callbacks_refuses_dirty_nonempty_log_without_writes() {
     let img = dirty_copy("cb_refuse_pending", true, true);
-    let before = std::fs::read(&img).expect("snapshot image");
+    let before = common::snapshot_image(&img).expect("snapshot image");
     let (ctx, size) = make_ctx(&img);
     let cfg = FsNtfsBlockdevCfg {
         read: read_cb,
@@ -324,7 +324,7 @@ fn fsck_with_callbacks_refuses_dirty_nonempty_log_without_writes() {
     assert_eq!(rc, -1);
     assert!(last_error().contains("$LogFile"));
     drop(ctx);
-    assert_eq!(std::fs::read(&img).expect("read image"), before);
+    common::assert_images_equal(&img, before.path(), "image contents");
 }
 
 #[test]

@@ -144,7 +144,7 @@ fn a_volume_windows_hibernated_is_refused_for_writing_as_ntfs_3g_refuses_it() {
 
         for (how, write) in WRITES {
             let img = volume_with_hiberfil(&stem, &hiberfil(&signature, len));
-            let before = std::fs::read(&img).unwrap();
+            let before = common::snapshot_image(&img).expect("snapshot image");
             match (write(&img), writable) {
                 (Ok(()), true) => {}
                 (Err(why), true) => panic!("{case}: {how} refused a volume ntfs-3g opens: {why}"),
@@ -155,7 +155,7 @@ fn a_volume_windows_hibernated_is_refused_for_writing_as_ntfs_3g_refuses_it() {
                         "{case}: {how} refused, but not for the hibernation: {why}"
                     );
                     assert!(
-                        std::fs::read(&img).unwrap() == before,
+                        before.matches(&img),
                         "{case}: {how} refused and wrote to the volume anyway"
                     );
                 }

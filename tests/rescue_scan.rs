@@ -850,7 +850,7 @@ fn a_scan_stopped_after_the_allocated_pass_keeps_every_file() {
 /// small enough to cut at every record boundary. Returns the archive's
 /// bytes and where each record starts in them, by the documented layout,
 /// with the archive's length last.
-fn cut_fixture() -> (Vec<u8>, Archive, Vec<u64>) {
+fn cut_fixture() -> (common::ImageSnapshot, Archive, Vec<u64>) {
     let src = unpack("windows-interrupted-1");
     let prefix = common::temp_image_path("rescue_prefix");
     let mut head = vec![0u8; 8 << 20];
@@ -872,7 +872,7 @@ fn cut_fixture() -> (Vec<u8>, Archive, Vec<u64>) {
     };
     scan(&mut source, &mut new_file(&archive), options).expect("scan the prefix");
     let parsed = parse(&archive, |_, _| {});
-    let bytes = std::fs::read(&archive).expect("read the archive");
+    let bytes = common::snapshot_image(&archive).expect("snapshot the archive");
     let mut starts = vec![32u64];
     for r in &parsed.records {
         let payload = if r.kind == 1 { r.len } else { 0 };
@@ -907,7 +907,7 @@ fn an_archive_cut_short_reads_back_to_its_last_whole_record() {
             }
         }
         for cut in cuts {
-            let got = read_archive(&mut &bytes[..cut as usize])
+            let got = read_archive(&mut File::open(bytes.path()).unwrap().take(cut))
                 .unwrap_or_else(|e| panic!("cut at {cut}: {e}"));
             assert_eq!(got.sector_size, parsed.sector, "cut at {cut}");
             assert_eq!(got.source_size, parsed.size, "cut at {cut}");
@@ -939,15 +939,16 @@ fn a_whole_record_with_a_bad_checksum_is_refused_as_damage() {
         .find(|&i| parsed.records[i].kind == 1)
         .expect("a data record in the archive's second half");
     let at = starts[i] + 28 + parsed.records[i].len / 2;
-    bytes[at as usize] ^= 0x01;
-    let err = read_archive(&mut &bytes[..])
+    bytes.xor(at as usize, 0x01);
+    let err = read_archive(&mut File::open(bytes.path()).unwrap())
         .expect_err("a flipped payload byte is damage, not an interruption");
     assert!(
         err.contains(&format!("archive byte {}", starts[i])),
         "the refusal names the damaged record: {err}"
     );
     // Cut inside that record, the damage is a torn tail like any other.
-    let got = read_archive(&mut &bytes[..at as usize]).expect("the cut archive");
+    let got =
+        read_archive(&mut File::open(bytes.path()).unwrap().take(at)).expect("the cut archive");
     assert_eq!(got.records.len(), i);
 }
 
@@ -1014,10 +1015,8 @@ fn resuming_a_damaged_archive_is_refused_and_leaves_it_unchanged() {
     let archive = common::temp_image_path("rescue_resume_damaged");
     for (what, at) in flips {
         let mut damaged = bytes.clone();
-        damaged[at as usize] ^= 0x01;
-        new_file(&archive)
-            .write_all(&damaged)
-            .expect("write the damaged archive");
+        damaged.xor(at as usize, 0x01);
+        damaged.copy_to(&archive);
         let before = file_sha256(&archive);
         let mut source = Untouched {
             size: parsed.size,
@@ -1108,7 +1107,7 @@ fn a_resumed_scan_reads_again_only_ranges_with_no_data_record() {
         .find(|&i| whole.records[i].kind == 1)
         .expect("a data record after the last unreadable one");
     let cut = starts[k] + 28 + whole.records[k].len / 2;
-    let before = std::fs::read(&archive).expect("read the first pass's archive");
+    let before = common::snapshot_image(&archive).expect("snapshot the first pass's archive");
     OpenOptions::new()
         .write(true)
         .open(&archive)
@@ -1162,10 +1161,10 @@ fn a_resumed_scan_reads_again_only_ranges_with_no_data_record() {
             );
         }
     }
-    let after = std::fs::read(&archive).expect("read the resumed archive");
+    let difference = common::first_image_difference_in_prefix(&archive, before.path(), starts[k])
+        .expect("compare the resumed archive");
     assert!(
-        after.len() as u64 > starts[k]
-            && after[..starts[k] as usize] == before[..starts[k] as usize],
+        std::fs::metadata(&archive).unwrap().len() > starts[k] && difference.is_none(),
         "the resume changed the archive's whole records"
     );
 
@@ -1356,7 +1355,7 @@ fn an_archive_interrupted_anywhere_and_resumed_rebuilds_each_windows_capture() {
             .unwrap_or_else(|e| panic!("{name}: the uninterrupted scan: {e}"));
         let whole = parse(&full, |_, _| {});
         let starts = record_starts(&whole);
-        let bytes = std::fs::read(&full).expect("read the uninterrupted archive");
+        let bytes = common::snapshot_image(&full).expect("snapshot the uninterrupted archive");
         assert_eq!(
             *starts.last().unwrap(),
             bytes.len() as u64,
@@ -1375,9 +1374,13 @@ fn an_archive_interrupted_anywhere_and_resumed_rebuilds_each_windows_capture() {
             }
             for cut in cuts {
                 let archive = common::temp_image_path("rescue_resume_cut");
-                new_file(&archive)
-                    .write_all(&bytes[..cut as usize])
-                    .expect("write the interrupted archive");
+                bytes.copy_to(&archive);
+                OpenOptions::new()
+                    .write(true)
+                    .open(&archive)
+                    .unwrap()
+                    .set_len(cut)
+                    .unwrap();
                 let mut source = FileSource::open(Path::new(&src)).unwrap();
                 let mut out = OpenOptions::new()
                     .read(true)
@@ -1427,15 +1430,15 @@ fn an_archive_interrupted_anywhere_and_resumed_rebuilds_each_windows_capture() {
 /// The first sector, in archive order, at which one of the first `k` data
 /// records of the archive at `path` differs from `other`, the bytes of another
 /// source: the sector a resume of that archive against `other` must name.
-fn first_differing_sector(path: &str, k: usize, other: &[u8]) -> Option<u64> {
+fn first_differing_sector(path: &str, k: usize, other: &common::ImageSnapshot) -> Option<u64> {
     let mut seen = 0;
     let mut first = None;
     let parsed = parse(path, |offset, bytes| {
         if seen < k && first.is_none() {
-            let there = &other[offset as usize..offset as usize + bytes.len()];
+            let there = other.read(offset as usize..offset as usize + bytes.len());
             first = bytes
                 .iter()
-                .zip(there)
+                .zip(&there)
                 .position(|(a, b)| a != b)
                 .map(|i| offset + i as u64);
         }
@@ -1462,14 +1465,14 @@ fn resuming_one_windows_captures_archive_against_another_is_refused() {
         "{name}: the scan recorded unreadable sectors"
     );
     let starts = record_starts(&whole);
-    let bytes = std::fs::read(&full).expect("read the archive");
+    let bytes = common::snapshot_image(&full).expect("snapshot the archive");
     // Interrupted one byte into the middle record: the records before it are
     // whole, the middle one is torn.
     let k = whole.records.len() / 2;
     let cut = starts[k] + 1;
     for other in ["windows-interrupted-6", "windows-interrupted-1.recovered"] {
         let foreign = unpack(other);
-        let there = std::fs::read(&foreign).expect("read the other capture");
+        let there = common::snapshot_image(&foreign).expect("snapshot the other capture");
         assert_eq!(
             there.len() as u64,
             whole.size,
@@ -1479,9 +1482,13 @@ fn resuming_one_windows_captures_archive_against_another_is_refused() {
             panic!("no whole record of the {name} archive holds a byte {other} differs in")
         });
         let archive = common::temp_image_path("rescue_foreign_cut");
-        new_file(&archive)
-            .write_all(&bytes[..cut as usize])
-            .expect("write the interrupted archive");
+        bytes.copy_to(&archive);
+        OpenOptions::new()
+            .write(true)
+            .open(&archive)
+            .unwrap()
+            .set_len(cut)
+            .unwrap();
         let before = file_sha256(&archive);
         let mut source = FileSource::open(Path::new(&foreign)).unwrap();
         let mut out = OpenOptions::new()

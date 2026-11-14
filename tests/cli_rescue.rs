@@ -8,6 +8,7 @@
 
 mod common;
 
+use std::io::{Seek, SeekFrom};
 use std::path::Path;
 use std::process::Command;
 
@@ -36,20 +37,21 @@ fn image(tag: &str, lead: u64) -> String {
     let mut dev = fs_ntfs::block_io::PathIo::open_rw(Path::new(&volume)).unwrap();
     fs_ntfs::mkfs::format_filesystem(&mut dev, VOL, 4096, 4096, None, Some(1)).unwrap();
     drop(dev);
-    let mut bytes = vec![0u8; lead as usize];
-    bytes.extend(std::fs::read(&volume).expect("read volume"));
-    std::fs::write(&img, bytes).expect("write image");
+    let mut output = std::fs::File::create(&img).expect("create image");
+    output.set_len(lead + VOL).expect("size image");
+    output
+        .seek(SeekFrom::Start(lead))
+        .expect("seek volume offset");
+    std::io::copy(&mut std::fs::File::open(&volume).unwrap(), &mut output).expect("copy volume");
     let _ = std::fs::remove_file(&volume);
     img
 }
 
-fn exported(archive: &str) -> Vec<u8> {
+fn exported(archive: &str) -> String {
     let out = format!("{archive}.img");
     let _ = std::fs::remove_file(&out);
     fs_ntfs::rescue::export_to_path(Path::new(archive), Path::new(&out)).expect("export");
-    let bytes = std::fs::read(&out).expect("read export");
-    let _ = std::fs::remove_file(&out);
-    bytes
+    out
 }
 
 fn fresh_archive(tag: &str) -> String {
@@ -74,7 +76,7 @@ fn a_rescue_reports_a_complete_archive_of_the_source() {
     let allocated = classes["allocated"]["archived"].as_u64().unwrap();
     let free = classes["free"]["archived"].as_u64().unwrap();
     assert!(allocated > 0 && free > 0, "{report}");
-    assert_eq!(exported(&archive), std::fs::read(&img).unwrap());
+    common::assert_images_equal(exported(&archive), &img, "image contents");
 }
 
 #[test]
@@ -82,20 +84,20 @@ fn a_second_rescue_without_resume_refuses_and_changes_nothing() {
     let img = image("refuse", 0);
     let archive = fresh_archive("refuse");
     assert_eq!(fs(&[&img, "rescue", &archive]).0, 0);
-    let source_before = std::fs::read(&img).unwrap();
-    let archive_before = std::fs::read(&archive).unwrap();
+    let source_before = common::snapshot_image(&img).unwrap();
+    let archive_before = common::snapshot_image(&archive).unwrap();
 
     let (code, report, stderr) = fs(&[&img, "rescue", &archive]);
     assert_eq!(code, 1, "{report} {stderr}");
     assert!(stderr.contains("--resume"), "{stderr}");
-    assert_eq!(std::fs::read(&img).unwrap(), source_before);
-    assert_eq!(std::fs::read(&archive).unwrap(), archive_before);
+    common::assert_images_equal(&img, source_before.path(), "image contents");
+    common::assert_images_equal(&archive, archive_before.path(), "image contents");
 
     let (code, report, stderr) = fs(&[&img, "rescue", &archive, "--resume"]);
     assert_eq!(code, 0, "{report} {stderr}");
     assert_eq!(report["complete"], true, "{report}");
     assert_eq!(report["resumed"], true, "{report}");
-    assert_eq!(exported(&archive), source_before);
+    common::assert_images_equal(exported(&archive), source_before.path(), "image contents");
 }
 
 #[test]
@@ -112,14 +114,14 @@ fn every_refusal_exits_non_zero_and_creates_no_archive() {
     );
 
     let img = image("resume_none", 0);
-    let source_before = std::fs::read(&img).unwrap();
+    let source_before = common::snapshot_image(&img).unwrap();
     let (code, _, stderr) = fs(&[&img, "rescue", &archive, "--resume"]);
     assert_eq!(code, 1, "{stderr}");
     assert!(
         !Path::new(&archive).exists(),
         "a refused resume made an archive"
     );
-    assert_eq!(std::fs::read(&img).unwrap(), source_before);
+    common::assert_images_equal(&img, source_before.path(), "image contents");
 }
 
 #[test]
@@ -133,8 +135,10 @@ fn offset_rescues_the_partition_inside_a_whole_disk() {
     assert_eq!(report["complete"], true, "{report}");
     assert_eq!(report["source_size"], VOL, "{report}");
     assert_eq!(report["offset"], PARTITION, "{report}");
-    let whole = std::fs::read(&img).unwrap();
-    assert_eq!(exported(&archive), whole[PARTITION as usize..]);
+    assert_eq!(
+        common::image_digest(exported(&archive)).unwrap(),
+        common::image_digest_from(&img, PARTITION).unwrap()
+    );
 }
 
 /// The CLI contract's `fs.<fs>` statuses (diskjockey docs/cli-tooling-design.md):

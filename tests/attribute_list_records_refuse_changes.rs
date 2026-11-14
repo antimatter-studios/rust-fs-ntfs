@@ -33,9 +33,8 @@ fn refused<V: std::fmt::Debug>(what: &str, got: Result<V, Error>) {
     }
 }
 
-fn unchanged(img: &str, before: &[u8]) {
-    let after = std::fs::read(img).expect("read image");
-    let first = before.iter().zip(&after).position(|(a, b)| a != b);
+fn unchanged(img: &str, before: &common::ImageSnapshot) {
+    let first = common::first_image_difference(before.path(), img).expect("compare images");
     assert!(
         first.is_none(),
         "a refused write changed the image, first at byte {first:?}"
@@ -108,7 +107,7 @@ fn adding_an_attribute_the_list_does_not_follow_is_refused() {
     sparse[..8].copy_from_slice(b"sparse!!");
     write::write_sparse_file_io(&mut io, "/f", &sparse).expect("make /f's unnamed stream sparse");
     <PathIo as BlockIo>::sync(&mut io).expect("sync");
-    let before = std::fs::read(&img).expect("read image");
+    let before = common::snapshot_image(&img).expect("snapshot image");
     refused(
         "rewrite a sparse unnamed stream plain",
         write::write_file_contents_io(&mut io, "/f", b"plain"),

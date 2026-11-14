@@ -266,9 +266,12 @@ fn a_copy_repair_that_fails_while_copying_leaves_no_target_and_a_retry_succeeds(
         directory.join("plan"),
         directory.join("target"),
     );
-    let mut pristine = vec![0u8; 3 << 20];
-    pristine[SERIAL_OFFSET..SERIAL_OFFSET + 8].copy_from_slice(&SERIAL.to_le_bytes());
-    std::fs::write(&source, &pristine).unwrap();
+    std::fs::File::create(&source)
+        .unwrap()
+        .set_len(3 << 20)
+        .unwrap();
+    common::write_image_region(&source, SERIAL_OFFSET as u64, &SERIAL.to_le_bytes()).unwrap();
+    let pristine = common::snapshot_image(&source).unwrap();
     let plan = SavedPlan {
         source_size: pristine.len() as u64,
         volume_serial: SERIAL,
@@ -320,20 +323,17 @@ fn a_copy_repair_that_fails_while_copying_leaves_no_target_and_a_retry_succeeds(
         "a copy that failed left another name beside the target"
     );
     assert!(
-        std::fs::read(&source).unwrap() == pristine,
+        pristine.matches(&source),
         "a copy that failed changed its source"
     );
 
     copy_repair(&plan, &source, &target)
         .unwrap_or_else(|e| panic!("the retry of a copy that failed: {e}"));
-    assert!(
-        std::fs::read(&target).unwrap() == holding(pristine.clone(), &[&plan.units[0].writes[0]]),
-        "the retry's target holds other bytes than the source with the unit applied"
-    );
-    assert!(
-        std::fs::read(&source).unwrap() == pristine,
-        "the retry changed its source"
-    );
+    let mut expected = pristine.clone();
+    let write = &plan.units[0].writes[0];
+    expected.write(write.offset as usize, &write.after);
+    common::assert_images_equal(&target, expected.path(), "image contents");
+    assert!(pristine.matches(&source), "the retry changed its source");
     assert_eq!(
         names_in(&directory),
         ["plan", "source", "target"],

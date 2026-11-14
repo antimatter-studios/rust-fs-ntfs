@@ -335,13 +335,13 @@ fn a_second_file_is_refused_an_object_id_windows_indexed_past_the_root() {
         .map(|(path, _)| path.clone())
         .expect("every workload file has an object id");
 
-    let before = std::fs::read(&img).unwrap();
+    let before = common::snapshot_image(&img).expect("snapshot image");
     let err = fs_ntfs::write::write_object_id(Path::new(&img), &other, &id).unwrap_err();
     assert!(
         err.to_string().contains("already has that object id"),
         "{err}"
     );
-    assert!(std::fs::read(&img).unwrap() == before, "the refusal wrote");
+    assert!(before.matches(&img), "the refusal wrote");
 }
 
 /// A volume formatted here has empty roots. Entries put in fill each root,

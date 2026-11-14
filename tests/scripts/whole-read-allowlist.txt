@@ -1,0 +1,9 @@
+# Exact path:line:call # reason; only files smaller than 1 MiB by construction belong here.
+src/cli/ntfs/device.rs:186:std::fs::read(&file) # The rehearsal source is exactly 4096 generated pattern bytes.
+src/rescue.rs:1543:std::fs::read(&at) # The archive holds a 64 KiB Sectored source plus fixed-size framing, below 70 KiB.
+src/rescue.rs:1555:std::fs::read(&at) # The refused archive is the same bounded archive, below 70 KiB.
+tests/repair_journal_location.rs:157:std::fs::read(&taken) # The destination is seeded with the fixed 20-byte string "someone else's bytes".
+tests/repair_plan_copy.rs:395:std::fs::read(&source) # This test's source_bytes() builds exactly SIZE = 4096 bytes.
+tests/repair_plan_copy.rs:401:std::fs::read(&target) # The copy-repair uses a SIZE = 4096 byte source and only in-bounds four-byte writes.
+tests/rescue_export.rs:179:fs::read(&image) # The refused destination is the fixed 12-byte string "already here".
+tests/rescue_scan.rs:574:std::fs::read(&existing) # The refused destination is the fixed 14-byte string "not an archive".

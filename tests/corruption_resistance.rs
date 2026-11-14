@@ -39,11 +39,11 @@ fn fresh_vol(tag: &str) -> String {
     dst
 }
 
-fn read_all(img: &str) -> Vec<u8> {
-    std::fs::read(img).expect("read image")
+fn read_boot(img: &str) -> Vec<u8> {
+    common::read_image_region(img, 0, 512).expect("read boot sector")
 }
-fn write_all(img: &str, bytes: &[u8]) {
-    std::fs::write(img, bytes).expect("write image");
+fn write_boot(img: &str, bytes: &[u8]) {
+    common::write_image_region(img, 0, bytes).expect("write boot sector");
 }
 
 /// Mount and exercise basic reads; returns Ok(()) if it completed (whether
@@ -74,9 +74,9 @@ fn mount_and_probe_caught(img: &str) -> Result<(), ()> {
 #[test]
 fn non_power_of_two_sectors_per_cluster_rejected() {
     let img = fresh_vol("npot_spc");
-    let mut bytes = read_all(&img);
+    let mut bytes = read_boot(&img);
     bytes[0x0D] = 3; // sectors_per_cluster = 3 (not a power of two)
-    write_all(&img, &bytes);
+    write_boot(&img, &bytes);
     assert!(
         Filesystem::mount(&img).is_err(),
         "mount must reject a non-power-of-two cluster geometry"
@@ -86,10 +86,10 @@ fn non_power_of_two_sectors_per_cluster_rejected() {
 #[test]
 fn zero_bytes_per_sector_rejected() {
     let img = fresh_vol("zero_bps");
-    let mut bytes = read_all(&img);
+    let mut bytes = read_boot(&img);
     bytes[0x0B] = 0;
     bytes[0x0C] = 0; // bytes_per_sector = 0
-    write_all(&img, &bytes);
+    write_boot(&img, &bytes);
     assert!(
         Filesystem::mount(&img).is_err(),
         "mount must reject bytes_per_sector = 0"
@@ -103,11 +103,11 @@ fn zero_bytes_per_sector_rejected() {
 #[test]
 fn wiped_boot_sector_resistance_no_panic() {
     let img = fresh_vol("wipe_boot");
-    let mut bytes = read_all(&img);
+    let mut bytes = read_boot(&img);
     for b in &mut bytes[0..512] {
         *b = 0;
     }
-    write_all(&img, &bytes);
+    write_boot(&img, &bytes);
     assert!(
         mount_and_probe_caught(&img).is_ok(),
         "wiped boot sector must not panic"
@@ -117,7 +117,8 @@ fn wiped_boot_sector_resistance_no_panic() {
 #[test]
 fn corrupt_mft_magic_does_not_panic() {
     let img = fresh_vol("mft_magic");
-    let mut bytes = read_all(&img);
+    let bytes = read_boot(&img);
+    let image_len = std::fs::metadata(&img).unwrap().len() as usize;
     // MFT byte offset = mft_lcn * cluster_size. mft_lcn is u64 LE at 0x30.
     let mft_lcn = u64::from_le_bytes(bytes[0x30..0x38].try_into().unwrap());
     let mft_off = (mft_lcn * CLUSTER as u64) as usize;
@@ -125,12 +126,11 @@ fn corrupt_mft_magic_does_not_panic() {
     // corruption below would be silently skipped and the test would prove
     // nothing (it'd just mount a pristine volume).
     assert!(
-        mft_off + 4 <= bytes.len(),
+        mft_off + 4 <= image_len,
         "MFT offset {mft_off} outside image ({}); test would be vacuous",
-        bytes.len()
+        image_len
     );
-    bytes[mft_off..mft_off + 4].copy_from_slice(b"XXXX"); // clobber "FILE"
-    write_all(&img, &bytes);
+    common::write_image_region(&img, mft_off as u64, b"XXXX").unwrap();
     assert!(
         mount_and_probe_caught(&img).is_ok(),
         "corrupt $MFT magic must not panic"
@@ -140,8 +140,12 @@ fn corrupt_mft_magic_does_not_panic() {
 #[test]
 fn truncated_image_resistance_no_panic() {
     let img = fresh_vol("trunc");
-    let bytes = read_all(&img);
-    write_all(&img, &bytes[..bytes.len() / 2]); // chop the image in half
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&img)
+        .unwrap()
+        .set_len(VOL_SIZE / 2)
+        .unwrap();
     assert!(
         mount_and_probe_caught(&img).is_ok(),
         "truncated image must not panic"
@@ -151,21 +155,19 @@ fn truncated_image_resistance_no_panic() {
 #[test]
 fn zeroed_mft_region_does_not_panic() {
     let img = fresh_vol("zero_mft");
-    let mut bytes = read_all(&img);
+    let bytes = read_boot(&img);
+    let image_len = std::fs::metadata(&img).unwrap().len() as usize;
     let mft_lcn = u64::from_le_bytes(bytes[0x30..0x38].try_into().unwrap());
     let mft_off = (mft_lcn * CLUSTER as u64) as usize;
-    let end = (mft_off + 64 * 1024).min(bytes.len());
+    let end = (mft_off + 64 * 1024).min(image_len);
     // Fail loudly rather than silently skip — otherwise a pristine volume
     // would be tested and the invariant would go unverified.
     assert!(
         mft_off < end,
         "MFT offset {mft_off} outside image ({}); test would be vacuous",
-        bytes.len()
+        image_len
     );
-    for b in &mut bytes[mft_off..end] {
-        *b = 0;
-    }
-    write_all(&img, &bytes);
+    common::write_image_region(&img, mft_off as u64, &vec![0; end - mft_off]).unwrap();
     assert!(
         mount_and_probe_caught(&img).is_ok(),
         "zeroed MFT region must not panic"
