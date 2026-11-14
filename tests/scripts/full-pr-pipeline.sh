@@ -45,8 +45,12 @@ def validate(configuration):
         for job_name, job in workflow["jobs"].items():
             if name == "ci.yml" and job_name == "box-cache":
                 continue
+            # !cancelled() is a lifecycle gate, not a filter: the job runs
+            # after a failed dependency (always() does too) and is skipped
+            # only when the run itself was cancelled. Anything narrower fails.
             require(job.get("if") in (
-                None, "always()", "needs.changes.outputs.code == 'true'",
+                None, "always()", "${{ !cancelled() }}",
+                "needs.changes.outputs.code == 'true'",
                 "needs.changes.outputs.mkfs == 'true'",
             ), f"{name}/{job_name}: validation job has an unexpected gate")
             for step in job.get("steps", []):
@@ -75,7 +79,8 @@ def validate(configuration):
 validate(workflows)
 rejected = 0
 for mutation in ("missing-trigger", "path-filter", "branch-filter", "job-gate", "step-gate",
-                 "windows-filter", "missing-fixtures", "missing-platform"):
+                 "lifecycle-gate-narrowed", "windows-filter", "missing-fixtures",
+                 "missing-platform"):
     changed = copy.deepcopy(workflows)
     jobs = changed["ci.yml"]["jobs"]
     if mutation == "missing-trigger":
@@ -86,6 +91,9 @@ for mutation in ("missing-trigger", "path-filter", "branch-filter", "job-gate", 
         changed["ci.yml"]["on"]["pull_request"] = {"branches": ["main"]}
     elif mutation == "job-gate":
         jobs["integration"]["if"] = "github.event_name != 'pull_request'"
+    elif mutation == "lifecycle-gate-narrowed":
+        changed["slate-oracle.yml"]["jobs"]["slate-writes-windows"]["if"] = (
+            "${{ !cancelled() && github.event_name != 'pull_request' }}")
     elif mutation == "step-gate":
         jobs["test"]["steps"][0]["if"] = "github.event_name != 'pull_request'"
     elif mutation == "windows-filter":
