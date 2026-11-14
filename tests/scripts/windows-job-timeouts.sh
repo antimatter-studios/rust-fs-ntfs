@@ -33,7 +33,7 @@ jobs_of() {
             job = $1; sub(/:$/, "", job); win = 0; limit = ""
             next
         }
-        in_jobs && job != "" && /^    runs-on:.*windows/ { win = 1 }
+        in_jobs && job != "" && /^    runs-on:.*windows-(latest|20[0-9][0-9])/ { win = 1 }
         in_jobs && job != "" && /^    timeout-minutes:[[:space:]]*[0-9]+[[:space:]]*$/ {
             limit = $2
         }
@@ -103,6 +103,9 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps: []
+  gated:
+    runs-on: ${{ fromJSON(needs.windows-native-read-fixtures.outputs.runners || '{}')['gated'] || 'ubuntu-24.04' }}
+    steps: []
   hung:
     name: a Windows job
     runs-on: windows-latest
@@ -110,7 +113,7 @@ jobs:
       - run: |
           timeout-minutes: 5
 EOF
-if [ "$(unbounded_windows_jobs "$sandbox/unbounded.yml")" = hung ]; then ok; else bad "an unbounded Windows job was not caught (a step's text must not count as the job's bound)"; fi
+if [ "$(unbounded_windows_jobs "$sandbox/unbounded.yml")" = hung ]; then ok; else bad "an unbounded Windows job was not caught, or a Linux job whose runner comes from a Windows job's output was taken for a Windows job"; fi
 sed 's/^    name: a Windows job$/    timeout-minutes: 30/' "$sandbox/unbounded.yml" > "$sandbox/bounded.yml"
 if [ -z "$(unbounded_windows_jobs "$sandbox/bounded.yml")" ]; then ok; else bad "a bounded Windows job was reported as unbounded"; fi
 

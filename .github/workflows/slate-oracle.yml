@@ -51,6 +51,8 @@ jobs:
     name: Windows formats and chkdsk grades the cases
     needs: writer-cases
     runs-on: windows-latest
+    outputs:
+      runners: ${{ steps.runners.outputs.runners || '{}' }}
     # Seven 256 MiB images, two Windows formats and seven read-only chkdsk
     # passes. A bound, so a hung mount fails by name (#388).
     timeout-minutes: 30
@@ -105,13 +107,46 @@ jobs:
             tmp/slate-oracle/windows-read-diag/
           if-no-files-found: error
           retention-days: 7
+      - name: Pick runners
+        id: runners
+        shell: bash
+        env:
+          ORG: ${{ github.repository_owner }}
+          ACTOR: ${{ github.triggering_actor }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          SENDER: ${{ github.event.sender.login }}
+          GH_ACTOR: ${{ github.actor }}
+          JOBS: slate-check
+        run: |
+          set -euo pipefail
+          ours=true
+          for who in "$ACTOR" "$GH_ACTOR" "$SENDER" "$AUTHOR"; do
+            [ -z "$who" ] || [ "$who" = christhomas ] || ours=false
+          done
+          pick() {
+            $ours || { echo ubuntu-24.04; return; }
+            r=$(curl -fsS --max-time 10 --get https://runner-gate.antimatter-studios.com/pick \
+                  --data-urlencode "org=$ORG" --data-urlencode prefer=antimatter-vps-linux-x64 \
+                  --data-urlencode fallback=ubuntu-24.04 --data-urlencode "actor=$ACTOR" --data-urlencode "author=$AUTHOR" \
+                  --data-urlencode "run=${{ github.run_id }}" --data-urlencode "attempt=${{ github.run_attempt }}" \
+                  --data-urlencode "job=$1") || r=ubuntu-24.04
+            case "$r" in antimatter-vps-linux-x64|ubuntu-24.04) echo "$r" ;; *) echo ubuntu-24.04 ;; esac
+          }
+          runners='{}'
+          for job in $JOBS; do runners=$(jq -c --arg j "$job" --arg r "$(pick "$job")" '. + {($j): $r}' <<<"$runners"); done
+          echo "$runners" | jq . | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "runners=$runners" >> "$GITHUB_OUTPUT"
   slate-check:
     name: Slate checks the same bytes
-    needs: windows-cases
-    runs-on: ubuntu-latest
+    needs: [writer-cases, windows-cases]
+    runs-on: ${{ fromJSON(needs.windows-cases.outputs.runners || '{}')['slate-check'] || 'ubuntu-24.04' }}
     timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.95.0

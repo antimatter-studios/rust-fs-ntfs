@@ -25,10 +25,15 @@ permissions:
 jobs:
   interrupted-bootstrap:
     name: interrupted fixture bootstrap guard
-    runs-on: ubuntu-latest
+    needs: changes
+    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['interrupted-bootstrap'] || 'ubuntu-24.04' }}
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
+      - name: Install PowerShell
+        uses: ./.github/actions/user-tools
+        with:
+          tools: pwsh
       - run: python3 scripts/check-interrupted-bootstrap.py
       - run: python3 tests/interrupted_bootstrap_guard.py
       - name: Fetch the original fixture blobs for byte preservation checks
@@ -42,10 +47,15 @@ jobs:
 
   python-abi:
     name: Python ctypes client over the shared C ABI
-    runs-on: ubuntu-latest
+    needs: changes
+    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['python-abi'] || 'ubuntu-24.04' }}
     timeout-minutes: 15
+    env:
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - name: The aggregate gate requires every Python oracle job
         run: python3 -m unittest -v tests/python/test_ci_gate.py
       - name: The fsutil record binding refuses a wrong image or revision
@@ -81,11 +91,15 @@ jobs:
   # volume it formatted, bound to that image's SHA-256.
   python-volume-info-windows:
     name: Python volume info matches Windows fsutil
-    needs: [windows-native-read-fixtures]
-    runs-on: ubuntu-latest
+    needs: [changes, windows-native-read-fixtures]
+    runs-on: ${{ fromJSON(needs.windows-native-read-fixtures.outputs.runners || '{}')['python-volume-info-windows'] || 'ubuntu-24.04' }}
     timeout-minutes: 15
+    env:
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
@@ -118,7 +132,8 @@ jobs:
 
   readonly-file-name:
     name: focused readonly FILE_NAME regression
-    runs-on: ubuntu-latest
+    needs: changes
+    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['readonly-file-name'] || 'ubuntu-24.04' }}
     timeout-minutes: 15
     env:
       CARGO_BUILD_JOBS: 2
@@ -131,6 +146,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install Linux build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - name: Record and verify the exact source head
         run: |
           mkdir -p tmp/logs
@@ -174,9 +191,11 @@ jobs:
 
   test:
     name: test-${{ matrix.os }}
-    runs-on: ${{ matrix.os == 'ubuntu-latest' && 'antimatter-vps-linux-x64' || matrix.os }}
-    # Every pull request runs all three platforms. Only a push to main uses
-    # the quick Linux checks, after the merge queue validated the full tree.
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && (fromJSON(needs.changes.outputs.runners)['test-ubuntu-latest'] || 'ubuntu-24.04') || matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: 2
+    # Every pull request runs both Linux architectures and the Darwin build below.
+    # Only a push to main uses quick Linux checks, after the queue validated the tree.
     needs: changes
     strategy:
       fail-fast: false
@@ -184,18 +203,20 @@ jobs:
         # ubuntu-24.04-arm is native ARM64, not a cross-check: `c_char` is
         # `u8` on aarch64 Linux and `i8` on x86_64 and macOS, so a lint
         # about a C-ABI pointer cast can fail on one and not the other (#268).
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
-        exclude: ${{ fromJSON(needs.changes.outputs.code == 'false' && '[{"os":"ubuntu-24.04-arm"},{"os":"macos-latest"}]' || '[]') }}
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        exclude: ${{ fromJSON(needs.changes.outputs.code == 'false' && '[{"os":"ubuntu-24.04-arm"}]' || '[]') }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential gh shellcheck python3-yaml
       # Tools come from scripts/install-user-tools.sh, the script developers
       # run as `chore tools`, so CI and a developer's machine set up the same
-      # way. It installs nothing as root: the self-hosted runners cannot sudo.
+      # way. PowerShell and chore use the existing cached user installation.
       # What a runner already has is left alone, and the rest is cached.
       - name: tools, without root
         uses: ./.github/actions/user-tools
         with:
-          tools: ${{ matrix.os == 'ubuntu-latest' && 'chore pwsh ntfs-3g pyyaml cc' || 'chore' }}
+          tools: ${{ matrix.os == 'ubuntu-latest' && 'chore pwsh ntfs-3g pyyaml' || 'chore' }}
       - name: check out sibling repos
         # Replaces `submodules: recursive`. The pins live in chores.yml,
         # so CI and a developer's machine read the same declaration
@@ -285,7 +306,7 @@ jobs:
       # hook. Lint output is NOT deterministic across architectures: the
       # C-ABI `*mut c_char` casts are redundant exactly where `c_char` is
       # `u8`, so ubuntu-latest alone passed while aarch64 failed (#268).
-      # Run it on both Linux architectures; macOS adds nothing x86 lacks.
+      # Run it on both Linux architectures; Darwin is cross-built below.
       - name: cargo clippy
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm'
         run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness -- -D warnings
@@ -390,8 +411,8 @@ jobs:
       # measurement so ordinary churn does not trip them, and they move UP
       # with the suite and never down.
       #
-      # `awk '{s+=$4}'` rather than `bc`: this job runs on macOS too, and the
-      # sibling crates run the same shape on windows-latest where the default
+      # `awk '{s+=$4}'` rather than `bc`: sibling crates run the same shape
+      # on windows-latest where the default
       # shell is pwsh. Keep it POSIX and keep it in one pipeline.
       #
       # EACH RUN IS A QUIET TIER. `../rust-fs-core/scripts/tier.sh <tier> -- cargo test ...`
@@ -575,7 +596,7 @@ jobs:
       # absent from Cargo.toml.
       #
       # Declared as an `env:` mapping rather than inline as
-      # `VAR=1 cargo test`. This job's matrix is ubuntu + macos, so the
+      # `VAR=1 cargo test`. This job's matrix is Linux, so the
       # inline form would work here; the mapping is what the
       # cross-platform siblings require, because an inline prefix is a
       # PowerShell syntax error on windows-latest. The guard reads both
@@ -614,6 +635,25 @@ jobs:
           name: test-logs-${{ matrix.os }}
           path: tmp/logs/
           if-no-files-found: ignore
+
+  darwin-cross:
+    name: cross-build aarch64-apple-darwin
+    needs: changes
+    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['darwin-cross'] || 'ubuntu-24.04' }}
+    timeout-minutes: 15
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - name: Install the Darwin target
+        run: rustup target add aarch64-apple-darwin
+      - name: Build the Darwin library
+        run: cargo build --locked --release --lib --target aarch64-apple-darwin
 
   op-sequence-chkdsk:
     name: Windows chkdsk grades retained operation samples
@@ -690,6 +730,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
+    outputs:
+      runners: ${{ steps.runners.outputs.runners || '{}' }}
     # The expanded producer took 14m46s in run 39483906221 and exceeded the
     # old 15-minute limit in run 39540070558 (#1156). Run 43228476645 then hit
     # the 30-minute limit at step 28 of 34. Allow cold Rust builds and every
@@ -1101,6 +1143,35 @@ jobs:
             test-disks/usn-measure-*.img
           if-no-files-found: warn
           retention-days: 7
+      - name: Pick runners
+        id: runners
+        shell: bash
+        env:
+          ORG: ${{ github.repository_owner }}
+          ACTOR: ${{ github.triggering_actor }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          SENDER: ${{ github.event.sender.login }}
+          GH_ACTOR: ${{ github.actor }}
+          JOBS: python-volume-info-windows
+        run: |
+          set -euo pipefail
+          ours=true
+          for who in "$ACTOR" "$GH_ACTOR" "$SENDER" "$AUTHOR"; do
+            [ -z "$who" ] || [ "$who" = christhomas ] || ours=false
+          done
+          pick() {
+            $ours || { echo ubuntu-24.04; return; }
+            r=$(curl -fsS --max-time 10 --get https://runner-gate.antimatter-studios.com/pick \
+                  --data-urlencode "org=$ORG" --data-urlencode prefer=antimatter-vps-linux-x64 \
+                  --data-urlencode fallback=ubuntu-24.04 --data-urlencode "actor=$ACTOR" --data-urlencode "author=$AUTHOR" \
+                  --data-urlencode "run=${{ github.run_id }}" --data-urlencode "attempt=${{ github.run_attempt }}" \
+                  --data-urlencode "job=$1") || r=ubuntu-24.04
+            case "$r" in antimatter-vps-linux-x64|ubuntu-24.04) echo "$r" ;; *) echo ubuntu-24.04 ;; esac
+          }
+          runners='{}'
+          for job in $JOBS; do runners=$(jq -c --arg j "$job" --arg r "$(pick "$job")" '. + {($j): $r}' <<<"$runners"); done
+          echo "$runners" | jq . | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "runners=$runners" >> "$GITHUB_OUTPUT"
 
   # Full integration suite — every unit AND integration test, with the
   # read-path .img fixtures generated on the runner via ntfs-3g/mkntfs.
@@ -1113,10 +1184,17 @@ jobs:
   # against real ntfs-3g-authored images.
   integration:
     name: full test suite (fixtures + integration)
-    runs-on: ubuntu-latest
-    needs: [windows-native-read-fixtures]
+    # Hosted only: it mounts images with ntfs-3g through FUSE, which the
+    # unprivileged antimatter-vps pods cannot open (/dev/fuse: Operation not
+    # permitted, merge-group run 43569142215).
+    runs-on: ubuntu-24.04
+    needs: [changes, windows-native-read-fixtures]
+    env:
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - name: check out sibling repos
         # Replaces `submodules: recursive`. The pins live in chores.yml,
         # so CI and a developer's machine read the same declaration
@@ -1322,7 +1400,7 @@ jobs:
   # name, so `unit tests` was what branch protection required and what a
   # reviewer read. It is not the unit tests -- those are the `test`
   # matrix above, reporting as test-ubuntu-latest, test-ubuntu-24.04-arm
-  # and test-macos-latest. A green `unit tests` tick here would have
+  # and the Darwin cross-build. A green `unit tests` tick here would have
   # stayed green with the cargo invocation below deleted.
   #
   # `(advisory)` is in the name on purpose, and it is the part to keep.
@@ -1345,7 +1423,7 @@ jobs:
     name: unit tests under ASan (nightly toolchain, advisory)
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['asan'] || 'ubuntu-24.04' }}
     # ADVISORY, DECLARED (#409). ci-ok does not need this job, by decision: a
     # pinned nightly can break independently of stable. Job-level
     # continue-on-error is how that decision is written down where a check
@@ -1357,6 +1435,7 @@ jobs:
     # Only the toolchain install step tolerates failure inside the job.
     continue-on-error: true
     env:
+      CARGO_BUILD_JOBS: 2
       # PINNED, like every other toolchain in both workflows. It floated on
       # `@nightly` while the rest pin 1.95.0, and combined with the old
       # blanket continue-on-error a nightly that stopped building this
@@ -1365,6 +1444,8 @@ jobs:
       ASAN_TOOLCHAIN: nightly-2026-09-01
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - name: check out sibling repos
         # Replaces `submodules: recursive`. The pins live in chores.yml,
         # so CI and a developer's machine read the same declaration
@@ -1508,6 +1589,7 @@ jobs:
     outputs:
       mkfs: ${{ steps.code.outputs.code }}
       code: ${{ steps.code.outputs.code }}
+      runners: ${{ steps.runners.outputs.runners || '{}' }}
     steps:
       - uses: actions/checkout@v4
       - id: code
@@ -1515,10 +1597,40 @@ jobs:
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
         run: bash scripts/ci-plan.sh
+      - name: Pick runners
+        id: runners
+        env:
+          ORG: ${{ github.repository_owner }}
+          ACTOR: ${{ github.triggering_actor }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          SENDER: ${{ github.event.sender.login }}
+          GH_ACTOR: ${{ github.actor }}
+          JOBS: interrupted-bootstrap python-abi readonly-file-name test-ubuntu-latest darwin-cross asan semver
+        run: |
+          set -euo pipefail
+          ours=true
+          for who in "$ACTOR" "$GH_ACTOR" "$SENDER" "$AUTHOR"; do
+            [ -z "$who" ] || [ "$who" = christhomas ] || ours=false
+          done
+          pick() {
+            $ours || { echo ubuntu-24.04; return; }
+            r=$(curl -fsS --max-time 10 --get https://runner-gate.antimatter-studios.com/pick \
+                  --data-urlencode "org=$ORG" --data-urlencode prefer=antimatter-vps-linux-x64 \
+                  --data-urlencode fallback=ubuntu-24.04 --data-urlencode "actor=$ACTOR" --data-urlencode "author=$AUTHOR" \
+                  --data-urlencode "run=${{ github.run_id }}" --data-urlencode "attempt=${{ github.run_attempt }}" \
+                  --data-urlencode "job=$1") || r=ubuntu-24.04
+            case "$r" in antimatter-vps-linux-x64|ubuntu-24.04) echo "$r" ;; *) echo ubuntu-24.04 ;; esac
+          }
+          runners='{}'
+          for job in $JOBS; do runners=$(jq -c --arg j "$job" --arg r "$(pick "$job")" '. + {($j): $r}' <<<"$runners"); done
+          echo "$runners" | jq . | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "runners=$runners" >> "$GITHUB_OUTPUT"
 
   validate-mkfs-windows-run:
     name: Windows chkdsk execution
     runs-on: windows-latest
+    outputs:
+      runners: ${{ steps.runners.outputs.runners || '{}' }}
     # Run 43117610604 hit the 85-minute limit with the CLI matrix still
     # progressing (last heartbeat: 26/34 complete), without a failed scenario.
     # Earlier steps took 69.6 minutes before CLI validation started. Budget
@@ -2132,6 +2244,35 @@ jobs:
           chkdsk_after_outcome: ${{ steps.chkdsk_after.outcome }}
           chkdsk_after_exit: ${{ steps.chkdsk_after.outputs.scan_exit }}
           seal_outcome: ${{ steps.seal.outcome }}
+      - name: Pick runners
+        id: runners
+        shell: bash
+        env:
+          ORG: ${{ github.repository_owner }}
+          ACTOR: ${{ github.triggering_actor }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          SENDER: ${{ github.event.sender.login }}
+          GH_ACTOR: ${{ github.actor }}
+          JOBS: validate-mkfs-windows
+        run: |
+          set -euo pipefail
+          ours=true
+          for who in "$ACTOR" "$GH_ACTOR" "$SENDER" "$AUTHOR"; do
+            [ -z "$who" ] || [ "$who" = christhomas ] || ours=false
+          done
+          pick() {
+            $ours || { echo ubuntu-24.04; return; }
+            r=$(curl -fsS --max-time 10 --get https://runner-gate.antimatter-studios.com/pick \
+                  --data-urlencode "org=$ORG" --data-urlencode prefer=antimatter-vps-linux-x64 \
+                  --data-urlencode fallback=ubuntu-24.04 --data-urlencode "actor=$ACTOR" --data-urlencode "author=$AUTHOR" \
+                  --data-urlencode "run=${{ github.run_id }}" --data-urlencode "attempt=${{ github.run_attempt }}" \
+                  --data-urlencode "job=$1") || r=ubuntu-24.04
+            case "$r" in antimatter-vps-linux-x64|ubuntu-24.04) echo "$r" ;; *) echo ubuntu-24.04 ;; esac
+          }
+          runners='{}'
+          for job in $JOBS; do runners=$(jq -c --arg j "$job" --arg r "$(pick "$job")" '. + {($j): $r}' <<<"$runners"); done
+          echo "$runners" | jq . | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "runners=$runners" >> "$GITHUB_OUTPUT"
 
   # THE COMMAND-LINE TOOLS, AS INSTALLED. The multi-call binary is built in
   # release mode and staged by `chore cli:install` under every name it
@@ -2153,12 +2294,19 @@ jobs:
   # reported (tests/cli-oracle/).
   cli:
     name: cli (the installed tools, on PATH)
-    runs-on: ubuntu-latest
+    # Hosted only: its man-page checks need a real `man`; the antimatter-vps
+    # image is minimized and `man -w` answers with the minimization notice
+    # (merge-group run 43569142215).
+    runs-on: ubuntu-24.04
     # The Windows-authored volumes are the oracle for the read verbs
     # (tests/cli-oracle/); only a Windows runner can make them.
-    needs: [windows-native-read-fixtures]
+    needs: [changes, windows-native-read-fixtures]
+    env:
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - name: Install chore and check out sibling repos
         shell: bash
         run: |
@@ -2336,9 +2484,11 @@ jobs:
     # on crates.io, refusing a break the version in Cargo.toml does not
     # declare (#399). No fixtures, no VM -- only the registry.
     name: semver (public API against crates.io)
-    runs-on: ubuntu-latest
+    needs: changes
+    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['semver'] || 'ubuntu-24.04' }}
     timeout-minutes: 30
     env:
+      CARGO_BUILD_JOBS: 2
       # The version ../rust-fs-core/scripts/semver-check.sh expects. A prebuilt binary,
       # checksum-verified by the action, rather than a ten-minute build.
       CARGO_SEMVER_CHECKS_VERSION: "0.50.0"
@@ -2347,6 +2497,8 @@ jobs:
       OUTPUT_BUDGET_FAIL_TAIL: "200"
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - name: Install chore and check out sibling repos
         shell: bash
         run: |
@@ -2375,7 +2527,8 @@ jobs:
 
   validate-mkfs-windows:
     name: validate rust-ntfs format (Windows chkdsk)
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.validate-mkfs-windows-run.outputs.runners || '{}')['validate-mkfs-windows'] || 'ubuntu-24.04' }}
+    timeout-minutes: 3
     if: always()
     needs: [changes, validate-mkfs-windows-run]
     steps:
@@ -2396,7 +2549,7 @@ jobs:
     name: ci-ok
     runs-on: ubuntu-latest
     if: always()
-    needs: [readonly-file-name, test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows, op-sequence-chkdsk]
+    needs: [readonly-file-name, test, darwin-cross, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows, op-sequence-chkdsk]
     steps:
       - uses: actions/checkout@v4
       - name: Check every gating job
