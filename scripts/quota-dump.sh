@@ -19,7 +19,7 @@ shift 2
 
 out="$REPO/test-diagnostics/matrix/$name.quota.tsv"
 mkdir -p "$(dirname "$out")"
-cargo run --quiet --release --manifest-path "$REPO/Cargo.toml" --example quota_dump -- "$image" "$@" >"$out"
+cargo run --quiet --profile test-opt --manifest-path "$REPO/Cargo.toml" --example quota_dump -- "$image" "$@" >"$out"
 cat "$out"
 for path in "$@"; do
     grep -q "^file	$path	[0-9]" "$out" || { echo "quota-dump: $path has no owner id in the dump" >&2; exit 1; }

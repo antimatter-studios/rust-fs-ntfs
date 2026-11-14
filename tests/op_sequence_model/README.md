@@ -137,7 +137,7 @@ One command, run from the repository root on a retained `reproducer.json`
 or a raw libFuzzer input, minimizes the failure and pins it in the corpus:
 
 ```sh
-cargo run --release --example op_sequence_capture -- tmp/op-sequence-model/explorer/reproducer.json truncate-keeps-old-size
+cargo run --profile test-opt --example op_sequence_capture -- tmp/op-sequence-model/explorer/reproducer.json truncate-keeps-old-size
 ```
 
 A mismatch is its kind and its step. The kind is the failure message's first

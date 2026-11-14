@@ -58,7 +58,7 @@ pub(crate) fn reference_tools(image: &str, model: &BTreeMap<String, Vec<u8>>, ar
 }
 
 /// The capture command (#684), run from the repository root:
-/// `cargo run --release --example op_sequence_capture -- INPUT NAME`.
+/// `cargo run --profile test-opt --example op_sequence_capture -- INPUT NAME`.
 #[allow(dead_code)]
 pub fn capture(original: &Path, name: &str) -> Result<std::path::PathBuf, String> {
     shrink::quiet_panics();

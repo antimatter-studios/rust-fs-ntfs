@@ -286,7 +286,7 @@ for the next class of bugs.
 
 ## Invariants every agent must enforce
 
-- **Linux test contract**: `cargo test --release --lib mkfs --test
+- **Linux test contract**: `cargo test --profile test-opt --lib mkfs --test
   mkfs_roundtrip --test mkfs_bin_smoke` must pass after every change.
   If a change makes a test fail, fix the change, not the test.
 - **Lint contract**: `cargo fmt --check` and `cargo clippy

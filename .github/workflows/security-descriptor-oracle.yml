@@ -49,16 +49,16 @@ jobs:
       - name: The INHERITED_ACE transformation passes its captured controls
         shell: pwsh
         run: ./tests/scripts/acl-logical-flags-controls.ps1
-      - name: Build the release CLI
+      - name: Build the test-opt CLI
         shell: bash
         env:
           CARGO_BUILD_JOBS: 2
-        run: cargo build --locked --release --features cli --bin rust-fs-ntfs
+        run: cargo build --locked --profile test-opt --features cli --bin rust-fs-ntfs
       - name: Compare fs acl show with Windows Get-Acl on a Windows-formatted image
         shell: pwsh
         run: >-
           ./tests/scripts/acl-show-windows-oracle.ps1
-          -Cli target/release/rust-fs-ntfs.exe
+          -Cli target/test-opt/rust-fs-ntfs.exe
           -OutDir tmp/acl-oracle
       # #606: Windows fills $Secure:$SDS past one 256 KiB region, and every
       # descriptor it stored must be in the CLI's catalog, every copy verified.
@@ -67,7 +67,7 @@ jobs:
         shell: pwsh
         run: >-
           ./tests/scripts/acl-catalog-windows-oracle.ps1
-          -Cli target/release/rust-fs-ntfs.exe
+          -Cli target/test-opt/rust-fs-ntfs.exe
           -OutDir tmp/acl-catalog-oracle
       - name: The oracle images were deleted and only JSON is retained
         if: always()

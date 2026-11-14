@@ -4,7 +4,7 @@
 # built a week earlier — a real class of failures seen on sibling repos.
 #
 # Bump this deliberately, not incidentally: update locally, verify
-# `cargo test --release` + `cargo clippy --all-targets` + `cargo fmt --check`
+# `cargo test --profile test-opt` + `cargo clippy --all-targets` + `cargo fmt --check`
 # pass, then update CI's `with: toolchain:` to match.
 [toolchain]
 channel = "1.95.0"

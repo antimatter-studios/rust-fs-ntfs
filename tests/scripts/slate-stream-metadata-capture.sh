@@ -43,7 +43,7 @@ if not compare or int(compare.group(1)) != 5 + len(captured):
 # Named streams and EAs are written by the harness binary, which cli-oracle.sh
 # refuses to run without; it must be built before the capture runs.
 before = job.group(1)[:step.start()]
-if not re.search(r"cargo build --locked --release --features harness --bin rust-ntfs", before):
+if not re.search(r"cargo build --locked --profile test-opt --features harness --bin rust-ntfs", before):
     problems.append("the writer-cases job does not build rust-ntfs with --features harness "
                     "before capturing the stream and EA recipes")
 

@@ -207,3 +207,10 @@ panic = "unwind"
 [profile.dev]
 opt-level = 1
 panic = "unwind"
+
+# Tests and oracle binaries do not need the shipping profile's fat LTO or
+# single codegen unit. Inherit dev's opt-level 1 and default codegen units;
+# retain overflow checks and debug assertions for the full integration suite.
+[profile.test-opt]
+inherits = "dev"
+lto = false

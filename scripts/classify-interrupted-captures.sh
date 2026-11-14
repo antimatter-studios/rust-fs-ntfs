@@ -21,7 +21,7 @@ set -euo pipefail
 dir="${1:?usage: classify-interrupted-captures.sh DIR}"
 fsck="${FSCK:-fsck.ntfs}"
 command -v "$fsck" >/dev/null 2>&1 || {
-    echo "classify: no $fsck: build it with \`cargo build --release --locked --features cli --bin rust-fs-ntfs\` and link fsck.ntfs to it" >&2
+    echo "classify: no $fsck: build it with \`cargo build --profile test-opt --locked --features cli --bin rust-fs-ntfs\` and link fsck.ntfs to it" >&2
     exit 1
 }
 command -v jq >/dev/null 2>&1 || {

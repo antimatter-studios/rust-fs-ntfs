@@ -1,7 +1,7 @@
 # build-slate-oracle-cases.ps1 -- the Windows half of the Slate checker
 # oracle (#687): formatted volumes, each graded by Windows chkdsk.
 #
-#   pwsh -File test-disks/build-slate-oracle-cases.ps1 -Cli target/release/rust-fs-ntfs.exe
+#   pwsh -File test-disks/build-slate-oracle-cases.ps1 -Cli target/test-opt/rust-fs-ntfs.exe
 #
 # Four 256 MiB volumes, two from each formatter at 4 KiB and 64 KiB
 # clusters:
