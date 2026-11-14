@@ -1,0 +1,11 @@
+[profile]
+guest = "debian-12"
+modules = "ntfs3"
+setup = "prepare.sh"
+setup_sha256 = "710cd1cc767d96d5bd4a26243498fd05218833d551431d95986158b211b868ed"
+
+[x86_64]
+release = "6.12.95+deb12-amd64"
+
+[aarch64]
+release = "6.12.95+deb12-arm64"

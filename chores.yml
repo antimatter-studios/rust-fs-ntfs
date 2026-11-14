@@ -68,18 +68,11 @@ vars:
   # The Linux test VM (fs-linux-test-harness): where Linux's own ntfs3
   # mounts what this crate writes, `chore test:kernel` (#486). Not a cargo
   # dependency; a tool the kernel tests invoke from ../fs-linux-test-harness.
-  # v0.5.0 pins each guest's box in a map, which the box-cache job reads.
-  # v0.5.x: a slot is kept while a VM boots or restarts, and nothing in a
-  # macOS guest writes to the shares (harness #84). v0.5.9 runs a `vm.sh run`
-  # or `vm.sh exec` command through `bash -c`, with no stdin, which the kernel
-  # tests already give it. v0.6.1: the VM-free suite runs no real `sync` on
-  # the host (harness #191), suites can share one guest through
-  # FLTH_SHARED_ROOT (harness #153), and a macOS host needs
-  # vagrant-notify-forwarder-christhomas 0.7.7 or newer, which
-  # `chore vm:host:check` says (harness #164). v0.6.2: the stub engine runs no
-  # real `sync` whatever PATH a guard sets (harness #202), and CI setup moves
-  # off a stalled Ubuntu mirror (harness #200).
-  LINUX_HARNESS_REF: v0.6.2
+  # v0.7.0 shares one guest per prepared environment and attaches each run's
+  # worktree through virtiofs. Linux hosts need virtiofsd, installed by the
+  # harness's ci-setup-linux.sh. The ntfs3 run profile pins the booted kernel
+  # and required module before any consumer joins (harness #225).
+  LINUX_HARNESS_REF: v0.7.0
 
   # The in-house VHD writer (rust-img-vhd) the Windows jobs build to wrap
   # a raw image for Windows. Not a cargo dependency, so this is the only
@@ -123,7 +116,7 @@ vars:
 dotenv: ['?.test-env']
 
 # THE LINUX VM'S TASKS, as `chore linux:<task>`: linux:up, linux:run --
-# <command>, linux:down, linux:slot:status and the rest of the harness's
+# <command>, linux:down, linux:status and the rest of the harness's
 # vm.chores.yml. Not `vm:`, which this file's own tasks already use for the
 # Windows VM. The harness's messages still say `chore vm:down`; here that is
 # `chore linux:down`. Optional, because `chore siblings` is what checks the
@@ -133,9 +126,8 @@ includes:
     taskfile: ../fs-linux-test-harness/vm.chores.yml
     optional: true
 
-# The net for a run that left the Linux VM up without a session: the slot
-# is one for the whole machine, so an idle VM blocks every other
-# repository's VM work.
+# Reap dead runs and unfinished boots; a healthy shared guest stays up for
+# the next consumer after this run ends.
 lifecycle:
   after_all:
     - '[ ! -x ../fs-linux-test-harness/scripts/vm.sh ] || ../fs-linux-test-harness/scripts/vm.sh reap'
@@ -569,8 +561,8 @@ tasks:
   test:kernel:
     desc: "The kernel oracle: Linux's ntfs3 mounts what this crate wrote, in the fs-linux-test-harness VM, and this crate reads what ntfs3 wrote"
     deps: [siblings:gate]
-    # A harness session: the VM the tests boot comes down, and the
-    # machine-wide slot is released, when cargo ends, however it ends. The
+    # A harness session: this run detaches when cargo ends, however it ends,
+    # while the shared guest stays up for the next consumer. The
     # floor fails a run that built no kernel test, which `cargo test` would
     # report as a green `0 passed`.
     cmds:

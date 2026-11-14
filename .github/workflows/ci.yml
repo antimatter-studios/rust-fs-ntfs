@@ -196,6 +196,12 @@ jobs:
         uses: ./.github/actions/user-tools
         with:
           tools: ${{ matrix.os == 'ubuntu-latest' && 'chore pwsh ntfs-3g pyyaml cc' || 'chore' }}
+      # tests/scripts/linux-harness-profile.sh resolves the ntfs3 run profile
+      # with the harness's own scripts/run-profile.rb. Hosted runners ship
+      # Ruby; the antimatter-vps runner image does not, and allows sudo apt.
+      - name: ruby for the harness's run-profile resolver
+        if: matrix.os == 'ubuntu-latest'
+        run: command -v ruby >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq ruby; }
       - name: check out sibling repos
         # Replaces `submodules: recursive`. The pins live in chores.yml,
         # so CI and a developer's machine read the same declaration
@@ -2253,7 +2259,7 @@ jobs:
         with:
           path: ~/.vagrant.d/boxes
           key: ${{ steps.vm-host.outputs.box-cache-key }}
-      - name: KVM, QEMU and Vagrant
+      - name: KVM, QEMU, virtiofsd and Vagrant
         if: steps.box.outputs.cache-hit != 'true'
         run: ../fs-linux-test-harness/scripts/ci-setup-linux.sh
       - name: Fetch the pinned box without booting a VM
@@ -2293,7 +2299,7 @@ jobs:
           curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 "https://github.com/antimatter-studios/chore/releases/download/v0.11.0/chore-0.11.0-linux-x86_64.tar.gz" \
             | sudo tar xz -C /usr/local/bin chore
           chore siblings
-      - name: KVM, QEMU and Vagrant
+      - name: KVM, QEMU, virtiofsd and Vagrant
         id: vm-host
         run: ../fs-linux-test-harness/scripts/ci-setup-linux.sh
       - name: Cache the Vagrant box
@@ -2316,11 +2322,11 @@ jobs:
       - name: chore test:kernel
         id: tier
         run: chore test:kernel
-      # The tier runs in a harness session, which takes the VM down however
-      # it ends; a VM still up here would hold the machine's slot.
-      - name: The VM is down again
+      # Sessions detach their run and leave the shared guest up. Stop it
+      # explicitly on this ephemeral runner once no consumer is using it.
+      - name: Stop the idle shared guest
         if: always() && steps.tier.outcome != 'skipped'
-        run: '! chore linux:status'
+        run: chore linux:down
       - name: Keep the tier log
         if: always() && steps.tier.outcome != 'skipped'
         uses: actions/upload-artifact@v4

@@ -9,12 +9,13 @@
 //!
 //! IT RUNS ONLY IN THE fs-linux-test-harness VM, never on the host: a
 //! mount needs root and a kernel with ntfs3, which the guest gets from
-//! `scripts/vm-setup.sh`. The guest sees this repository at `/repo`, so an
+//! the ntfs3 run profile, checked by `scripts/vm-setup.sh`. The guest sees
+//! this repository at `/repo`, so an
 //! image a test writes under `test-disks/` crosses as a path, not a copy.
 //!
 //! ONE GUEST CALL PER MOUNT. The guest script copies the image to its own
 //! disk, mounts it, runs what it was given, unmounts, and copies the image
-//! back for a writable mount. A loop mount pointed at a file on the 9p
+//! back for a writable mount. A loop mount pointed at a file on the virtiofs
 //! share would mix the guest's page cache with the host's view of one
 //! file, and the copy costs a fraction of a second for these images.
 //!
@@ -76,8 +77,8 @@ fn session() {
         assert!(
             out.status.success(),
             "the fs-linux-test-harness VM would not start, so ntfs3 cannot mount \
-             anything. `chore vm:host:check` says what this host is missing; `chore \
-             vm:destroy` clears a broken machine.\n{}{}",
+             anything. `chore linux:host:check` says what this host is missing; `chore \
+             linux:destroy` clears a broken machine.\n{}{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );

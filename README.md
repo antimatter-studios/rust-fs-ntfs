@@ -77,6 +77,17 @@ are documented there.
 - **Fuzz:** `fuzz/` carries cargo-fuzz harnesses for the three
   byte-decoders most likely to regress (data-runs, attribute headers,
   INDX block headers).
+- **Linux kernel oracle:** `chore test:kernel` runs four ntfs3 tests in the
+  harness's shared guest, using `run-profiles/ntfs3.toml`. This Linux VM
+  config is only for the kernel oracle. The profile keeps Debian 12 for
+  macOS and boots exactly `6.12.95+deb12-amd64` or `6.12.95+deb12-arm64`,
+  with `ntfs3` loaded before tests join. `run-profiles/prepare.sh` pins the
+  Debian bookworm-backports package version; recompute the profile's
+  `setup_sha256` whenever that script changes. Consumer setup checks the
+  booted kernel rather than installing another one. Sessions detach their
+  worktree and leave the shared guest up; `chore linux:down` stops it when
+  idle. Linux hosts need `virtiofsd`; CI uses the harness's
+  `scripts/ci-setup-linux.sh` to install it.
 - **Bench:** `benches/byte_decoders.rs` (Criterion). Not part of CI.
 - **Shell tests:** `chore test:scripts` runs `tests/scripts/*.sh`. It needs
   Python 3.11 or newer first on `PATH` (for `tomllib`), PyYAML and PowerShell
