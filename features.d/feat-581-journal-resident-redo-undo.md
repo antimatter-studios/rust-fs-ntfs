@@ -1,0 +1,3 @@
+## Checking and recovery
+
+| `$LogFile` writing: a change to a resident value in an MFT record, logged as Windows logs one (`UpdateResidentValue` with its redo and undo, then `ForgetTransaction`) and appended after the last record of an LFS 2.x log, in memory (`logfile_write::append_resident_update`) | Partial: both records are byte for byte what Windows wrote in a capture, and this crate's replay redoes the change on a volume Windows left mid-write. Not yet used by any write; no device I/O or flush ordering, LFS 1.x clean-log handoff, `$MFT` attribute opening, records across pages or log wrap; Windows' restart recovering such a log not yet shown | Unreleased | #581 | `logfile_write::tests`, `logfile_write.rs` |
