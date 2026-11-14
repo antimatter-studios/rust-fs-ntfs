@@ -27,8 +27,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.95.0
-      - name: Build the release CLI
-        run: cargo build --locked --release --features cli --bin rust-fs-ntfs
+      - name: Build the test-opt CLI
+        run: cargo build --locked --profile test-opt --features cli --bin rust-fs-ntfs
       - name: Capture the existing data mutation recipes
         run: |
           mkdir -p tmp/logs
@@ -77,16 +77,16 @@ jobs:
       - name: Windows cluster allocation contracts (floor 14)
         shell: pwsh
         run: ./tests/scripts/slate-windows-allocation.ps1
-      - name: Build the release CLI
+      - name: Build the test-opt CLI
         shell: bash
         env:
           CARGO_BUILD_JOBS: 2
-        run: cargo build --locked --release --features cli --bin rust-fs-ntfs
+        run: cargo build --locked --profile test-opt --features cli --bin rust-fs-ntfs
       - name: Format the cases and grade each with Windows chkdsk
         shell: pwsh
         run: >-
           ./test-disks/build-slate-oracle-cases.ps1
-          -Cli target/release/rust-fs-ntfs.exe
+          -Cli target/test-opt/rust-fs-ntfs.exe
           -OutDir tmp/slate-oracle
           -WriterCases tmp/writer-input/slate-writer/captures.tsv
           -WriterImages tmp/writer-input/slate-writer/images

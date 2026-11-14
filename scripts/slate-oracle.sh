@@ -16,7 +16,7 @@
 #
 #   slate-oracle.sh build SRC [BIN]
 #       Build BIN (`ntfs-chkdsk` unless named; `ntfs-write-lab` is the other)
-#       from SRC's tools crate (src/tools, MIT), --locked and --release, at
+#       from SRC's tools crate (src/tools, MIT), --locked and --profile test-opt, at
 #       this repository's pinned toolchain, and print the binary's path. Only
 #       the MIT crates are built: ntfs_utils (MIT AND GPL-2.0-or-later),
 #       kernel/ and kernel/patches/ are never compiled, and nothing here
@@ -158,11 +158,14 @@ build() {
     [ -f "$src/src/tools/Cargo.toml" ] || die "$src has no src/tools/Cargo.toml"
     # Run from this repository, so rustup picks the toolchain its
     # rust-toolchain.toml pins rather than whatever the runner has.
-    (cd "$ROOT" && CARGO_TARGET_DIR="$src/target" cargo build --quiet --locked --release \
+    # This independent manifest needs the same test profile supplied via cargo config.
+    (cd "$ROOT" && CARGO_TARGET_DIR="$src/target" cargo build --quiet --locked --profile test-opt \
+        --config 'profile.test-opt.inherits="dev"' --config 'profile.test-opt.opt-level=1' \
+        --config 'profile.test-opt.lto=false' \
         --manifest-path "$src/src/tools/Cargo.toml" --bin "$bin") >&2 ||
         die "cannot build $bin from $src"
-    [ -x "$src/target/release/$bin" ] || die "the build left no $src/target/release/$bin"
-    printf '%s\n' "$src/target/release/$bin"
+    [ -x "$src/target/test-opt/$bin" ] || die "the build left no $src/target/test-opt/$bin"
+    printf '%s\n' "$src/target/test-opt/$bin"
 }
 
 write() {

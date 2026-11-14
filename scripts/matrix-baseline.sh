@@ -4,14 +4,14 @@
 #
 # The baseline file binds together:
 #   * tested_at_sha          — git HEAD at run time
-#   * binary_sha256          — sha256 of target/release/rust-ntfs
+#   * binary_sha256          — sha256 of target/test-opt/rust-ntfs
 #   * VM metadata            — Windows + ntfs.sys + chkdsk versions
 #   * harness_submodule_sha  — exact harness commit (sibling checkout)
 #   * test_matrix_json_sha256— hash of the scenarios definition
 #   * per-scenario status, verdict_shape, chkdsk exit codes
 #
 # The result file is the *primary* evidence for a sealed commit:
-# `binary_sha256 == sha256(target/release/rust-ntfs)` is the load-bearing
+# `binary_sha256 == sha256(target/test-opt/rust-ntfs)` is the load-bearing
 # check (content-addressable; survives rebase / squash-merge).
 #
 # Usage:
@@ -55,15 +55,15 @@ source .test-env
 # 1. Build the binary with path-stable rustc flags so binary_sha256 is
 #    invariant across worktrees / machines. Without these remaps, rustc
 #    embeds the absolute source path in panic strings + debug info, so
-#    `cargo build --release` of the same source produces different
+#    `cargo build --profile test-opt` of the same source produces different
 #    binaries from different paths (e.g. /Volumes/.../rust-fs-ntfs vs
 #    /Volumes/.../rust-fs-ntfs-s4). That breaks the seal-by-binary-hash
 #    property documented in .claude/skills/windows-test-skill/SKILL.md.
-echo "[matrix-baseline] cargo build --release (path-stable)"
+echo "[matrix-baseline] cargo build --profile test-opt (path-stable)"
 export RUSTFLAGS="${RUSTFLAGS:-} \
     --remap-path-prefix=$PWD=. \
     --remap-path-prefix=$HOME/.cargo/registry=/registry"
-cargo build --release --features harness --quiet
+cargo build --profile test-opt --features harness --quiet
 
 # 2. Run the matrix.
 matrix_log="$(mktemp -t matrix-baseline.XXXXXX.log)"
@@ -92,7 +92,7 @@ bash scripts/_matrix-collect-vm.sh "$matrix_log"
 
 echo "[matrix-baseline] wrote test-diagnostics/matrix-results.json"
 echo "[matrix-baseline] tested_at_sha=$(git rev-parse HEAD)"
-echo "[matrix-baseline] binary_sha256=$(sha256sum target/release/rust-ntfs | awk '{print $1}')"
+echo "[matrix-baseline] binary_sha256=$(sha256sum target/test-opt/rust-ntfs | awk '{print $1}')"
 
 if [ "$run_exit" -eq 0 ]; then
     echo "[matrix-baseline] DONE — all scenarios passed (exit 0)"

@@ -253,8 +253,8 @@ Standard cargo:
 ```sh
 cargo build --release
 # → target/release/libfs_ntfs.{a,rlib}
-cargo build --release --features harness --bin rust-ntfs
-# → target/release/rust-ntfs   (the test matrix's driver: format / ls / touch / mkdir / write / rm / rmdir / set_dirty)
+cargo build --profile test-opt --features harness --bin rust-ntfs
+# → target/test-opt/rust-ntfs  (the test matrix's driver: format / ls / touch / mkdir / write / rm / rmdir / set_dirty)
 ```
 
 `rust-ntfs` is behind the test-only `harness` feature, so `cargo install

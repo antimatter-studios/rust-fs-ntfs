@@ -55,24 +55,24 @@ jobs:
         with:
           toolchain: "1.95.0"
       - name: Build the shared library without changing the declared crate types
-        run: cargo rustc --release --lib --crate-type cdylib
+        run: cargo rustc --profile test-opt --lib --crate-type cdylib
       - name: Compile the independent C layout and call probe
-        run: cc -std=c11 -Wall -Werror -Iinclude tests/python/abi_volume_info.c -Ltarget/release -lfs_ntfs -Wl,-rpath,"$PWD/target/release" -o target/abi_volume_info
+        run: cc -std=c11 -Wall -Werror -Iinclude tests/python/abi_volume_info.c -Ltarget/test-opt -lfs_ntfs -Wl,-rpath,"$PWD/target/test-opt" -o target/abi_volume_info
       - name: Decompress the Windows-recovered fixture
         run: gunzip -c test-disks/windows-interrupted-1.recovered.img.gz > target/python-abi.img
       - name: Python client agrees with the C ABI
         env:
-          FS_NTFS_SHARED_LIB: ${{ github.workspace }}/target/release/libfs_ntfs.so
+          FS_NTFS_SHARED_LIB: ${{ github.workspace }}/target/test-opt/libfs_ntfs.so
           FS_NTFS_ABI_PROBE: ${{ github.workspace }}/target/abi_volume_info
           FS_NTFS_FIXTURE: ${{ github.workspace }}/target/python-abi.img
         run: python3 -m unittest -v tests/python/test_volume_info.py
       - name: Compile the independent C directory-listing probe
-        run: cc -std=c11 -Wall -Werror -Iinclude tests/python/abi_dir_listing.c -Ltarget/release -lfs_ntfs -Wl,-rpath,"$PWD/target/release" -o target/abi_dir_listing
+        run: cc -std=c11 -Wall -Werror -Iinclude tests/python/abi_dir_listing.c -Ltarget/test-opt -lfs_ntfs -Wl,-rpath,"$PWD/target/test-opt" -o target/abi_dir_listing
       - name: Install the independent raw-directory reference
         run: sudo apt-get update && sudo apt-get install -y ntfs-3g
       - name: Python directory iterator agrees with the C ABI
         env:
-          FS_NTFS_SHARED_LIB: ${{ github.workspace }}/target/release/libfs_ntfs.so
+          FS_NTFS_SHARED_LIB: ${{ github.workspace }}/target/test-opt/libfs_ntfs.so
           FS_NTFS_DIR_PROBE: ${{ github.workspace }}/target/abi_dir_listing
           FS_NTFS_FIXTURE: ${{ github.workspace }}/target/python-abi.img
         run: python3 -m unittest -v tests/python/test_dir_listing.py
@@ -90,7 +90,7 @@ jobs:
         with:
           toolchain: "1.95.0"
       - name: Build the shared library without changing the declared crate types
-        run: cargo rustc --release --lib --crate-type cdylib
+        run: cargo rustc --profile test-opt --lib --crate-type cdylib
       - name: Download Windows-authored native read fixtures
         uses: actions/download-artifact@v4
         with:
@@ -98,17 +98,17 @@ jobs:
           path: test-disks
       - name: Python client agrees with fsutil fsinfo ntfsinfo
         env:
-          FS_NTFS_SHARED_LIB: ${{ github.workspace }}/target/release/libfs_ntfs.so
+          FS_NTFS_SHARED_LIB: ${{ github.workspace }}/target/test-opt/libfs_ntfs.so
           FS_NTFS_WINDOWS_IMAGE: ${{ github.workspace }}/test-disks/ntfs-cli-read.img
           FS_NTFS_WINDOWS_RECORD: ${{ github.workspace }}/test-disks/ntfs-cli-read.ntfsinfo.txt
           FS_NTFS_WRONG_IMAGE: ${{ github.workspace }}/test-disks/ntfs-attrlist.img
           FS_NTFS_EXPECTED_HEAD: ${{ github.sha }}
         run: python3 -m unittest -v tests/python/test_volume_info_windows.py
       - name: Compile the C directory caller for the same Windows image
-        run: cc -std=c11 -Wall -Werror -Iinclude tests/python/abi_dir_listing.c -Ltarget/release -lfs_ntfs -Wl,-rpath,"$PWD/target/release" -o target/abi_dir_listing
+        run: cc -std=c11 -Wall -Werror -Iinclude tests/python/abi_dir_listing.c -Ltarget/test-opt -lfs_ntfs -Wl,-rpath,"$PWD/target/test-opt" -o target/abi_dir_listing
       - name: Python and C directory iterators agree with native Windows, zero skipped
         env:
-          FS_NTFS_SHARED_LIB: ${{ github.workspace }}/target/release/libfs_ntfs.so
+          FS_NTFS_SHARED_LIB: ${{ github.workspace }}/target/test-opt/libfs_ntfs.so
           FS_NTFS_DIR_PROBE: ${{ github.workspace }}/target/abi_dir_listing
           FS_NTFS_WINDOWS_IMAGE: ${{ github.workspace }}/test-disks/ntfs-cli-read.img
           FS_NTFS_DIRECTORY_RECORD: ${{ github.workspace }}/test-disks/ntfs-cli-read.directory.json
@@ -156,7 +156,7 @@ jobs:
       - name: Run the unchanged readonly test through the existing suite tier
         run: |
           bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- \
-            nice -n 10 cargo test --release --locked --features cli,harness \
+            nice -n 10 cargo test --profile test-opt --locked --features cli,harness \
             --test field_exhaustion_fn readonly_attribute_reflected_in_file_name -- --exact --nocapture
           grep -Fxq 'test readonly_attribute_reflected_in_file_name ... ok' tmp/logs/suite.log
           grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' tmp/logs/suite.log
@@ -403,9 +403,9 @@ jobs:
       # `cmd | tee` reports a red suite as green -- so GitHub's `bash -e`
       # stops the step on a failure before the floor is read. Every log is
       # uploaded as the `test-logs-*` artifact at the end of the job.
-      - name: unit tests (release) with an executed-test floor
+      - name: unit tests (test-opt) with an executed-test floor
         run: |
-          bash ../rust-fs-core/scripts/tier.sh --refuse-skips unit -- cargo test --release --locked --lib
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips unit -- cargo test --profile test-opt --locked --lib
           # The #1043 contract passed with 790 unit cases via local-unit.sh on 2026-10-18.
           # Previous floor 601 plus two listed-directory index contracts in #816.
           # The two contracts ran with 777 unit cases on 2026-10-18.
@@ -424,10 +424,10 @@ jobs:
       # as a clean pass. A small floor above zero catches that; a floor of
       # zero catches nothing. Raise it when the files grow.
       - name: fixture-free repair journal framing and torn-tail tests
-        run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --release --locked --features plan-file --test repair_journal
+        run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --profile test-opt --locked --features plan-file --test repair_journal
       - name: fixture-free integration tests with an executed-test floor
         run: |
-          bash ../rust-fs-core/scripts/tier.sh --refuse-skips mkfs -- cargo test --release --locked --features cli,harness --test mkfs_roundtrip --test mkfs_bin_smoke
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips mkfs -- cargo test --profile test-opt --locked --features cli,harness --test mkfs_roundtrip --test mkfs_bin_smoke
           # Measured 16 executed (mkfs_roundtrip 9 + mkfs_bin_smoke 7) on
           # 2026-09-29, when mkfs_bin_smoke gained the --version test. Floor 15.
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/mkfs.log | awk '{s+=$4} END{print s+0}')
@@ -440,7 +440,7 @@ jobs:
       # 5 executed on 2026-11-04; the floor catches the drop to zero.
       - name: fixture-free copy-repair tests with an executed-test floor
         run: |
-          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --release --locked --features cli,harness --test repair_plan_copy
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --profile test-opt --locked --features cli,harness --test repair_plan_copy
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
           echo "tests executed: $n (floor 5)"
           if [ "$n" -lt 5 ]; then
@@ -450,7 +450,7 @@ jobs:
 
       - name: fixture-free copy-repair tests with an executed-test floor
         run: |
-          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --release --locked --features cli,harness --test repair_plan_copy
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --profile test-opt --locked --features cli,harness --test repair_plan_copy
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
           echo "tests executed: $n (floor 5)"
           if [ "$n" -lt 5 ]; then
@@ -464,7 +464,7 @@ jobs:
           read -r lines bytes < <(awk '$1 == "mkfs" { print $2, $3 }' scripts/tier-budgets.txt)
           bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored \
             op-sequence-reference-model op-sequence-reference-model "$lines" "$bytes" -- \
-            cargo test --release --locked --test op_sequence_reference_model
+            cargo test --profile test-opt --locked --test op_sequence_reference_model
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/op-sequence-reference-model.log | awk '{s+=$4} END{print s+0}')
           # Eight declared contracts in #680, #731's named streams and #732's
           # EAs; zero selected is never a pass.
@@ -475,7 +475,7 @@ jobs:
           read -r lines bytes < <(awk '$1 == "mkfs" { print $2, $3 }' scripts/tier-budgets.txt)
           bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored \
             op-sequence-generator op-sequence-generator "$lines" "$bytes" -- \
-            cargo test --release --locked --test op_sequence_generator
+            cargo test --profile test-opt --locked --test op_sequence_generator
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/op-sequence-generator.log | awk '{s+=$4} END{print s+0}')
           # Eight declared fixture-free contracts in #681, #684's pin format,
           # #731's stream opcodes and #732's EA opcodes, on every host leg,
@@ -487,7 +487,7 @@ jobs:
           read -r lines bytes < <(awk '$1 == "mkfs" { print $2, $3 }' scripts/tier-budgets.txt)
           bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored \
             op-sequence-readback op-sequence-readback "$lines" "$bytes" -- \
-            cargo test --release --locked --test op_sequence_readback
+            cargo test --profile test-opt --locked --test op_sequence_readback
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/op-sequence-readback.log | awk '{s+=$4} END{print s+0}')
           # Four original seeds, four declared #682 image-harness contracts,
           # #683's corpus replay, #684's three shrink and capture contracts,
@@ -502,7 +502,7 @@ jobs:
           read -r lines bytes < <(awk '$1 == "mkfs" { print $2, $3 }' scripts/tier-budgets.txt)
           bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored \
             fuzz-coverage fuzz-coverage "$lines" "$bytes" -- \
-            cargo test --release --locked --features cli,harness --test fuzz_decoders \
+            cargo test --profile test-opt --locked --features cli,harness --test fuzz_decoders \
               the_gate_covers_every_explorer_target -- --exact
           grep -Fxq 'test the_gate_covers_every_explorer_target ... ok' tmp/logs/fuzz-coverage.log
 
@@ -530,66 +530,22 @@ jobs:
             tmp/logs/op-sequence-readback.log
           if-no-files-found: error
 
-      # AND ONCE IN DEBUG, BECAUSE `overflow-checks` IS OFF IN RELEASE.
+      # KEEP THE DEFAULT-PROFILE OVERFLOW GUARD.
+      # test-opt inherits dev and now also checks arithmetic, but this separate
+      # --lib run preserves the explicit runtime handshake guarded by
+      # tests/ci_profile.rs (#248). No fixtures are needed.
       #
-      # Every other `cargo test` in this repository is `--release`, and
-      # `[profile.release]` sets `lto`, `codegen-units`, `opt-level` and
-      # `panic` but not `overflow-checks`, so it defaults off. A defect
-      # whose only symptom is an arithmetic-overflow panic therefore
-      # cannot be observed by any of them: the guard and the gate live in
-      # different build profiles.
+      # Why the guard exists: 4cb14f1ec (#216) reintroduced the signed_bytes_needed
+      # defect and measured release at 615 passed versus debug at 611 passed,
+      # four failures ("attempt to negate with overflow"). Release defaults
+      # overflow-checks off; the shipping profile deliberately keeps that default.
       #
-      # This is narrower than "arithmetic is untested". The crate's 37
-      # `checked_add`/`checked_sub`/`checked_mul` sites return `None` or
-      # an error, and release observes those perfectly well. What it
-      # cannot observe is the case where the ONLY symptom is the panic —
-      # which is what `signed_bytes_needed` was before it was fixed:
-      # negating `i64::MIN` panicked in debug, wrapped in release, and
-      # the wrap happened to reach the right answer through the
-      # function's fallback. Its four tests ran in CI and could not fail
-      # there.
-      #
-      # Measured on this branch by reintroducing that defect:
-      #
-      #     cargo test --release --locked --lib   ->  EXIT=0,   615 passed
-      #     cargo test --locked --lib             ->  EXIT=101, 611 passed, 4 failed
-      #                                               "attempt to negate with overflow"
-      #
-      # With the defect fixed, both are EXIT=0 and 615 passed — so the
-      # difference is the defect, not the profile.
-      #
-      # `--lib` only: the unit tests need no fixtures, so this costs a
-      # second compile and nothing else. It is deliberately not
-      # `--release`'s twin in coverage — it exists for the profile, not
-      # for the breadth.
-      #
-      # EXPECT_OVERFLOW_CHECKS ARMS THE ONE CHECK A TEXT SCAN CANNOT DO.
-      # This run has no `--release`, so overflow-checks are on, and it is
-      # what makes every arithmetic test in this crate mean anything --
-      # `signed_bytes_needed` above is the case that proved it.
-      #
-      # The variable tells `overflow_checks::the_build_the_gate_asked_to
-      # _check_does_check` in src/lib.rs that THIS is the run that must
-      # trap an overflow -- asking the build directly rather than
-      # inferring it from which spellings of "disabled" happen to be
-      # absent from Cargo.toml.
-      #
-      # Declared as an `env:` mapping rather than inline as
-      # `VAR=1 cargo test`. This job's matrix is ubuntu + macos, so the
-      # inline form would work here; the mapping is what the
-      # cross-platform siblings require, because an inline prefix is a
-      # PowerShell syntax error on windows-latest. The guard reads both
-      # spellings, and the copies of it stay one answer rather than
-      # several.
-      #
-      # Do not add `--release` to this run, and do not drop the variable:
-      # tests/ci_profile.rs reads this file and fails if no `cargo test`
-      # in it runs without `--release` while setting this. See #248.
-      #
-      # The floor below counts this run separately from the release `--lib`
-      # above even though the two select the same tests: they are separate
-      # invocations, and an edit that empties one empties neither the other
-      # nor the evidence. See the floor commentary above the release run.
+      # EXPECT_OVERFLOW_CHECKS=1 asks src/lib.rs's overflow_checks runtime probe
+      # to prove this build traps, rather than infer it from manifest text.
+      # Keep the env mapping: it also works with PowerShell on Windows, unlike
+      # an inline VAR=1 prefix. Do not remove it or select a custom profile here.
+      # The floor counts this invocation separately from test-opt above so
+      # an empty selection in either invocation fails independently.
       - name: unit tests (debug, overflow checks armed) with an executed-test floor
         run: |
           bash ../rust-fs-core/scripts/tier.sh --refuse-skips unit-debug -- cargo test --locked --lib
@@ -1001,7 +957,7 @@ jobs:
           $m = Get-Content -Raw $env:NTFS_I30_SLACK_MANIFEST | ConvertFrom-Json
           $h = (Get-FileHash $env:NTFS_I30_SLACK_IMAGE -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($h -ne $m.image_sha256) { throw "image $h is not the captured $($m.image_sha256)" }
-          cargo test --release --locked --lib --features windows-i30-oracle index_slack::windows_capture
+          cargo test --profile test-opt --locked --lib --features windows-i30-oracle index_slack::windows_capture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       # The capture writes its manifest and raw-scan diagnostic before it
       # judges PRECONDITION i30-raw-deleted-candidate, so a failed capture or
@@ -1266,7 +1222,7 @@ jobs:
 
       - name: full suite with an executed-test floor
         run: |
-          bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli,harness --no-fail-fast
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --profile test-opt --locked --features cli,harness --no-fail-fast
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
           # Previous floor 1370 plus the #644 recursive-walk fault contract,
           # three declared #731 named-stream contracts and three #732 EA
@@ -1436,7 +1392,7 @@ jobs:
           RUSTFLAGS: "-Zsanitizer=address"
           RUSTDOCFLAGS: "-Zsanitizer=address"
         run: |
-          bash ../rust-fs-core/scripts/tier.sh --refuse-skips asan -- cargo "+$ASAN_TOOLCHAIN" test --release --locked --lib \
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips asan -- cargo "+$ASAN_TOOLCHAIN" test --profile test-opt --locked --lib \
             --target x86_64-unknown-linux-gnu
           # A floor on an ADVISORY job, which is not a contradiction. This job
           # cannot gate a merge (it is not in .github-guard's required set),
@@ -1625,7 +1581,7 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/scripts/chkdsk-verdict.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build rust-ntfs (Windows)
-        run: cargo build --release --locked --features harness --bin rust-ntfs
+        run: cargo build --profile test-opt --locked --features harness --bin rust-ntfs
       - name: Validate rmdir matrix scenarios
         shell: bash
         run: |
@@ -1866,7 +1822,7 @@ jobs:
       # Windows build, so this calls the suite's Windows half directly, as
       # the steps above do.
       - name: Build the command-line tools (Windows)
-        run: cargo build --release --locked --features cli --bin rust-fs-ntfs
+        run: cargo build --profile test-opt --locked --features cli --bin rust-fs-ntfs
       # Its named stream is written with rust-ntfs, built above, so it is
       # not in the cli group, whose host half runs where that binary is not.
       - name: Validate a fragmented file whose attribute grew, on Windows
@@ -1905,7 +1861,7 @@ jobs:
       - name: Generate raw image and wrap in GPT-partitioned VHD
         shell: pwsh
         run: |
-          pwsh -File scripts/fs-windows-test-harness/ci-make-image.ps1
+          pwsh -File scripts/fs-windows-test-harness/ci-make-image.ps1 -Binary ./target/test-opt/rust-ntfs.exe
       - name: Mount VHD and capture pre-chkdsk diagnostics
         id: mount
         shell: pwsh

@@ -178,7 +178,7 @@ cryptographic fingerprint:
 ```
 
 A commit is **sealed** only when its tree contains a `matrix-results.json` whose
-`binary_sha256` matches a fresh `cargo build --release` of that exact tree:
+`binary_sha256` matches a fresh `cargo build --profile test-opt` of that exact tree:
 
 ```bash
 bash scripts/matrix-verify.sh           # exits 0 iff the current tree is sealed

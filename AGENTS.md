@@ -310,10 +310,10 @@ The tasks are the interface; CI runs exactly these:
 chore siblings          # ../rust-fs-core and both harnesses at their pinned tags
 chore siblings:check    # report drift, change nothing
 chore lint              # fmt + clippy, exactly as CI runs them
-chore test:unit         # unit tests (src/), release
+chore test:unit         # unit tests (src/), test-opt
 chore test:unit:debug   # unit tests, debug, overflow checks armed
 chore test:mkfs         # the two fixture-free integration files
-chore test:suite        # every unit and integration test, release
+chore test:suite        # every unit and integration test, test-opt
 chore test:kernel       # Linux's ntfs3 reads what we wrote, and we read what it wrote (Linux VM)
 chore test              # every tier CI runs, quietly
 chore test:scripts      # the shell tests (tests/scripts/*.sh)
