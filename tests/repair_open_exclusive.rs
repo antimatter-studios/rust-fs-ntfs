@@ -14,7 +14,6 @@ use std::fs::File;
 use std::process::Command;
 
 use fs_ntfs::block_io::PathIo;
-use sha2::{Digest, Sha256};
 
 /// Unpack a `test-disks/` image to a scratch path.
 fn unpack(name: &str) -> String {
@@ -30,7 +29,7 @@ fn unpack(name: &str) -> String {
 }
 
 fn sha256(path: &str) -> Vec<u8> {
-    Sha256::digest(std::fs::read(path).expect("read image")).to_vec()
+    common::image_digest(path).expect("digest image").to_vec()
 }
 
 #[test]

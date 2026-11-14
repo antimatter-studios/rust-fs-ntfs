@@ -358,7 +358,7 @@ mod tests {
     /// bits. The image is not written.
     #[test]
     fn resumed_batches_carry_every_windows_reference_losslessly_and_write_nothing() {
-        let before = std::fs::read(WINDOWS_IMG).expect("read image");
+        let before = crate::test_image::snapshot_image(WINDOWS_IMG).expect("snapshot image");
         let mut io = fixture();
         let mut cursor = 0u64;
         let mut references = Vec::new();
@@ -414,7 +414,11 @@ mod tests {
             "slot reuse left at least one sequence above one"
         );
         drop(io);
-        assert_eq!(before, std::fs::read(WINDOWS_IMG).expect("read image"));
+        crate::test_image::assert_images_equal(
+            WINDOWS_IMG,
+            before.path(),
+            "inventory must not write",
+        );
     }
 
     #[test]
@@ -461,7 +465,7 @@ mod tests {
     /// none repeated. The image is not written.
     #[test]
     fn a_batch_cancelled_mid_way_resumes_without_loss_or_repeat() {
-        let before = std::fs::read(WINDOWS_IMG).expect("read image");
+        let before = crate::test_image::snapshot_image(WINDOWS_IMG).expect("snapshot image");
         let mut io = fixture();
         let whole = lines(&mut io, 0, 40).expect("uncancelled batch");
         assert_eq!(
@@ -491,7 +495,11 @@ mod tests {
         joined.extend(records_of(&rest));
         assert_eq!(joined, records_of(&whole), "lost or repeated records");
         drop(io);
-        assert_eq!(before, std::fs::read(WINDOWS_IMG).expect("read image"));
+        crate::test_image::assert_images_equal(
+            WINDOWS_IMG,
+            before.path(),
+            "inventory must not write",
+        );
     }
 
     #[test]

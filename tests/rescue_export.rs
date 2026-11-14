@@ -6,6 +6,7 @@
 //! against this crate's reading of its archive.
 
 mod common;
+use common::{ImageBytes, TestDigest};
 
 use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::fsck;
@@ -14,7 +15,6 @@ use fs_ntfs::rescue::{
     export_manifest_path, export_temp_path, export_to_path, export_with, scan, ExportOptions,
     ReadFailure, RescueSource, ScanOptions,
 };
-use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
@@ -25,7 +25,7 @@ const NTFS_SIZE: u64 = 8 * 1024 * 1024;
 
 /// A source of `SIZE` patterned bytes; reads touching a `bad` sector fail.
 struct Memory {
-    bytes: Vec<u8>,
+    bytes: ImageBytes,
     bad: Vec<u64>,
 }
 
@@ -35,10 +35,13 @@ impl Memory {
     }
 
     fn with_bad(bad: Vec<u64>) -> Self {
-        let bytes = (0..SIZE)
+        let bytes: Vec<u8> = (0..SIZE)
             .map(|i| (i.wrapping_mul(31) ^ (i >> 9)) as u8)
             .collect();
-        Memory { bytes, bad }
+        Memory {
+            bytes: bytes.into(),
+            bad,
+        }
     }
 
     /// A clean NTFS volume of `NTFS_SIZE` bytes from `mkfs`, its `bad`
@@ -57,7 +60,7 @@ impl Memory {
             !fsck::is_dirty(&path).expect("read the source's dirty flag"),
             "mkfs left the source volume dirty"
         );
-        let bytes = fs::read(&path).expect("read the volume");
+        let bytes = ImageBytes::snapshot(&path).expect("snapshot the volume");
         fs::remove_file(&path).ok();
         Memory { bytes, bad }
     }
@@ -66,7 +69,8 @@ impl Memory {
     /// sector's `$MFT` cluster and the 1024-byte records `ntfs` formats.
     fn volume_record_sector(&self) -> u64 {
         let le = |at: usize, n: usize| {
-            self.bytes[at..at + n]
+            self.bytes
+                .read(at..at + n)
                 .iter()
                 .rev()
                 .fold(0u64, |v, &b| (v << 8) | u64::from(b))
@@ -90,7 +94,7 @@ impl RescueSource for Memory {
                 )));
             }
         }
-        buf.copy_from_slice(&self.bytes[offset as usize..end as usize]);
+        buf.copy_from_slice(&self.bytes.read(offset as usize..end as usize));
         Ok(())
     }
 }
@@ -100,7 +104,7 @@ fn hex(digest: &[u8]) -> String {
 }
 
 fn sha256_of(path: &Path) -> String {
-    hex(&Sha256::digest(fs::read(path).expect("read the file")))
+    hex(&common::image_digest(path).expect("digest the file"))
 }
 
 fn archive_of(source: &mut Memory, name: &str) -> PathBuf {
@@ -118,7 +122,7 @@ fn archive_of(source: &mut Memory, name: &str) -> PathBuf {
 #[test]
 fn a_complete_archive_exports_to_an_image_equal_to_its_source() {
     let mut source = Memory::new(None);
-    let expected = hex(&Sha256::digest(&source.bytes));
+    let expected = hex(&source.bytes.test_digest());
     let archive = archive_of(&mut source, "rescue_export_complete");
     let archived = sha256_of(&archive);
     let image = PathBuf::from(common::temp_image_path("rescue_export_complete_image"));
@@ -208,9 +212,11 @@ fn an_incomplete_archive_exported_on_request_zeroes_its_missing_spans_and_lists_
     let mut expected_bytes = source.bytes.clone();
     for &sector in &bad {
         let at = (sector * SECTOR) as usize;
-        expected_bytes[at..at + SECTOR as usize].fill(0);
+        expected_bytes
+            .write(at..at + SECTOR as usize, &vec![0; SECTOR as usize])
+            .unwrap();
     }
-    let expected = hex(&Sha256::digest(&expected_bytes));
+    let expected = hex(&expected_bytes.test_digest());
     let spans: Vec<(u64, u64)> = bad.iter().map(|&s| (s * SECTOR, SECTOR)).collect();
     let archive = archive_of(&mut source, "rescue_export_on_request");
     let archived = sha256_of(&archive);
@@ -246,7 +252,7 @@ fn an_incomplete_archive_exported_on_request_zeroes_its_missing_spans_and_lists_
 #[test]
 fn a_complete_archive_exported_with_the_opt_in_reports_complete_and_writes_no_manifest() {
     let mut source = Memory::new(None);
-    let expected = hex(&Sha256::digest(&source.bytes));
+    let expected = hex(&source.bytes.test_digest());
     let archive = archive_of(&mut source, "rescue_export_opt_in_complete");
     let image = PathBuf::from(common::temp_image_path(
         "rescue_export_opt_in_complete_image",
@@ -308,7 +314,7 @@ fn an_incomplete_ntfs_export_sets_the_volume_dirty_flag() {
 #[test]
 fn a_complete_ntfs_export_leaves_the_dirty_flag_as_the_source_had_it() {
     let mut source = Memory::ntfs("complete", Vec::new());
-    let expected = hex(&Sha256::digest(&source.bytes));
+    let expected = hex(&source.bytes.test_digest());
     let archive = archive_of(&mut source, "rescue_export_ntfs_complete");
     let image = PathBuf::from(common::temp_image_path("rescue_export_ntfs_complete_image"));
 
@@ -334,8 +340,10 @@ fn an_incomplete_export_missing_the_volume_record_says_the_flag_is_unset() {
     let expected = {
         let mut bytes = source.bytes.clone();
         let at = (bad * SECTOR) as usize;
-        bytes[at..at + SECTOR as usize].fill(0);
-        hex(&Sha256::digest(&bytes))
+        bytes
+            .write(at..at + SECTOR as usize, &vec![0; SECTOR as usize])
+            .unwrap();
+        hex(&bytes.test_digest())
     };
     let archive = archive_of(&mut source, "rescue_export_ntfs_no_volume_record");
     let image = PathBuf::from(common::temp_image_path(

@@ -104,9 +104,10 @@ fn the_explorer_counts_a_refused_geometry_with_its_reason() {
         refusals.starts_with("format\t") && refusals.contains("invalid cluster_size 131072"),
         "{refusals}"
     );
-    let histogram: (Vec<usize>, Vec<usize>, usize) =
-        serde_json::from_slice(&fs::read(artifacts.join("refusal-histogram.json")).unwrap())
-            .expect("accepted and refused operations, then refused geometries");
+    let histogram: (Vec<usize>, Vec<usize>, usize) = serde_json::from_slice(
+        &common::read_small_file(artifacts.join("refusal-histogram.json")).unwrap(),
+    )
+    .expect("accepted and refused operations, then refused geometries");
     assert!(histogram.2 >= 1, "{histogram:?}");
     // By reason too (#1031): a refused geometry is a `format` refusal.
     let reasons = fs::read_to_string(artifacts.join("refusal-reasons.tsv")).unwrap();
@@ -269,7 +270,8 @@ fn every_committed_corpus_seed_names_its_geometry() {
         if seed.extension().is_none_or(|extension| extension != "json") {
             continue;
         }
-        let (_, pinned) = generator::decode_regression(&fs::read(&seed).unwrap()).unwrap();
+        let (_, pinned) =
+            generator::decode_regression(&common::read_small_file(&seed).unwrap()).unwrap();
         let pinned = pinned.unwrap_or_else(|| panic!("{} has no geometry", seed.display()));
         assert_eq!(
             model::format_refusal(
@@ -288,7 +290,8 @@ fn boundary_corpus_replay(cluster: u32, record: u32) {
     let stem = format!("geometry-c{cluster}-r{record}-v1");
     let seed = Path::new(CORPUS).join(format!("{stem}.json"));
     let (operations, pinned) = generator::decode_regression(
-        &fs::read(&seed).unwrap_or_else(|error| panic!("missing seed {}: {error}", seed.display())),
+        &common::read_small_file(&seed)
+            .unwrap_or_else(|error| panic!("missing seed {}: {error}", seed.display())),
     )
     .unwrap();
     let geometry = pinned
@@ -346,7 +349,8 @@ fn committed_corpus_replays_every_seed() {
     for seed in &seeds {
         // Shown only if this test fails: which seed, and what it pins.
         eprintln!("replaying {}", seed.display());
-        let (operations, pinned) = generator::decode_regression(&fs::read(seed).unwrap()).unwrap();
+        let (operations, pinned) =
+            generator::decode_regression(&common::read_small_file(seed).unwrap()).unwrap();
         assert!(!operations.is_empty(), "empty seed {}", seed.display());
         // A pin replays on the image it was captured on; a plain seed on
         // the default one.
@@ -896,8 +900,12 @@ fn capture_pins_a_minimized_regression_and_never_discards_the_original() {
     let pinned =
         harness::capture(&original, "stale-truncate-size", &corpus, stale_truncate).unwrap();
     assert_eq!(pinned, corpus.join("stale-truncate-size-v1.json"));
-    assert_eq!(fs::read(&original).unwrap(), input, "original kept");
-    let captured = fs::read(&pinned).unwrap();
+    assert_eq!(
+        common::read_small_file(&original).unwrap(),
+        input,
+        "original kept"
+    );
+    let captured = common::read_small_file(&pinned).unwrap();
     let (operations, regression) = generator::decode_regression(&captured).unwrap();
     let mut minimum = stale_truncate_minimum();
     minimum[1] = generator::Op::Write {
@@ -923,7 +931,7 @@ fn capture_pins_a_minimized_regression_and_never_discards_the_original() {
     let error =
         harness::capture(&original, "stale-truncate-size", &corpus, stale_truncate).unwrap_err();
     assert!(error.contains("exists"), "{error}");
-    assert_eq!(fs::read(&pinned).unwrap(), captured);
+    assert_eq!(common::read_small_file(&pinned).unwrap(), captured);
 
     // An input that does not fail pins nothing and is left as it was.
     let passing = root.join("passing-v1.json");
@@ -931,7 +939,7 @@ fn capture_pins_a_minimized_regression_and_never_discards_the_original() {
     fs::write(&passing, &bytes).unwrap();
     let error = harness::capture(&passing, "passing", &corpus, |model| model).unwrap_err();
     assert!(error.contains(&passing.display().to_string()), "{error}");
-    assert_eq!(fs::read(&passing).unwrap(), bytes);
+    assert_eq!(common::read_small_file(&passing).unwrap(), bytes);
     assert!(!corpus.join("passing-v1.json").exists());
 
     // An input inside the capture's own scratch directory would be
@@ -942,7 +950,7 @@ fn capture_pins_a_minimized_regression_and_never_discards_the_original() {
     fs::write(&inside, &bytes).unwrap();
     let error = harness::capture(&inside, "inside", &corpus, stale_truncate).unwrap_err();
     assert!(error.contains(&inside.display().to_string()), "{error}");
-    assert_eq!(fs::read(&inside).unwrap(), bytes);
+    assert_eq!(common::read_small_file(&inside).unwrap(), bytes);
 
     // Corpus names describe the finding: lowercase words and hyphens only.
     for name in ["", "Stale", "../escape", "a b", "trailing-"] {

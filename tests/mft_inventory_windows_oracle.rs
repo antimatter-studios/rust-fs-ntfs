@@ -8,6 +8,8 @@
 //! `fsutil file queryfileid` reported for every surviving file. Each must
 //! appear, bit for bit, in a bounded, resumed inventory of the image.
 
+mod common;
+
 use fs_ntfs::block_io::PathIo;
 use fs_ntfs::mft_inventory::{inventory_batch_io, InventoryCursor};
 use std::collections::BTreeSet;
@@ -45,7 +47,7 @@ fn inventory_references_are_the_ones_windows_reports() {
             "missing {path}; run test-disks/build-windows-native-read-fixtures.ps1 on Windows"
         );
     }
-    let before = std::fs::read(WINDOWS_IMG).expect("read image");
+    let before = common::snapshot_image(WINDOWS_IMG).expect("snapshot image");
     let mut io = PathIo::open_ro(Path::new(WINDOWS_IMG)).expect("open_ro");
     let mut cursor = InventoryCursor::START;
     let mut ours = BTreeSet::new();
@@ -71,5 +73,5 @@ fn inventory_references_are_the_ones_windows_reports() {
         windows.iter().any(|(_, r)| r >> 48 > 1),
         "slot reuse left at least one sequence above one"
     );
-    assert_eq!(before, std::fs::read(WINDOWS_IMG).expect("read image"));
+    common::assert_images_equal(before.path(), WINDOWS_IMG, "image contents");
 }

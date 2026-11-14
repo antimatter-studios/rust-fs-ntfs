@@ -9,6 +9,8 @@
 //! Windows refuses. A missing probe fails, naming that script.
 #![cfg(windows)]
 
+mod common;
+
 use fs_ntfs::usn_cursor::{admit_cursor, CursorAdmission, UsnCursor, UsnJournalData};
 use sha2::{Digest, Sha256};
 
@@ -87,7 +89,7 @@ fn probe() -> (String, UsnJournalData, Vec<Probe>) {
 #[test]
 fn probe_reads_the_captured_journal() {
     let (sha, journal, probes) = probe();
-    let capture = std::fs::read(JOURNAL)
+    let capture = common::read_small_file(JOURNAL)
         .unwrap_or_else(|_| panic!("{JOURNAL}: run test-disks/capture-usn-journal-data.ps1"));
     assert_eq!(sha, format!("{:x}", Sha256::digest(&capture)));
     let fsutil_id = String::from_utf8(capture)

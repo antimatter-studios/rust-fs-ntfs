@@ -278,14 +278,13 @@ fn eas_of_a_file_with_a_list_are_written_rewritten_and_removed_through_it() {
 #[test]
 fn an_ea_set_over_64_kib_is_refused_and_changes_nothing() {
     let (img, _) = volume_with_a_listed_file("refused");
-    let before = std::fs::read(&img).expect("read image");
+    let before = common::snapshot_image(&img).expect("snapshot image");
     let mut io = PathIo::open_rw(Path::new(&img)).expect("open_rw");
     let got = write::write_ea_io(&mut io, "/f", b"USER.HUGE", &value(65535), 0);
     assert!(got.is_err(), "a 65535-byte EA was accepted");
     <PathIo as BlockIo>::sync(&mut io).expect("sync");
     drop(io);
-    let after = std::fs::read(&img).expect("read image");
-    let first = before.iter().zip(&after).position(|(a, b)| a != b);
+    let first = common::first_image_difference(before.path(), &img).expect("compare images");
     assert!(
         first.is_none(),
         "a refused write changed the image, first at byte {first:?}"

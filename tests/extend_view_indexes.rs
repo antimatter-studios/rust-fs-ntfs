@@ -148,13 +148,13 @@ fn a_second_file_is_refused_an_object_id_another_has() {
     let id = [0x33u8; 16];
     write::write_object_id(Path::new(&img), "/hello.txt", &id).unwrap();
     write::create_file(Path::new(&img), "/", "other.txt").unwrap();
-    let before = std::fs::read(&img).unwrap();
+    let before = common::snapshot_image(&img).expect("snapshot image");
     let err = write::write_object_id(Path::new(&img), "/other.txt", &id).unwrap_err();
     assert!(
         err.to_string().contains("already has that object id"),
         "{err}"
     );
-    assert!(std::fs::read(&img).unwrap() == before, "the refusal wrote");
+    assert!(before.matches(&img), "the refusal wrote");
     // The same id again on the same file is no change.
     write::write_object_id(Path::new(&img), "/hello.txt", &id).unwrap();
 }

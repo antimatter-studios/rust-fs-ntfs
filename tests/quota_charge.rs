@@ -145,7 +145,7 @@ fn value<'r>(rec: &'r [u8], a: &Attr) -> &'r [u8] {
 /// sector, `$MFT`'s runs and update-sequence fixups, and nothing in this
 /// crate.
 struct Vol {
-    bytes: Vec<u8>,
+    bytes: common::ImageSnapshot,
     cluster: u64,
     record: u64,
     mft_runs: Vec<(u64, u64)>,
@@ -153,12 +153,13 @@ struct Vol {
 
 impl Vol {
     fn read(path: &str) -> Vol {
-        let bytes = std::fs::read(path).unwrap();
-        let cluster = le(&bytes, 0x0B, 2) * le(&bytes, 0x0D, 1);
-        let c = bytes[0x40] as i8;
+        let bytes = common::snapshot_image(path).unwrap();
+        let boot = bytes.read(0..512);
+        let cluster = le(&boot, 0x0B, 2) * le(&boot, 0x0D, 1);
+        let c = boot[0x40] as i8;
         let record = if c > 0 { c as u64 * cluster } else { 1 << -c };
-        let at = (le(&bytes, 0x30, 8) * cluster) as usize;
-        let rec0 = fixed(&bytes[at..at + record as usize]).expect("$MFT's own record");
+        let at = (le(&boot, 0x30, 8) * cluster) as usize;
+        let rec0 = fixed(&bytes.read(at..at + record as usize)).expect("$MFT's own record");
         let data = attrs(&rec0)
             .into_iter()
             .find(|a| a.ty == DATA && a.non_resident)
@@ -193,7 +194,7 @@ impl Vol {
         for &(lcn, len) in &self.mft_runs {
             if off < len * self.cluster {
                 let at = (lcn * self.cluster + off) as usize;
-                let rec = fixed(&self.bytes[at..at + self.record as usize])?;
+                let rec = fixed(&self.bytes.read(at..at + self.record as usize))?;
                 return (le(&rec, 0x16, 2) & 1 != 0).then_some(rec);
             }
             off -= len * self.cluster;

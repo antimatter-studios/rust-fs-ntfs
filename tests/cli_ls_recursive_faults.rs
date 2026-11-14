@@ -43,7 +43,7 @@ fn cycles_duplicates_and_unreadable_directories_preserve_the_report() {
         .unwrap();
         io.sync().unwrap();
         drop(io);
-        let before = std::fs::read(&img).unwrap();
+        let before = common::snapshot_image(&img).expect("snapshot image");
         let out = cli(&["fs", &img, "ls", "-R", "/"]);
         let rows: serde_json::Value =
             serde_json::from_slice(&out.stdout).expect("whole JSON report");
@@ -77,6 +77,6 @@ fn cycles_duplicates_and_unreadable_directories_preserve_the_report() {
                 .unwrap()
                 .contains(&format!("{repeated} [revisited]")));
         }
-        assert_eq!(std::fs::read(&img).unwrap(), before, "{fault}: read-only");
+        common::assert_images_equal(&img, before.path(), "image contents");
     }
 }

@@ -80,6 +80,7 @@
 
 mod common;
 
+use common::{ImageBytes, TestDigest};
 use fs_ntfs::facade::{FileType, Filesystem};
 use fs_ntfs::fsck;
 use fs_ntfs::{
@@ -89,6 +90,7 @@ use fs_ntfs::{
     fs_ntfs_mount_with_callbacks_replaying_log, fs_ntfs_mount_with_fs_core_device, fs_ntfs_umount,
     FsNtfsBlockdevCfg,
 };
+#[cfg(feature = "plan-file")]
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::ffi::CString;
@@ -206,8 +208,9 @@ const PARTITIONS: [(&str, &str); 26] = [
     ),
 ];
 
-fn hex_sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
+fn hex_sha256(bytes: &(impl TestDigest + ?Sized)) -> String {
+    bytes
+        .test_digest()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
@@ -233,7 +236,7 @@ fn unpack(name: &str) -> String {
         .unwrap_or_else(|| panic!("{name} has no recorded SHA-256"))
         .1;
     assert_eq!(
-        hex_sha256(&std::fs::read(&path).unwrap()),
+        common::sha256_file(&path).unwrap(),
         want,
         "{name} is not the captured partition with only bootstrap code removed"
     );
@@ -459,14 +462,14 @@ fn fsck_refuses_a_log_it_cannot_read_to_the_end_and_writes_nothing() {
         let img = unpack(&format!("windows-interrupted-{k}"));
         let logfile_lcn = 10_318u64; // $LogFile's one run, in both images
         let at = logfile_lcn * 4096 + page + 510; // the first sector's USN copy
-        let mut bytes = std::fs::read(&img).unwrap();
-        bytes[at as usize] ^= 0xFF;
-        std::fs::write(&img, &bytes).unwrap();
+        let mut bytes = ImageBytes::snapshot(&img).unwrap();
+        bytes.xor(at as usize, 0xFF);
+        bytes.copy_to(&img);
 
         let err = fsck::fsck(&img).expect_err("fsck must not act on a log it cannot read");
         assert!(err.contains("$LogFile"), "snapshot {k}: {err}");
         assert!(
-            std::fs::read(&img).unwrap() == bytes,
+            ImageBytes::snapshot(&img).unwrap() == bytes,
             "snapshot {k}: a refused fsck wrote to the volume"
         );
     }
@@ -775,7 +778,10 @@ fn a_quota_entry_update_leaves_the_record_lsn_where_windows_left_it() {
     // here.
     let want = QUOTA_RECORD_LSN;
     let win = Image::read(&unpack("windows-interrupted-quota.recovered"));
-    assert_eq!(le(&fixed(win.raw_record(24), b"FILE").unwrap(), 8, 8), want);
+    assert_eq!(
+        le(&fixed(&win.raw_record(24), b"FILE").unwrap(), 8, 8),
+        want
+    );
     let replay: [(&str, Mount); 2] = [
         ("fsck", |img| {
             fsck::fsck(img).map(|_| ()).map_err(|e| e.to_string())
@@ -790,7 +796,7 @@ fn a_quota_entry_update_leaves_the_record_lsn_where_windows_left_it() {
         run(&img).unwrap_or_else(|e| panic!("quota: {how}: {e}"));
         let ours = Image::read(&img);
         assert_eq!(
-            le(&fixed(ours.raw_record(24), b"FILE").unwrap(), 8, 8),
+            le(&fixed(&ours.raw_record(24), b"FILE").unwrap(), 8, 8),
             want,
             "quota: {how}: record 24's LSN moved"
         );
@@ -811,7 +817,7 @@ fn a_quota_entry_update_in_an_index_block_leaves_the_block_lsn_where_windows_lef
     // (#137). The comparison blanks LSNs, so this is checked here.
     let lsn = |img: &Image, lcn: u64| {
         le(
-            &fixed(img.cluster_bytes(lcn, 1), b"INDX").expect("an index block"),
+            &fixed(&img.cluster_bytes(lcn, 1), b"INDX").expect("an index block"),
             8,
             8,
         )
@@ -851,7 +857,7 @@ fn a_quota_entry_update_in_an_index_block_leaves_the_block_lsn_where_windows_lef
 #[test]
 fn a_deallocation_undone_keeps_the_record_windows_kept() {
     let win = Image::read(&unpack("windows-interrupted-open-at-checkpoint.recovered"));
-    let want = content(win.raw_record(2559), b"FILE").expect("Windows' record 2559");
+    let want = content(&win.raw_record(2559), b"FILE").expect("Windows' record 2559");
     let replay: [(&str, Mount); 2] = [
         ("fsck", |img| {
             fsck::fsck(img).map(|_| ()).map_err(|e| e.to_string())
@@ -865,7 +871,7 @@ fn a_deallocation_undone_keeps_the_record_windows_kept() {
         let img = unpack("windows-interrupted-open-at-checkpoint");
         run(&img).unwrap_or_else(|e| panic!("open-at-checkpoint: {how}: {e}"));
         assert!(
-            content(Image::read(&img).raw_record(2559), b"FILE").as_ref() == Some(&want),
+            content(&Image::read(&img).raw_record(2559), b"FILE").as_ref() == Some(&want),
             "open-at-checkpoint: {how}: record 2559 is not what Windows' restart left"
         );
         std::fs::remove_file(&img).unwrap();
@@ -1174,10 +1180,10 @@ fn every_write_without_a_read_write_mount_replays_the_log_first_or_writes_nothin
         };
         for (how, write) in PATH_WRITES {
             let img = unpack(&format!("windows-interrupted-{k}"));
-            let before = std::fs::read(&img).unwrap();
+            let before = ImageBytes::snapshot(&img).unwrap();
             match write(&img, "written") {
                 Err(why) => assert!(
-                    std::fs::read(&img).unwrap() == before,
+                    ImageBytes::snapshot(&img).unwrap() == before,
                     "snapshot {k}: {how} refused ({why}) and wrote to the volume anyway"
                 ),
                 Ok(rn) => {
@@ -1216,7 +1222,7 @@ fn a_read_only_mount_of_a_volume_windows_left_mid_write_replays_nothing() {
     // does with a volume it is not allowed to change.
     for k in ["1", "6"] {
         let img = unpack(&format!("windows-interrupted-{k}"));
-        let before = std::fs::read(&img).unwrap();
+        let before = ImageBytes::snapshot(&img).unwrap();
 
         Filesystem::mount(&img).expect("a read-only mount is allowed");
         callback_mount(&img, false)
@@ -1230,7 +1236,7 @@ fn a_read_only_mount_of_a_volume_windows_left_mid_write_replays_nothing() {
         unsafe { fs_core::ffi::fs_core_device_close(dev) };
 
         assert!(
-            std::fs::read(&img).unwrap() == before,
+            ImageBytes::snapshot(&img).unwrap() == before,
             "snapshot {k}: a read-only mount wrote to the volume"
         );
     }
@@ -1246,9 +1252,9 @@ fn a_read_write_mount_refuses_a_log_it_cannot_replay_in_full_and_writes_nothing(
             let img = unpack(&format!("windows-interrupted-{k}"));
             let logfile_lcn = 10_318u64; // $LogFile's one run, in both images
             let at = logfile_lcn * 4096 + page + 510; // the first sector's USN copy
-            let mut bytes = std::fs::read(&img).unwrap();
-            bytes[at as usize] ^= 0xFF;
-            std::fs::write(&img, &bytes).unwrap();
+            let mut bytes = ImageBytes::snapshot(&img).unwrap();
+            bytes.xor(at as usize, 0xFF);
+            bytes.copy_to(&img);
 
             let err = rw_mount(&img).expect_err("a mount over a log it cannot replay");
             assert!(
@@ -1256,7 +1262,7 @@ fn a_read_write_mount_refuses_a_log_it_cannot_replay_in_full_and_writes_nothing(
                 "snapshot {k}: {name}: {err}"
             );
             assert!(
-                std::fs::read(&img).unwrap() == bytes,
+                ImageBytes::snapshot(&img).unwrap() == bytes,
                 "snapshot {k}: {name}: a refused mount wrote to the volume"
             );
             std::fs::remove_file(&img).unwrap();
@@ -1277,7 +1283,7 @@ fn a_read_write_mount_refuses_a_log_holding_work_unless_asked_to_replay_it() {
     for (k, _) in LOG_END {
         for (name, rw_mount) in RW_MOUNTS {
             let img = unpack(&format!("windows-interrupted-{k}"));
-            let before = std::fs::read(&img).unwrap();
+            let before = ImageBytes::snapshot(&img).unwrap();
 
             let err = rw_mount(&img).expect_err("a read-write mount of a log holding work");
             assert!(
@@ -1289,7 +1295,7 @@ fn a_read_write_mount_refuses_a_log_holding_work_unless_asked_to_replay_it() {
                 "snapshot {k}: {name}: the refusal does not say how to replay: {err}"
             );
             assert!(
-                std::fs::read(&img).unwrap() == before,
+                ImageBytes::snapshot(&img).unwrap() == before,
                 "snapshot {k}: {name}: a refused mount wrote to the volume"
             );
             std::fs::remove_file(&img).unwrap();
@@ -1306,12 +1312,12 @@ fn a_dirty_volume_is_refused_before_its_log_is_replayed() {
         for (name, rw_mount) in RW_MOUNTS.iter().chain(&RW_MOUNTS_REPLAYING) {
             let img = unpack(&format!("windows-interrupted-{k}"));
             fsck::set_dirty(&img).expect("mark dirty");
-            let before = std::fs::read(&img).unwrap();
+            let before = ImageBytes::snapshot(&img).unwrap();
 
             let err = rw_mount(&img).expect_err("a read-write mount of a dirty volume");
             assert!(err.contains("dirty"), "snapshot {k}: {name}: {err}");
             assert!(
-                std::fs::read(&img).unwrap() == before,
+                ImageBytes::snapshot(&img).unwrap() == before,
                 "snapshot {k}: {name}: a refused mount wrote to the volume"
             );
             std::fs::remove_file(&img).unwrap();
@@ -1328,12 +1334,12 @@ fn a_dirty_volume_is_refused_before_its_log_is_replayed() {
 #[test]
 fn a_replay_through_callbacks_that_cannot_flush_is_refused() {
     let img = unpack("windows-interrupted-1");
-    let before = std::fs::read(&img).unwrap();
+    let before = ImageBytes::snapshot(&img).unwrap();
     let why = callback_mount_as(&img, true, true)
         .expect_err("a replaying mount through callbacks with no flush callback");
     assert!(why.contains("flush"), "the refusal names the flush: {why}");
     assert!(
-        std::fs::read(&img).unwrap() == before,
+        ImageBytes::snapshot(&img).unwrap() == before,
         "the refused mount wrote to the volume"
     );
 
@@ -1359,7 +1365,7 @@ fn a_replay_through_callbacks_that_cannot_flush_is_refused() {
     assert!(why.contains("flush"), "the refusal names the flush: {why}");
     drop(ctx);
     assert!(
-        std::fs::read(&img).unwrap() == before,
+        ImageBytes::snapshot(&img).unwrap() == before,
         "the refused fsck wrote to the volume"
     );
 }
@@ -1650,7 +1656,7 @@ fn floors(k: &str) -> (usize, usize, usize) {
 /// MS-FSCC and nothing in this crate: the boot sector, `$MFT`'s runs, and
 /// update-sequence fixups.
 struct Image {
-    bytes: Vec<u8>,
+    bytes: ImageBytes,
     cluster: u64,
     record: u64,
     /// Index block size, which spans several clusters when they are small.
@@ -1711,11 +1717,12 @@ fn attrs(rec: &[u8]) -> Vec<(usize, u32, bool)> {
 
 impl Image {
     fn read(path: &str) -> Image {
-        let bytes = std::fs::read(path).unwrap();
-        let cluster = le(&bytes, 0x0B, 2) * le(&bytes, 0x0D, 1);
-        let c = bytes[0x40] as i8;
+        let bytes = ImageBytes::snapshot(path).unwrap();
+        let boot = bytes.read(0..512);
+        let cluster = le(&boot, 0x0B, 2) * le(&boot, 0x0D, 1);
+        let c = boot[0x40] as i8;
         let record = if c > 0 { c as u64 * cluster } else { 1 << -c };
-        let c = bytes[0x44] as i8;
+        let c = boot[0x44] as i8;
         let index = if c > 0 { c as u64 * cluster } else { 1 << -c };
         let mut img = Image {
             bytes,
@@ -1724,9 +1731,9 @@ impl Image {
             index,
             mft_runs: Vec::new(),
         };
-        let mft_lcn = le(&img.bytes, 0x30, 8);
+        let mft_lcn = le(&boot, 0x30, 8);
         let at = (mft_lcn * cluster) as usize;
-        let rec0 = fixed(&img.bytes[at..at + record as usize], b"FILE").unwrap();
+        let rec0 = fixed(&img.bytes.read(at..at + record as usize), b"FILE").unwrap();
         let data = attrs(&rec0)
             .into_iter()
             .find(|&(_, t, nr)| t == 0x80 && nr)
@@ -1735,8 +1742,9 @@ impl Image {
         img
     }
 
-    fn cluster_bytes(&self, lcn: u64, n: u64) -> &[u8] {
-        &self.bytes[(lcn * self.cluster) as usize..((lcn + n) * self.cluster) as usize]
+    fn cluster_bytes(&self, lcn: u64, n: u64) -> Vec<u8> {
+        self.bytes
+            .read((lcn * self.cluster) as usize..((lcn + n) * self.cluster) as usize)
     }
 
     fn records(&self) -> u64 {
@@ -1744,19 +1752,19 @@ impl Image {
     }
 
     /// Record `n` as stored, before fixups.
-    fn raw_record(&self, n: u64) -> &[u8] {
+    fn raw_record(&self, n: u64) -> Vec<u8> {
         self.raw_record_if_mapped(n)
             .unwrap_or_else(|| panic!("record {n} is past $MFT"))
     }
 
     /// Record `n` as stored, or `None` past this image's `$MFT`: a record
     /// the log adds after growing `$MFT` has no place before the replay.
-    fn raw_record_if_mapped(&self, n: u64) -> Option<&[u8]> {
+    fn raw_record_if_mapped(&self, n: u64) -> Option<Vec<u8>> {
         let mut off = n * self.record;
         for &(lcn, len) in &self.mft_runs {
             if off < len * self.cluster {
                 let at = (lcn * self.cluster + off) as usize;
-                return Some(&self.bytes[at..at + self.record as usize]);
+                return Some(self.bytes.read(at..at + self.record as usize));
             }
             off -= len * self.cluster;
         }
@@ -1764,7 +1772,7 @@ impl Image {
     }
 
     fn record(&self, n: u64) -> Option<Vec<u8>> {
-        fixed(self.raw_record(n), b"FILE")
+        fixed(&self.raw_record(n), b"FILE")
     }
 
     /// The unnamed stream of type `t` of record `n`, non-resident.
@@ -1777,7 +1785,7 @@ impl Image {
         let size = le(&rec, a + 0x30, 8) as usize;
         let mut out = Vec::new();
         for (lcn, len) in runs_of(&rec, a) {
-            out.extend_from_slice(self.cluster_bytes(lcn, len));
+            out.extend_from_slice(&self.cluster_bytes(lcn, len));
         }
         out.truncate(size);
         out
@@ -1913,20 +1921,20 @@ mod oracle {
             if after.contains(&n) {
                 continue;
             }
-            let w = after_restart(k, n, None, content(win.raw_record(n), b"FILE"));
+            let w = after_restart(k, n, None, content(&win.raw_record(n), b"FILE"));
             if pre
                 .raw_record_if_mapped(n)
-                .and_then(|r| content(r, b"FILE"))
+                .and_then(|r| content(&r, b"FILE"))
                 != w
             {
                 replayed += 1;
             }
-            if content(ours.raw_record(n), b"FILE") != w {
+            if content(&ours.raw_record(n), b"FILE") != w {
                 differ.push(n);
             }
             let (o, w) = (
-                lsn(ours.raw_record(n), b"FILE"),
-                lsn(win.raw_record(n), b"FILE"),
+                lsn(&ours.raw_record(n), b"FILE"),
+                lsn(&win.raw_record(n), b"FILE"),
             );
             if !same_lsn(o, w, log_end) {
                 lsn_differ.push(format!("record {n}: {o:#x?}, Windows {w:#x?}"));
@@ -2045,7 +2053,7 @@ mod oracle {
         let mut owned_after = BTreeSet::new();
         for &n in &after {
             for img in [win, ours] {
-                let Some(rec) = img.raw_record_if_mapped(n).and_then(|r| fixed(r, b"FILE")) else {
+                let Some(rec) = img.raw_record_if_mapped(n).and_then(|r| fixed(&r, b"FILE")) else {
                     continue;
                 };
                 for (a, _, nr) in attrs(&rec) {
@@ -2181,14 +2189,14 @@ fn creating_files_on_a_volume_windows_wrote_grows_its_mft_once_its_records_run_o
 /// fails, as a power cut leaves them. Each write lands whole or not at
 /// all.
 struct Overlay<'a> {
-    base: &'a [u8],
+    base: &'a ImageBytes,
     written: BTreeMap<u64, Vec<u8>>,
     writes: usize,
     stop_after: Option<usize>,
 }
 
 impl<'a> Overlay<'a> {
-    fn new(base: &'a [u8], stop_after: Option<usize>) -> Self {
+    fn new(base: &'a ImageBytes, stop_after: Option<usize>) -> Self {
         Overlay {
             base,
             written: BTreeMap::new(),
@@ -2197,17 +2205,17 @@ impl<'a> Overlay<'a> {
         }
     }
 
-    fn sector(&self, n: u64) -> &[u8] {
-        self.written.get(&n).map_or_else(
-            || &self.base[(n * 512) as usize..(n * 512 + 512) as usize],
-            |s| s.as_slice(),
-        )
+    fn sector(&self, n: u64) -> Vec<u8> {
+        self.written
+            .get(&n)
+            .cloned()
+            .unwrap_or_else(|| self.base.read((n * 512) as usize..(n * 512 + 512) as usize))
     }
 
     fn bytes(&self, at: u64, len: usize) -> Vec<u8> {
         let mut out = Vec::with_capacity(len);
         for n in at / 512..(at + len as u64).div_ceil(512) {
-            out.extend_from_slice(self.sector(n));
+            out.extend_from_slice(&self.sector(n));
         }
         let skip = (at % 512) as usize;
         out[skip..skip + len].to_vec()
@@ -2265,7 +2273,7 @@ fn a_replay_stopped_after_any_write_reaches_the_same_volume_when_run_again() {
     let mut failed = Vec::new();
     for k in RERUN {
         let img = unpack(&format!("windows-interrupted-{k}"));
-        let base = std::fs::read(&img).unwrap();
+        let base = ImageBytes::snapshot(&img).unwrap();
         std::fs::remove_file(&img).unwrap();
 
         let mut whole = Overlay::new(&base, None);
@@ -2387,7 +2395,7 @@ fn a_replay_stopped_after_its_first_undo_write_leaves_the_log_holding_work() {
     // the work Windows' own restart will then find (#648).
     for k in RERUN {
         let img = unpack(&format!("windows-interrupted-{k}"));
-        let base = std::fs::read(&img).unwrap();
+        let base = ImageBytes::snapshot(&img).unwrap();
         std::fs::remove_file(&img).unwrap();
 
         let stamp = replay_stop::undo_stamp(&mut Overlay::new(&base, None))
@@ -2448,10 +2456,10 @@ fn captures_holding_work() -> Vec<(&'static str, u64)> {
 /// bytes there before it and of the bytes it leaves.
 type PlannedWrite = (u64, u64, String, String);
 
-/// A volume held in memory that records every write made to it, grouped
+/// A sparse file-backed volume that records every write made to it, grouped
 /// into the units a flush closes, and makes each one.
 struct RecordedRepair {
-    bytes: Vec<u8>,
+    bytes: ImageBytes,
     units: Vec<Vec<PlannedWrite>>,
     open: Vec<PlannedWrite>,
 }
@@ -2463,7 +2471,7 @@ impl fs_ntfs::block_io::BlockIo for RecordedRepair {
             .bytes
             .get(at..at + buf.len())
             .ok_or("read past the end")?;
-        buf.copy_from_slice(there);
+        buf.copy_from_slice(&there);
         Ok(())
     }
 
@@ -2471,11 +2479,17 @@ impl fs_ntfs::block_io::BlockIo for RecordedRepair {
         let at = offset as usize;
         let there = self
             .bytes
-            .get_mut(at..at + buf.len())
+            .get(at..at + buf.len())
             .ok_or("write past the end")?;
-        self.open
-            .push((offset, buf.len() as u64, hex_sha256(there), hex_sha256(buf)));
-        there.copy_from_slice(buf);
+        self.open.push((
+            offset,
+            buf.len() as u64,
+            hex_sha256(&there),
+            hex_sha256(buf),
+        ));
+        self.bytes
+            .write(at..at + buf.len(), buf)
+            .ok_or("write past the end")?;
         Ok(())
     }
 
@@ -2503,7 +2517,7 @@ fn a_dry_run_plans_the_writes_that_reach_what_windows_recovered_and_makes_none()
     // reached from the same capture.
     for (k, log_end) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
-        let pristine = std::fs::read(&src).unwrap();
+        let pristine = ImageBytes::snapshot(&src).unwrap();
 
         let mut repair = RecordedRepair {
             bytes: pristine.clone(),
@@ -2520,7 +2534,7 @@ fn a_dry_run_plans_the_writes_that_reach_what_windows_recovered_and_makes_none()
             repair.units.len()
         );
         let repaired = format!("{src}.repaired");
-        std::fs::write(&repaired, &repair.bytes).unwrap();
+        repair.bytes.copy_to(&repaired);
         let want = manifest(k);
         let got = walk(&repaired);
         assert!(
@@ -2586,7 +2600,7 @@ fn a_dry_run_plans_the_writes_that_reach_what_windows_recovered_and_makes_none()
             repair.units.len()
         );
         assert!(
-            std::fs::read(&src).unwrap() == pristine,
+            ImageBytes::snapshot(&src).unwrap() == pristine,
             "{k}: fsck.ntfs --dry-run wrote to the source"
         );
         // Windows refuses to delete a read-only file.
@@ -2624,16 +2638,16 @@ fn plan_file_sections(units: &[fs_ntfs::repair_plan::PlanUnit]) -> (Vec<usize>, 
 #[cfg(feature = "plan-file")]
 /// Applies a loaded plan onto `bytes` by this test's own writes, refusing
 /// any write whose before-image is not what `bytes` hold.
-fn apply_plan(k: &str, bytes: &mut [u8], units: &[fs_ntfs::repair_plan::PlanUnit]) {
+fn apply_plan(k: &str, bytes: &mut ImageBytes, units: &[fs_ntfs::repair_plan::PlanUnit]) {
     for (u, unit) in units.iter().enumerate() {
         for w in &unit.writes {
             let at = w.offset as usize;
-            let there = &mut bytes[at..at + w.after.len()];
+            let there = bytes.read(at..at + w.after.len());
             assert!(
-                there == &w.before[..],
+                there == w.before[..],
                 "{k}: unit {u}: the write at {at} finds other bytes than its before-image"
             );
-            there.copy_from_slice(&w.after);
+            bytes.write(at..at + w.after.len(), &w.after).unwrap();
         }
     }
 }
@@ -2648,7 +2662,7 @@ fn a_saved_plan_loads_back_to_what_windows_recovered_and_only_when_intact() {
     use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
     for (k, log_end) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
-        let pristine = std::fs::read(&src).unwrap();
+        let pristine = ImageBytes::snapshot(&src).unwrap();
         let mut volume = RecordedRepair {
             bytes: pristine.clone(),
             units: Vec::new(),
@@ -2668,7 +2682,7 @@ fn a_saved_plan_loads_back_to_what_windows_recovered_and_only_when_intact() {
             pristine.len() as u64,
             "{k}: source size"
         );
-        let serial = u64::from_le_bytes(pristine[0x48..0x50].try_into().unwrap());
+        let serial = u64::from_le_bytes(pristine.read(0x48..0x50).try_into().unwrap());
         assert_eq!(loaded.volume_serial, serial, "{k}: volume serial number");
         assert!(
             loaded.units == plan.units,
@@ -2678,7 +2692,7 @@ fn a_saved_plan_loads_back_to_what_windows_recovered_and_only_when_intact() {
         let mut copy = pristine.clone();
         apply_plan(k, &mut copy, &loaded.units);
         let repaired = format!("{src}.repaired");
-        std::fs::write(&repaired, &copy).unwrap();
+        copy.copy_to(&repaired);
         let want = manifest(k);
         let got = walk(&repaired);
         assert!(
@@ -2775,14 +2789,14 @@ fn a_loaded_plan_is_checked_against_its_source_and_refused_on_the_first_mismatch
     // capture with one byte changed, one sector shorter, or with another
     // serial must be refused naming what differs, and never written.
     use fs_ntfs::repair_plan::{check_plan_source, load_plan, plan_fsck_io, save_plan};
-    let volume = |bytes: Vec<u8>| RecordedRepair {
+    let volume = |bytes: ImageBytes| RecordedRepair {
         bytes,
         units: Vec::new(),
         open: Vec::new(),
     };
     for (k, _) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
-        let pristine = std::fs::read(&src).unwrap();
+        let pristine = ImageBytes::snapshot(&src).unwrap();
         let pristine_sha = hex_sha256(&pristine);
         let mut v = volume(pristine.clone());
         let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
@@ -2802,7 +2816,7 @@ fn a_loaded_plan_is_checked_against_its_source_and_refused_on_the_first_mismatch
             "{k}: the check wrote to the capture"
         );
 
-        let refused = |what: &str, bytes: Vec<u8>, names: &str| {
+        let refused = |what: &str, bytes: ImageBytes, names: &str| {
             let before = hex_sha256(&bytes);
             let mut v = volume(bytes);
             match check_plan_source(&loaded, &mut v) {
@@ -2830,7 +2844,7 @@ fn a_loaded_plan_is_checked_against_its_source_and_refused_on_the_first_mismatch
         for (u, w) in [first, last] {
             let at = uncovered_byte(&loaded.units, u, w).unwrap() as usize;
             let mut changed = pristine.clone();
-            changed[at] ^= 0xff;
+            changed.xor(at, 0xff);
             refused(
                 &format!("byte {at} changed"),
                 changed,
@@ -2843,7 +2857,7 @@ fn a_loaded_plan_is_checked_against_its_source_and_refused_on_the_first_mismatch
         refused("one sector shorter", shorter, "size");
 
         let mut other = pristine.clone();
-        other[0x48] ^= 0xff;
+        other.xor(0x48, 0xff);
         refused("another volume serial", other, "serial");
 
         std::fs::remove_file(&src).unwrap();
@@ -2872,14 +2886,14 @@ fn a_plan_unit_is_checked_on_the_device_about_to_receive_it_at_its_turn() {
     // unit's ranges must be refused naming that write's range, and the
     // check must never write.
     use fs_ntfs::repair_plan::{check_unit_on_device, load_plan, plan_fsck_io, save_plan};
-    let volume = |bytes: Vec<u8>| RecordedRepair {
+    let volume = |bytes: ImageBytes| RecordedRepair {
         bytes,
         units: Vec::new(),
         open: Vec::new(),
     };
     for (k, _) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
-        let pristine = std::fs::read(&src).unwrap();
+        let pristine = ImageBytes::snapshot(&src).unwrap();
         let mut v = volume(pristine.clone());
         let plan = plan_fsck_io(&mut v, fsck::FsckOptions::default())
             .unwrap_or_else(|e| panic!("{k}: plan: {e}"));
@@ -2910,7 +2924,7 @@ fn a_plan_unit_is_checked_on_the_device_about_to_receive_it_at_its_turn() {
                 .unwrap_or_else(|| panic!("{k}: unit {u} has no byte its own writes do not cover"));
             let mut copy = volume(pristine.clone());
             apply_plan(k, &mut copy.bytes, &loaded.units[..u]);
-            copy.bytes[at] ^= 0xff;
+            copy.bytes.xor(at, 0xff);
             let before = hex_sha256(&copy.bytes);
             let write = &unit.writes[w];
             let range = format!(
@@ -2954,7 +2968,7 @@ fn a_copy_repair_reaches_what_windows_recovered_and_never_writes_its_source() {
     use std::path::Path;
     for (k, log_end) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
-        let pristine = std::fs::read(&src).unwrap();
+        let pristine = ImageBytes::snapshot(&src).unwrap();
         let pristine_sha = hex_sha256(&pristine);
         let mut v = RecordedRepair {
             bytes: pristine.clone(),
@@ -2975,7 +2989,7 @@ fn a_copy_repair_reaches_what_windows_recovered_and_never_writes_its_source() {
         copy_repair(&loaded, Path::new(&src), Path::new(&target))
             .unwrap_or_else(|e| panic!("{k}: copy-repair: {e}"));
         assert_eq!(
-            hex_sha256(&std::fs::read(&src).unwrap()),
+            common::sha256_file(&src).unwrap(),
             pristine_sha,
             "{k}: copy-repair wrote to its source"
         );
@@ -2999,7 +3013,7 @@ fn a_copy_repair_reaches_what_windows_recovered_and_never_writes_its_source() {
 
         // The target now exists: a second copy-repair onto it is refused
         // and leaves it as it was.
-        let kept = hex_sha256(&std::fs::read(&target).unwrap());
+        let kept = common::sha256_file(&target).unwrap();
         match copy_repair(&loaded, Path::new(&src), Path::new(&target)) {
             Ok(()) => panic!("{k}: copy-repair onto an existing target went ahead"),
             Err(e) => assert!(
@@ -3008,7 +3022,7 @@ fn a_copy_repair_reaches_what_windows_recovered_and_never_writes_its_source() {
             ),
         }
         assert_eq!(
-            hex_sha256(&std::fs::read(&target).unwrap()),
+            common::sha256_file(&target).unwrap(),
             kept,
             "{k}: the refused copy-repair changed the existing target"
         );
@@ -3020,9 +3034,9 @@ fn a_copy_repair_reaches_what_windows_recovered_and_never_writes_its_source() {
             .unwrap_or_else(|| panic!("{k}: the first write has no byte of its own"))
             as usize;
         let mut changed = pristine.clone();
-        changed[at] ^= 0xff;
+        changed.xor(at, 0xff);
         let changed_src = format!("{src}.changed");
-        std::fs::write(&changed_src, &changed).unwrap();
+        changed.copy_to(&changed_src);
         let changed_sha = hex_sha256(&changed);
         let refused_target = format!("{src}.refused");
         let _ = std::fs::remove_file(&refused_target);
@@ -3038,7 +3052,7 @@ fn a_copy_repair_reaches_what_windows_recovered_and_never_writes_its_source() {
             "{k}: a refused copy-repair left a target behind"
         );
         assert_eq!(
-            hex_sha256(&std::fs::read(&changed_src).unwrap()),
+            common::sha256_file(&changed_src).unwrap(),
             changed_sha,
             "{k}: the refused copy-repair wrote to its source"
         );
@@ -3052,7 +3066,7 @@ fn a_copy_repair_reaches_what_windows_recovered_and_never_writes_its_source() {
 /// the order they reach it.
 #[cfg(feature = "plan-file")]
 struct CountingTarget {
-    bytes: Vec<u8>,
+    bytes: ImageBytes,
     events: Vec<Option<u64>>,
 }
 
@@ -3064,16 +3078,15 @@ impl fs_ntfs::block_io::BlockIo for CountingTarget {
             .bytes
             .get(at..at + buf.len())
             .ok_or("read past the end")?;
-        buf.copy_from_slice(there);
+        buf.copy_from_slice(&there);
         Ok(())
     }
 
     fn write_all_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), String> {
         let at = offset as usize;
         self.bytes
-            .get_mut(at..at + buf.len())
-            .ok_or("write past the end")?
-            .copy_from_slice(buf);
+            .write(at..at + buf.len(), buf)
+            .ok_or("write past the end")?;
         self.events.push(Some(offset));
         Ok(())
     }
@@ -3099,7 +3112,7 @@ fn a_copy_repair_syncs_after_every_unit_and_never_inside_one() {
     let mut most_units = 0;
     for (k, _) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
-        let pristine = std::fs::read(&src).unwrap();
+        let pristine = ImageBytes::snapshot(&src).unwrap();
         let mut v = RecordedRepair {
             bytes: pristine.clone(),
             units: Vec::new(),
@@ -3164,7 +3177,7 @@ fn a_repair_journal_reads_back_to_its_last_whole_record_and_refuses_the_rest() {
     for (k, _) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
         let mut v = RecordedRepair {
-            bytes: std::fs::read(&src).unwrap(),
+            bytes: ImageBytes::snapshot(&src).unwrap(),
             units: Vec::new(),
             open: Vec::new(),
         };
@@ -3305,9 +3318,9 @@ fn a_repair_journal_reads_back_to_its_last_whole_record_and_refuses_the_rest() {
 /// Each capture's plan, loaded back from its file, with the SHA-256 of
 /// that file and the capture's bytes.
 #[cfg(feature = "plan-file")]
-fn saved_plan(k: &str, src: &str) -> (fs_ntfs::repair_plan::SavedPlan, [u8; 32], Vec<u8>) {
+fn saved_plan(k: &str, src: &str) -> (fs_ntfs::repair_plan::SavedPlan, [u8; 32], ImageBytes) {
     use fs_ntfs::repair_plan::{load_plan, plan_fsck_io, save_plan};
-    let pristine = std::fs::read(src).unwrap();
+    let pristine = ImageBytes::snapshot(src).unwrap();
     let mut v = RecordedRepair {
         bytes: pristine.clone(),
         units: Vec::new(),
@@ -3322,6 +3335,38 @@ fn saved_plan(k: &str, src: &str) -> (fs_ntfs::repair_plan::SavedPlan, [u8; 32],
         "{k}: a log holding work planned nothing"
     );
     (loaded, Sha256::digest(&saved).into(), pristine)
+}
+
+#[cfg(feature = "plan-file")]
+fn checked_journal_bytes(
+    path: impl AsRef<std::path::Path>,
+    binding: &fs_ntfs::repair_journal::JournalBinding,
+    plan: &fs_ntfs::repair_plan::SavedPlan,
+) -> Vec<u8> {
+    use fs_ntfs::repair_journal::{applied_record, header_record, intent_record};
+    let path = path.as_ref();
+    let length = std::fs::metadata(path).expect("journal metadata").len() as usize;
+    let mut expected = header_record(binding);
+    for (index, unit) in plan.units.iter().enumerate() {
+        if expected.len() >= length {
+            break;
+        }
+        expected.extend(intent_record(index as u32, unit));
+        if expected.len() < length {
+            expected.extend(applied_record(index as u32));
+        }
+    }
+    assert!(
+        length <= expected.len(),
+        "journal extends past the plan's final record"
+    );
+    expected.truncate(length);
+    assert_eq!(
+        common::image_digest(path).expect("digest journal"),
+        expected.test_digest(),
+        "journal differs from the expected encoded records"
+    );
+    expected
 }
 
 #[cfg(feature = "plan-file")]
@@ -3345,7 +3390,7 @@ fn an_in_place_repair_reaches_what_windows_recovered_and_equals_the_copy_repair(
             .unwrap_or_else(|e| panic!("{k}: copy-repair: {e}"));
 
         let device = format!("{src}.in-place");
-        std::fs::write(&device, &pristine).unwrap();
+        pristine.copy_to(&device);
         // The primitive's unique path, made a directory, so the journal is
         // beside neither the device nor the target.
         let journal_dir =
@@ -3361,7 +3406,7 @@ fn an_in_place_repair_reaches_what_windows_recovered_and_equals_the_copy_repair(
                 .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
         }
         assert!(
-            std::fs::read(&device).unwrap() == std::fs::read(&target).unwrap(),
+            ImageBytes::snapshot(&device).unwrap() == ImageBytes::snapshot(&target).unwrap(),
             "{k}: the in-place repair left other bytes than copy-repair's target"
         );
         let binding = JournalBinding {
@@ -3369,8 +3414,11 @@ fn an_in_place_repair_reaches_what_windows_recovered_and_equals_the_copy_repair(
             source_size: loaded.source_size,
             volume_serial: loaded.volume_serial,
         };
-        let read = read_journal(&std::fs::read(&journal).unwrap(), &binding)
-            .unwrap_or_else(|e| panic!("{k}: the journal reads back as {e}"));
+        let read = read_journal(
+            &checked_journal_bytes(&journal, &binding, &loaded),
+            &binding,
+        )
+        .unwrap_or_else(|e| panic!("{k}: the journal reads back as {e}"));
         let applied = read
             .records
             .iter()
@@ -3422,7 +3470,7 @@ enum IoEvent {
 #[cfg(feature = "plan-file")]
 type IoLog = std::rc::Rc<std::cell::RefCell<Vec<(bool, IoEvent)>>>;
 
-/// One side of a recording pair: in-memory bytes, and every write, sync
+/// One side of a recording pair: file-backed image or small journal, and every write, sync
 /// and read pushed to a log shared with the other side, tagged
 /// `journal` or not. `drop_write` names one write, by its order among
 /// this side's writes, that is recorded but never lands. `cut_after`
@@ -3432,7 +3480,7 @@ type IoLog = std::rc::Rc<std::cell::RefCell<Vec<(bool, IoEvent)>>>;
 /// names, the other half left as the device held it.
 #[cfg(feature = "plan-file")]
 struct RecordingIo {
-    bytes: Vec<u8>,
+    bytes: ImageBytes,
     journal: bool,
     log: IoLog,
     writes: usize,
@@ -3459,7 +3507,7 @@ impl fs_ntfs::block_io::BlockIo for RecordingIo {
             .bytes
             .get(at..at + buf.len())
             .ok_or("read past the end")?;
-        buf.copy_from_slice(there);
+        buf.copy_from_slice(&there);
         self.log.borrow_mut().push((self.journal, IoEvent::Read));
         Ok(())
     }
@@ -3482,9 +3530,8 @@ impl fs_ntfs::block_io::BlockIo for RecordingIo {
                 };
                 if let Some(range) = landing {
                     let from = range.start - at;
-                    if let Some(there) = self.bytes.get_mut(range.clone()) {
-                        there.copy_from_slice(&buf[from..from + range.len()]);
-                    }
+                    self.bytes
+                        .write(range.clone(), &buf[from..from + range.len()]);
                 }
                 return Err("the power was cut".into());
             }
@@ -3495,9 +3542,8 @@ impl fs_ntfs::block_io::BlockIo for RecordingIo {
         }
         if self.drop_write != Some(self.writes) {
             self.bytes
-                .get_mut(at..at + buf.len())
-                .ok_or("write past the end")?
-                .copy_from_slice(buf);
+                .write(at..at + buf.len(), buf)
+                .ok_or("write past the end")?;
         }
         self.writes += 1;
         self.log.borrow_mut().push((self.journal, IoEvent::Write));
@@ -3515,10 +3561,13 @@ impl fs_ntfs::block_io::BlockIo for RecordingIo {
 }
 
 #[cfg(feature = "plan-file")]
-fn recording_pair(pristine: &[u8], drop_write: Option<usize>) -> (RecordingIo, RecordingIo, IoLog) {
+fn recording_pair(
+    pristine: &ImageBytes,
+    drop_write: Option<usize>,
+) -> (RecordingIo, RecordingIo, IoLog) {
     let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let device = RecordingIo {
-        bytes: pristine.to_vec(),
+        bytes: pristine.clone(),
         journal: false,
         log: log.clone(),
         writes: 0,
@@ -3527,7 +3576,7 @@ fn recording_pair(pristine: &[u8], drop_write: Option<usize>) -> (RecordingIo, R
         tear: None,
     };
     let journal = RecordingIo {
-        bytes: Vec::new(),
+        bytes: ImageBytes::new(),
         journal: true,
         log: log.clone(),
         writes: 0,
@@ -3622,7 +3671,7 @@ fn an_in_place_repair_stops_at_a_unit_the_device_reads_back_wrong_and_never_mark
             source_size: loaded.source_size,
             volume_serial: loaded.volume_serial,
         };
-        let read = read_journal(&journal.bytes, &binding)
+        let read = read_journal(journal.bytes.small(), &binding)
             .unwrap_or_else(|e| panic!("{k}: the journal reads back as {e}"));
         let last_u32 = last as u32;
         assert!(
@@ -3661,7 +3710,7 @@ fn a_repair_journal_reports_the_units_applied_and_the_unit_left_open_at_every_cu
         let (mut device, mut journal, _) = recording_pair(&pristine, None);
         apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
             .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
-        let bytes = journal.bytes;
+        let bytes = journal.bytes.small().to_vec();
         let binding = JournalBinding {
             plan_sha256,
             source_size: loaded.source_size,
@@ -3809,7 +3858,7 @@ fn an_in_place_repair_stopped_after_any_write_resumes_to_the_uninterrupted_volum
                 ));
                 continue;
             }
-            let read = match read_journal(&journal.bytes, &binding) {
+            let read = match read_journal(journal.bytes.small(), &binding) {
                 Ok(read) => read,
                 Err(e) => {
                     bad.push(format!("stop after {stop}: the journal reads back as {e}"));
@@ -3850,7 +3899,7 @@ fn an_in_place_repair_stopped_after_any_write_resumes_to_the_uninterrupted_volum
         );
 
         let device = format!("{src}.resumed");
-        std::fs::write(&device, resumed.expect("no stop resumed")).unwrap();
+        resumed.expect("no stop resumed").copy_to(&device);
         let want = manifest(k);
         let got = walk(&device);
         assert!(
@@ -4043,7 +4092,7 @@ fn an_in_place_repair_cancelled_anywhere_stops_after_a_whole_unit_and_resumes() 
                 bad.push(format!("{when}: the cancelled apply's progress: {e}"));
                 continue;
             }
-            let read = match read_journal(&journal.bytes, &binding) {
+            let read = match read_journal(journal.bytes.small(), &binding) {
                 Ok(read) => read,
                 Err(e) => {
                     bad.push(format!("{when}: the journal reads back as {e}"));
@@ -4118,7 +4167,7 @@ fn an_in_place_repair_cancelled_anywhere_stops_after_a_whole_unit_and_resumes() 
         assert!(device.bytes == whole, "{k}: the unobserved apply differs");
 
         let device = format!("{src}.cancelled");
-        std::fs::write(&device, resumed.expect("no cancellation resumed")).unwrap();
+        resumed.expect("no cancellation resumed").copy_to(&device);
         let want = manifest(k);
         let got = walk(&device);
         assert!(
@@ -4192,7 +4241,7 @@ fn a_c_abi_in_place_repair_cancelled_by_its_callback_resumes_through_the_c_abi()
     };
     for (k, log_end) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
-        let pristine = std::fs::read(&src).unwrap();
+        let pristine = ImageBytes::snapshot(&src).unwrap();
         let mut v = RecordedRepair {
             bytes: pristine.clone(),
             units: Vec::new(),
@@ -4225,7 +4274,7 @@ fn a_c_abi_in_place_repair_cancelled_by_its_callback_resumes_through_the_c_abi()
         let _ = std::fs::remove_dir_all(&journal_dir);
         std::fs::create_dir_all(&journal_dir).unwrap();
         let journal_file = journal_dir.join("repair.journal");
-        std::fs::write(&device, &pristine).unwrap();
+        pristine.copy_to(&device);
         std::fs::write(&plan_file, &saved).unwrap();
         let c_device = CString::new(device.as_str()).unwrap();
         let c_plan = CString::new(plan_file.as_str()).unwrap();
@@ -4276,7 +4325,7 @@ fn a_c_abi_in_place_repair_cancelled_by_its_callback_resumes_through_the_c_abi()
         rising(&again.reports, done, total, total)
             .unwrap_or_else(|e| panic!("{k}: the resume's progress: {e}"));
         assert!(
-            std::fs::read(&device).unwrap() == whole,
+            ImageBytes::snapshot(&device).unwrap() == whole,
             "{k}: the device resumed through the C ABI holds other bytes than an \
              uninterrupted apply"
         );
@@ -4436,7 +4485,7 @@ fn a_resumed_in_place_repair_writes_nothing_to_the_device_for_a_unit_marked_appl
 /// access is this `BlockIo`.
 #[cfg(feature = "plan-file")]
 struct RestoringIo<'a> {
-    bytes: Vec<u8>,
+    bytes: ImageBytes,
     journal: bool,
     undo: Vec<Replaced>,
     power: &'a Power,
@@ -4470,13 +4519,13 @@ impl RestoringIo<'_> {
         let end = (at + buf.len()).min(len);
         self.undo.push(Replaced {
             at: at.min(len),
-            bytes: self.bytes[at.min(len)..end].to_vec(),
+            bytes: self.bytes.read(at.min(len)..end),
             len,
         });
         if len < at + buf.len() {
             self.bytes.resize(at + buf.len(), 0);
         }
-        self.bytes[at..at + buf.len()].copy_from_slice(buf);
+        self.bytes.write(at..at + buf.len(), buf).unwrap();
     }
 
     /// Put back everything written since `undo` held `mark` entries, and
@@ -4491,16 +4540,18 @@ impl RestoringIo<'_> {
         let same_len = first.len == self.bytes.len();
         let held: Vec<(usize, Vec<u8>)> = self.undo[mark..]
             .iter()
-            .map(|r| (r.at, self.bytes[r.at..r.at + r.bytes.len()].to_vec()))
+            .map(|r| (r.at, self.bytes.read(r.at..r.at + r.bytes.len())))
             .collect();
         for r in self.undo.drain(mark..).rev() {
             self.bytes.truncate(r.len);
-            self.bytes[r.at..r.at + r.bytes.len()].copy_from_slice(&r.bytes);
+            self.bytes
+                .write(r.at..r.at + r.bytes.len(), &r.bytes)
+                .unwrap();
         }
         same_len
             && held
                 .iter()
-                .all(|(at, was)| self.bytes[*at..*at + was.len()] == was[..])
+                .all(|(at, was)| self.bytes.read(*at..*at + was.len()) == was[..])
     }
 }
 
@@ -4512,7 +4563,7 @@ impl fs_ntfs::block_io::BlockIo for RestoringIo<'_> {
             .bytes
             .get(at..at + buf.len())
             .ok_or("read past the end")?;
-        buf.copy_from_slice(there);
+        buf.copy_from_slice(&there);
         Ok(())
     }
 
@@ -4589,7 +4640,7 @@ fn a_resume_refuses_a_unit_whose_range_changed_while_stopped_and_names_the_byte(
             power: &power,
         };
         let mut journal = RestoringIo {
-            bytes: Vec::new(),
+            bytes: ImageBytes::new(),
             journal: true,
             undo: Vec::new(),
             power: &power,
@@ -4606,7 +4657,7 @@ fn a_resume_refuses_a_unit_whose_range_changed_while_stopped_and_names_the_byte(
                 continue;
             }
             power.cut_after.set(None);
-            let read = read_journal(&journal.bytes, &binding)
+            let read = read_journal(journal.bytes.small(), &binding)
                 .unwrap_or_else(|e| panic!("{k}: write {stop}: the journal: {e}"));
             let stopped = progress(&read, &loaded)
                 .unwrap_or_else(|e| panic!("{k}: write {stop}: the journal: {e}"));
@@ -4655,7 +4706,7 @@ fn a_resume_refuses_a_unit_whose_range_changed_while_stopped_and_names_the_byte(
                 if in_applied {
                     applied_cases += 1;
                 }
-                avoid.push(device.bytes[byte as usize]);
+                avoid.push(device.bytes.read(byte as usize..byte as usize + 1)[0]);
                 let value = (0..=255u8).find(|v| !avoid.contains(v)).unwrap();
                 let at_the_cut = device.undo.len();
                 device.replace(byte as usize, &[value]);
@@ -4770,7 +4821,7 @@ fn a_torn_journal_tail_resumes_only_as_a_prefix_of_the_record_the_plan_expects_n
         apply_in_place(&loaded, plan_sha256, &mut device, &mut journal)
             .unwrap_or_else(|e| panic!("{k}: in-place repair: {e}"));
         let whole = device.bytes;
-        let full = journal.bytes;
+        let full = journal.bytes.small().to_vec();
         let binding = JournalBinding {
             plan_sha256,
             source_size: loaded.source_size,
@@ -4782,13 +4833,13 @@ fn a_torn_journal_tail_resumes_only_as_a_prefix_of_the_record_the_plan_expects_n
         let mut unit0 = pristine.clone();
         for w in &loaded.units[0].writes {
             let at = w.offset as usize;
-            unit0[at..at + w.after.len()].copy_from_slice(&w.after);
+            unit0.write(at..at + w.after.len(), &w.after).unwrap();
         }
         let joined = |parts: &[&[u8]]| parts.concat();
         let after_all = 1 + 2 * loaded.units.len();
 
         let mut bad = Vec::new();
-        let corrupt: Vec<(&str, &[u8], Vec<u8>, usize)> = vec![
+        let corrupt: Vec<(&str, &ImageBytes, Vec<u8>, usize)> = vec![
             ("the header's length raised", &pristine, raised(&header), 0),
             (
                 "unit 0's intent length raised",
@@ -4823,13 +4874,13 @@ fn a_torn_journal_tail_resumes_only_as_a_prefix_of_the_record_the_plan_expects_n
         ];
         for (what, held, bytes, record) in corrupt {
             let (mut device, mut journal, _) = recording_pair(held, None);
-            journal.bytes = bytes.clone();
+            journal.bytes = bytes.clone().into();
             match resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
                 Ok(()) => bad.push(format!("{what}: the resume reported success")),
                 Err(InPlaceError::Journal(e))
                     if e.record == record && e.fault == JournalFault::TornTailDiffers =>
                 {
-                    if device.bytes != held {
+                    if device.bytes != *held {
                         bad.push(format!("{what}: refused as {e}, but the device changed"));
                     }
                     if journal.bytes != bytes {
@@ -4842,7 +4893,7 @@ fn a_torn_journal_tail_resumes_only_as_a_prefix_of_the_record_the_plan_expects_n
             }
         }
 
-        let frame_refused: Vec<(&str, &[u8], Vec<u8>, usize)> = vec![
+        let frame_refused: Vec<(&str, &ImageBytes, Vec<u8>, usize)> = vec![
             (
                 "the header's length raised alone",
                 &pristine,
@@ -4864,13 +4915,13 @@ fn a_torn_journal_tail_resumes_only_as_a_prefix_of_the_record_the_plan_expects_n
         ];
         for (what, held, bytes, record) in frame_refused {
             let (mut device, mut journal, _) = recording_pair(held, None);
-            journal.bytes = bytes.clone();
+            journal.bytes = bytes.clone().into();
             match resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
                 Ok(()) => bad.push(format!("{what}: the resume reported success")),
                 Err(InPlaceError::Journal(e))
                     if e.record == record && e.fault == JournalFault::ChecksumMismatch =>
                 {
-                    if device.bytes != held {
+                    if device.bytes != *held {
                         bad.push(format!("{what}: refused as {e}, but the device changed"));
                     }
                     if journal.bytes != bytes {
@@ -4883,7 +4934,7 @@ fn a_torn_journal_tail_resumes_only_as_a_prefix_of_the_record_the_plan_expects_n
             }
         }
 
-        let prefixes: Vec<(&str, &[u8], Vec<u8>)> = vec![
+        let prefixes: Vec<(&str, &ImageBytes, Vec<u8>)> = vec![
             (
                 "half the header",
                 &pristine,
@@ -4902,7 +4953,7 @@ fn a_torn_journal_tail_resumes_only_as_a_prefix_of_the_record_the_plan_expects_n
         ];
         for (what, held, bytes) in prefixes {
             let (mut device, mut journal, _) = recording_pair(held, None);
-            journal.bytes = bytes;
+            journal.bytes = bytes.into();
             match resume_in_place(&loaded, plan_sha256, &mut device, &mut journal) {
                 Ok(()) if device.bytes == whole => {}
                 Ok(()) => bad.push(format!(
@@ -4947,7 +4998,7 @@ fn a_plan_for_an_in_place_apply_opens_by_setting_the_dirty_flag() {
     };
     for (k, _) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
-        let pristine = std::fs::read(&src).unwrap();
+        let pristine = ImageBytes::snapshot(&src).unwrap();
         std::fs::remove_file(&src).unwrap();
         let mut dirtied = RecordedRepair {
             bytes: pristine.clone(),
@@ -5054,7 +5105,7 @@ fn fsck_apply_copy_repairs_a_read_only_capture_into_a_new_target() {
     use std::path::Path;
     for (k, _) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
-        let pristine = std::fs::read(&src).unwrap();
+        let pristine = ImageBytes::snapshot(&src).unwrap();
         let pristine_sha = hex_sha256(&pristine);
         let mut v = RecordedRepair {
             bytes: pristine.clone(),
@@ -5070,7 +5121,7 @@ fn fsck_apply_copy_repairs_a_read_only_capture_into_a_new_target() {
         set_read_only(&src, true);
         let unchanged = |what: &str| {
             assert_eq!(
-                hex_sha256(&std::fs::read(&src).unwrap()),
+                common::sha256_file(&src).unwrap(),
                 pristine_sha,
                 "{k}: {what} changed the capture"
             );
@@ -5134,7 +5185,7 @@ fn fsck_apply_copy_repairs_a_read_only_capture_into_a_new_target() {
                 &refused,
             ),
         ];
-        let kept = hex_sha256(&std::fs::read(&target).unwrap());
+        let kept = common::sha256_file(&target).unwrap();
         for (what, args, reason, not_created) in cases {
             let (code, said) = fsck_cli(&args);
             assert_ne!(code, 0, "{k}: {what} went ahead: {said}");
@@ -5149,7 +5200,7 @@ fn fsck_apply_copy_repairs_a_read_only_capture_into_a_new_target() {
             );
         }
         assert_eq!(
-            hex_sha256(&std::fs::read(&target).unwrap()),
+            common::sha256_file(&target).unwrap(),
             kept,
             "{k}: a refused --apply changed the existing target"
         );
@@ -5175,16 +5226,15 @@ fn fsck_dry_run_plan_writes_the_plan_to_an_external_file_never_its_target() {
     // its units are the report's plan. `--plan` naming the capture, by path
     // or hard link, naming a file that exists, or without `--dry-run`, is
     // refused naming its reason, and nothing is written.
-    use fs_ntfs::repair_plan::load_plan;
     use std::path::Path;
     type Writes = Vec<Vec<(u64, u64, String, String)>>;
     for (k, _) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
-        let pristine_sha = hex_sha256(&std::fs::read(&src).unwrap());
+        let pristine_sha = common::sha256_file(&src).unwrap();
         set_read_only(&src, true);
         let unchanged = |what: &str| {
             assert_eq!(
-                hex_sha256(&std::fs::read(&src).unwrap()),
+                common::sha256_file(&src).unwrap(),
                 pristine_sha,
                 "{k}: {what} changed the capture"
             );
@@ -5228,8 +5278,12 @@ fn fsck_dry_run_plan_writes_the_plan_to_an_external_file_never_its_target() {
                     .collect()
             })
             .collect();
-        let saved = load_plan(&std::fs::read(&plan_file).unwrap())
-            .unwrap_or_else(|e| panic!("{k}: the plan file does not load: {e}"));
+        let (saved, expected_sha, _) = saved_plan(k, &src);
+        assert_eq!(
+            common::image_digest(&plan_file).unwrap(),
+            expected_sha,
+            "{k}: the CLI plan is not the library plan"
+        );
         let loaded: Writes = saved
             .units
             .iter()
@@ -5289,7 +5343,7 @@ fn fsck_dry_run_plan_writes_the_plan_to_an_external_file_never_its_target() {
                 "--dry-run",
             ),
         ];
-        let kept = hex_sha256(&std::fs::read(&plan_file).unwrap());
+        let kept = common::sha256_file(&plan_file).unwrap();
         for (what, args, reason) in cases {
             let (code, said) = fsck_cli(&args);
             assert_ne!(code, 0, "{k}: {what} went ahead: {said}");
@@ -5304,7 +5358,7 @@ fn fsck_dry_run_plan_writes_the_plan_to_an_external_file_never_its_target() {
             );
         }
         assert_eq!(
-            hex_sha256(&std::fs::read(&plan_file).unwrap()),
+            common::sha256_file(&plan_file).unwrap(),
             kept,
             "{k}: a refused --plan changed the existing plan file"
         );
@@ -5333,7 +5387,7 @@ fn fsck_apply_in_place_repairs_a_copy_through_an_external_journal() {
     use std::path::Path;
     for (k, _) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
-        let pristine = std::fs::read(&src).unwrap();
+        let pristine = ImageBytes::snapshot(&src).unwrap();
         let pristine_sha = hex_sha256(&pristine);
         let mut v = RecordedRepair {
             bytes: pristine.clone(),
@@ -5354,9 +5408,9 @@ fn fsck_apply_in_place_repairs_a_copy_through_an_external_journal() {
         // A second copy that no longer holds the first write's before-image.
         let first = &loaded.units[0].writes[0];
         let mut changed = pristine.clone();
-        changed[first.offset as usize] ^= 0xff;
+        changed.xor(first.offset as usize, 0xff);
         let other = format!("{src}.other");
-        std::fs::write(&other, &changed).unwrap();
+        changed.copy_to(&other);
         let other_sha = hex_sha256(&changed);
         drop(changed);
         drop(pristine);
@@ -5491,7 +5545,7 @@ fn fsck_apply_in_place_repairs_a_copy_through_an_external_journal() {
                 &pristine_sha
             };
             assert_eq!(
-                &hex_sha256(&std::fs::read(target).unwrap()),
+                &common::sha256_file(target).unwrap(),
                 want,
                 "{k}: {what} changed {target}"
             );
@@ -5504,7 +5558,7 @@ fn fsck_apply_in_place_repairs_a_copy_through_an_external_journal() {
                 "{k}: {what} created {elsewhere}"
             );
             assert_eq!(
-                hex_sha256(&std::fs::read(&plan_file).unwrap()),
+                common::sha256_file(&plan_file).unwrap(),
                 plan_sha,
                 "{k}: {what} changed the plan file"
             );
@@ -5528,7 +5582,7 @@ fn fsck_apply_in_place_repairs_a_copy_through_an_external_journal() {
                 "{k}: a locked copy refused without naming the holder: {said}"
             );
             assert_eq!(
-                hex_sha256(&std::fs::read(&src).unwrap()),
+                common::sha256_file(&src).unwrap(),
                 pristine_sha,
                 "{k}: a locked copy was changed"
             );
@@ -5557,8 +5611,11 @@ fn fsck_apply_in_place_repairs_a_copy_through_an_external_journal() {
             want.len()
         );
         let binding = JournalBinding::of(&saved).unwrap();
-        let read = read_journal(&std::fs::read(&journal).unwrap(), &binding)
-            .unwrap_or_else(|e| panic!("{k}: the journal read back refused: {e:?}"));
+        let read = read_journal(
+            &checked_journal_bytes(&journal, &binding, &loaded),
+            &binding,
+        )
+        .unwrap_or_else(|e| panic!("{k}: the journal read back refused: {e:?}"));
         assert_eq!(read.torn, None, "{k}: the journal ends in a torn record");
         let done = progress(&read, &loaded).unwrap_or_else(|e| panic!("{k}: progress: {e:?}"));
         assert_eq!(
@@ -5605,7 +5662,7 @@ fn fsck_apply_in_place_resume_finishes_a_stopped_repair_from_its_journal() {
 
     for (k, log_end) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
-        let pristine = std::fs::read(&src).unwrap();
+        let pristine = ImageBytes::snapshot(&src).unwrap();
         let mut v = RecordedRepair {
             bytes: pristine.clone(),
             units: Vec::new(),
@@ -5625,7 +5682,7 @@ fn fsck_apply_in_place_resume_finishes_a_stopped_repair_from_its_journal() {
         let journal = format!("{journal_dir}/repair.journal");
         let pristine_sha = hex_sha256(&pristine);
         let device = format!("{src}.resume.img");
-        std::fs::write(&device, &pristine).unwrap();
+        pristine.copy_to(&device);
         drop(pristine);
 
         // `--resume` with no journal to resume is refused before anything
@@ -5644,7 +5701,7 @@ fn fsck_apply_in_place_resume_finishes_a_stopped_repair_from_its_journal() {
             "{k}: --resume with no journal exited {code}: {said}"
         );
         assert_eq!(
-            hex_sha256(&std::fs::read(&device).unwrap()),
+            common::sha256_file(&device).unwrap(),
             pristine_sha,
             "{k}: --resume with no journal changed the copy"
         );
@@ -5688,8 +5745,11 @@ fn fsck_apply_in_place_resume_finishes_a_stopped_repair_from_its_journal() {
             "{k}: --apply --in-place --resume exited {code}: {said}"
         );
         let binding = JournalBinding::of(&saved).unwrap();
-        let read = read_journal(&std::fs::read(&journal).unwrap(), &binding)
-            .unwrap_or_else(|e| panic!("{k}: the journal read back refused: {e:?}"));
+        let read = read_journal(
+            &checked_journal_bytes(&journal, &binding, &loaded),
+            &binding,
+        )
+        .unwrap_or_else(|e| panic!("{k}: the journal read back refused: {e:?}"));
         assert_eq!(read.torn, None, "{k}: the journal ends in a torn record");
         let done = progress(&read, &loaded).unwrap_or_else(|e| panic!("{k}: progress: {e:?}"));
         assert_eq!(
@@ -5759,7 +5819,7 @@ fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
 
     for (k, log_end) in captures_holding_work() {
         let src = unpack(&format!("windows-interrupted-{k}"));
-        let pristine = std::fs::read(&src).unwrap();
+        let pristine = ImageBytes::snapshot(&src).unwrap();
         let mut v = RecordedRepair {
             bytes: pristine.clone(),
             units: Vec::new(),
@@ -5778,7 +5838,7 @@ fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
         std::fs::create_dir(&journal_dir).unwrap();
         let journal = format!("{journal_dir}/repair.journal");
         let device = format!("{src}.sigint.img");
-        std::fs::write(&device, &pristine).unwrap();
+        pristine.copy_to(&device);
         drop(pristine);
 
         let hold = units / 2;
@@ -5831,8 +5891,11 @@ fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
             "{k}: progress before the stop does not rise to {hold} of {units}: {stopped:?}"
         );
         let binding = JournalBinding::of(&saved).unwrap();
-        let read = read_journal(&std::fs::read(&journal).unwrap(), &binding)
-            .unwrap_or_else(|e| panic!("{k}: the journal read back refused: {e:?}"));
+        let read = read_journal(
+            &checked_journal_bytes(&journal, &binding, &loaded),
+            &binding,
+        )
+        .unwrap_or_else(|e| panic!("{k}: the journal read back refused: {e:?}"));
         let done = progress(&read, &loaded).unwrap_or_else(|e| panic!("{k}: progress: {e:?}"));
         assert_eq!(
             (done.applied as u64, done.open),
@@ -5860,8 +5923,11 @@ fn fsck_apply_in_place_stops_at_a_unit_boundary_on_sigint() {
                 && resumed.last() == Some(&(units, units)),
             "{k}: progress of the resume does not rise from {hold} to {units}: {resumed:?}"
         );
-        let read = read_journal(&std::fs::read(&journal).unwrap(), &binding)
-            .unwrap_or_else(|e| panic!("{k}: the journal read back refused: {e:?}"));
+        let read = read_journal(
+            &checked_journal_bytes(&journal, &binding, &loaded),
+            &binding,
+        )
+        .unwrap_or_else(|e| panic!("{k}: the journal read back refused: {e:?}"));
         let done = progress(&read, &loaded).unwrap_or_else(|e| panic!("{k}: progress: {e:?}"));
         assert_eq!(
             (done.applied as u64, done.open),
