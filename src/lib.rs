@@ -2961,6 +2961,71 @@ pub extern "C" fn fs_ntfs_read_security_id(
     })
 }
 
+/// The security descriptor `path` resolves to, as stored: its own
+/// `$SECURITY_DESCRIPTOR` attribute, else the `$Secure:$SDS` copy its
+/// security id names, a verified primary or else its verified mirror
+/// (`sds::file_descriptor`, #606). The bytes are self-relative and
+/// undecoded.
+///
+/// `*out_len` gets the descriptor's length whenever it is found, so a
+/// caller can size-query with `out_buf = NULL, out_buf_len = 0`.
+/// Returns:
+///    1  — the descriptor was copied into `out_buf[0..*out_len]`
+///    2  — `out_buf_len` is too small; nothing was written
+///   -1  — error (see `fs_ntfs_last_error`)
+///
+/// `out_len` must be non-NULL. `out_buf` may be NULL only when
+/// `out_buf_len == 0`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fs_ntfs_read_security_descriptor(
+    image: *const c_char,
+    path: *const c_char,
+    out_buf: *mut c_void,
+    out_buf_len: usize,
+    out_len: *mut usize,
+) -> c_int {
+    ffi_guard("fs_ntfs_read_security_descriptor", -1, move || {
+        let Some(img) = cstr_to_path(image) else {
+            set_einval("fs_ntfs_read_security_descriptor: null or non-UTF-8 image");
+            return -1;
+        };
+        let Some(p) = cstr_to_path(path) else {
+            set_einval("fs_ntfs_read_security_descriptor: null or non-UTF-8 path");
+            return -1;
+        };
+        if out_len.is_null() {
+            set_einval("fs_ntfs_read_security_descriptor: null out_len");
+            return -1;
+        }
+        if out_buf.is_null() && out_buf_len != 0 {
+            set_einval("fs_ntfs_read_security_descriptor: null out_buf with non-zero out_buf_len");
+            return -1;
+        }
+        match sds::file_descriptor(std::path::Path::new(img), p) {
+            Ok(descriptor) => {
+                unsafe { *out_len = descriptor.len() };
+                if descriptor.len() > out_buf_len {
+                    return 2;
+                }
+                if !descriptor.is_empty() {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            descriptor.as_ptr(),
+                            out_buf.cast::<u8>(),
+                            descriptor.len(),
+                        );
+                    }
+                }
+                1
+            }
+            Err(e) => {
+                set_error(&e);
+                -1
+            }
+        }
+    })
+}
+
 /// Full `$STANDARD_INFORMATION` value (Linux-NTFS documentation). The four
 /// timestamps are NT 100-nanosecond intervals since 1601-01-01 UTC.
 /// `file_attributes` is the FILE_ATTRIBUTE_* bitmask. The trailing
@@ -4583,6 +4648,77 @@ mod capi_read_tests {
         let h = fs_ntfs_mount(c.as_ptr());
         assert!(!h.is_null(), "fs_ntfs_mount returned null for {path}");
         h
+    }
+
+    /// `fs_ntfs_read_security_descriptor` hands back the descriptor a file
+    /// resolves to, as stored (#606). Probed with no buffer it reports the
+    /// length; a buffer one byte short gets nothing written; one large
+    /// enough receives bytes the bounded decoder accepts, owner present,
+    /// the same bytes the library's own lookup reads. A path that is not
+    /// there, and a null image, are errors.
+    #[test]
+    fn capi_security_descriptor_probes_then_copies_the_stored_bytes() {
+        use super::fs_ntfs_read_security_descriptor;
+        let img = fresh_image("secdesc");
+        let image = CString::new(&*img).unwrap();
+        let path = CString::new("/hello.txt").unwrap();
+        let read = |buf: &mut [u8], len: &mut usize| {
+            fs_ntfs_read_security_descriptor(
+                image.as_ptr(),
+                path.as_ptr(),
+                if buf.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    buf.as_mut_ptr() as *mut c_void
+                },
+                buf.len(),
+                len,
+            )
+        };
+        let mut len = 0usize;
+        assert_eq!(read(&mut [], &mut len), 2, "a size query");
+        assert!(len > 20, "a descriptor is longer than its header: {len}");
+        let mut short = vec![0xAAu8; len - 1];
+        assert_eq!(read(&mut short, &mut len), 2, "one byte short");
+        assert!(
+            short.iter().all(|&b| b == 0xAA),
+            "nothing is written into a short buffer"
+        );
+        let mut buf = vec![0u8; len];
+        assert_eq!(read(&mut buf, &mut len), 1);
+        assert_eq!(len, buf.len());
+        let sd = crate::security_descriptor::SecurityDescriptor::parse(&buf)
+            .expect("the bounded decoder accepts it");
+        assert!(
+            sd.owner.is_some(),
+            "the formatter's descriptor names an owner"
+        );
+        assert_eq!(
+            buf,
+            crate::sds::file_descriptor(Path::new(&*img), "/hello.txt").unwrap()
+        );
+        let missing = CString::new("/absent.txt").unwrap();
+        let mut n = 0usize;
+        assert_eq!(
+            fs_ntfs_read_security_descriptor(
+                image.as_ptr(),
+                missing.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                &mut n,
+            ),
+            -1
+        );
+        assert_eq!(
+            fs_ntfs_read_security_descriptor(
+                std::ptr::null(),
+                path.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                &mut n,
+            ),
+            -1
+        );
     }
 
     #[test]
