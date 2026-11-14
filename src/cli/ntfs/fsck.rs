@@ -1141,17 +1141,6 @@ fn finding(f: &CheckFinding) -> Json {
             ("why", Json::from(reason.as_str())),
             ("repairable", Json::from(false)),
         ]),
-        CheckFinding::LinkCountDrift {
-            record,
-            links,
-            names,
-        } => Json::object([
-            ("kind", Json::from("link_count_drift")),
-            ("record", Json::from(*record)),
-            ("links", Json::from(u64::from(*links))),
-            ("names", Json::from(u64::from(*names))),
-            ("repairable", Json::from(false)),
-        ]),
         CheckFinding::QuotaChargeDrift {
             record,
             charged,
@@ -1161,6 +1150,17 @@ fn finding(f: &CheckFinding) -> Json {
             ("record", Json::from(*record)),
             ("charged", Json::from(*charged)),
             ("due", Json::from(*due)),
+            ("repairable", Json::from(false)),
+        ]),
+        CheckFinding::LinkCountDrift {
+            record,
+            links,
+            names,
+        } => Json::object([
+            ("kind", Json::from("link_count_drift")),
+            ("record", Json::from(*record)),
+            ("links", Json::from(u64::from(*links))),
+            ("names", Json::from(u64::from(*names))),
             ("repairable", Json::from(false)),
         ]),
     }

@@ -36,7 +36,7 @@
 //!   entry's offset is the id its records carry
 //!   (`test-disks/windows-interrupted-open-at-checkpoint`). A transaction
 //!   prepared or committed and not forgotten is refused: no capture has
-//!   held one.
+//!   held one (#653).
 //!
 //! Every redo operation replayed here was checked against what Windows'
 //! own restart produced from the same pre-image (the `.recovered` images):
@@ -65,9 +65,12 @@
 //!   on, found from the record's length
 //!   (`test-disks/windows-interrupted-tail-continuation`).
 //! * The log wraps from its last page to the first page of its record
-//!   area (the first page at its own home, after the tail-copy area), one
-//!   sequence number up: a record may run across the end, and the record
-//!   after the last page's last starts the new lap.
+//!   area, one sequence number up: a record may run across the end, and
+//!   the record after the last page's last starts the new lap. The record
+//!   area starts after the two restart pages and the 32 tail-copy pages,
+//!   whatever its first page holds: a record that wraps may leave on it
+//!   only its continuation, whose last LSN names the log's last page
+//!   (`test-disks/windows-interrupted-wrap-continuation`, #654).
 //! * `DeallocateFileRecordSegment` clears the in-use flag and increments
 //!   the record's sequence number, skipping 0.
 //! * `SetIndexEntryVcnAllocation` writes the child VCN into the last 8
@@ -122,6 +125,9 @@ use crate::mft_io::{apply_fixup_on_read_magic, apply_fixup_on_write_magic, BootP
 pub(crate) const LFS_STRIDE: u16 = 512;
 /// Size of an LFS record header; the client data follows it.
 pub(crate) const RECORD_HEADER: usize = 0x30;
+/// Log pages an LFS 2.x log keeps for tail copies, between its two restart
+/// pages and its record area.
+const TAIL_COPY_PAGES: usize = 32;
 /// LFS record types.
 pub(crate) const LFS_CLIENT_RECORD: u32 = 1;
 pub(crate) const LFS_CLIENT_RESTART: u32 = 2;
@@ -145,11 +151,13 @@ const NOOP: u16 = 0x00;
 pub(crate) const COMPENSATION: u16 = 0x01;
 const INITIALIZE_FILE_RECORD: u16 = 0x02;
 const DEALLOCATE_FILE_RECORD: u16 = 0x03;
+const WRITE_END_OF_FILE_RECORD_SEGMENT: u16 = 0x04;
 const CREATE_ATTRIBUTE: u16 = 0x05;
 const DELETE_ATTRIBUTE: u16 = 0x06;
 pub(crate) const UPDATE_RESIDENT_VALUE: u16 = 0x07;
 const UPDATE_NONRESIDENT_VALUE: u16 = 0x08;
 const UPDATE_MAPPING_PAIRS: u16 = 0x09;
+const DELETE_DIRTY_CLUSTERS: u16 = 0x0A;
 const SET_NEW_ATTRIBUTE_SIZES: u16 = 0x0B;
 const ADD_INDEX_ENTRY_ROOT: u16 = 0x0C;
 const DELETE_INDEX_ENTRY_ROOT: u16 = 0x0D;
@@ -162,6 +170,7 @@ const UPDATE_FILE_NAME_ROOT: u16 = 0x13;
 const UPDATE_FILE_NAME_ALLOCATION: u16 = 0x14;
 const SET_BITS_IN_NONRESIDENT_BITMAP: u16 = 0x15;
 const CLEAR_BITS_IN_NONRESIDENT_BITMAP: u16 = 0x16;
+const HOT_FIX: u16 = 0x17;
 const END_TOP_LEVEL_ACTION: u16 = 0x18;
 const PREPARE_TRANSACTION: u16 = 0x19;
 const COMMIT_TRANSACTION: u16 = 0x1A;
@@ -171,6 +180,8 @@ pub(crate) const OPEN_ATTRIBUTE_TABLE_DUMP: u16 = 0x1D;
 pub(crate) const TRANSACTION_TABLE_DUMP: u16 = 0x20;
 const UPDATE_RECORD_DATA_ROOT: u16 = 0x21;
 const UPDATE_RECORD_DATA_ALLOCATION: u16 = 0x22;
+const UPDATE_RELATIVE_DATA_IN_INDEX: u16 = 0x23;
+const UPDATE_RELATIVE_DATA_IN_INDEX2: u16 = 0x24;
 const ZERO_END_OF_FILE_RECORD: u16 = 0x25;
 
 /// Operations on an MFT record (`$MFT`'s `$DATA`).
@@ -244,10 +255,36 @@ fn op_name(op: u16) -> &'static str {
 }
 
 fn refuse(why: impl std::fmt::Display) -> Error {
+    refuse_until(137, why)
+}
+
+/// A refusal of a shape no capture has held yet, naming the open issue
+/// that waits for one, so the message outlives #137.
+fn refuse_until(issue: u32, why: impl std::fmt::Display) -> Error {
     Error::io(format!(
         "$LogFile cannot be replayed in full ({why}), so nothing was replayed \
-         (rust-fs-ntfs#137)"
+         (rust-fs-ntfs#{issue})"
     ))
+}
+
+/// The refusal of a redo operation replay does not perform, naming the
+/// issue that waits for a capture holding one.
+fn unperformed(lsn: u64, op: u16) -> Error {
+    let issue = match op {
+        WRITE_END_OF_FILE_RECORD_SEGMENT => 650,
+        DELETE_DIRTY_CLUSTERS => 651,
+        UPDATE_RELATIVE_DATA_IN_INDEX | UPDATE_RELATIVE_DATA_IN_INDEX2 => 652,
+        HOT_FIX => 1158,
+        // A code NTFS does not define: a damaged log, not missing work.
+        _ => 137,
+    };
+    refuse_until(
+        issue,
+        format!(
+            "LSN {lsn:#x} holds a {} ({op:#x}) redo, which replay does not perform yet",
+            op_name(op)
+        ),
+    )
 }
 
 pub(crate) fn u16_at(b: &[u8], off: usize) -> Result<u16, Error> {
@@ -601,11 +638,14 @@ pub(crate) fn read_log(log: &[u8]) -> Result<(Log<'_>, Option<u64>), Error> {
         (Err(a), Err(_)) => return Err(a),
     };
     if ra.major != 2 {
-        return Err(refuse(format!(
-            "LFS version {}, and replay has been checked only on the 2.x logs Windows 8 \
-             and later write",
-            ra.major
-        )));
+        return Err(refuse_until(
+            1159,
+            format!(
+                "LFS version {}, and replay has been checked only on the 2.x logs Windows 8 \
+                 and later write",
+                ra.major
+            ),
+        ));
     }
     let lps = ra.log_page;
     if !(512..=65536).contains(&lps)
@@ -635,8 +675,7 @@ pub(crate) fn read_log(log: &[u8]) -> Result<(Log<'_>, Option<u64>), Error> {
         newest: 0,
     };
     // A page names its home through its last LSN. Only a page in the tail
-    // area -- before the first page that sits at its own home -- is a copy
-    // of another page: in the record area, a page no record starts on
+    // area -- before the record area -- is a copy of another page: in the record area, a page no record starts on
     // carries the LSN of the record spanning into it, which names the page
     // before it.
     let mut pages = Vec::new();
@@ -655,12 +694,16 @@ pub(crate) fn read_log(log: &[u8]) -> Result<(Log<'_>, Option<u64>), Error> {
         }
         at += lps;
     }
-    let record_area = pages
-        .iter()
-        .filter(|(at, home, _, _)| at == home)
-        .map(|(at, _, _, _)| *at)
-        .min()
-        .unwrap_or(log.len());
+    // The record area is where the layout puts it, not the first page found
+    // at its own home: the first page may hold only the continuation of a
+    // record that wrapped, its last LSN naming the log's last page (#654).
+    let record_area = 2 * sps + TAIL_COPY_PAGES * lps;
+    if record_area + lps > log.len() {
+        return Err(refuse(format!(
+            "log geometry: no record area after the tail copies in a log of {} bytes",
+            log.len()
+        )));
+    }
     l.first_page = record_area;
     // A tail copy's last LSN names the record that ENDS on it. When that
     // record ends before the offset it starts at, it started on an earlier
@@ -801,7 +844,7 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|_| refuse("a dirty page whose clusters run past its entry"))?;
             if lcns.is_empty() {
-                return Err(refuse("a dirty page of no clusters"));
+                return Err(refuse_until(654, "a dirty page of no clusters"));
             }
             // A record names the VCN of the block it changes, which may be
             // any cluster of the page, so each cluster is entered under its
@@ -829,11 +872,14 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
         }
         for (at, e) in entries(&t)? {
             if e[0x04] != TRANSACTION_ACTIVE {
-                return Err(refuse(format!(
-                    "the checkpoint lists transaction {at} in state {}, and only active \
-                     ones have been seen",
-                    e[0x04]
-                )));
+                return Err(refuse_until(
+                    653,
+                    format!(
+                        "the checkpoint lists transaction {at} in state {}, and only active \
+                         ones have been seen",
+                        e[0x04]
+                    ),
+                ));
             }
             let undo_next = u64_at(&e, 0x18)?;
             checkpoint_transactions.push((at as u32, (undo_next != 0, u64_at(&e, 0x10)?)));
@@ -884,10 +930,13 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
             open_transactions.remove(&transaction);
         } else {
             if matches!(redo, PREPARE_TRANSACTION | COMMIT_TRANSACTION) {
-                return Err(refuse(format!(
-                    "transaction {transaction} is prepared or committed at LSN {lsn:#x} and \
-                     not forgotten, which no capture has shown"
-                )));
+                return Err(refuse_until(
+                    653,
+                    format!(
+                        "transaction {transaction} is prepared or committed at LSN {lsn:#x} \
+                         and not forgotten, which no capture has shown"
+                    ),
+                ));
             }
             let t = open_transactions.entry(transaction).or_default();
             t.0 |= !matches!(undo, NOOP | COMPENSATION);
@@ -985,10 +1034,7 @@ pub fn plan(log: &[u8], params: &BootParams, read: &mut ReadVolume<'_>) -> Resul
                     | CLEAR_BITS_IN_NONRESIDENT_BITMAP
             );
         if !supported {
-            return Err(refuse(format!(
-                "LSN {lsn:#x} holds a {} ({op:#x}) redo, which replay does not perform yet",
-                op_name(op)
-            )));
+            return Err(unperformed(lsn, op));
         }
         let target = u16_at(data, 0x0C)?;
         let vcn = u64_at(data, 0x18)?;
@@ -1367,6 +1413,19 @@ fn redo_file_record(
             remove(rec, a, len, used)?;
             set_used(rec, used - len)?;
         }
+        // Over a non-resident attribute, the bytes are its header: Windows
+        // logs one when it marks a file's `$DATA` compressed. Its 0x10 and
+        // 0x14 are the lowest VCN, not a value's length and offset, so it
+        // is overwritten in place and nothing moves
+        // (`test-disks/windows-interrupted-freed`, #1231).
+        UPDATE_RESIDENT_VALUE if rec.get(a + 8).is_some_and(|&b| b != 0) => {
+            if off + data.len() > u32_at(rec, a + 4)? as usize {
+                return Err(refuse(
+                    "a non-resident attribute's header written past its end",
+                ));
+            }
+            put(rec, a + off, data)?;
+        }
         UPDATE_RESIDENT_VALUE => {
             let (vo, vl) = (
                 u16_at(rec, a + 0x14)? as usize,
@@ -1662,6 +1721,24 @@ mod tests {
         let err = plan(&vec![0u8; 65536], &params, &mut read).unwrap_err();
         assert!(err.contains("$LogFile"), "{err}");
     }
+
+    #[test]
+    fn each_redo_replay_does_not_perform_names_the_issue_waiting_for_it() {
+        // #137 tracked them all; each now has an open issue of its own,
+        // waiting for a capture that holds the operation.
+        for (op, issue) in [
+            (WRITE_END_OF_FILE_RECORD_SEGMENT, "(rust-fs-ntfs#650)"),
+            (DELETE_DIRTY_CLUSTERS, "(rust-fs-ntfs#651)"),
+            (UPDATE_RELATIVE_DATA_IN_INDEX, "(rust-fs-ntfs#652)"),
+            (UPDATE_RELATIVE_DATA_IN_INDEX2, "(rust-fs-ntfs#652)"),
+            (HOT_FIX, "(rust-fs-ntfs#1158)"),
+        ] {
+            let err = unperformed(0x1234, op).to_string();
+            assert!(err.contains(op_name(op)) && err.ends_with(issue), "{err}");
+        }
+        let err = unperformed(0x1234, 0x30).to_string();
+        assert!(err.ends_with("(rust-fs-ntfs#137)"), "{err}");
+    }
 }
 
 /// A read-only view of one `$LogFile` client record: the fields replay
@@ -1700,6 +1777,115 @@ pub fn record_at_lsn(log: &[u8], lsn: u64, max_record_bytes: usize) -> Result<Re
     let (pages, _) = read_log(log)?;
     let (header, data, _) = pages.record_bounded(lsn, max_record_bytes)?;
     RecordView::parse(&header, &data)
+}
+
+/// One record a [`walk_records`] read, and where it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkedRecord {
+    pub view: RecordView,
+    /// Byte offset of the record's header in `$LogFile`, at its home page.
+    pub offset: u64,
+    /// The LSN the log puts the next record at.
+    pub next_lsn: u64,
+}
+
+/// What a [`walk_records`] read: the records, in LSN order; whether it
+/// reached the log's newest record; and, when a record could not be read,
+/// why, with everything read before it kept.
+#[derive(Debug)]
+pub struct RecordWalk {
+    pub records: Vec<WalkedRecord>,
+    pub complete: bool,
+    pub stopped: Option<Error>,
+}
+
+/// The records from `from` forward in LSN order, read-only, up to `limit`
+/// records and the log's newest (#607). By default the walk starts where
+/// replay's analysis does: the in-use client's checkpoint start, or the
+/// checkpoint itself when that is zero.
+///
+/// It reads through replay's own page model, so the geometry, fixups,
+/// tail-copy choice and continuation pages are the ones replay trusts, and
+/// a record whose client data exceeds `max_record_bytes` is refused before
+/// it is assembled. A record that cannot be read ends the walk with the
+/// reason in [`RecordWalk::stopped`]; reaching `limit` ends it incomplete
+/// with no error. Opening the log is the only error returned: a log that is
+/// not LFS 2.x is refused as [`record_at_lsn`] refuses it. Nothing here is
+/// replay authority.
+pub fn walk_records(
+    log: &[u8],
+    from: Option<u64>,
+    limit: usize,
+    max_record_bytes: usize,
+) -> Result<RecordWalk, Error> {
+    let (l, checkpoint) = read_log(log)?;
+    let mut walk = RecordWalk {
+        records: Vec::new(),
+        complete: false,
+        stopped: None,
+    };
+    let start = match from {
+        Some(lsn) => lsn,
+        None => {
+            let checkpoint = checkpoint.ok_or_else(|| refuse("no client has the log open"))?;
+            match l.record_bounded(checkpoint, max_record_bytes) {
+                Ok((header, body, _))
+                    if u32_at(&header, 0x20)? == LFS_CLIENT_RESTART && body.len() >= 0x10 =>
+                {
+                    match u64_at(&body, 0x08)? {
+                        0 => checkpoint,
+                        start => start,
+                    }
+                }
+                Ok(_) => checkpoint,
+                Err(e) => {
+                    walk.stopped = Some(e);
+                    return Ok(walk);
+                }
+            }
+        }
+    };
+    let mut lsn = start;
+    while walk.records.len() < limit {
+        let (header, data, next) = match l.record_bounded(lsn, max_record_bytes) {
+            Ok(record) => record,
+            Err(e) => {
+                walk.stopped = Some(e);
+                return Ok(walk);
+            }
+        };
+        let view = match RecordView::parse(&header, &data) {
+            Ok(view) => view,
+            Err(e) => {
+                walk.stopped = Some(e);
+                return Ok(walk);
+            }
+        };
+        walk.records.push(WalkedRecord {
+            view,
+            offset: l.offset(lsn) as u64,
+            next_lsn: next,
+        });
+        if lsn == l.newest {
+            walk.complete = true;
+            return Ok(walk);
+        }
+        if lsn > l.newest {
+            walk.stopped = Some(refuse(format!(
+                "the record at LSN {lsn:#x} is past the newest, {:#x}",
+                l.newest
+            )));
+            return Ok(walk);
+        }
+        if next <= lsn {
+            walk.stopped = Some(refuse(format!(
+                "the record after LSN {lsn:#x} goes backwards"
+            )));
+            return Ok(walk);
+        }
+        lsn = next;
+    }
+    Ok(walk)
 }
 
 impl RecordView {
@@ -1778,7 +1964,91 @@ mod record_view_tests {
         let before = out.stdout.clone();
         let error = record_at_lsn(&out.stdout, 0x184415, out.stdout.len()).unwrap_err();
         assert!(error.to_string().contains("LFS version 1"), "{error}");
+        assert!(error.to_string().contains("(rust-fs-ntfs#1159)"), "{error}");
         assert_eq!(out.stdout, before);
+    }
+
+    /// The LFS 2.0 Windows capture the checkpoint test reads, verified.
+    fn interrupted_capture() -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        let out = std::process::Command::new("gzip")
+            .args(["-dc", "test-disks/windows-interrupted-logfile-1.bin.gz"])
+            .output()
+            .expect("install gzip to read the Windows capture");
+        assert!(out.status.success(), "gzip: {:?}", out.stderr);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&out.stdout)),
+            "e6a36b92ace6fa15378af53d9239b1df0aacdf931e4c721d10ce287259d638eb"
+        );
+        out.stdout
+    }
+
+    /// A walk from the in-use client's checkpoint start reads every record
+    /// to the log's newest, in LSN order, each where its predecessor said
+    /// the next one starts, each the record strict lookup reads at its LSN,
+    /// and passes the checkpoint at the restart LSN Windows wrote (#607).
+    #[test]
+    fn a_walk_from_the_checkpoint_start_reads_every_record_in_order() {
+        let log = interrupted_capture();
+        let before = log.clone();
+        let walk = walk_records(&log, None, 100_000, log.len()).expect("the capture opens");
+        assert!(walk.stopped.is_none(), "{:?}", walk.stopped);
+        assert!(walk.complete, "the walk reached the newest record");
+        let lsns: Vec<u64> = walk.records.iter().map(|r| r.view.lsn).collect();
+        assert!(lsns.len() > 1, "{lsns:x?}");
+        assert!(lsns.windows(2).all(|w| w[0] < w[1]), "LSNs rise: {lsns:x?}");
+        for pair in walk.records.windows(2) {
+            assert_eq!(pair[0].next_lsn, pair[1].view.lsn, "{:x?}", pair[0].view);
+        }
+        let checkpoint = walk
+            .records
+            .iter()
+            .find(|r| r.view.lsn == 0x33e791)
+            .expect("the walk passes the checkpoint Windows wrote");
+        assert_eq!(checkpoint.view.record_type, 2);
+        for r in &walk.records {
+            assert!((r.offset as usize) < log.len(), "{r:x?}");
+            assert_eq!(
+                r.view,
+                record_at_lsn(&log, r.view.lsn, log.len()).unwrap(),
+                "the walk and strict lookup agree at {:#x}",
+                r.view.lsn
+            );
+        }
+        assert_eq!(log, before, "a walk changes nothing");
+    }
+
+    /// A walk ends at its record limit, incomplete with no error, or at the
+    /// first record it cannot read, with what it read before kept and the
+    /// reason named. A record past the byte budget is refused before it is
+    /// assembled.
+    #[test]
+    fn a_walk_stops_at_its_limit_or_its_first_bad_record_and_says_which() {
+        let log = interrupted_capture();
+        let limited = walk_records(&log, None, 2, log.len()).unwrap();
+        assert_eq!(limited.records.len(), 2);
+        assert!(!limited.complete && limited.stopped.is_none());
+        let from = walk_records(&log, Some(0x33e791), 1, log.len()).unwrap();
+        assert_eq!(from.records[0].view.lsn, 0x33e791);
+        let bad = walk_records(&log, Some(0x33e791 + 1), 10, log.len()).unwrap();
+        assert!(bad.records.is_empty() && !bad.complete);
+        assert!(bad.stopped.is_some(), "an LSN no record sits at is named");
+        let tight = walk_records(&log, Some(0x33e791), 10, 8).unwrap();
+        assert!(tight.records.is_empty() && !tight.complete);
+        let why = tight.stopped.expect("the budget refuses the checkpoint");
+        assert!(why.to_string().contains("budget"), "{why}");
+    }
+
+    /// An LFS 1.x log is refused by the walk as strict lookup refuses it.
+    #[test]
+    fn a_walk_refuses_an_lfs1_log_as_lookup_does() {
+        let out = std::process::Command::new("gzip")
+            .args(["-dc", "test-disks/windows-clean-logfile.bin.gz"])
+            .output()
+            .expect("install gzip to read the Windows capture");
+        assert!(out.status.success(), "gzip: {:?}", out.stderr);
+        let error = walk_records(&out.stdout, None, 10, out.stdout.len()).unwrap_err();
+        assert!(error.to_string().contains("LFS version 1"), "{error}");
     }
 
     #[test]
