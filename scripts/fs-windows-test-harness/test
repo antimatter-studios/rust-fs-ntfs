@@ -345,8 +345,11 @@ fi
 # ── build phase ─────────────────────────────────────────────────
 if [[ "${DO_BUILD}" == "1" ]]; then
     echo "[test] === build phase ==="
-    cargo build --release --features harness --bin rust-ntfs
-    cargo build --manifest-path vendor/harness/runner/Cargo.toml --release --bin run-matrix
+    cargo build --profile test-opt --features harness --bin rust-ntfs
+    # The runner has its own manifest, so supply this repository's test profile.
+    cargo build --manifest-path vendor/harness/runner/Cargo.toml \
+        --config 'profile.test-opt.inherits="dev"' --config 'profile.test-opt.opt-level=1' \
+        --config 'profile.test-opt.lto=false' --profile test-opt --bin run-matrix
 fi
 
 # ── ship phase ──────────────────────────────────────────────────
@@ -472,7 +475,9 @@ PYEOF
     rc=0
     HARNESS_CONSUMER_ROOT="$(pwd)" HARNESS_IMAGE_DIR="$(pwd)" \
         cargo run --manifest-path vendor/harness/runner/Cargo.toml \
-                  --release --bin run-matrix -- "${filter}" \
+                  --config 'profile.test-opt.inherits="dev"' --config 'profile.test-opt.opt-level=1' \
+                  --config 'profile.test-opt.lto=false' \
+                  --profile test-opt --bin run-matrix -- "${filter}" \
         || rc=$?
     elapsed=$(( $(date +%s) - start ))
 

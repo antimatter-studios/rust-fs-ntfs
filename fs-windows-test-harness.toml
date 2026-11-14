@@ -83,7 +83,7 @@ cli = [
 
 [project]
 name        = "rust-fs-ntfs"
-binary      = "target/release/rust-ntfs"
+binary      = "target/test-opt/rust-ntfs"
 matrix_path = "test-matrix.json"
 
 [vm]
@@ -369,7 +369,7 @@ expect_exit = 0
 # ----- the command-line tools -----
 #
 # Each runs one step of scripts/cli-oracle.sh, which invokes the multi-call
-# binary (target/release/rust-fs-ntfs, built with `--features cli`) under
+# binary (target/test-opt/rust-fs-ntfs, built with `--features cli`) under
 # its repository name and checks what the tool itself reported, so a
 # scenario fails at the step that went wrong. Windows then grades the image.
 

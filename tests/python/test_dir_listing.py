@@ -2,7 +2,7 @@
 
 Inputs, all required (a missing one fails, it never skips):
   FS_NTFS_SHARED_LIB  absolute path of the cdylib built by
-                      `cargo rustc --release --lib --crate-type cdylib`
+                      `cargo rustc --profile test-opt --lib --crate-type cdylib`
   FS_NTFS_DIR_PROBE   tests/python/abi_dir_listing.c compiled against
                       include/fs_ntfs.h and the same library
   FS_NTFS_FIXTURE     a decompressed NTFS image

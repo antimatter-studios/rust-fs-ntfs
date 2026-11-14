@@ -88,9 +88,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build fsck.ntfs
         run: |
-          cargo build --release --locked --features cli --bin rust-fs-ntfs
+          cargo build --profile test-opt --locked --features cli --bin rust-fs-ntfs
           mkdir -p tmp/bin
-          ln -sf "$PWD/target/release/rust-fs-ntfs" tmp/bin/fsck.ntfs
+          ln -sf "$PWD/target/test-opt/rust-fs-ntfs" tmp/bin/fsck.ntfs
       - uses: actions/download-artifact@v4
         with:
           name: logfile-oracle

@@ -140,7 +140,7 @@
 #                                    finds nothing. IMAGE.manifest is Windows' listing
 #                                    plus every file fs.ntfs wrote
 #
-# The binary is target/release/rust-fs-ntfs (built with `--features cli`),
+# The binary is target/test-opt/rust-fs-ntfs (built with `--features cli`),
 # or RUST_FS_NTFS. JSON is read with grep, not jq: the Windows runner's Git
 # Bash is not promised to carry jq, and each check is one field.
 set -euo pipefail
@@ -152,7 +152,7 @@ set -euo pipefail
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="${RUST_FS_NTFS:-$REPO/target/release/rust-fs-ntfs}"
+BIN="${RUST_FS_NTFS:-$REPO/target/test-opt/rust-fs-ntfs}"
 
 die() {
     echo "cli-oracle: $*" >&2
@@ -165,7 +165,7 @@ image="$2"
 shift 2
 
 [ -x "$BIN" ] || [ -x "$BIN.exe" ] ||
-    die "no $BIN: build it with \`cargo build --release --locked --features cli --bin rust-fs-ntfs\`"
+    die "no $BIN: build it with \`cargo build --profile test-opt --locked --features cli --bin rust-fs-ntfs\`"
 
 # run TOOL ARG...: the tool's report in $out, its status in $status. Quiet:
 # a failing step prints the report it is failing on, a passing one a line.
@@ -197,7 +197,7 @@ random() { if [ "$2" -gt 0 ]; then head -c "$2" /dev/urandom >"$1"; else : >"$1"
 # lsns IMAGE: the LSNs IMAGE's raw bytes carry, one "<kind> <lsn>" per
 # line (examples/log_lsns.rs).
 lsns() {
-    cargo run --quiet --release --manifest-path "$REPO/Cargo.toml" --example log_lsns -- "$1" ||
+    cargo run --quiet --profile test-opt --manifest-path "$REPO/Cargo.toml" --example log_lsns -- "$1" ||
         die "log_lsns $1 failed"
 }
 
@@ -668,9 +668,9 @@ case "$step" in
         work="$(mktemp -d)"
         trap 'rm -rf "$work"' EXIT
         : >"$manifest"
-        HARNESS="${RUST_NTFS:-$REPO/target/release/rust-ntfs}"
+        HARNESS="${RUST_NTFS:-$REPO/target/test-opt/rust-ntfs}"
         [ -x "$HARNESS" ] || [ -x "$HARNESS.exe" ] ||
-            die "no $HARNESS: build it with \`cargo build --release --locked --features harness --bin rust-ntfs\`"
+            die "no $HARNESS: build it with \`cargo build --profile test-opt --locked --features harness --bin rust-ntfs\`"
         for file in /f /g; do
             random "$work/${file#/}" 8192
             set +e
@@ -720,9 +720,9 @@ case "$step" in
         : >"$manifest"
         # The named streams and the EA are written by the harness binary,
         # rust-ntfs stream and ea: fs.ntfs reads them but has no writer.
-        HARNESS="${RUST_NTFS:-$REPO/target/release/rust-ntfs}"
+        HARNESS="${RUST_NTFS:-$REPO/target/test-opt/rust-ntfs}"
         [ -x "$HARNESS" ] || [ -x "$HARNESS.exe" ] ||
-            die "no $HARNESS: build it with \`cargo build --release --locked --features harness --bin rust-ntfs\`"
+            die "no $HARNESS: build it with \`cargo build --profile test-opt --locked --features harness --bin rust-ntfs\`"
         # 120-byte resident streams, each a 0x18-byte header, a name of two
         # or three UTF-16 letters aligned to 8 and the value: two more than
         # the record holds outgrow it before the EA or the unnamed stream is
@@ -847,9 +847,9 @@ case "$step" in
         work="$(mktemp -d)"
         trap 'rm -rf "$work"' EXIT
         : >"$manifest"
-        HARNESS="${RUST_NTFS:-$REPO/target/release/rust-ntfs}"
+        HARNESS="${RUST_NTFS:-$REPO/target/test-opt/rust-ntfs}"
         [ -x "$HARNESS" ] || [ -x "$HARNESS.exe" ] ||
-            die "no $HARNESS: build it with \`cargo build --release --locked --features harness --bin rust-ntfs\`"
+            die "no $HARNESS: build it with \`cargo build --profile test-opt --locked --features harness --bin rust-ntfs\`"
         cluster="$(cluster_size "$image")"
         # A one-cluster file has to be non-resident to leave a hole behind.
         [ "$cluster" -ge "$(record_size "$image")" ] ||
@@ -868,7 +868,7 @@ case "$step" in
             die "$clusters runs fit in one $(record_size "$image")-byte record: the run list would not split"
         # extents: the unnamed $DATA extents /split.dat's list names.
         extents() {
-            cargo run --quiet --release --manifest-path "$REPO/Cargo.toml" --example listed_data_extents -- \
+            cargo run --quiet --profile test-opt --manifest-path "$REPO/Cargo.toml" --example listed_data_extents -- \
                 "$image" /split.dat >"$work/extents" || die "listed_data_extents $image /split.dat failed"
             wc -l <"$work/extents" | tr -d ' '
         }
@@ -961,7 +961,7 @@ case "$step" in
             [ "$status" -eq 0 ] || die "rust-ntfs stream /split.dat s$i exited $status: $(cat "$image.cli-err")"
         done
         set +e
-        cargo run --quiet --release --manifest-path "$REPO/Cargo.toml" --example listed_data_extents -- \
+        cargo run --quiet --profile test-opt --manifest-path "$REPO/Cargo.toml" --example listed_data_extents -- \
             "$image" /split.dat >/dev/null
         status=$?
         set -e
@@ -975,7 +975,7 @@ case "$step" in
         # have to grow past resident (#1346), and that is not what this
         # scenario grades. The holes and the clusters they cut are the same
         # either way.
-        cargo run --quiet --release --manifest-path "$REPO/Cargo.toml" --example split_extent_holes -- \
+        cargo run --quiet --profile test-opt --manifest-path "$REPO/Cargo.toml" --example split_extent_holes -- \
             "$image" create "$holes" "$cluster" || die "creating the split-extents holes failed"
         run fs "$image" get free_bytes --text
         [ "$status" -eq 0 ] || die "fs.ntfs get free_bytes exited $status: $(cat "$image.cli-err")"
@@ -986,7 +986,7 @@ case "$step" in
         head -c $((out - spare * cluster)) /dev/zero | tr '\000' '\074' >"$work/fill"
         run fs "$image" write /fill <"$work/fill"
         [ "$status" -eq 0 ] || die "fs.ntfs write /fill exited $status: $(cat "$image.cli-err")"
-        cargo run --quiet --release --manifest-path "$REPO/Cargo.toml" --example split_extent_holes -- \
+        cargo run --quiet --profile test-opt --manifest-path "$REPO/Cargo.toml" --example split_extent_holes -- \
             "$image" remove "$holes" "$cluster" || die "removing the split-extents holes failed"
 
         # The stream grows past its end over the holes, then is patched
@@ -1191,7 +1191,7 @@ case "$step" in
         # next mount -- Windows, in the scenario -- runs its own restart
         # over what the stopped replay left (#648).
         set +e
-        out="$(cargo run --quiet --release --manifest-path "$REPO/Cargo.toml" \
+        out="$(cargo run --quiet --profile test-opt --manifest-path "$REPO/Cargo.toml" \
             --example replay_stopped -- "$image" 2>&1)"
         status=$?
         set -e

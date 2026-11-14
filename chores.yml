@@ -331,7 +331,7 @@ tasks:
           exit 1
         fi
   build:cli:
-    desc: Build the CLIs the matrix drives (target/release/rust-ntfs, and rust-fs-ntfs for the cli group) -- skipped when up to date
+    desc: Build the CLIs the matrix drives (target/test-opt/rust-ntfs, and rust-fs-ntfs for the cli group) -- skipped when up to date
     # UP TO DATE MEANS THE SOURCES HAVE NOT CHANGED, by content: chore hashes
     # these files and skips the task while the hashes match and the binary
     # exists. cargo would also notice nothing changed, but only after
@@ -350,17 +350,17 @@ tasks:
       - '../rust-fs-core/Cargo.toml'
       - '../rust-fs-core/src/**/*.rs'
     generates:
-      - target/release/rust-ntfs
-      - target/release/rust-fs-ntfs
+      - target/test-opt/rust-ntfs
+      - target/test-opt/rust-fs-ntfs
     # THE GATE, not the report: siblings:check prints a line per sibling
     # whether or not anything drifted, and `chore matrix` would wear those
     # two lines in front of every run. Same check, silent when it passes.
     deps: [siblings:gate]
     cmds:
-      - cargo build --release --locked --features harness --bin rust-ntfs --quiet
+      - cargo build --profile test-opt --locked --features harness --bin rust-ntfs --quiet
       # The command-line tools, which the `cli` scenarios run on the host
       # (scripts/cli-oracle.sh).
-      - cargo build --release --locked --features cli --bin rust-fs-ntfs --quiet
+      - cargo build --profile test-opt --locked --features cli --bin rust-fs-ntfs --quiet
 
   matrix:
     desc: 'Run matrix scenarios on the Windows VM: `chore matrix -- <group|filter>` (e.g. smoke, mac-format-tiny-32mib)'
@@ -518,22 +518,22 @@ tasks:
   # the same script, so a tier that goes over budget goes over it in both
   # places. The executed-test floors stay in ci.yml, where they gate.
   test:unit:
-    desc: 'Unit tests (src/), release -- ci.yml "unit tests (release)"'
+    desc: 'Unit tests (src/), test-opt -- ci.yml "unit tests (test-opt)"'
     deps: [siblings:gate]
     cmds:
-      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips unit -- cargo test --release --locked --lib
+      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips unit -- cargo test --profile test-opt --locked --lib
 
   test:repair-journal:
     desc: Fixture-free repair journal framing and torn-tail tests
     deps: [siblings:gate]
     cmds:
-      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --release --locked --features plan-file --test repair_journal
+      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --profile test-opt --locked --features plan-file --test repair_journal
 
   test:repair-plan-copy:
     desc: Fixture-free copy-repair tests
     deps: [siblings:gate]
     cmds:
-      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --release --locked --features cli,harness --test repair_plan_copy
+      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --profile test-opt --locked --features cli,harness --test repair_plan_copy
 
   test:unit:debug:
     desc: 'Unit tests (src/), debug, overflow checks armed -- ci.yml "unit tests (debug, ...)"'
@@ -549,16 +549,16 @@ tasks:
     desc: 'The two fixture-free integration files -- ci.yml "fixture-free integration tests"'
     deps: [siblings:gate]
     cmds:
-      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips mkfs -- cargo test --release --locked --features cli,harness --test mkfs_roundtrip --test mkfs_bin_smoke
+      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips mkfs -- cargo test --profile test-opt --locked --features cli,harness --test mkfs_roundtrip --test mkfs_bin_smoke
 
   test:suite:
-    desc: 'Every unit and integration test, release -- ci.yml "full suite"'
+    desc: 'Every unit and integration test, test-opt -- ci.yml "full suite"'
     deps: [siblings:gate]
     # The fixtures are checked first: without them the fixture-driven files
     # panic one test at a time, 4,755 lines of the same missing file.
     cmds:
       - test-disks/check-fixtures.sh
-      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --release --locked --features cli,harness --no-fail-fast
+      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips suite -- cargo test --profile test-opt --locked --features cli,harness --no-fail-fast
 
   test:op-sequence-oracle:
     desc: "Seeded and generated operation readback, graded by ntfs-3g (`chore tools` installs it)"
@@ -574,7 +574,7 @@ tasks:
     # floor fails a run that built no kernel test, which `cargo test` would
     # report as a green `0 passed`.
     cmds:
-      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips kernel -- ../fs-linux-test-harness/scripts/vm.sh session cargo test --release --locked --features cli,harness,kernel --test kernel_ntfs3
+      - bash ../rust-fs-core/scripts/tier.sh --refuse-skips kernel -- ../fs-linux-test-harness/scripts/vm.sh session cargo test --profile test-opt --locked --features cli,harness,kernel --test kernel_ntfs3
       - bash ../rust-fs-core/scripts/test-floor.sh kernel 4
 
   test:
@@ -690,13 +690,13 @@ tasks:
     # eleven minutes into the Windows job (#546). Each command and its
     # expected exit come from fs-windows-test-harness.toml and
     # test-matrix.json, so a new cli scenario is covered with no edit here.
-    # They run the release CLI at target/release/rust-fs-ntfs, which
-    # cli:install builds. FLOOR: the 20 cli scenarios when the tier was added;
+    # They run the test-opt CLI at target/test-opt/rust-fs-ntfs, which
+    # build:cli builds. FLOOR: the 20 cli scenarios when the tier was added;
     # 25 with the three format-plan scenarios (#698); 26 with the rename
     # scenario (#645); 27 with the link scenario (#646); 28 with the
     # mkdir --parents scenario (#647); 29 with truncate (#655);
     # 30 with positioned writes (#656); 31 with import (#1079).
-    deps: [cli:install]
+    deps: [build:cli]
     cmds:
       - 'bash ../rust-fs-core/scripts/tier.sh --refuse-skips cli-host -- python3 scripts/fs-windows-test-harness/run-host-steps --group cli --floor 31'
 
@@ -715,7 +715,7 @@ tasks:
     cmds:
       - |
         set -u
-        out=$(cargo test --release --locked --features cli,harness -- --ignored 2>&1)
+        out=$(cargo test --profile test-opt --locked --features cli,harness -- --ignored 2>&1)
         printf '%s\n' "$out" | grep -E '^test .* \.\.\. (ok|FAILED)' || true
         passed=$(printf '%s\n' "$out" | grep -cE '^test .* \.\.\. ok' || true)
         if [ "${passed:-0}" -gt 0 ]; then
