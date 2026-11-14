@@ -54,14 +54,21 @@ def validate(configuration):
                 require("github.event_name" not in condition and "github.ref" not in condition,
                         f"{name}/{job_name}: validation step has an event/ref gate")
     jobs = configuration["ci.yml"]["jobs"]
-    for job_name in ("test", "windows-native-read-fixtures", "integration", "cli", "kernel", "asan",
+    for job_name in ("test", "darwin-cross", "windows-native-read-fixtures", "integration", "cli", "kernel", "asan",
                      "validate-mkfs-windows-run", "validate-mkfs-windows", "ci-ok"):
         require(job_name in jobs, f"ci.yml: full-pipeline job {job_name} is missing")
     matrix = jobs["test"]["strategy"]["matrix"]
-    require(matrix["os"] == ["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest"],
-            "ci.yml: Linux, ARM64 and macOS must all run")
-    allowed_exclusion = "${{ fromJSON(needs.changes.outputs.code == 'false' && '[{\"os\":\"ubuntu-24.04-arm\"},{\"os\":\"macos-latest\"}]' || '[]') }}"
+    require(matrix["os"] == ["ubuntu-latest", "ubuntu-24.04-arm"],
+            "ci.yml: native Linux x86_64 and ARM64 tests must both run")
+    allowed_exclusion = "${{ fromJSON(needs.changes.outputs.code == 'false' && '[{\"os\":\"ubuntu-24.04-arm\"}]' || '[]') }}"
     require(matrix.get("exclude") in (None, allowed_exclusion), "ci.yml: unexpected platform exclusion")
+    darwin = jobs["darwin-cross"]
+    require("if" not in darwin, "ci.yml: the Darwin build must run on every event")
+    require(any(step.get("run") == "rustup target add aarch64-apple-darwin"
+                for step in darwin["steps"]), "ci.yml: Darwin target installation is missing")
+    require(any(step.get("run") == "cargo build --locked --release --lib --target aarch64-apple-darwin"
+                for step in darwin["steps"]), "ci.yml: Darwin cross-build is missing")
+    require("darwin-cross" in jobs["ci-ok"]["needs"], "ci.yml: Darwin build must gate ci-ok")
     changes = jobs["changes"]
     for output in ("code", "mkfs"):
         require(changes["outputs"][output] == "${{ steps.code.outputs.code }}",
@@ -75,7 +82,8 @@ def validate(configuration):
 validate(workflows)
 rejected = 0
 for mutation in ("missing-trigger", "path-filter", "branch-filter", "job-gate", "step-gate",
-                 "windows-filter", "missing-fixtures", "missing-platform"):
+                 "windows-filter", "missing-fixtures",
+                 "missing-platform", "missing-darwin", "missing-darwin-build", "ungated-darwin"):
     changed = copy.deepcopy(workflows)
     jobs = changed["ci.yml"]["jobs"]
     if mutation == "missing-trigger":
@@ -93,7 +101,13 @@ for mutation in ("missing-trigger", "path-filter", "branch-filter", "job-gate", 
     elif mutation == "missing-fixtures":
         jobs.pop("windows-native-read-fixtures")
     elif mutation == "missing-platform":
-        jobs["test"]["strategy"]["matrix"]["os"].remove("macos-latest")
+        jobs["test"]["strategy"]["matrix"]["os"].remove("ubuntu-24.04-arm")
+    elif mutation == "missing-darwin":
+        jobs.pop("darwin-cross")
+    elif mutation == "missing-darwin-build":
+        jobs["darwin-cross"]["steps"][-1]["run"] = "echo no build"
+    elif mutation == "ungated-darwin":
+        jobs["ci-ok"]["needs"].remove("darwin-cross")
     try:
         validate(changed)
     except AssertionError:
@@ -123,5 +137,5 @@ for job_name in needs:
         require(verdict.returncode != 0, f"PR gate accepted {job_name}={result}")
         rejected += 1
 
-print(f"full PR pipeline: {len(workflows)} unfiltered workflows, 3 platforms, {rejected} rejected regressions")
+print(f"full PR pipeline: {len(workflows)} unfiltered workflows, 2 native Linux legs and Darwin build, {rejected} rejected regressions")
 PY

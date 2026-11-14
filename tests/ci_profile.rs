@@ -857,6 +857,7 @@ fn ci_ok_covers_every_gating_job_and_preserves_windows_filter() {
         [
             "readonly-file-name",
             "test",
+            "darwin-cross",
             "windows-native-read-fixtures",
             "integration",
             "changes",
