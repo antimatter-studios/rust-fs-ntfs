@@ -43,6 +43,7 @@ fn device_and_plan() -> (ReadOnlyDevice, SavedPlan) {
         fail_at: None,
     };
     let plan = SavedPlan {
+        clear_dirty_from: None,
         source_size: device.size(),
         volume_serial: 0,
         units: vec![

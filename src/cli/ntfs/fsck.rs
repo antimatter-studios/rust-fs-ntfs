@@ -63,7 +63,10 @@
 //! through `apply_in_place`, journalling into FILE. In-place is never the
 //! default: `--in-place` needs `--journal`, `--journal` needs `--in-place`,
 //! and `--in-place` refuses `--to`, `--dry-run` and `-y`. Every refusal comes
-//! before anything is created or written.
+//! before anything is created or written. Once the last unit is applied the
+//! report carries the library's audit of the repaired volume (#943): the
+//! dirty flag the repair leaves set is expected and exits 0, anything else
+//! the audit finds exits 4.
 //!
 //! WHAT `--apply PLAN --in-place --resume --journal FILE` DOES: resumes an
 //! in-place repair that stopped (#963). FILE is the journal the stopped
@@ -89,7 +92,7 @@ use fs_ntfs::fsck::{
 #[cfg(unix)]
 use fs_ntfs::repair_plan::check_plan_source;
 use fs_ntfs::repair_plan::{
-    copy_repair, load_plan, plan_fsck_io, save_plan, CopyRepairError, RepairPlan,
+    copy_repair, load_plan, plan_fsck_io, save_plan, CopyRepairError, PlanSourceError, RepairPlan,
 };
 use sha2::{Digest, Sha256};
 
@@ -118,6 +121,12 @@ const LEFT_FOR_CHKDSK: &str = "left set: the dirty flag asks for a check of the 
                                which Windows' chkdsk makes at the next mount and this is not; \
                                pass --clear-dirty with -y to clear it on a volume known to be \
                                consistent";
+
+/// Why an in-place repair's audit finds the dirty flag set (#941). Only
+/// the in-place apply, which is unix-only, reports it.
+#[cfg(unix)]
+const IN_PLACE_DIRTY: &str = "left set: an in-place repair leaves the dirty flag for Windows' \
+                              chkdsk, which checks the whole volume at the next mount";
 
 /// The sentence that stops exit 0 being read as more than it is.
 const SCOPE: &str = "the dirty flag, whether $LogFile is empty, $MFTMirr against $MFT, the \
@@ -156,7 +165,9 @@ fn command() -> Cmd {
              and checked against PLAN, and only then is FILE created and PLAN applied, \
              each unit journalled into FILE before it is written. With --resume, FILE \
              is the journal a stopped in-place repair left, and the repair continues \
-             from where it stopped.\n\n\
+             from where it stopped. The report then audits the repaired volume: the \
+             dirty flag is left set for Windows' chkdsk, and anything else found exits \
+             4.\n\n\
              --dry-run works out every write -y would make (--clear-dirty's too, when \
              given) and makes none: TARGET is opened read-only. The report's plan lists \
              them in units, each the writes between two flushes, each by offset, length \
@@ -487,14 +498,7 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
         ("scope", Json::from(SCOPE)),
         ("clean", Json::from(remaining == 0)),
         ("dirty", Json::from(after.dirty)),
-        (
-            "logfile",
-            Json::from(match after.logfile {
-                LogfileState::Empty => "empty",
-                LogfileState::Clean(_) => "clean",
-                LogfileState::Pending(_) => "records",
-            }),
-        ),
+        ("logfile", Json::from(logfile_state(&after.logfile))),
         ("exit", Json::from(u64::from(code))),
         ("found", Json::from(found)),
         ("repaired", Json::from(repaired)),
@@ -629,6 +633,14 @@ fn apply(source: &Path, plan: &Path, target: &Path) -> Result<Outcome, CliError>
         CopyRepairError::Source(_) => failed(format!(
             "{name}: refused for plan '{plan_name}', no target created: {e}"
         )),
+        CopyRepairError::Target(
+            PlanSourceError::DeviceSize { .. } | PlanSourceError::DeviceSerial { .. },
+        ) => failed(format!(
+            "{name}: copy-repair into '{to}' refused before the first unit: {e}"
+        )),
+        CopyRepairError::Target(_) => failed(format!(
+            "{name}: copy-repair into '{to}' stopped, the earlier units written: {e}"
+        )),
         CopyRepairError::Io(_) => failed(format!("{name}: copy-repair into '{to}': {e}")),
     })?;
     let units = saved.units.len() as u64;
@@ -654,7 +666,8 @@ fn apply(source: &Path, plan: &Path, target: &Path) -> Result<Outcome, CliError>
     Ok(Outcome::report(report).with_text(text).with_code(CLEAN))
 }
 
-/// Set by SIGINT; an in-place apply stops before its next unit (#964).
+/// Set by SIGINT or SIGTERM; an in-place apply stops before its next unit
+/// (#964, #967).
 #[cfg(unix)]
 static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -663,14 +676,25 @@ extern "C" fn on_interrupt(_: libc::c_int) {
     INTERRUPTED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Set by SIGUSR1 in the harness build: a held apply goes on without being
+/// stopped, so a test can hold it at a known point and then let it finish.
+#[cfg(all(unix, feature = "harness"))]
+static RELEASED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(all(unix, feature = "harness"))]
+extern "C" fn on_release(_: libc::c_int) {
+    RELEASED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Watches an in-place apply from the CLI (#964): each progress report is
-/// a line on stderr, and a SIGINT stops the apply before its next unit, so
-/// the unit in hand is finished first.
+/// a line on stderr, and a SIGINT or SIGTERM stops the apply before its next
+/// unit, so the unit in hand is finished first.
 #[cfg(unix)]
 struct CliObserver {
     name: String,
     /// The harness build holds the apply once this many units are applied,
-    /// until a signal arrives, so a test can send SIGINT at a known point.
+    /// until a signal arrives, so a test can send SIGINT or SIGTERM at a
+    /// known point, or SIGUSR1 to let it finish.
     #[cfg(feature = "harness")]
     hold_after: Option<u32>,
 }
@@ -683,6 +707,12 @@ impl CliObserver {
         unsafe {
             let handler = on_interrupt as extern "C" fn(libc::c_int) as libc::sighandler_t;
             libc::signal(libc::SIGINT, handler);
+            libc::signal(libc::SIGTERM, handler);
+            #[cfg(feature = "harness")]
+            libc::signal(
+                libc::SIGUSR1,
+                on_release as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            );
         }
         Self {
             name: name.to_string(),
@@ -705,6 +735,7 @@ impl fs_ntfs::repair_journal::ApplyObserver for CliObserver {
         if self.hold_after == Some(at.units) {
             let held = std::time::Instant::now();
             while !INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)
+                && !RELEASED.load(std::sync::atomic::Ordering::Relaxed)
                 && held.elapsed() < std::time::Duration::from_secs(60)
             {
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -759,6 +790,20 @@ fn apply_in_place(
     let bytes = std::fs::read(plan).map_err(|e| failed(format!("read plan '{plan_name}': {e}")))?;
     let saved =
         load_plan(&bytes).map_err(|e| failed(format!("plan '{plan_name}' refused: {e}")))?;
+    // The journal is held exclusively for the whole apply or resume (#936),
+    // by the same lock as the device: a second resume of a journal another
+    // holds is refused before either is written. A resume takes the hold
+    // before the device's, so the refusal names the journal.
+    let journal_held = |e: String| {
+        failed(format!(
+            "--journal '{journal_name}' refused, nothing written: {e}"
+        ))
+    };
+    let mut held = if resume {
+        Some(PathIo::open_exclusive(journal).map_err(journal_held)?)
+    } else {
+        None
+    };
     let mut io = PathIo::open_exclusive(device)
         .map_err(|e| failed(format!("{name}: refused, nothing written: {e}")))?;
     if !resume {
@@ -773,7 +818,10 @@ fn apply_in_place(
             .open(journal)
             .map_err(|e| failed(format!("create journal '{journal_name}': {e}")))?;
     }
-    let mut journal_io = PathIo::open_rw(journal).map_err(failed)?;
+    let mut journal_io = match held.take() {
+        Some(held) => held,
+        None => PathIo::open_exclusive(journal).map_err(journal_held)?,
+    };
     let sha: [u8; 32] = Sha256::digest(&bytes).into();
     let mut observer = CliObserver::new(&name);
     let done = if resume {
@@ -782,7 +830,7 @@ fn apply_in_place(
         apply_in_place_observed(&saved, sha, &mut io, &mut journal_io, &mut observer)
     };
     let units = saved.units.len() as u64;
-    done.map_err(|e| match e {
+    let audit = done.map_err(|e| match e {
         InPlaceError::Cancelled { applied } => failed(format!(
             "{name}: interrupted: stopped after {applied} of {units} units, each finished; \
              --apply '{plan_name}' --in-place --resume --journal '{journal_name}' finishes it"
@@ -797,6 +845,27 @@ fn apply_in_place(
         .iter()
         .map(|u| u.writes.len() as u64)
         .sum::<u64>();
+    // The audit of the repaired volume (#943): the dirty flag the repair
+    // leaves set is expected, anything else is left uncorrected.
+    let mut findings = Vec::new();
+    if let LogfileState::Pending(why) = &audit.logfile {
+        findings.push(Json::object([
+            ("kind", Json::from("logfile")),
+            ("repaired", Json::from(false)),
+            ("why", Json::from(why.as_str())),
+        ]));
+    }
+    if audit.dirty {
+        findings.push(Json::object([
+            ("kind", Json::from("dirty")),
+            ("repairable", Json::from(false)),
+            ("repaired", Json::from(false)),
+            ("why", Json::from(IN_PLACE_DIRTY)),
+        ]));
+    }
+    findings.extend(audit.findings.iter().map(finding));
+    let remaining = count(&audit) - u64::from(audit.dirty);
+    let code = if remaining > 0 { UNCORRECTED } else { CLEAN };
     let report = Json::object([
         ("fs", Json::from("ntfs")),
         ("device", Json::from(name.as_str())),
@@ -806,18 +875,53 @@ fn apply_in_place(
         ("resumed", Json::from(resume)),
         ("units", Json::from(units)),
         ("writes", Json::from(writes)),
-        ("exit", Json::from(u64::from(CLEAN))),
+        (
+            "audit",
+            Json::object([
+                (
+                    "checks",
+                    Json::Arr(CHECKS.iter().map(|c| Json::from(*c)).collect()),
+                ),
+                ("scope", Json::from(SCOPE)),
+                ("clean", Json::from(remaining == 0)),
+                ("dirty", Json::from(audit.dirty)),
+                ("logfile", Json::from(logfile_state(&audit.logfile))),
+                ("remaining", Json::from(remaining)),
+                (
+                    "scanned",
+                    Json::object([
+                        ("mft_records", Json::from(audit.records_scanned)),
+                        ("clusters", Json::from(audit.clusters_scanned)),
+                    ]),
+                ),
+                ("findings", Json::Arr(findings.clone())),
+            ]),
+        ),
+        ("exit", Json::from(u64::from(code))),
     ]);
     let how = if resume {
         "resumed and applied"
     } else {
         "applied"
     };
-    let text = format!(
+    let mut text = vec![format!(
         "fsck.ntfs: {name}: plan '{plan_name}' {how} in place ({units} units, {writes} \
          writes), journalled into '{journal_name}'"
-    );
-    Ok(Outcome::report(report).with_text(text).with_code(CLEAN))
+    )];
+    text.push(if remaining == 0 {
+        format!(
+            "  audit: clean but for the dirty flag ({} MFT records, {} clusters)",
+            audit.records_scanned, audit.clusters_scanned
+        )
+    } else {
+        format!("  audit: {remaining} problems remaining")
+    });
+    for f in &findings {
+        text.push(format!("  {}", f.to_text().replace('\n', ", ")));
+    }
+    Ok(Outcome::report(report)
+        .with_text(text.join("\n"))
+        .with_code(code))
 }
 
 /// An in-place repair needs the journal location check, which is Unix-only.
@@ -922,6 +1026,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// How many problems a check left: the dirty flag counts as one, and so
 /// does a log holding work.
+/// `$LogFile`'s state as the report names it.
+fn logfile_state(state: &LogfileState) -> &'static str {
+    match state {
+        LogfileState::Empty => "empty",
+        LogfileState::Clean(_) => "clean",
+        LogfileState::Pending(_) => "records",
+    }
+}
+
 fn count(report: &CheckReport) -> u64 {
     u64::from(report.dirty)
         + u64::from(report.logfile.needs_replay())
