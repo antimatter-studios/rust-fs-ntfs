@@ -72,7 +72,9 @@ vars:
   # worktree through virtiofs. Linux hosts need virtiofsd, installed by the
   # harness's ci-setup-linux.sh. The ntfs3 run profile pins the booted kernel
   # and required module before any consumer joins (harness #225).
-  LINUX_HARNESS_REF: v0.7.0
+  # v0.7.1 disables guest auto-updates on every boot and defaults builds to
+  # one job, with transient destroy-lock retries.
+  LINUX_HARNESS_REF: v0.7.1
 
   # The in-house VHD writer (rust-img-vhd) the Windows jobs build to wrap
   # a raw image for Windows. Not a cargo dependency, so this is the only

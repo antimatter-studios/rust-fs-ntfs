@@ -32,7 +32,7 @@ assert unsupported_arch.returncode != 0 and "unsupported architecture" in unsupp
 assert '"linux-image-$FLTH_KERNEL_RELEASE=6.12.95-1~bpo12+1"' in prepare.read_text()
 assert "apt-get" not in (root / "scripts/vm-setup.sh").read_text()
 chores = yaml.safe_load((root / "chores.yml").read_text())
-assert chores["vars"]["LINUX_HARNESS_REF"] == "v0.7.0"
+assert chores["vars"]["LINUX_HARNESS_REF"] == "v0.7.1"
 jobs = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())["jobs"]
 for job in ("kernel", "box-cache"):
     assert any(step.get("run") == "../fs-linux-test-harness/scripts/ci-setup-linux.sh"
