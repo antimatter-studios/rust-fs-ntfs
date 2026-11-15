@@ -264,6 +264,52 @@ function Get-LargeClusterLayout([string]$Letter, [int]$Size) {
     }
     $layout
 }
+# The unit of an index VCN, from INDX blocks Windows wrote (#704): each
+# block's own VCN field (at 0x10) against its byte offset in the directory's
+# $INDEX_ALLOCATION. Every block past the first must agree on one unit that
+# divides its offset exactly, and at least two must, or nothing was measured.
+function Measure-IndexVcnUnit([object[]]$Blocks) {
+    $first = @($Blocks | Where-Object { $_.offset -eq 0 })
+    if ($first.Count -ne 1 -or $first[0].vcn -ne 0) { throw 'the block at offset 0 does not carry VCN 0' }
+    $later = @($Blocks | Where-Object { $_.offset -gt 0 })
+    if ($later.Count -lt 2) { throw "only $($later.Count) index blocks past the first; the unit is not measured" }
+    $units = @($later | ForEach-Object {
+        if ($_.vcn -le 0 -or $_.offset % $_.vcn -ne 0) {
+            throw "the block at offset $($_.offset) carries VCN $($_.vcn), which no unit maps there"
+        }
+        [long]($_.offset / $_.vcn)
+    } | Sort-Object -Unique)
+    if ($units.Count -ne 1) { throw "index blocks disagree on the VCN unit: $($units -join ', ')" }
+    [long]$units[0]
+}
+# A directory Windows grows past several index blocks, and every INDX block
+# of its $INDEX_ALLOCATION read raw through the disk at the extents Windows
+# reports: each block's byte offset in the stream and its own VCN field.
+function Get-IndexVcnBlocks([string]$Letter, [int]$DiskNumber, [long]$PartitionOffset,
+        [long]$ClusterBytes, [long]$IndexBlockBytes) {
+    $dir = "${Letter}:\vcn-measure"
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    $stem = 'x' * 120
+    for ($i = 0; $i -lt 400; $i++) {
+        [IO.File]::WriteAllBytes((Join-Path $dir ('{0}-{1:d4}' -f $stem, $i)), [byte[]]::new(0))
+    }
+    Write-VolumeCache -DriveLetter $Letter
+    $run = ConvertFrom-RetrievalExtents (Get-NtfsStreamExtents ($dir + ':$I30:$INDEX_ALLOCATION'))
+    $blocks = [Collections.Generic.List[object]]::new()
+    foreach ($extent in $run.extents) {
+        for ($vcn = [long]$extent.vcn; $vcn -lt $extent.next_vcn; $vcn++) {
+            $lcn = [long]$extent.lcn + ($vcn - [long]$extent.vcn)
+            for ($within = 0L; $within -lt $ClusterBytes; $within += $IndexBlockBytes) {
+                $offset = $vcn * $ClusterBytes + $within
+                $bytes = Read-GeometryDisk $DiskNumber ($PartitionOffset + $lcn * $ClusterBytes + $within) $IndexBlockBytes
+                if ([Text.Encoding]::ASCII.GetString($bytes, 0, 4) -ne 'INDX') { continue }
+                $blocks.Add([pscustomobject][ordered]@{ offset = $offset;
+                    vcn = [BitConverter]::ToInt64($bytes, 0x10) })
+            }
+        }
+    }
+    , $blocks.ToArray()
+}
 function Invoke-WindowsFormatGeometryCapture([string]$OutDir) {
     $ErrorActionPreference = 'Stop'
     if (-not $IsWindows) { throw 'the capture requires an elevated hosted Windows runner' }
@@ -351,6 +397,10 @@ function Invoke-WindowsFormatGeometryCapture([string]$OutDir) {
                 if ($row.accepted) {
                     $measured = Get-LargeClusterLayout $letter $request.allocation_unit_bytes
                     foreach ($file in $measured.Keys) { $layout[$file] = $measured[$file] }
+                    $blocks = Get-IndexVcnBlocks $letter $disk.Number $partition.Offset `
+                        $request.allocation_unit_bytes $row.boot.index_block_bytes
+                    $layout.index_vcn = [ordered]@{ index_block_bytes = $row.boot.index_block_bytes;
+                        unit_bytes = Measure-IndexVcnUnit $blocks; blocks = $blocks }
                 }
                 $layoutRows.Add([pscustomobject]$layout)
                 ConvertTo-Json -InputObject @($layoutRows.ToArray()) -Depth 8 |
@@ -363,7 +413,143 @@ function Invoke-WindowsFormatGeometryCapture([string]$OutDir) {
         }
         Assert-FormatGeometryRows @($rows.ToArray())
         Assert-LargeClusterLayoutRows @($layoutRows.ToArray())
-        Write-Host 'format-geometry: 26 requests captured; both 4 KiB controls passed; 6 large-cluster layouts measured'
+        foreach ($layout in $layoutRows) {
+            if ($null -eq $layout.index_vcn -or -not $layout.index_vcn.unit_bytes) {
+                throw "no index VCN unit was measured at $($layout.allocation_unit_bytes)-byte clusters"
+            }
+            Write-Host "format-geometry: index VCN unit $($layout.index_vcn.unit_bytes) bytes at $($layout.allocation_unit_bytes)-byte clusters, $(@($layout.index_vcn.blocks).Count) blocks"
+        }
+        Write-Host 'format-geometry: 26 requests captured; both 4 KiB controls passed; 6 large-cluster layouts and index VCN units measured'
+    } finally {
+        if ($attached) {
+            $image = Get-DiskImage -ImagePath $vhd -ErrorAction Stop
+            if ($image.Attached) { Dismount-DiskImage -ImagePath $vhd -ErrorAction Stop }
+            if ((Get-DiskImage -ImagePath $vhd).Attached) { throw 'scratch VHD remains attached' }
+        }
+        if (Test-Path -LiteralPath $vhd) { Remove-Item -LiteralPath $vhd -Force -ErrorAction Stop }
+    }
+}
+# The small volumes Windows is asked to format as NTFS at 4 KiB clusters
+# (#961), in MiB: around the 8 MiB this crate's formatter refuses.
+function Get-SmallVolumeRequests { 1, 2, 3, 4, 5, 6, 7, 8, 12, 16 }
+# The live $LogFile's size in bytes, from `chkdsk X: /L`'s report.
+function ConvertFrom-ChkdskLogSize([string[]]$Lines) {
+    $values = @($Lines | ForEach-Object { if ($_ -match 'current log file size is (\d+) KB') { [long]$Matches[1] } })
+    if ($values.Count -ne 1) { throw "chkdsk /L must report exactly one current log file size, not $($values.Count)" }
+    return $values[0] * 1024
+}
+# One numeric field of `fsutil fsinfo ntfsinfo`, hexadecimal or decimal.
+# Current fsutil prints a count with thousands separators and its size in
+# padded decimal units, e.g. `Total Clusters :  1,535  (  6.0 MB)`; the
+# annotation is display only, and the separators are dropped.
+function Get-NtfsInfoField([string[]]$Lines, [string]$Name) {
+    $pattern = '^\s*' + [regex]::Escape($Name) + '\s*:\s*(0x[0-9a-fA-F]+|[0-9][0-9,]*)(?:\s+\(\s*[0-9][0-9.,]*\s*[A-Za-z]+\))?\s*$'
+    $values = @($Lines | ForEach-Object { if ($_ -match $pattern) { $Matches[1] } })
+    if ($values.Count -ne 1) { throw "fsutil must report exactly one $Name field, not $($values.Count)" }
+    if ($values[0].StartsWith('0x')) { return [Convert]::ToUInt64($values[0].Substring(2), 16) }
+    return [Convert]::ToUInt64($values[0].Replace(',', ''), 10)
+}
+# The small-volume rows ascend by size, Windows accepts at least one, and
+# every accepted size carries what was measured. Returns the smallest
+# accepted size in MiB.
+function Assert-SmallVolumeRows([object[]]$Rows) {
+    if ($Rows.Count -eq 0) { throw 'no small-volume rows were captured' }
+    for ($i = 1; $i -lt $Rows.Count; $i++) {
+        if ($Rows[$i].size_mib -le $Rows[$i - 1].size_mib) { throw 'small-volume rows must ascend by size' }
+    }
+    $accepted = @($Rows | Where-Object accepted)
+    if ($accepted.Count -eq 0) {
+        throw "Windows formatted none of $(($Rows | ForEach-Object size_mib) -join ', ') MiB, so its smallest volume was not measured"
+    }
+    foreach ($row in $accepted) {
+        foreach ($field in 'log_bytes', 'mft_lcn', 'mftmirr_lcn', 'total_clusters') {
+            if (-not $row.$field) { throw "the $($row.size_mib) MiB volume has no $field" }
+        }
+    }
+    return $accepted[0].size_mib
+}
+# Windows' smallest NTFS volume at 4 KiB clusters (#961). Each size is a
+# partition of its own on a scratch MBR disk, formatted by Format-Volume. An
+# accepted size records fsutil's MFT and $MFTMirr positions, record size and
+# cluster count, and chkdsk /L's live $LogFile size; a refused one records
+# Windows' error. Nothing from this crate runs.
+function Invoke-WindowsSmallVolumeCapture([string]$OutDir) {
+    $ErrorActionPreference = 'Stop'
+    if (-not $IsWindows) { throw 'the capture requires an elevated hosted Windows runner' }
+    $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'the capture requires Administrator'
+    }
+    $out = [IO.Path]::GetFullPath($OutDir)
+    New-Item -ItemType Directory -Force -Path $out | Out-Null
+    $vhd = Join-Path $out ("small-volume-" + [guid]::NewGuid() + '.vhd')
+    $diskpart = Join-Path $out 'small-volume-create-disk.txt'
+    Set-Content -LiteralPath $diskpart -Encoding ascii -Value @(
+        "create vdisk file=`"$vhd`" maximum=64 type=expandable", 'exit')
+    $rows = [Collections.Generic.List[object]]::new()
+    $attached = $false
+    try {
+        $process = Start-Process diskpart.exe -ArgumentList '/s', "`"$diskpart`"" -PassThru -NoNewWindow `
+            -RedirectStandardOutput (Join-Path $out 'small-volume-create-disk.stdout.txt') `
+            -RedirectStandardError (Join-Path $out 'small-volume-create-disk.stderr.txt')
+        if (-not $process.WaitForExit(60000)) { $process.Kill(); $process.WaitForExit(); throw 'diskpart creation timed out' }
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $vhd)) { throw 'diskpart failed to create the scratch VHD' }
+        $attached = $true
+        $disk = Mount-DiskImage -ImagePath $vhd -PassThru | Get-Disk
+        if ($disk.LogicalSectorSize -ne 512) { throw 'scratch disk does not expose 512-byte sectors' }
+        Initialize-Disk -Number $disk.Number -PartitionStyle MBR | Out-Null
+        foreach ($mib in Get-SmallVolumeRequests) {
+            Write-Host "small-volume: $mib MiB"
+            try {
+                $partition = New-Partition -DiskNumber $disk.Number -Size ([long]$mib * 1MB) -AssignDriveLetter
+            } catch [Microsoft.Management.Infrastructure.CimException] {
+                # A partition Windows will not make is a size it does not
+                # format either; record why and go on to the next.
+                $rows.Add([pscustomobject][ordered]@{ size_mib = $mib; partition_bytes = $null; accepted = $false;
+                    error_id = $_.FullyQualifiedErrorId; diagnostic = "New-Partition: $($_.Exception.Message)";
+                    log_bytes = $null; mft_lcn = $null; mftmirr_lcn = $null; record_bytes = $null; total_clusters = $null;
+                    command = "New-Partition -DiskNumber <scratch> -Size $([long]$mib * 1MB) -AssignDriveLetter" })
+                continue
+            }
+            if (-not $partition.DriveLetter) { throw "the $mib MiB partition has no drive letter" }
+            $letter = $partition.DriveLetter
+            $row = [ordered]@{ size_mib = $mib; partition_bytes = $partition.Size; accepted = $false;
+                error_id = $null; diagnostic = $null; log_bytes = $null; mft_lcn = $null; mftmirr_lcn = $null;
+                record_bytes = $null; total_clusters = $null;
+                command = "Format-Volume -DriveLetter $letter -FileSystem NTFS -AllocationUnitSize 4096 -NewFileSystemLabel SMALL -Force -Confirm:`$false" }
+            try {
+                Format-Volume -DriveLetter $letter -FileSystem NTFS -AllocationUnitSize 4096 `
+                    -NewFileSystemLabel SMALL -Force -Confirm:$false | Out-Null
+                $row.accepted = $true
+            } catch [Microsoft.Management.Infrastructure.CimException] {
+                # Only formatter errors are measured refusals; the rest escape.
+                $row.error_id = $_.FullyQualifiedErrorId
+                $row.diagnostic = $_.Exception.Message
+                $_ | Format-List * -Force | Out-String | Set-Content (Join-Path $out "small-volume-$mib-format-error.txt")
+            }
+            if ($row.accepted) {
+                $info = @(& fsutil fsinfo ntfsinfo "${letter}:")
+                if ($LASTEXITCODE -ne 0) { throw "fsutil failed for the $mib MiB volume" }
+                $info | Set-Content (Join-Path $out "small-volume-$mib-ntfsinfo.txt") -Encoding utf8
+                $native = ConvertFrom-GeometryNtfsInfo $info
+                $row.mft_lcn = $native.mft_lcn
+                $row.mftmirr_lcn = $native.mftmirr_lcn
+                $row.record_bytes = $native.record_bytes
+                $row.total_clusters = Get-NtfsInfoField $info 'Total Clusters'
+                $log = @(& chkdsk.exe "${letter}:" /L 2>&1 | ForEach-Object { "$_" })
+                $log | Set-Content (Join-Path $out "small-volume-$mib-chkdsk-l.txt") -Encoding utf8
+                $row.log_bytes = ConvertFrom-ChkdskLogSize $log
+            }
+            $rows.Add([pscustomobject]$row)
+            # Keep partial evidence if a later size fails.
+            ConvertTo-Json -InputObject @($rows.ToArray()) -Depth 5 |
+                Set-Content (Join-Path $out 'small-volume.json') -Encoding utf8
+            Remove-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber -Confirm:$false
+        }
+        $smallest = Assert-SmallVolumeRows @($rows.ToArray())
+        $first = @($rows | Where-Object accepted)[0]
+        Write-Host "small-volume: Windows formats NTFS at 4 KiB clusters from $smallest MiB: `$LogFile $($first.log_bytes) bytes, `$MFTMirr at LCN $($first.mftmirr_lcn) of $($first.total_clusters) clusters"
     } finally {
         if ($attached) {
             $image = Get-DiskImage -ImagePath $vhd -ErrorAction Stop
