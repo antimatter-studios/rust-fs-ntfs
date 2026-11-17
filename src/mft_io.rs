@@ -161,6 +161,24 @@ pub fn read_boot_params_io<T: BlockIo + ?Sized>(io: &mut T) -> Result<BootParams
     Ok(params)
 }
 
+/// Parse and validate a boot sector held in memory, such as a copy saved
+/// earlier or the backup in a volume's last sector. It reads only the first
+/// 512 bytes of `sector`, checks the NTFS OEM identifier and a non-zero
+/// length, and decodes the same geometry [`read_boot_params_io`] does. It
+/// does not look at the device, so a volume's own boot sector can be
+/// distrusted while a saved one is used.
+pub fn parse_boot_sector(sector: &[u8]) -> Result<BootParams, Error> {
+    let boot: &[u8; 512] = sector
+        .get(..512)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| Error::invalid("boot sector is shorter than 512 bytes"))?;
+    let params = parse_boot_params_from_bytes(boot)?;
+    if &params.oem_id != NTFS_OEM_ID || params.total_sectors == 0 {
+        return Err(Error::invalid("invalid NTFS volume identity or length"));
+    }
+    Ok(params)
+}
+
 pub(crate) fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParams, Error> {
     let bytes_per_sector = read_u16_le(boot, BOOT_OFF_BYTES_PER_SECTOR)
         .ok_or_else(|| Error::io("boot sector too short to read bytes_per_sector"))?;

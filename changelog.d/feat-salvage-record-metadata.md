@@ -1,0 +1,3 @@
+### Added
+
+- **A salvaged record's names, times and own number are decoded by the driver.** `RecordEvidence` gains `record_number` (read only where the update sequence array starts after it, so the Linux ntfs3 driver's records report none), `file_names()`, `standard_information()`, `has_attribute_list()`, `volume_information()` and `volume_name()`, so a recovery caller no longer decodes `$FILE_NAME` and `$STANDARD_INFORMATION` itself. A name that overruns its attribute is skipped, and an unpaired surrogate is reported as an invalid name. `mft_io::parse_boot_sector` validates the geometry of a boot sector held in memory, such as a saved copy or the backup in the last sector (#1378).
