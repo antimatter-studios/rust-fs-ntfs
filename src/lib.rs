@@ -58,6 +58,7 @@ pub mod data_runs;
 pub mod ea_io;
 pub mod error;
 pub mod facade;
+pub mod file;
 pub mod fs_core_bridge;
 pub mod fsck;
 pub mod idx_block;
@@ -70,6 +71,7 @@ pub mod mft_bitmap;
 pub mod mft_inventory;
 pub mod mft_io;
 pub mod mkfs;
+pub mod primitives;
 pub mod quota;
 pub mod read;
 pub mod record_build;
@@ -86,7 +88,12 @@ pub mod usn;
 pub mod usn_cursor;
 pub mod usn_image;
 pub mod view_index;
+pub mod volume;
 pub mod write;
+
+pub use file::FileAPI;
+pub use primitives::PrimitiveAPI;
+pub use volume::{RawVolume, Volume, VolumeAPI};
 
 #[cfg(test)]
 mod test_image;
