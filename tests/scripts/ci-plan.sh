@@ -69,17 +69,22 @@ grep -Fq '      mkfs: ${{ steps.code.outputs.code }}' "$CI" && ok || bad "Window
 grep -q 'CODE: \${{ needs.changes.outputs.code }}' "$CI" && ok || bad "ci-ok does not read the run's depth"
 for job in validate-mkfs-windows ci-ok; do
     verdict="$(sed -n "/^  $job:/,/^  [a-z_]*:/p" "$CI")"
-    printf '%s\n' "$verdict" | grep -Fq 'EVENT: ${{ github.event_name }}' && ok || bad "$job does not bind skipped-job exceptions to the event"
-    printf '%s\n' "$verdict" | grep -Fq 'REF: ${{ github.ref }}' && ok || bad "$job does not bind skipped-job exceptions to main"
+    grep -Fq 'EVENT: ${{ github.event_name }}' <<<"$verdict" && ok || bad "$job does not bind skipped-job exceptions to the event"
+    grep -Fq 'REF: ${{ github.ref }}' <<<"$verdict" && ok || bad "$job does not bind skipped-job exceptions to main"
 done
 
+# THE JOB BLOCK IS MATCHED WITH A HERE-STRING, NOT A PIPE. `grep -q` exits
+# at its first match and closes the pipe it reads; the writer then gets EPIPE,
+# and `pipefail` reports that as the pipeline's status, so a match it found
+# reads as a failure. Seen on a runner as `printf: write error: Broken pipe`
+# above a `FAIL` for an assertion that had matched.
 box_cache="$(sed -n '/^  box-cache:/,/^  kernel:/p' "$CI")"
-printf '%s\n' "$box_cache" | grep -q "^    if: github.event_name == 'push' && github.ref == 'refs/heads/main'$" && ok || bad "box cache must run only on a push to main"
-printf '%s\n' "$box_cache" | grep -q '^          chore siblings$' && ok || bad "box cache does not use the pinned siblings"
-printf '%s\n' "$box_cache" | grep -q 'ci-setup-linux.sh --box-cache-key' && ok || bad "box cache key does not come from the pinned harness"
-printf '%s\n' "$box_cache" | grep -q 'key: \${{ steps.vm-host.outputs.box-cache-key }}' && ok || bad "box cache key differs from the kernel job"
-printf '%s\n' "$box_cache" | grep -q 'path: ~/.vagrant.d/boxes' && ok || bad "box cache path differs from the kernel job"
-printf '%s\n' "$box_cache" | grep -q 'vagrant box add "$box" --box-version "$box_version" --provider libvirt --architecture amd64' && ok || bad "box cache does not fetch the pinned Linux box"
+grep -q "^    if: github.event_name == 'push' && github.ref == 'refs/heads/main'$" <<<"$box_cache" && ok || bad "box cache must run only on a push to main"
+grep -q '^          chore siblings$' <<<"$box_cache" && ok || bad "box cache does not use the pinned siblings"
+grep -q 'ci-setup-linux.sh --box-cache-key' <<<"$box_cache" && ok || bad "box cache key does not come from the pinned harness"
+grep -q 'key: \${{ steps.vm-host.outputs.box-cache-key }}' <<<"$box_cache" && ok || bad "box cache key differs from the kernel job"
+grep -q 'path: ~/.vagrant.d/boxes' <<<"$box_cache" && ok || bad "box cache path differs from the kernel job"
+grep -q 'vagrant box add "$box" --box-version "$box_version" --provider libvirt --architecture amd64' <<<"$box_cache" && ok || bad "box cache does not fetch the pinned Linux box"
 if printf '%s\n' "$box_cache" | grep -Eq 'needs:|vagrant up|chore (test|linux:up|vm:up)'; then
     bad "box cache must not depend on a suite or boot a VM"
 else

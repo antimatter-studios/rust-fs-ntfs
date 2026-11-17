@@ -29,7 +29,7 @@ case "${1:-}" in
         # The list once left out `semver`, and a failing semver job left
         # ci-ok green (#409). rust-fs-core's ci-gate holds `needs:` to every
         # job in ci.yml.
-        filter='def full: ["windows-native-read-fixtures", "integration",
+        filter='def full: ["windows-native-read-fixtures", "windows-4kn-fixture", "integration",
                 "cli", "kernel", "python-volume-info-windows",
                 "op-sequence-chkdsk"];
             def ok($job): .result == "success" or
