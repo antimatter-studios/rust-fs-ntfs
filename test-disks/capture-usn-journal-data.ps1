@@ -90,7 +90,7 @@ try {
         Where-Object { $_ -match '^journal_id\t(0x[0-9a-fA-F]+)$' } |
         ForEach-Object { [Convert]::ToUInt64($Matches[1].Substring(2), 16) } |
         Select-Object -First 1
-    $wrongId = $capturedId -bxor [uint64]0x8000000000000000
+    $wrongId = $capturedId -bxor [Convert]::ToUInt64('8000000000000000', 16)
     $controlTsv = [System.IO.Path]::GetFullPath('test-disks/usn-journal-data.wrong-id-control.tsv')
     $controlProbe = [System.IO.Path]::GetFullPath('test-disks/usn-read-probe.wrong-id-control.tsv')
     Get-Content -LiteralPath $out | ForEach-Object {
