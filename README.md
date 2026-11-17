@@ -23,12 +23,18 @@ the C ABI, command-line tools, and legacy `facade` remain compatible.
   inspection and stream extraction without requiring a functioning namespace.
   It preserves original bytes separately from update-sequence-fixed bytes and
   reports invalid fixups, malformed attributes, and incomplete attribute chains.
-  Deleted records remain inspectable. Resident data and complete, uncompressed,
+  Deleted records remain inspectable. A record also decodes its own number, its
+  resident `$FILE_NAME` attributes (parent reference, namespace, name, times and
+  sizes) and `$STANDARD_INFORMATION` as typed evidence; a name that overruns its
+  attribute is skipped, never guessed at. Resident data and complete, uncompressed,
   unencrypted non-resident mapping pairs can be read, including sparse holes and
   initialized-size zero filling. Torn records and unresolved attribute-list
   extents are not silently presented as recoverable files.
 - **VolumeAPI** (`volume::VolumeAPI`) provides source size, fallible geometry,
   bounded volume-relative reads, and capability-checked writes and flushes.
+  `mft_io::parse_boot_sector` validates geometry from boot-sector bytes held in
+  memory, so a saved copy or the backup boot sector can be used without trusting
+  the device's own first sector.
   `RawVolume::open` requires no valid boot sector or MFT: invalid and unrecognised
   bytes remain readable. `Volume::open_for_salvage` requires valid boot geometry,
   but not an intact MFT or directory tree. `Volume::open` additionally validates
