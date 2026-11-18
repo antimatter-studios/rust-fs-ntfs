@@ -29,6 +29,9 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
+      - name: The Windows 4Kn fixture lifecycle is bounded
+        shell: bash
+        run: bash tests/scripts/windows-4kn-fixture-phases.sh
       - run: python3 scripts/check-interrupted-bootstrap.py
       - run: python3 tests/interrupted_bootstrap_guard.py
       - name: Fetch the original fixture blobs for byte preservation checks
@@ -895,6 +898,38 @@ jobs:
             tmp/rescue-export/*/*.txt
             tmp/rescue-export/*/verdict.json
           if-no-files-found: warn
+      # The same image exported incomplete, two sectors inside /random.bin's
+      # data unreadable, then handed back to Windows: fsutil must call the
+      # volume dirty, and Get-FileHash of every other file must match the
+      # hash Windows recorded before the rescue (#1003). The test itself
+      # holds the export's missing spans to the injected sectors.
+      - name: Windows reads an incomplete rescued export as dirty and every undamaged file intact
+        shell: pwsh
+        run: |
+          cargo test --locked --test rescue_export_windows an_incomplete_windows_export_is_written_for_windows_to_grade
+          if ($LASTEXITCODE -ne 0) { throw 'the incomplete export of ntfs-cli-read.img is not the injected sectors, dirty' }
+          $image = Join-Path $PWD 'tmp/rescue-export-incomplete/ntfs-cli-read.img'
+          # The dirty query attaches the export first; KeepImage holds it for
+          # the hashes, whose cleanup removes it.
+          pwsh -File scripts/fs-windows-test-harness/win-dirty-query.ps1 `
+            -ImagePath $image -Expect Dirty -Diag 'tmp/rescue-export-incomplete/dirty' -KeepImage true
+          if ($LASTEXITCODE -ne 0) { throw 'Windows does not call the incomplete export dirty; see tmp/rescue-export-incomplete/dirty/dirty-query.txt' }
+          pwsh -File scripts/fs-windows-test-harness/win-cli-verify.ps1 `
+            -ImagePath $image `
+            -Manifest (Join-Path $PWD 'tmp/rescue-export-incomplete/ntfs-cli-read.manifest.tsv') `
+            -Diag 'tmp/rescue-export-incomplete/verify'
+          if ($LASTEXITCODE -ne 0) { throw 'an undamaged file on the incomplete export is not the one Windows recorded; see tmp/rescue-export-incomplete/verify/cli-verify.txt' }
+      - name: Retain the incomplete export's Windows verdicts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rescue-export-incomplete-windows-verdicts
+          path: |
+            tmp/rescue-export-incomplete/*.tsv
+            tmp/rescue-export-incomplete/*.missing.txt
+            tmp/rescue-export-incomplete/*/*.txt
+            tmp/rescue-export-incomplete/*/verdict.json
+          if-no-files-found: warn
       - name: Ctrl-C interrupts the inventory CLI process
         shell: pwsh
         run: cargo test --locked --features cli,harness --test cli_inventory_ctrl_c
@@ -1130,6 +1165,195 @@ jobs:
             test-disks/usn-measure-*.img
           if-no-files-found: warn
           retention-days: 7
+
+  # A VHD always presents 512-byte sectors, so the 4Kn fixture is not among
+  # the native read fixtures: Windows formats a VHDX presenting 4096-byte
+  # logical sectors, and its partition is copied out to the raw image (#1150).
+  #
+  # Its own job (#1352). Six times (runs 43366642500, 43977846487,
+  # 43977846593 twice, 44055260559 and 44095836188) the native fixtures job
+  # stopped in this build and Actions closed it exactly 55 minutes after it
+  # started, ten past its 45-minute limit. The step's timeout-minutes, the
+  # process watchdog and every `if: always()` step after it never ran, and
+  # the job log and artifacts were lost with the job: the runner itself
+  # stopped answering. Here a stall costs this job alone, after the native
+  # fixtures came home. Each storage operation is its own step, so the job's
+  # step list, which did survive, names the operation the runner was in.
+  windows-4kn-fixture:
+    name: Windows 4096-byte sector fixture
+    # Skipped only on a push to main, like the native fixtures it builds on.
+    needs: [changes, windows-native-read-fixtures]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-latest
+    # A cold build of one test binary and fourteen phases of a few seconds
+    # each, every phase bounded at two minutes.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - name: Cache the Windows fixture Rust builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-fixtures-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+      # ntfs-cli-read.sha256.tsv names the files the 4Kn volume holds.
+      - name: Download Windows-authored native read fixtures
+        uses: actions/download-artifact@v4
+        with:
+          name: ntfs-windows-native-read-fixtures
+          path: test-disks
+      - name: The fixture producer has an independent process deadline
+        shell: pwsh
+        run: python tests/python/test_fixture_process.py
+      # Built before the disk exists, so no phase waits on the compiler.
+      - name: Build the 4096-byte sector fixture's test
+        shell: pwsh
+        run: cargo test --locked --test fixture_4kn_windows --no-run
+      - name: "4Kn create: make the scratch VHDX"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-fixture-process/create
+          --lifecycle test-disks/ntfs-4kn-read.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-windows-4kn-fixture.ps1 -Phase create
+      - name: "4Kn attach: Mount-DiskImage"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-fixture-process/attach
+          --lifecycle test-disks/ntfs-4kn-read.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-windows-4kn-fixture.ps1 -Phase attach
+      - name: "4Kn initialize: Initialize-Disk"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-fixture-process/initialize
+          --lifecycle test-disks/ntfs-4kn-read.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-windows-4kn-fixture.ps1 -Phase initialize
+      - name: "4Kn partition: New-Partition"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-fixture-process/partition
+          --lifecycle test-disks/ntfs-4kn-read.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-windows-4kn-fixture.ps1 -Phase partition
+      - name: "4Kn format: Format-Volume"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-fixture-process/format
+          --lifecycle test-disks/ntfs-4kn-read.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-windows-4kn-fixture.ps1 -Phase format
+      - name: "4Kn populate: write the file set"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-fixture-process/populate
+          --lifecycle test-disks/ntfs-4kn-read.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-windows-4kn-fixture.ps1 -Phase populate
+      - name: "4Kn fsutil: fsutil fsinfo ntfsinfo"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-fixture-process/fsutil
+          --lifecycle test-disks/ntfs-4kn-read.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-windows-4kn-fixture.ps1 -Phase fsutil
+      - name: "4Kn chkdsk: chkdsk"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-fixture-process/chkdsk
+          --lifecycle test-disks/ntfs-4kn-read.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-windows-4kn-fixture.ps1 -Phase chkdsk
+      - name: "4Kn detach: Dismount-DiskImage"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-fixture-process/detach
+          --lifecycle test-disks/ntfs-4kn-read.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-windows-4kn-fixture.ps1 -Phase detach
+      - name: "4Kn attach-readonly: Mount-DiskImage read-only"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-fixture-process/attach-readonly
+          --lifecycle test-disks/ntfs-4kn-read.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-windows-4kn-fixture.ps1 -Phase attach-readonly
+      - name: "4Kn export: copy the partition out"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-fixture-process/export
+          --lifecycle test-disks/ntfs-4kn-read.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-windows-4kn-fixture.ps1 -Phase export
+      - name: "4Kn detach-readonly: Dismount-DiskImage read-only"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-fixture-process/detach-readonly
+          --lifecycle test-disks/ntfs-4kn-read.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-windows-4kn-fixture.ps1 -Phase detach-readonly
+      - name: "4Kn record: bind the record to the image"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-fixture-process/record
+          --lifecycle test-disks/ntfs-4kn-read.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-windows-4kn-fixture.ps1 -Phase record
+      - name: "4Kn cleanup: detach and remove the scratch disk"
+        if: always()
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-fixture-process/cleanup
+          --lifecycle test-disks/ntfs-4kn-read.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-windows-4kn-fixture.ps1 -Phase cleanup
+      - name: Retain the 4Kn fixture lifecycle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-4kn-fixture-lifecycle
+          path: |
+            test-disks/ntfs-4kn-read.lifecycle.log
+            tmp/4kn-fixture-process/
+            tmp/4kn-fixture/
+          if-no-files-found: error
+      # ntfs-4kn-read.img, Windows' own NTFS format of a disk presenting
+      # 4096-byte logical sectors, against what fsutil reported for the
+      # mounted volume and the file set of ntfs-cli-read.img (#1150).
+      - name: The 4096-byte sector fixture is the volume Windows formatted
+        shell: pwsh
+        run: cargo test --locked --test fixture_4kn_windows
+      - name: Upload the 4096-byte sector fixture
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-4kn-read-fixture
+          path: |
+            test-disks/ntfs-4kn-read.img
+            test-disks/ntfs-4kn-read.ntfsinfo.txt
+            test-disks/ntfs-4kn-read.sha256.tsv
+          if-no-files-found: error
+          retention-days: 1
 
   # Full integration suite — every unit AND integration test, with the
   # read-path .img fixtures generated on the runner via ntfs-3g/mkntfs.
@@ -2447,7 +2671,7 @@ jobs:
     name: ci-ok
     runs-on: ubuntu-latest
     if: always()
-    needs: [readonly-file-name, test, windows-native-read-fixtures, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows, op-sequence-chkdsk]
+    needs: [readonly-file-name, test, windows-native-read-fixtures, windows-4kn-fixture, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows, op-sequence-chkdsk]
     steps:
       - uses: actions/checkout@v4
       - name: Check every gating job

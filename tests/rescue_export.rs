@@ -11,8 +11,8 @@ use fs_ntfs::block_io::{BlockIo, PathIo};
 use fs_ntfs::fsck;
 use fs_ntfs::mkfs::format_filesystem;
 use fs_ntfs::rescue::{
-    export_manifest_path, export_temp_path, export_to_path, export_with, scan, ExportOptions,
-    ReadFailure, RescueSource, ScanOptions,
+    export_manifest_path, export_temp_path, export_to_path, export_with, scan,
+    set_before_export_rename, ExportOptions, ReadFailure, RescueSource, ScanOptions,
 };
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
@@ -178,6 +178,37 @@ fn an_existing_destination_is_refused_and_left_unchanged() {
     assert!(
         !export_temp_path(&image).exists(),
         "a temporary file was created beside it"
+    );
+}
+
+#[test]
+fn a_destination_created_after_the_last_check_is_never_replaced() {
+    let mut source = Memory::new(None);
+    let archive = archive_of(&mut source, "rescue_export_raced");
+    let image = PathBuf::from(common::temp_image_path("rescue_export_raced_image"));
+    let _ = fs::remove_file(&image);
+    let _ = fs::remove_file(export_temp_path(&image));
+    // The file another writer creates there between the export's last
+    // check and its move into place.
+    let raced = image.clone();
+    set_before_export_rename(Some(Box::new(move |destination: &Path| {
+        assert_eq!(destination, raced, "the hook names the destination");
+        fs::write(destination, b"created during the export").expect("create the destination");
+    })));
+
+    let result = export_to_path(&archive, &image);
+    set_before_export_rename(None);
+
+    let err = result.expect_err("a destination created before the move is refused");
+    assert!(err.contains(&image.display().to_string()), "{err}");
+    assert_eq!(
+        fs::read(&image).expect("read the destination"),
+        b"created during the export",
+        "the file created at the destination was replaced"
+    );
+    assert!(
+        !export_temp_path(&image).exists(),
+        "the temporary file was left beside it"
     );
 }
 
@@ -362,5 +393,86 @@ fn an_incomplete_export_missing_the_volume_record_says_the_flag_is_unset() {
             .lines()
             .any(|l| l.starts_with('#') && l.contains("dirty flag is not set")),
         "the manifest does not say the dirty flag could not be set:\n{manifest}"
+    );
+}
+
+/// The owner field of every error manifest line that is not a `#`
+/// comment: what follows its `offset length`, empty for a span with none.
+fn manifest_owners(path: &Path) -> Vec<String> {
+    fs::read_to_string(path)
+        .expect("read the manifest")
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| {
+            line.split_whitespace()
+                .skip(2)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+#[test]
+fn a_missing_span_inside_an_mft_record_names_that_record_and_one_outside_names_none() {
+    // `volume_record_sector` places record 3 from the boot sector's own
+    // fields; a free sector near the end is in no MFT record.
+    let probe = Memory::ntfs("owner_probe", Vec::new());
+    let record = probe.volume_record_sector();
+    let free = NTFS_SIZE / SECTOR - 16;
+    let mut source = Memory::ntfs("owner", vec![record, free]);
+    let archive = archive_of(&mut source, "rescue_export_ntfs_owner");
+    let image = PathBuf::from(common::temp_image_path("rescue_export_ntfs_owner_image"));
+
+    let report = export_with(
+        &archive,
+        &image,
+        ExportOptions {
+            allow_incomplete: true,
+        },
+    )
+    .expect("an incomplete archive exports when asked to");
+
+    assert_eq!(
+        report.missing,
+        vec![(record * SECTOR, SECTOR), (free * SECTOR, SECTOR)]
+    );
+    assert_eq!(
+        report.mft_records,
+        vec![vec![3], Vec::new()],
+        "the MFT records each missing span covers"
+    );
+    assert_eq!(
+        manifest_owners(&export_manifest_path(&image)),
+        vec!["records=3".to_string(), String::new()],
+        "the manifest names record 3 for its span and no owner for the free one"
+    );
+}
+
+#[test]
+fn an_export_missing_the_mft_record_itself_names_no_owner() {
+    // Record 0 maps the MFT; without it no span can be placed in a record,
+    // so none is guessed, not even record 0's own.
+    let probe = Memory::ntfs("owner_mft_probe", Vec::new());
+    let mft = probe.volume_record_sector() - 3 * 1024 / SECTOR;
+    let mut source = Memory::ntfs("owner_mft", vec![mft]);
+    let archive = archive_of(&mut source, "rescue_export_ntfs_owner_mft");
+    let image = PathBuf::from(common::temp_image_path(
+        "rescue_export_ntfs_owner_mft_image",
+    ));
+
+    let report = export_with(
+        &archive,
+        &image,
+        ExportOptions {
+            allow_incomplete: true,
+        },
+    )
+    .expect("an incomplete archive exports when asked to");
+
+    assert_eq!(report.missing, vec![(mft * SECTOR, SECTOR)]);
+    assert_eq!(report.mft_records, vec![Vec::<u64>::new()]);
+    assert_eq!(
+        manifest_owners(&export_manifest_path(&image)),
+        vec![String::new()]
     );
 }
