@@ -3,6 +3,8 @@
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/../../test-disks/capture-slate-windows-manifest.ps1"
 $work = Join-Path ([IO.Path]::GetTempPath()) ("slate-manifest-" + [guid]::NewGuid())
+$outside = Join-Path ([IO.Path]::GetTempPath()) ("slate-manifest-outside-" + [guid]::NewGuid())
+New-Item -ItemType Directory -Path "$outside/tree" -Force | Out-Null
 $checks = 0
 function Assert-Manifest([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -52,8 +54,33 @@ try {
         try { Get-SlateWindowsManifest -Root $work -Case 'contract' -ImageSha256 $digest | Out-Null } catch { $failure = $_.Exception.Message }
         Assert-Manifest ($failure -match 'empty') 'a sharing violation fails by path'
     } finally { $held.Dispose() }
-    if ($checks -lt 11) { throw "only $checks manifest contracts executed, floor 11" }
-    Write-Host "slate-windows-manifest.ps1: all checks passed ($checks; floor 11)"
+    # Symbolic links are recorded with the target Windows reports and never
+    # followed (#1357): a relative and an absolute link inside the root, and
+    # links to a file and a directory outside it, whose bytes and names must
+    # not reach the manifest.
+    [IO.File]::WriteAllBytes("$outside/secret.bin", [byte[]](9, 9, 9, 9, 9))
+    [IO.File]::WriteAllBytes("$outside/tree/inside-outside.bin", [byte[]](1))
+    New-Item -ItemType SymbolicLink -Path "$work/rel-link" -Value 'nested\雪.bin' | Out-Null
+    New-Item -ItemType SymbolicLink -Path "$work/nested/abs-link" -Value "$work\empty" | Out-Null
+    New-Item -ItemType SymbolicLink -Path "$work/out-file" -Value "$outside\secret.bin" | Out-Null
+    New-Item -ItemType SymbolicLink -Path "$work/out-dir" -Value "$outside\tree" | Out-Null
+    $linked = Get-SlateWindowsManifest -Root $work -Case 'contract' -ImageSha256 $digest
+    $links = @{}
+    foreach ($entry in $linked.entries) { $links[$entry.path] = $entry }
+    Assert-Manifest ($links['/rel-link'].kind -ceq 'symlink' -and $links['/rel-link'].target -ceq 'nested\雪.bin' -and
+        $links['/rel-link'].streams.Count -eq 0) 'a relative file symlink is recorded with its target and no followed stream'
+    Assert-Manifest ($links['/nested/abs-link'].kind -ceq 'symlink' -and
+        $links['/nested/abs-link'].target -ceq "$work\empty" -and
+        $links['/nested/abs-link'].streams.Count -eq 0) 'an absolute file symlink is recorded with its target and no followed stream'
+    $leaked = @($linked.entries | Where-Object { $_.path -like '/out-dir/*' })
+    $outsideHash = (Get-FileHash -LiteralPath "$outside/secret.bin" -Algorithm SHA256).Hash.ToLowerInvariant()
+    $json = $linked | ConvertTo-Json -Depth 10 -Compress
+    Assert-Manifest ($links['/out-file'].kind -ceq 'symlink' -and $links['/out-dir'].kind -ceq 'symlink' -and
+        $leaked.Count -eq 0 -and -not $json.Contains($outsideHash) -and
+        -not $json.Contains('inside-outside.bin')) 'targets outside the captured root are never traversed'
+    if ($checks -lt 14) { throw "only $checks manifest contracts executed, floor 14" }
+    Write-Host "slate-windows-manifest.ps1: all checks passed ($checks; floor 14)"
 } finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction Stop
+    Remove-Item -LiteralPath $outside -Recurse -Force -ErrorAction Stop
 }

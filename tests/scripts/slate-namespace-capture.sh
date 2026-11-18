@@ -29,9 +29,11 @@ if len(set(captured)) != len(captured):
 if not floor or int(floor.group(1)) != len(captured):
     problems.append(f"capture floor {floor and floor.group(1)} is not the {len(captured)} captured scenarios")
 compare = re.search(r'"\$SLATE_CHECKER" tmp/slate-oracle/out (\d+)', workflow)
-if not compare or int(compare.group(1)) != 4 + len(captured):
+if "-LabSource tmp/writer-input/slate-writer/lab-source/slate-write-lab-source.img" not in workflow:
+    problems.append("the additional lab source is not independently graded by Windows")
+if not compare or int(compare.group(1)) != 5 + len(captured):
     problems.append(f"compare floor {compare and compare.group(1)} is not four format controls "
-                    f"plus {len(captured)} captured cases")
+                    f"plus {len(captured)} captured cases and the lab source")
 
 def commands(name):
     """The fs.ntfs subcommands the scenario's cli-oracle verbs run."""

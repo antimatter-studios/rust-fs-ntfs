@@ -42,7 +42,7 @@ table = root / "tests/slate-writes.tsv"
 if not table.is_file():
     sys.exit("FAIL tests/slate-writes.tsv, the write table, does not exist")
 lines = table.read_text().splitlines()
-header = "case\tsource\troot_file\toffset\texpected_hex\treplacement_hex"
+header = "case\tsource\troot_file\toffset\texpected_hex\treplacement_hex\tmode"
 if not lines or lines[0] != header:
     problems.append(f"the write table's header is not {header!r}")
 rows = [line.split("\t") for line in lines[1:] if line]
@@ -69,17 +69,19 @@ def byte(name, offset):
 
 seen = set()
 for row in rows:
-    if len(row) != 6:
-        problems.append(f"row {row} does not have six fields")
+    if len(row) != 7:
+        problems.append(f"row {row} does not have seven fields")
         continue
-    case, source, root_file, offset, expected, replacement = row
+    case, source, root_file, offset, expected, replacement, mode = row
     if not re.fullmatch(r"[A-Za-z0-9_-]+", case) or case in seen:
         problems.append(f"case {case!r} is malformed or listed twice")
     seen.add(case)
-    if source != "cli-write-at-win-verify-chkdsk.img":
-        problems.append(f"{case}: source {source} is not the captured write-at image")
-    elif source[:-4] not in captured:
-        problems.append(f"{case}: the writer-cases job does not capture {source[:-4]}")
+    if source != "slate-write-lab-source.img":
+        problems.append(f"{case}: source {source} is not the separately Windows-graded lab source")
+    if "cli-write-at-win-verify-chkdsk" not in captured:
+        problems.append(f"{case}: the original write-at capture was removed")
+    if mode != ("journaled" if root_file == "resident" else "direct"):
+        problems.append(f"{case}: mode {mode} does not match Slate's supported write mode")
     if root_file not in recipe:
         problems.append(f"{case}: {root_file} is not a file the write-at recipe writes")
         continue
@@ -109,9 +111,16 @@ upload = re.search(r"name: slate-oracle-writes-\$\{\{ github\.sha \}\}\n(.*?)if-
 if not upload:
     problems.append("the slate-check job does not upload slate-oracle-writes")
 else:
-    for want in ["tmp/slate-oracle/writes/", "tmp/slate-oracle/images/cli-write-at-win-verify-chkdsk.img"]:
+    for want in ["tmp/slate-oracle/writes/", "tmp/slate-oracle/images/cli-write-at-win-verify-chkdsk.img",
+                 "tmp/slate-oracle/images/slate-write-lab-source.img"]:
         if want not in upload.group(1):
             problems.append(f"the writes artifact does not carry {want}")
+if "bash scripts/slate-lab-source.sh" not in workflow or "-LabSource tmp/writer-input/slate-writer/lab-source/slate-write-lab-source.img" not in workflow:
+    problems.append("the lab source is not prepared and independently graded by Windows before Slate writes")
+if "bash scripts/slate-lab-source.sh verify tmp/slate-oracle/cases.tsv tmp/slate-oracle/images/slate-write-lab-source.img" not in job:
+    problems.append("Slate can receive a lab source without its exact clean Windows grade")
+if not re.search(r'"\$SLATE_CHECKER"\s+tmp/slate-oracle/out\s+17\b', workflow):
+    problems.append("the checker floor does not include all sixteen original cases and the lab source")
 if not pr_trigger_unfiltered(workflow):
     for path in ["tests/slate-writes.tsv", "tests/scripts/slate-write-workflow.sh"]:
         problems.append(f"a change to {path} does not run the workflow: its pull_request trigger is filtered")

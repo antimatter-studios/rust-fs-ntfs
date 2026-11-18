@@ -80,6 +80,11 @@ try {
             catch { $captured.reparseFailure = $_.Exception.Message }
             # Removes the junction, not the directory it points at.
             [IO.Directory]::Delete("${root}link", $false)
+            # A symbolic link's own descriptor, never its target's (#1357): the
+            # target's DACL is protected, the link's is inherited from the root.
+            New-Item -ItemType SymbolicLink -Path "${root}protected-link" -Value 'protected' | Out-Null
+            $captured.linked = Get-SlateWindowsAcl -Root $root -Case 'contract' -ImageSha256 $digest
+            [IO.File]::Delete("${root}protected-link")
             # An OWNER RIGHTS ACE replaces the owner's implicit READ_CONTROL,
             # and everyone is denied it: Windows cannot return the descriptor.
             # It is written last, because nothing can read it back.
@@ -138,9 +143,12 @@ try {
     Assert-Acl $captured.rejectedRoot 'a root that is not a volume root fails'
     Assert-Acl ($captured.unreadableFailure -match '/dir/locked') "an unreadable descriptor fails by path: '$($captured.unreadableFailure)'"
     Assert-Acl ($captured.identityAfter -ceq $captured.identityBefore) 'a rejected capture restores the caller identity and impersonation level'
+    $link = Get-Entry $captured.linked '/protected-link'
+    Assert-Acl ($link.kind -ceq 'symlink' -and -not $link.dacl_protected -and
+        (Get-Entry $captured.linked '/protected').dacl_protected) "a symbolic link records its own descriptor, not its target's"
     Assert-Acl ($captured.reparseFailure -match '/link') "a reparse point fails by path: '$($captured.reparseFailure)'"
-    if ($checks -lt 16) { throw "only $checks ACL contracts executed, floor 16" }
-    Write-Host "slate-windows-acl.ps1: all checks passed ($checks; floor 16)"
+    if ($checks -lt 17) { throw "only $checks ACL contracts executed, floor 17" }
+    Write-Host "slate-windows-acl.ps1: all checks passed ($checks; floor 17)"
 } finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction Stop
 }

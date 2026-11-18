@@ -23,11 +23,19 @@ The root directory itself is implicit; its streams are outside this schema.
 The exact root metadata and mount-created names omitted are recorded in
 `capabilities.excluded_root_names`. The same names below a user directory are
 not excluded. All other entries, including hidden files, are captured.
-Reparse points fail by path instead of being followed or silently omitted.
-An enumeration, stream-open, length or hash error also fails by path.
+A symbolic link is never followed (#1357). Its entry has `kind` `symlink`,
+the `target` Windows reports (.NET `LinkTarget`, the reparse point's print
+name) and no streams, since opening one would open its target. Any other
+reparse point, such as a junction, fails by path. The listing's reparse bit
+comes from the parent's `$I30` entry, and is checked against the file's own
+attributes; an entry that disagrees with its file fails by path. Consumers
+compare a link by its kind and target. An enumeration, stream-open, length
+or hash error also fails by path.
 
-`tests/scripts/slate-windows-manifest.ps1` creates ordinary files and named
-streams through Windows and requires eleven contracts to execute. The advisory
+`tests/scripts/slate-windows-manifest.ps1` creates ordinary files, named
+streams and symbolic links through Windows, including links to a file and a
+directory outside the captured root, and requires fourteen contracts to
+execute. The advisory
 workflow runs it on `windows-latest` before building its image cases. No NTFS
 reader from this crate or Slate supplies expected paths or bytes.
 
@@ -66,12 +74,13 @@ controls are called directly, so no locale-formatted text is parsed.
 The volume counts are Windows' counts after it mounted the read wrapper, so
 they include the clusters of any mount-created root names the entries
 exclude; `capabilities.volume_counts` says so. Reparse points and
-unreadable streams fail by path.
+unreadable streams fail by path; a symbolic link is a `symlink` entry with
+no streams, never followed.
 
 `tests/scripts/slate-windows-allocation.ps1` formats a scratch volume with
 Windows, writes a resident file, a 256 KiB file with a 64 KiB named stream,
-a sparse file with a leading hole and a junction through Windows, and
-requires fourteen contracts to execute. Get-Volume's free bytes, another
+a sparse file with a leading hole, a symbolic link and a junction through
+Windows, and requires fifteen contracts to execute. Get-Volume's free bytes, another
 Windows API, must lie between the free and the unreserved free clusters. No
 NTFS reader from this crate or Slate supplies expected values. Comparing
 Slate's allocation with these records is #877.
@@ -90,14 +99,15 @@ every DACL ACE in order as Windows' own SDDL parser splits it: `type`,
 `flags`, `inherited`, `sid` and `access_mask`. A null `aces` is a null DACL.
 Account names are never recorded, because they depend on the machine that
 reads the SID. The SACL needs `SeSecurityPrivilege` and is outside this
-manifest. A descriptor Windows refuses to return, and a reparse point, fail by
-path.
+manifest. A symbolic link records its own descriptor, read through a handle
+that does not follow it. A descriptor Windows refuses to return, and any
+other reparse point, fail by path.
 
 `tests/scripts/slate-windows-acl.ps1` formats a scratch volume with Windows,
 gives one file an explicit owner, a directory an inheritable explicit ACE, a
 child an inherited DACL, another child an explicit deny ACE beside the
-inherited ones, and a file a protected DACL, and requires sixteen contracts to
-execute: each SDDL is the one `Get-Acl` reads back for its path and
+inherited ones, a file a protected DACL, and a symbolic link to that file,
+and requires seventeen contracts to execute: each SDDL is the one `Get-Acl` reads back for its path and
 round-trips through Windows' descriptor parser, inherited and explicit ACEs
 are distinguished, and a descriptor whose `OWNER RIGHTS` ACE withholds
 `READ_CONTROL` fails by path. No NTFS reader from this crate or Slate supplies

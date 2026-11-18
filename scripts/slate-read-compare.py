@@ -55,7 +55,9 @@ def load_manifest(directory, case, digest, side, problems):
         streams = {
             s["name"]: (s["size"], s["sha256"]) for s in entry.get("streams", [])
         }
-        entries[entry["path"]] = (entry["kind"], streams)
+        # A symbolic link is never followed, so it is compared by the target
+        # each side reports (#1357); other kinds have none.
+        entries[entry["path"]] = (entry["kind"], streams, entry.get("target"))
     return entries
 
 
@@ -92,9 +94,11 @@ def compare(windows, slate):
         if path not in windows:
             found.append((path, "", "extra-path", "", slate[path][0]))
             continue
-        (wkind, wstreams), (skind, sstreams) = windows[path], slate[path]
+        (wkind, wstreams, wtarget), (skind, sstreams, starget) = windows[path], slate[path]
         if wkind != skind:
             found.append((path, "", "kind", wkind, skind))
+        elif wtarget != starget:
+            found.append((path, "", "target", wtarget or "", starget or ""))
         for name in sorted(set(wstreams) | set(sstreams)):
             if name not in sstreams:
                 found.append((path, name, "missing-stream", str(wstreams[name][0]), ""))
