@@ -1076,7 +1076,11 @@ fn read_compressed_nonresident<T: BlockIo + ?Sized>(
 /// The bytes `[offset, offset+len)` of a compressed non-resident attribute,
 /// clipped to its data size. Only the units the window overlaps are read
 /// and decompressed, one at a time, so a ranged read holds at most one
-/// unit's stored and decompressed bytes beside the returned window.
+/// unit's stored and decompressed bytes beside the returned window. Bytes
+/// past `initialized_size` read as zeros, as they do uncompressed: Windows
+/// reads zeros there even where a unit holds compressed data
+/// (`test-disks/windows-interrupted-freed`, whose files were captured
+/// mid-write with an initialized size of 0; #1238).
 fn read_compressed_window<T: BlockIo + ?Sized>(
     io: &mut T,
     params: &crate::mft_io::BootParams,
@@ -1108,6 +1112,12 @@ fn read_compressed_window<T: BlockIo + ?Sized>(
         )));
     }
     let unit_clusters = 1usize << cu_exp;
+    let init_size = u64::from_le_bytes(
+        record[loc.attr_offset + attr_off::NONRES_INITIALIZED_LENGTH
+            ..loc.attr_offset + attr_off::NONRES_INITIALIZED_LENGTH + 8]
+            .try_into()
+            .map_err(|_| "short record reading initialized_size")?,
+    );
     let mpo = loc
         .non_resident_mapping_pairs_offset
         .ok_or(Error::io("compressed attr has no mapping-pairs offset"))? as usize;
@@ -1119,9 +1129,11 @@ fn read_compressed_window<T: BlockIo + ?Sized>(
     let start = offset.min(data_size as u64) as usize;
     let end = start.saturating_add(len).min(data_size);
     let mut out = vec![0u8; end - start];
+    // Bytes past this read as zero.
+    let readable = end.min(init_size.min(data_size as u64) as usize);
 
     let mut unit_first_vcn = (start / unit_size) * unit_clusters;
-    while unit_first_vcn * cluster_size < end {
+    while unit_first_vcn * cluster_size < readable {
         let unit_off = unit_first_vcn * cluster_size;
         let unit_out_len = unit_size.min(data_size - unit_off);
 
@@ -1168,7 +1180,7 @@ fn read_compressed_window<T: BlockIo + ?Sized>(
             };
             // The part of this unit inside the window, in unit coordinates.
             let from = start.saturating_sub(unit_off);
-            let to = (end - unit_off).min(unit_out_len).min(plain.len());
+            let to = (readable - unit_off).min(unit_out_len).min(plain.len());
             if from < to {
                 let at = unit_off + from - start;
                 out[at..at + (to - from)].copy_from_slice(&plain[from..to]);
