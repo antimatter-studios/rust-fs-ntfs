@@ -19,8 +19,8 @@ jobs:
         with:
           toolchain: "1.95.0"
       - run: sudo apt-get update && sudo apt-get install -y ntfs-3g
-      - run: nice -n 10 cargo rustc --release --locked --lib --crate-type cdylib
-      - run: cc -std=c11 -Wall -Werror -Iinclude tests/python/abi_dir_listing.c -Ltarget/release -lfs_ntfs -Wl,-rpath,"$PWD/target/release" -o target/abi_dir_listing
+      - run: nice -n 10 cargo rustc --profile test-opt --locked --lib --crate-type cdylib
+      - run: cc -std=c11 -Wall -Werror -Iinclude tests/python/abi_dir_listing.c -Ltarget/test-opt -lfs_ntfs -Wl,-rpath,"$PWD/target/test-opt" -o target/abi_dir_listing
       - run: gunzip -c test-disks/windows-interrupted-1.recovered.img.gz > target/python-abi.img
       - name: Record the exact checkout and reference version
         # ntfsls --version prints its banner and exits 1 by design, so the
@@ -30,7 +30,7 @@ jobs:
           dpkg-query -W -f='${Package} ${Version}\n' ntfs-3g
       - name: Compare raw metadata, host visibility, Python and C
         env:
-          FS_NTFS_SHARED_LIB: ${{ github.workspace }}/target/release/libfs_ntfs.so
+          FS_NTFS_SHARED_LIB: ${{ github.workspace }}/target/test-opt/libfs_ntfs.so
           FS_NTFS_DIR_PROBE: ${{ github.workspace }}/target/abi_dir_listing
           FS_NTFS_FIXTURE: ${{ github.workspace }}/target/python-abi.img
         run: python3 -m unittest -v tests/python/test_dir_listing.py

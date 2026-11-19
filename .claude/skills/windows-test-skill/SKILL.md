@@ -33,7 +33,7 @@ Failing earlier is always cheaper. Always run cheaper gates first.
 
 | Gate | Cost | What it catches | When to run |
 |---|---|---|---|
-| **1. `cargo test --release`** | seconds | obvious logic + per-module bugs | every code change |
+| **1. `cargo test --profile test-opt`** | seconds | obvious logic + per-module bugs | every code change |
 | **2. Smoke matrix** (`bash scripts/matrix-baseline.sh --smoke`) | ~15 min | branch-local NTFS regressions | after a logical feature lands |
 | **3. Sequential rebase onto staging** | seconds–minutes | textual conflicts between branches | when integrating multiple features |
 | **4. Full matrix** (`bash scripts/matrix-baseline.sh`) | ~3–4 hr | semantic regressions, feature interactions | once per PR, at branch tip |
@@ -54,7 +54,7 @@ Every matrix run writes `test-diagnostics/matrix-results.json`. The
 file contains, alongside per-scenario verdicts:
 
 - `tested_at_sha` — git HEAD when the run started.
-- `binary_sha256` — sha256 of `target/release/rust-ntfs` at run time.
+- `binary_sha256` — sha256 of `target/test-opt/rust-ntfs` at run time.
   **This is the load-bearing seal**: content-addressable, survives
   rebase / squash-merge / cherry-pick.
 - `harness_submodule_sha` + `test_matrix_json_sha256` — pin the runner
@@ -63,7 +63,7 @@ file contains, alongside per-scenario verdicts:
   future readers diagnose multi-version validator drift.
 
 A commit is **sealed** when its tree contains a `matrix-results.json`
-whose `binary_sha256` matches a fresh `cargo build --release` of that
+whose `binary_sha256` matches a fresh `cargo build --profile test-opt` of that
 tree.
 
 Check the seal at any time:
@@ -88,7 +88,7 @@ git worktree add ../<repo>-<feature> -b feature/<feature> main
 # Develop freely; rely on cargo test for inner-loop confidence
 cd ../<repo>-<feature>
 # ... edit, commit ...
-cargo test --release
+cargo test --profile test-opt
 
 # Optional sanity gate before integration
 bash scripts/matrix-baseline.sh --smoke

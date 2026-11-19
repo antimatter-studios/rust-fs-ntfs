@@ -10,6 +10,8 @@
 #
 # Writes diag/*.txt (uploaded as the ntfs-windows-diag artifact) and
 # leaves nfs.img + nfs.vhd in the working directory for the mount step.
+# release.yml keeps the release default; CI explicitly selects test-opt.
+param([string]$Binary = "./target/release/rust-ntfs.exe")
 $ErrorActionPreference = "Stop"
 
 # Generate the raw NTFS volume bytes via our binary.
@@ -20,7 +22,7 @@ $ErrorActionPreference = "Stop"
 # /scan headroom and still runs in seconds.
 $rawSize = 256MB
 fsutil file createnew nfs.img $rawSize
-./target/release/rust-ntfs.exe format -L CITEST --serial deadbeefcafe1234 nfs.img
+& $Binary format -L CITEST --serial deadbeefcafe1234 nfs.img
 
 # Dump the first 64 bytes of nfs.img BEFORE we wrap/write to the
 # VHD. This is the ground-truth view of what rust-ntfs format produced.

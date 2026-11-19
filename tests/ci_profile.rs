@@ -55,6 +55,59 @@
 use saphyr::{LoadableYamlNode, Yaml};
 use std::path::{Path, PathBuf};
 
+/// The release profile belongs to shipped artifacts. CI test invocations keep
+/// their own profile even when the command is wrapped in tier.sh or nice.
+#[test]
+fn ci_tests_do_not_select_the_shipping_profile() {
+    let workflow = read_or_panic(&ci_yml());
+    let mut checked = 0;
+    for step in collect_steps(&workflow, false) {
+        for line in logical_lines(&step.run) {
+            let command = line.split(" #").next().unwrap_or(&line).trim();
+            if command.starts_with('#') {
+                continue;
+            }
+            let tokens: Vec<&str> = command.split_whitespace().map(unquoted).collect();
+            let Some(cargo) = tokens.iter().position(|token| *token == "cargo") else {
+                continue;
+            };
+            let mut arguments = &tokens[cargo + 1..];
+            if arguments
+                .first()
+                .is_some_and(|token| token.starts_with('+'))
+            {
+                arguments = &arguments[1..];
+            }
+            if arguments.first() != Some(&"test") {
+                continue;
+            }
+            checked += 1;
+            let mut standard_arguments = Vec::new();
+            let mut input = arguments.iter().copied();
+            while let Some(token) = input.next() {
+                if token == "--" {
+                    break;
+                }
+                if token == "--profile" {
+                    assert_eq!(input.next(), Some("test-opt"), "{command}");
+                } else if let Some(profile) = token.strip_prefix("--profile=") {
+                    assert_eq!(profile, "test-opt", "{command}");
+                } else {
+                    standard_arguments.push(token);
+                }
+            }
+            assert!(
+                !selects_a_release_profile(&standard_arguments),
+                "CI tests must use test-opt or the default debug profile: {command}"
+            );
+        }
+    }
+    assert!(
+        checked >= 10,
+        "expected CI's test commands, found {checked}"
+    );
+}
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }

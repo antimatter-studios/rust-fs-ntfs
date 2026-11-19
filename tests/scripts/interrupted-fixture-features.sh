@@ -16,6 +16,16 @@ chores = (root / "chores.yml").read_text()
 test_name = "a_dry_run_plans_the_writes_that_reach_what_windows_recovered_and_makes_none"
 checks = [
     (
+        manifest["profile"].get("test-opt") == {"inherits": "dev", "lto": False}
+        and manifest["profile"]["dev"].get("opt-level") == 1,
+        "test-opt inherits dev's opt-level 1 and default codegen units without LTO",
+    ),
+    (
+        manifest["profile"]["release"]
+        == {"lto": True, "codegen-units": 1, "opt-level": 3, "panic": "unwind"},
+        "the shipping release profile retains its optimization settings",
+    ),
+    (
         any(binary["name"] == "rust-fs-ntfs" and "cli" in binary.get("required-features", [])
             for binary in manifest["bin"]),
         "the CLI binary declares its cli prerequisite",
@@ -34,7 +44,7 @@ checks = [
 ]
 for document, label in [(workflow, "CI"), (chores, "chore test:suite")]:
     checks.append((
-        "cargo test --release --locked --features cli,harness --no-fail-fast" in document,
+        "cargo test --profile test-opt --locked --features cli,harness --no-fail-fast" in document,
         f"{label} runs every interrupted-fixture test with cli",
     ))
 failures = [description for passed, description in checks if not passed]

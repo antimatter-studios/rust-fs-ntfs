@@ -4,7 +4,7 @@
 #
 # Two-step check:
 #   1. tested_at_sha == HEAD (cheap — git rev-parse)
-#   2. binary_sha256 == sha256(target/release/rust-ntfs)  (rebuild if necessary)
+#   2. binary_sha256 == sha256(target/test-opt/rust-ntfs)  (rebuild if necessary)
 #
 # The binary check is the *primary* seal evidence. The SHA check is a
 # convenience for tooling that doesn't want to build. Either passing is
@@ -55,7 +55,7 @@ if git diff-index --quiet HEAD -- && [ "$head_sha" = "$tested_at_sha" ]; then
 fi
 
 # SHA check failed (probably rebased). Try binary hash.
-binary_path="target/release/rust-ntfs"
+binary_path="target/test-opt/rust-ntfs"
 if [ ! -f "$binary_path" ] || [ "$build" -eq 1 ]; then
     [ "$quiet" -eq 0 ] && echo "rebuilding binary for hash check (path-stable)..."
     # Same RUSTFLAGS as matrix-baseline.sh so a worktree's rebuild
@@ -65,7 +65,7 @@ if [ ! -f "$binary_path" ] || [ "$build" -eq 1 ]; then
     export RUSTFLAGS="${RUSTFLAGS:-} \
         --remap-path-prefix=$PWD=. \
         --remap-path-prefix=$HOME/.cargo/registry=/registry"
-    cargo build --release --features harness --quiet
+    cargo build --profile test-opt --features harness --quiet
 fi
 local_bin_sha=$(sha256sum "$binary_path" | awk '{print $1}')
 tested_bin_sha=$(python3 -c "import json,sys; print(json.load(open('$baseline'))['binary_sha256'])")
