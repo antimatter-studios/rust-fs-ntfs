@@ -1247,7 +1247,7 @@ jobs:
       # Built before the disk exists, so no phase waits on the compiler.
       - name: Build the 4096-byte sector fixture's test
         shell: pwsh
-        run: cargo test --locked --test fixture_4kn_windows --no-run
+        run: cargo test --locked --test fixture_4kn_windows --test small_records_4kn_windows --no-run
       - name: "4Kn create: make the scratch VHDX"
         timeout-minutes: 2
         shell: pwsh
@@ -1377,6 +1377,11 @@ jobs:
       - name: The 4096-byte sector fixture is the volume Windows formatted
         shell: pwsh
         run: cargo test --locked --test fixture_4kn_windows
+      # Windows gave that disk 1024-byte file records with one update
+      # sequence word per 512 bytes: read whole, a writable mount refused (#1384).
+      - name: The 4096-byte sector fixture's 1024-byte records read back
+        shell: pwsh
+        run: cargo test --locked --test small_records_4kn_windows
       - name: Upload the 4096-byte sector fixture
         uses: actions/upload-artifact@v4
         with:

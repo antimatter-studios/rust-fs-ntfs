@@ -1274,19 +1274,57 @@ mod tests {
         assert_eq!(bp.file_record_size, 4096);
     }
 
-    /// A record smaller than a sector switches the torn-write detector
-    /// off, so the parse refuses the volume rather than reading it with
-    /// a check that cannot fail (#154).
+    /// Windows formats a disk presenting 4096-byte sectors with 1024-byte
+    /// records, and keeps one update sequence word per 512 bytes of each
+    /// record (`tests/small_records_4kn_windows.rs`, #1384): the record holds
+    /// two strides, and the torn-write check still has two tails to compare.
     #[test]
-    fn a_record_smaller_than_a_sector_is_refused() {
-        // 4096-byte sectors, 1024-byte records: no fixup stride fits.
+    fn a_record_smaller_than_a_sector_is_read_with_512_byte_strides() {
         let boot = synth_boot(4096, 1, 4, -10);
-        let err = parse_boot_params_from_bytes(&boot)
-            .expect_err("a record smaller than a sector has no usable fixup array");
-        assert!(
-            err.contains("no fixup stride fits"),
-            "the error says what is wrong with the geometry, got: {err}"
-        );
+        let bp = parse_boot_params_from_bytes(&boot).expect("Windows formats this geometry");
+        assert_eq!((bp.bytes_per_sector, bp.file_record_size), (4096, 1024));
+    }
+
+    /// A FILE record of `len` bytes whose array starts at 0x30 with one word
+    /// per `stride` bytes, protected as a writer with that stride leaves it.
+    fn protected_record(len: usize, stride: usize) -> Vec<u8> {
+        let mut record: Vec<u8> = (0..len).map(|i| (i * 7) as u8).collect();
+        record[..4].copy_from_slice(FILE_MAGIC);
+        record[OFF_USA_OFFSET..OFF_USA_OFFSET + 2].copy_from_slice(&0x30u16.to_le_bytes());
+        record[OFF_USA_COUNT..OFF_USA_COUNT + 2]
+            .copy_from_slice(&((len / stride + 1) as u16).to_le_bytes());
+        apply_fixup_on_write(&mut record, stride as u16).unwrap();
+        record
+    }
+
+    #[test]
+    fn a_512_byte_stride_inside_a_larger_sector_is_read_and_checked() {
+        for (len, sector) in [(1024, 4096u16), (4096, 4096)] {
+            let record = protected_record(len, 512);
+            let mut fixed = record.clone();
+            apply_fixup_on_read(&mut fixed, sector)
+                .unwrap_or_else(|e| panic!("{len}-byte record, {sector}-byte sector: {e}"));
+            for tail in (510..len).step_by(512) {
+                let mut torn = record.clone();
+                torn[tail] ^= 0xff;
+                assert!(
+                    apply_fixup_on_read(&mut torn, sector).is_err(),
+                    "a torn stride ending at {tail} of a {len}-byte record was accepted"
+                );
+            }
+        }
+        // A stride of the sector itself still reads, as this crate writes 4Kn.
+        let mut fixed = protected_record(4096, 4096);
+        apply_fixup_on_read(&mut fixed, 4096).unwrap();
+    }
+
+    /// The writers build arrays from the sector size, so a record smaller
+    /// than its sector is refused rather than written with no stride.
+    #[test]
+    fn a_record_smaller_than_a_sector_is_not_written() {
+        let mut record = protected_record(1024, 512);
+        let error = apply_fixup_on_write(&mut record, 4096).unwrap_err();
+        assert!(error.contains("smaller than"), "{error}");
     }
 
     /// The boundary is real and legitimate: 4Kn volumes put a 4096-byte
@@ -1304,12 +1342,9 @@ mod tests {
         // 4 KiB native-sector ("4Kn") drive: bytes_per_sector=4096, spc=1
         // → cluster_size=4096.  BPB is otherwise identical to 512e volumes.
         //
-        // RECORDS ARE 4096 HERE (cpmr -12), not 1024. A 1024-byte record
-        // on a 4096-byte sector is not a volume Windows can write: the
-        // fixup stride is one sector, so no stride fits in the record and
-        // the torn-write check has nothing to check (#154). The parse
-        // refuses that now, and this test says 4Kn rather than
-        // 4Kn-with-an-impossible-record-size.
+        // Records are 4096 here (cpmr -12); 1024-byte records on 4096-byte
+        // sectors, Windows' own default, are covered by
+        // a_record_smaller_than_a_sector_is_read_with_512_byte_strides.
         let boot = synth_boot(4096, 1, 4, -12);
         let bp = parse_boot_params_from_bytes(&boot).unwrap();
         assert_eq!(bp.bytes_per_sector, 4096);
