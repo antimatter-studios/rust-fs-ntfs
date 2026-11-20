@@ -16,6 +16,7 @@ use crate::attr_io::{attr_flags, AttrType};
 use crate::compression;
 use crate::data_runs::DataRun;
 use crate::error::Error;
+use crate::mft_io::BootParams;
 use std::collections::BTreeMap;
 
 /// NTFS compresses in units of 16 clusters, `compression_unit = 4`, and
@@ -31,6 +32,8 @@ const MAX_EXTENSION_RECORDS: usize = 4096;
 /// this; a larger declared size is damage.
 const MAX_ATTRIBUTE_LIST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CLUSTER_SIZE: u64 = 2 * 1024 * 1024;
+/// The mirror readers are declared but not wired in yet.
+const MIRROR_READY: bool = false;
 
 #[derive(Clone, Debug)]
 enum Layout {
@@ -615,9 +618,87 @@ pub(super) fn read_mft_map<V: PrimitiveAPI + ?Sized>(
     let mut raw = vec![0; record_size];
     volume.read_volume_bytes(mft_offset, &mut raw)?;
     let record = inspect_file_record(mft_offset, raw, sector_size);
+    let map = map_from_record_zero(volume, &record, record_size, sector_size, cluster_size)?;
+    if map.record_offset(0) != Some(mft_offset) {
+        return Err(Error::invalid(
+            "$MFT's run list does not start where its record was read",
+        ));
+    }
+    Ok(map)
+}
+
+pub(super) fn read_mft_map_from_mirror<V: PrimitiveAPI + ?Sized>(
+    volume: &V,
+    boot: &BootParams,
+) -> Result<MftMap, Error> {
+    if !MIRROR_READY {
+        let _ = (volume, boot);
+        return Err(Error::refused("$MFTMirr reads are not wired in yet"));
+    }
+    let record = read_mirror_record(volume, boot, 0)?;
+    let mut map = map_from_record_zero(
+        volume,
+        &record,
+        boot.file_record_size as usize,
+        boot.bytes_per_sector,
+        boot.cluster_size,
+    )?;
+    map.limitations.insert(
+        0,
+        "built from $MFTMirr's copy of $MFT's record 0, which is only as current as the \
+         mirror"
+            .into(),
+    );
+    let expected = boot.mft_lcn.checked_mul(boot.cluster_size);
+    if map.record_offset(0) != expected {
+        map.limitations.push(format!(
+            "$MFTMirr's record 0 puts $MFT at byte {:?}, and the boot sector at cluster {}",
+            map.record_offset(0),
+            boot.mft_lcn
+        ));
+    }
+    Ok(map)
+}
+
+pub(super) fn read_mirror_record<V: PrimitiveAPI + ?Sized>(
+    volume: &V,
+    boot: &BootParams,
+    number: u64,
+) -> Result<RecordEvidence, Error> {
+    if !MIRROR_READY {
+        let _ = (volume, boot);
+        return Err(Error::refused("$MFTMirr reads are not wired in yet"));
+    }
+    if number >= boot.mft_mirror_records() {
+        return Err(Error::invalid(format!(
+            "$MFTMirr holds $MFT's first {} records, not record {number}",
+            boot.mft_mirror_records()
+        )));
+    }
+    let offset = boot
+        .mft_mirror_offset()
+        .and_then(|start| start.checked_add(number.checked_mul(boot.file_record_size)?))
+        .ok_or_else(|| Error::invalid("the boot sector's $MFTMirr cluster overflows"))?;
+    volume.read_file_record_at(
+        offset,
+        boot.file_record_size as usize,
+        boot.bytes_per_sector,
+    )
+}
+
+/// A map from `$MFT`'s own record 0, wherever that copy was read, following
+/// its attribute list when it has one.
+fn map_from_record_zero<V: PrimitiveAPI + ?Sized>(
+    volume: &V,
+    record: &RecordEvidence,
+    record_size: usize,
+    sector_size: u16,
+    cluster_size: u64,
+) -> Result<MftMap, Error> {
     if record.fixed.is_none() || record.base_reference != 0 {
         return Err(Error::invalid(format!(
-            "$MFT's record at {mft_offset} does not validate: {}",
+            "$MFT's record at {} does not validate: {}",
+            record.offset,
             record.issues.join("; ")
         )));
     }
@@ -646,13 +727,11 @@ pub(super) fn read_mft_map<V: PrimitiveAPI + ?Sized>(
         sector_size,
         cluster_size,
     )?;
-    if map.record_offset(0) != Some(mft_offset) {
-        return Err(Error::invalid(
-            "$MFT's run list does not start where its record was read",
-        ));
-    }
     if record.has_attribute_list() {
-        let resolved = resolve_salvage_record(volume, &record, &map)?;
+        // Record 0 is $MFT itself, wherever this copy of it came from.
+        let mut base = record.clone();
+        base.record_number.get_or_insert(0);
+        let resolved = resolve_salvage_record(volume, &base, &map)?;
         match resolved.stream("") {
             Some(stream) if stream.is_complete() => {
                 let mut full = MftMap::from_runs(

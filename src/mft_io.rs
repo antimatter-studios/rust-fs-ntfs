@@ -92,6 +92,10 @@ pub struct BootParams {
     pub sectors_per_cluster: u64,
     pub cluster_size: u64,
     pub mft_lcn: u64,
+    /// `$MFTMirr`'s first cluster (+0x38): where the copy of `$MFT`'s first
+    /// records is, as the boot sector says. Not checked against `$MFT`'s
+    /// own record 1, which may be what is damaged.
+    pub mft_mirror_lcn: u64,
     pub file_record_size: u64,
     /// QWORD total sectors (+0x28). `total_sectors * bytes_per_sector` is the
     /// NTFS volume size (one sector short of the device — the last sector
@@ -122,6 +126,18 @@ impl BootParams {
     /// resolve_path loads $UpCase before any lookup -- and
     /// handle_alloc_error answers that by aborting, past the FFI
     /// boundary's guard.
+    /// The volume offset of `$MFTMirr`'s first record, or `None` when the
+    /// boot sector's cluster number overflows.
+    pub fn mft_mirror_offset(&self) -> Option<u64> {
+        self.mft_mirror_lcn.checked_mul(self.cluster_size)
+    }
+
+    /// How many of `$MFT`'s first records `$MFTMirr` holds on this geometry:
+    /// [`mirror_records_bound`].
+    pub fn mft_mirror_records(&self) -> u64 {
+        mirror_records_bound(self)
+    }
+
     pub fn volume_bytes(&self) -> u64 {
         self.total_sectors
             .saturating_mul(u64::from(self.bytes_per_sector))
@@ -246,6 +262,8 @@ pub(crate) fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParam
             .try_into()
             .unwrap(),
     );
+    // Not read yet.
+    let mft_mirror_lcn = 0;
 
     // clusters_per_mft_record: positive ⇒ that many clusters; negative ⇒
     // 2^|val| bytes (common: -10 ⇒ 1024 byte records).
@@ -332,6 +350,7 @@ pub(crate) fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParam
         sectors_per_cluster,
         cluster_size,
         mft_lcn,
+        mft_mirror_lcn,
         file_record_size,
         index_block_size,
         total_sectors,
@@ -1422,6 +1441,7 @@ mod tests {
             sectors_per_cluster: 8,
             cluster_size: 4096,
             mft_lcn: 4,
+            mft_mirror_lcn: 2,
             file_record_size: 1024,
             // A real boot sector always says how big the volume is,
             // and cluster_span judges every transfer against it. 512 MiB
