@@ -23,7 +23,7 @@ mod image_bytes;
 pub use image_bytes::{ImageBytes, TestDigest};
 mod small_file;
 #[allow(unused_imports)]
-pub use small_file::{read_small_file, IMAGE_CHUNK_SIZE};
+pub use small_file::{read_repair_file, read_small_file, IMAGE_CHUNK_SIZE, MAX_REPAIR_FILE_BYTES};
 
 use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::structured_values::NtfsFileNamespace;

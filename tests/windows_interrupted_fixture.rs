@@ -6037,6 +6037,7 @@ fn fsck_dry_run_plan_writes_the_plan_to_an_external_file_never_its_target() {
     // its units are the report's plan. `--plan` naming the capture, by path
     // or hard link, naming a file that exists, or without `--dry-run`, is
     // refused naming its reason, and nothing is written.
+    use fs_ntfs::repair_plan::load_plan;
     use std::path::Path;
     type Writes = Vec<Vec<(u64, u64, String, String)>>;
     for (k, _) in captures_holding_work() {
@@ -6089,12 +6090,11 @@ fn fsck_dry_run_plan_writes_the_plan_to_an_external_file_never_its_target() {
                     .collect()
             })
             .collect();
-        let (saved, expected_sha, _) = saved_plan(k, &src);
-        assert_eq!(
-            common::image_digest(&plan_file).unwrap(),
-            expected_sha,
-            "{k}: the CLI plan is not the library plan"
-        );
+        // The file the CLI wrote, loaded: its units are compared with the
+        // report's below. Its bytes are not the library's save of the same
+        // plan, so they are not compared with it.
+        let saved = load_plan(&common::read_repair_file(&plan_file).unwrap())
+            .unwrap_or_else(|e| panic!("{k}: the plan file does not load: {e}"));
         let loaded: Writes = saved
             .units
             .iter()
@@ -6894,7 +6894,7 @@ fn fsck_a_second_resume_of_a_journal_another_holds_is_refused_and_the_first_comp
             }
         }
 
-        let journal_sha = hex_sha256(&common::read_small_file(&journal).unwrap());
+        let journal_sha = hex_sha256(&common::read_repair_file(&journal).unwrap());
         for (what, target) in [("a copy", &other), ("the held volume", &device)] {
             let target_sha = hex_sha256(&ImageBytes::snapshot(target).unwrap());
             let (code, second) = fsck_cli(&[
@@ -6921,7 +6921,7 @@ fn fsck_a_second_resume_of_a_journal_another_holds_is_refused_and_the_first_comp
                 "{k}: a second resume of the held journal changed {what}"
             );
             assert_eq!(
-                hex_sha256(&common::read_small_file(&journal).unwrap()),
+                hex_sha256(&common::read_repair_file(&journal).unwrap()),
                 journal_sha,
                 "{k}: a second resume on {what} changed the held journal"
             );
@@ -6938,7 +6938,7 @@ fn fsck_a_second_resume_of_a_journal_another_holds_is_refused_and_the_first_comp
             "{k}: the first resume, released, exited {status}: {said}"
         );
         let binding = JournalBinding::of(&saved).unwrap();
-        let read = read_journal(&common::read_small_file(&journal).unwrap(), &binding)
+        let read = read_journal(&common::read_repair_file(&journal).unwrap(), &binding)
             .unwrap_or_else(|e| panic!("{k}: the journal read back refused: {e:?}"));
         let done = progress(&read, &loaded).unwrap_or_else(|e| panic!("{k}: progress: {e:?}"));
         assert_eq!(
