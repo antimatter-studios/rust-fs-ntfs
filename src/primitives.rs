@@ -5,7 +5,9 @@ use crate::mft_io::{self, BootParams, MFT_FLAG_DIRECTORY, MFT_FLAG_IN_USE};
 use crate::volume::{RawVolume, Volume, VolumeAPI};
 use fs_core::BlockRead;
 
+mod allocation;
 mod extents;
+pub use allocation::{DerivedAllocation, RecordDamage, RunOutsideVolume};
 pub use extents::{
     MftMap, MissingExtent, ResolvedAttribute, ResolvedRecord, SalvageStream, StreamExtent,
 };
@@ -357,6 +359,22 @@ pub trait PrimitiveAPI: VolumeAPI {
     /// `$MFT` is.
     fn read_mft_map_from_mirror(&self, boot: &BootParams) -> Result<MftMap, Error> {
         extents::read_mft_map_from_mirror(self, boot)
+    }
+
+    /// The cluster allocation the readable file records describe, for a
+    /// volume whose `$Bitmap` cannot be read: every cluster of every
+    /// non-resident attribute of every in-use record `map` covers, base and
+    /// extension records alike, metafiles included, within the volume's
+    /// `cluster_count` clusters. Unreadable records, records read only in
+    /// part and runs past the volume are named in the limitations, and the
+    /// result says whether it is complete. Refused for a contiguous-hypothesis
+    /// map, which does not say how many records there are.
+    fn derive_allocation(
+        &self,
+        map: &MftMap,
+        cluster_count: u64,
+    ) -> Result<DerivedAllocation, Error> {
+        allocation::derive_allocation(self, map, cluster_count)
     }
 
     /// Reads file record `number` through `map`, joining the pieces of a

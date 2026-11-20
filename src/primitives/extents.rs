@@ -136,6 +136,14 @@ impl MftMap {
         matches!(self.layout, Layout::Contiguous { .. })
     }
 
+    /// `$MFT`'s run list, as the map holds it; empty for the hypothesis.
+    pub fn runs(&self) -> &[DataRun] {
+        match &self.layout {
+            Layout::Contiguous { .. } => &[],
+            Layout::Runs { runs, .. } => runs,
+        }
+    }
+
     /// How many records the map covers, when it is read from `$MFT`.
     pub fn records(&self) -> Option<u64> {
         match &self.layout {
