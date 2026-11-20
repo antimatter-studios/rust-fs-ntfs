@@ -44,8 +44,6 @@ const VOLUME_RECORD: u64 = 3;
 const LOGFILE_RECORD: u64 = 2;
 const BITMAP_RECORD: u64 = 6;
 const BOOT_BYTES: usize = 512;
-/// The layers are declared but not wired to the readers yet.
-const READY: bool = false;
 const VOLUME_IS_DIRTY: u16 = 0x0001;
 /// The codec of an LZNT1 compression unit.
 pub const CODEC_LZNT1: &str = "lznt1";
@@ -485,10 +483,6 @@ impl<D: BlockRead> OpenVolume for NtfsVolume<D> {
     }
 
     fn open(source: D) -> Result<Self, LayerError> {
-        if !READY {
-            drop(source);
-            return Err(ApiError::Unsupported("the three layers are not wired in yet").into());
-        }
         let boot = boot_at(&source, 0);
         Ok(Self {
             volume: Volume::open(Region::new(source, boot.as_ref()))?,
@@ -500,10 +494,6 @@ impl<D: BlockRead> OpenVolume for NtfsVolume<D> {
     /// The primary boot sector's geometry, or the backup's when the primary
     /// does not validate; nothing else needs to.
     fn open_for_salvage(source: D) -> Result<Self, LayerError> {
-        if !READY {
-            drop(source);
-            return Err(ApiError::Unsupported("the three layers are not wired in yet").into());
-        }
         if let Some(boot) = boot_at(&source, 0) {
             return Ok(Self {
                 volume: Volume::open_for_salvage(Region::new(source, Some(&boot)))?,
@@ -727,10 +717,6 @@ impl NtfsAdapter {
     /// sector when the primary does not validate, or with no geometry at
     /// all, when every verb but `report_damage` refuses with `NoGeometry`.
     pub fn from_source(source: &dyn BlockRead) -> Self {
-        if !READY {
-            let _ = source;
-            return Self { boot: None };
-        }
         let boot = boot_at(source, 0)
             .or_else(|| backup_boot_offset(source, None).and_then(|at| boot_at(source, at)));
         Self { boot }
