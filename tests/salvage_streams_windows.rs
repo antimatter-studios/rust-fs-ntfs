@@ -14,14 +14,12 @@
 //! salvage tool reads a volume whose namespace it cannot trust: from the
 //! boot sector's `$MFT` location to a record by number, never by path.
 
-use fs_core::BlockRead;
 use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::primitives::{MftMap, PrimitiveAPI, ResolvedRecord, SalvageStream};
 use fs_ntfs::volume::RawVolume;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::Arc;
 
 const IMAGE: &str = "test-disks/ntfs-salvage-streams.img";
 const REPORT: &str = "test-disks/ntfs-salvage-streams.tsv";
@@ -29,32 +27,15 @@ const PROVIDER: &str = "test-disks/build-windows-salvage-stream-fixtures.ps1";
 /// What a salvage tool reads at a time.
 const CHUNK: usize = 64 * 1024;
 
-#[derive(Clone)]
-struct Image(Arc<Vec<u8>>);
+mod common;
 
-impl BlockRead for Image {
-    fn read_at(&self, offset: u64, output: &mut [u8]) -> fs_core::Result<()> {
-        let range = usize::try_from(offset)
-            .ok()
-            .and_then(|start| Some(start..start.checked_add(output.len())?))
-            .and_then(|range| self.0.get(range));
-        output.copy_from_slice(range.ok_or(fs_core::Error::OutOfBounds {
-            offset,
-            len: output.len() as u64,
-            size: self.0.len() as u64,
-        })?);
-        Ok(())
-    }
-    fn size_bytes(&self) -> u64 {
-        self.0.len() as u64
-    }
-}
+use common::PatchedImage as Image;
 
 /// A stream Windows reported: its name, length and SHA-256.
 type WindowsStream = (String, u64, String);
 
 struct Fixture {
-    bytes: Vec<u8>,
+    image: Image,
     cluster_size: u64,
     mft_offset: u64,
     record_size: usize,
@@ -72,14 +53,14 @@ fn fixture() -> Fixture {
             "missing {path}; run {PROVIDER} on Windows"
         );
     }
-    let bytes = std::fs::read(IMAGE).unwrap();
-    let boot = fs_ntfs::mft_io::parse_boot_sector(&bytes[..512]).unwrap();
+    let image = Image::open(IMAGE).unwrap();
+    let boot = fs_ntfs::mft_io::parse_boot_sector(&image.read(0, 512)).unwrap();
     let mut fixture = Fixture {
         cluster_size: boot.cluster_size,
         mft_offset: boot.mft_lcn * boot.cluster_size,
         record_size: boot.file_record_size as usize,
         sector_size: boot.bytes_per_sector,
-        bytes,
+        image,
         streams: BTreeMap::new(),
         links: BTreeMap::new(),
         extents: BTreeMap::new(),
@@ -121,11 +102,11 @@ fn fixture() -> Fixture {
 
 impl Fixture {
     fn volume(&self) -> RawVolume<Image> {
-        self.volume_over(self.bytes.clone())
+        self.volume_over(self.image.clone())
     }
 
-    fn volume_over(&self, bytes: Vec<u8>) -> RawVolume<Image> {
-        RawVolume::open(Image(Arc::new(bytes)))
+    fn volume_over(&self, image: Image) -> RawVolume<Image> {
+        RawVolume::open(image)
     }
 
     fn map(&self, volume: &RawVolume<Image>) -> MftMap {
@@ -295,7 +276,7 @@ fn a_fragmented_run_list_matches_the_independent_reader() {
         .unwrap();
     let ours = read_all(&volume, &stream, fixture.cluster_size);
 
-    let mut cursor = std::io::Cursor::new(fixture.bytes.clone());
+    let mut cursor = std::io::BufReader::new(std::fs::File::open(IMAGE).unwrap());
     let independent = ntfs::Ntfs::new(&mut cursor).unwrap();
     let file = independent.file(&mut cursor, number).unwrap();
     let item = file.data(&mut cursor, "").unwrap().unwrap();
@@ -362,8 +343,8 @@ fn later_extent_record(fixture: &Fixture, path: &str) -> (u64, u64) {
     (number, map.record_offset(number).unwrap())
 }
 
-fn assert_refused(fixture: &Fixture, bytes: Vec<u8>, path: &str, why: &str) {
-    let volume = fixture.volume_over(bytes);
+fn assert_refused(fixture: &Fixture, image: Image, path: &str, why: &str) {
+    let volume = fixture.volume_over(image);
     let map = fixture.map(&volume);
     let resolved = fixture.resolve(&volume, &map, path);
     assert!(
@@ -389,25 +370,25 @@ fn a_missing_or_foreign_extension_record_is_reported_and_never_read_short() {
     let fixture = fixture();
     for path in ["/fragmented.bin", "/packed/list.bin"] {
         let (_, offset) = later_extent_record(&fixture, path);
-        let at = offset as usize;
+        let at = offset;
 
-        let mut zeroed = fixture.bytes.clone();
-        zeroed[at..at + fixture.record_size].fill(0);
+        let mut zeroed = fixture.image.clone();
+        zeroed.fill(at, fixture.record_size, 0);
         assert_refused(&fixture, zeroed, path, "does not validate");
 
         // A torn sector: the update sequence number no longer matches.
-        let mut torn = fixture.bytes.clone();
-        torn[at + 510] ^= 0xff;
+        let mut torn = fixture.image.clone();
+        torn.update(at + 510, |byte| byte ^ 0xff);
         assert_refused(&fixture, torn, path, "does not validate");
 
-        let mut free = fixture.bytes.clone();
-        free[at + 22] &= !1;
+        let mut free = fixture.image.clone();
+        free.update(at + 22, |byte| byte & !1);
         assert_refused(&fixture, free, path, "not in use");
 
         // The extension names another base record (the field is outside the
         // update sequence's protected words, so the record still validates).
-        let mut foreign = fixture.bytes.clone();
-        foreign[at + 32] ^= 0x01;
+        let mut foreign = fixture.image.clone();
+        foreign.update(at + 32, |byte| byte ^ 0x01);
         assert_refused(&fixture, foreign, path, "names base record");
     }
 }
@@ -430,10 +411,10 @@ fn a_damaged_compression_unit_is_an_error_not_zeros() {
         .find(|run| unit_vcn >= run.starting_vcn && unit_vcn - run.starting_vcn < run.length)
         .unwrap();
     let lcn = run.lcn.unwrap() + unit_vcn - run.starting_vcn;
-    let at = (lcn * fixture.cluster_size) as usize;
-    let mut bytes = fixture.bytes.clone();
-    bytes[at + 1] &= 0x8f;
-    let damaged = fixture.volume_over(bytes);
+    let at = lcn * fixture.cluster_size;
+    let mut image = fixture.image.clone();
+    image.update(at + 1, |byte| byte & 0x8f);
+    let damaged = fixture.volume_over(image);
     let unit = (1usize << stream.compression_unit) * fixture.cluster_size as usize;
     let mut output = vec![0; unit];
     let error = damaged
