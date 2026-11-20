@@ -59,9 +59,6 @@ impl<D: BlockRead + ?Sized> BlockIo for ReadOnly<'_, D> {
 /// The change journal's state: absent, being deleted, or active with the
 /// bounds its `$Max` and `$J` streams record.
 pub fn usn_journal_state<D: BlockRead + ?Sized>(device: &D) -> Result<JournalState, Error> {
-    if !READY {
-        return Err(not_ready());
-    }
     usn_image::journal_state_io(&mut ReadOnly(device))
 }
 
@@ -73,17 +70,11 @@ pub fn read_usn_records<D: BlockRead + ?Sized>(
     cursor: UsnCursor,
     max_bytes: usize,
 ) -> Result<RecordBatch, JournalReadError> {
-    if !READY {
-        return Err(JournalReadError::Io(not_ready()));
-    }
     usn_image::read_records_io(&mut ReadOnly(device), journal, cursor, max_bytes)
 }
 
 /// Whether `$LogFile` is empty, clean, or holds work a replay would redo.
 pub fn logfile_state<D: BlockRead + ?Sized>(device: &D) -> Result<LogfileState, Error> {
-    if !READY {
-        return Err(not_ready());
-    }
     fsck::logfile_state_io(&mut ReadOnly(device))
 }
 
@@ -96,9 +87,6 @@ pub struct LogfileBytes {
 
 /// Reads `$LogFile` whole, up to [`MAX_LOGFILE_BYTES`].
 pub fn read_logfile<D: BlockRead + ?Sized>(device: &D) -> Result<LogfileBytes, Error> {
-    if !READY {
-        return Err(not_ready());
-    }
     let (offset, size) = fsck::locate_logfile_data_io(&mut ReadOnly(device))?;
     if size > MAX_LOGFILE_BYTES {
         return Err(Error::invalid(format!(
@@ -126,13 +114,6 @@ pub fn walk_logfile<D: BlockRead + ?Sized>(
 }
 
 const PAGE: u64 = 4096;
-
-/// The read-only entry points are declared but not wired to the decoders yet.
-const READY: bool = false;
-
-fn not_ready() -> Error {
-    Error::refused("journal evidence from a read-only device is not wired in yet")
-}
 
 /// A device as a replay left it: its own bytes, with the replay's writes
 /// over them, held in memory.
@@ -254,9 +235,6 @@ impl<D: BlockRead> BlockIo for ReplayedVolume<D> {
 /// work returns the device unchanged with no report. A log the replay
 /// refuses is an error, and nothing is kept.
 pub fn replay_logfile_in_memory<D: BlockRead>(device: D) -> Result<ReplayedVolume<D>, Error> {
-    if !READY {
-        return Err(not_ready());
-    }
     let mut replayed = ReplayedVolume::new(device);
     if !logfile_state(&replayed.device)?.needs_replay() {
         return Ok(replayed);
