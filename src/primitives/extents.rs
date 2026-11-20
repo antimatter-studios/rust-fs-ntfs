@@ -31,8 +31,6 @@ const MAX_EXTENSION_RECORDS: usize = 4096;
 /// this; a larger declared size is damage.
 const MAX_ATTRIBUTE_LIST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CLUSTER_SIZE: u64 = 2 * 1024 * 1024;
-/// The extent and LZNT1 readers are not wired in yet.
-const UNRESOLVED: bool = true;
 
 #[derive(Clone, Debug)]
 enum Layout {
@@ -724,10 +722,6 @@ pub(super) fn resolve_salvage_record<V: PrimitiveAPI + ?Sized>(
     else {
         return Ok(resolved);
     };
-    if UNRESOLVED {
-        let _ = (volume, list);
-        return Ok(resolved);
-    }
     let value = match &list.value {
         AttributeValue::Resident(value) => Ok(value.clone()),
         AttributeValue::NonResident {
@@ -943,11 +937,6 @@ pub(super) fn read_stream_at<V: PrimitiveAPI + ?Sized>(
         .saturating_sub(offset)
         .min(output.len() as u64) as usize;
     let output = &mut output[..count];
-    if UNRESOLVED && stream.is_compressed() {
-        return Err(Error::refused(
-            "compressed or encrypted salvage streams require a format-specific decoder",
-        ));
-    }
     if stream.is_compressed() {
         read_compressed(volume, stream, cluster_size, offset, output)?;
     } else {
