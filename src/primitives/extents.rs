@@ -32,8 +32,6 @@ const MAX_EXTENSION_RECORDS: usize = 4096;
 /// this; a larger declared size is damage.
 const MAX_ATTRIBUTE_LIST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CLUSTER_SIZE: u64 = 2 * 1024 * 1024;
-/// The mirror readers are declared but not wired in yet.
-const MIRROR_READY: bool = false;
 
 #[derive(Clone, Debug)]
 enum Layout {
@@ -631,10 +629,6 @@ pub(super) fn read_mft_map_from_mirror<V: PrimitiveAPI + ?Sized>(
     volume: &V,
     boot: &BootParams,
 ) -> Result<MftMap, Error> {
-    if !MIRROR_READY {
-        let _ = (volume, boot);
-        return Err(Error::refused("$MFTMirr reads are not wired in yet"));
-    }
     let record = read_mirror_record(volume, boot, 0)?;
     let mut map = map_from_record_zero(
         volume,
@@ -665,10 +659,6 @@ pub(super) fn read_mirror_record<V: PrimitiveAPI + ?Sized>(
     boot: &BootParams,
     number: u64,
 ) -> Result<RecordEvidence, Error> {
-    if !MIRROR_READY {
-        let _ = (volume, boot);
-        return Err(Error::refused("$MFTMirr reads are not wired in yet"));
-    }
     if number >= boot.mft_mirror_records() {
         return Err(Error::invalid(format!(
             "$MFTMirr holds $MFT's first {} records, not record {number}",

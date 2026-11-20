@@ -61,6 +61,7 @@ const BOOT_OFF_TOTAL_SECTORS: usize = 0x28; // NTFS extension: QWORD total secto
 /// `2^|v|` bytes.
 const BOOT_OFF_CLUSTERS_PER_INDEX_BLOCK: usize = 0x44;
 const BOOT_OFF_MFT_LCN: usize = 0x30; // NTFS extension: QWORD MFT cluster number
+const BOOT_OFF_MFT_MIRROR_LCN: usize = 0x38; // QWORD $MFTMirr cluster number
 const BOOT_OFF_CLUSTERS_PER_MFT_RECORD: usize = 0x40; // NTFS extension: BYTE/i8 clusters per FILE record
 const BOOT_OFF_SERIAL: usize = 0x48; // NTFS extension: QWORD volume serial number
 
@@ -262,8 +263,11 @@ pub(crate) fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParam
             .try_into()
             .unwrap(),
     );
-    // Not read yet.
-    let mft_mirror_lcn = 0;
+    let mft_mirror_lcn = u64::from_le_bytes(
+        boot[BOOT_OFF_MFT_MIRROR_LCN..BOOT_OFF_MFT_MIRROR_LCN + 8]
+            .try_into()
+            .unwrap(),
+    );
 
     // clusters_per_mft_record: positive ⇒ that many clusters; negative ⇒
     // 2^|val| bytes (common: -10 ⇒ 1024 byte records).
@@ -1290,6 +1294,23 @@ mod tests {
     }
 
     // --- boot params parsing -----------------------------------------------
+
+    #[test]
+    fn the_mirror_cluster_is_read_from_its_own_field() {
+        let mut boot = synth_boot(512, 8, 4, -10);
+        boot[0x38..0x40].copy_from_slice(&0x1234_5678u64.to_le_bytes());
+        let bp = parse_boot_params_from_bytes(&boot).unwrap();
+        assert_eq!((bp.mft_lcn, bp.mft_mirror_lcn), (4, 0x1234_5678));
+        assert_eq!(bp.mft_mirror_offset(), Some(0x1234_5678 * 4096));
+        assert_eq!(bp.mft_mirror_records(), 4);
+        boot[0x38..0x40].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(
+            parse_boot_params_from_bytes(&boot)
+                .unwrap()
+                .mft_mirror_offset(),
+            None
+        );
+    }
 
     #[test]
     fn parse_boot_typical_512_8_4_neg10() {
