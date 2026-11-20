@@ -13,9 +13,6 @@ use super::{AttributeValue, MftMap, PrimitiveAPI};
 use crate::attr_io::AttrType;
 use crate::error::Error;
 
-/// The walk is declared but not wired in yet.
-const READY: bool = false;
-
 /// One record that was read but whose attributes could not all be decoded,
 /// such as a run list that does not decode: the attributes before the
 /// damage are counted, the rest are not.
@@ -101,12 +98,6 @@ pub(super) fn derive_allocation<V: PrimitiveAPI + ?Sized>(
     map: &MftMap,
     cluster_count: u64,
 ) -> Result<DerivedAllocation, Error> {
-    if !READY {
-        let _ = (volume, map, cluster_count);
-        return Err(Error::refused(
-            "rebuilding allocation from the records is not wired in yet",
-        ));
-    }
     let records = map.records().ok_or_else(|| {
         Error::refused(
             "the map is the contiguous hypothesis, which does not say how many records there \

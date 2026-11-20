@@ -1,0 +1,3 @@
+### Added
+
+- **Cluster allocation rebuilt from the file records.** `PrimitiveAPI::derive_allocation(map, cluster_count)` walks every record an `MftMap` covers, skipping those `$MFT`'s own `$BITMAP` marks free, and claims every cluster of every non-resident attribute of every in-use record, base and extension, the metafiles and `$BadClus:$Bad` included, as chkdsk rebuilds `$Bitmap`. `DerivedAllocation` gives the claimed cluster ranges, the records that could not be read (count and ranges), records read only in part, runs past the volume, and whether the result is complete. A map from `read_mft_map_from_mirror` walks a volume whose record 0 is lost (#1388).
