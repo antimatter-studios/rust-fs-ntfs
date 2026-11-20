@@ -22,11 +22,11 @@ command = [
 
 
 def violations(document):
-    steps = document.get("jobs", {}).get("test", {}).get("steps", [])
+    steps = document.get("jobs", {}).get("test-linux-x64", {}).get("steps", [])
     shells = [step for step in steps if step.get("name") == "shell tests"]
     errors = []
     if len(shells) != 1:
-        errors.append("test must have exactly one shell tests step")
+        errors.append("test-linux-x64 must have exactly one shell tests step")
     else:
         try:
             tokens = shlex.split(shells[0].get("run", ""))
@@ -44,7 +44,7 @@ def violations(document):
         )
     ]
     if not uploads:
-        errors.append("test must upload tmp/logs/scripts.log even on failure")
+        errors.append("test-linux-x64 must upload tmp/logs/scripts.log even on failure")
     return errors
 
 
@@ -64,7 +64,7 @@ check(not errors, "; ".join(errors))
 
 control = yaml.safe_load("""
 jobs:
-  test:
+  test-linux-x64:
     steps:
       - name: shell tests
         run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips scripts -- scripts/run-script-tests.sh tests/scripts
@@ -86,11 +86,11 @@ for label, replacement in (
     ("a comment instead of the wrapper", "scripts/run-script-tests.sh tests/scripts # " + shlex.join(command)),
 ):
     mutant = copy.deepcopy(control)
-    mutant["jobs"]["test"]["steps"][0]["run"] = replacement
+    mutant["jobs"]["test-linux-x64"]["steps"][0]["run"] = replacement
     check(bool(violations(mutant)), f"{label} must fail")
 
 mutant = copy.deepcopy(control)
-mutant["jobs"]["test"]["steps"].append(copy.deepcopy(mutant["jobs"]["test"]["steps"][0]))
+mutant["jobs"]["test-linux-x64"]["steps"].append(copy.deepcopy(mutant["jobs"]["test-linux-x64"]["steps"][0]))
 check(bool(violations(mutant)), "duplicate shell tests steps must fail")
 
 for label, field, value in (
@@ -98,7 +98,7 @@ for label, field, value in (
     ("another artifact", "with", {"path": "tmp/logs/unit.log"}),
 ):
     mutant = copy.deepcopy(control)
-    mutant["jobs"]["test"]["steps"][1][field] = value
+    mutant["jobs"]["test-linux-x64"]["steps"][1][field] = value
     check(bool(violations(mutant)), f"{label} must fail")
 
 print(f"script-tier-budget: {passed} passed, {failed} failed")

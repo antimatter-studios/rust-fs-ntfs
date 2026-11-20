@@ -52,20 +52,22 @@ def validate(configuration):
                 None, "always()", "${{ !cancelled() }}",
                 "needs.changes.outputs.code == 'true'",
                 "needs.changes.outputs.mkfs == 'true'",
+                "needs.changes.outputs.code != 'false'",
             ), f"{name}/{job_name}: validation job has an unexpected gate")
             for step in job.get("steps", []):
                 condition = step.get("if", "")
                 require("github.event_name" not in condition and "github.ref" not in condition,
                         f"{name}/{job_name}: validation step has an event/ref gate")
     jobs = configuration["ci.yml"]["jobs"]
-    for job_name in ("test", "darwin-cross", "windows-native-read-fixtures", "integration", "cli", "kernel", "asan",
+    for job_name in ("test-linux-x64", "test-linux-arm64", "darwin-cross", "windows-native-read-fixtures", "integration", "cli", "kernel", "asan",
                      "validate-mkfs-windows-run", "validate-mkfs-windows", "ci-ok"):
         require(job_name in jobs, f"ci.yml: full-pipeline job {job_name} is missing")
-    matrix = jobs["test"]["strategy"]["matrix"]
-    require(matrix["os"] == ["ubuntu-latest", "ubuntu-24.04-arm"],
-            "ci.yml: native Linux x86_64 and ARM64 tests must both run")
-    allowed_exclusion = "${{ fromJSON(needs.changes.outputs.code == 'false' && '[{\"os\":\"ubuntu-24.04-arm\"}]' || '[]') }}"
-    require(matrix.get("exclude") in (None, allowed_exclusion), "ci.yml: unexpected platform exclusion")
+    # Each native Linux architecture is its own job, with its own runner gate.
+    # Only a push to main, after the queue validated the tree, skips ARM64.
+    require("strategy" not in jobs["test-linux-x64"] and "if" not in jobs["test-linux-x64"],
+            "ci.yml: the native x86_64 Linux test must run on every event")
+    require(jobs["test-linux-arm64"].get("if") in (None, "needs.changes.outputs.code != 'false'"),
+            "ci.yml: unexpected platform exclusion")
     darwin = jobs["darwin-cross"]
     require("if" not in darwin, "ci.yml: the Darwin build must run on every event")
     require(any(step.get("run") == "rustup target add aarch64-apple-darwin"
@@ -102,13 +104,13 @@ for mutation in ("missing-trigger", "path-filter", "branch-filter", "job-gate", 
         changed["slate-oracle.yml"]["jobs"]["slate-writes-windows"]["if"] = (
             "${{ !cancelled() && github.event_name != 'pull_request' }}")
     elif mutation == "step-gate":
-        jobs["test"]["steps"][0]["if"] = "github.event_name != 'pull_request'"
+        jobs["test-linux-x64"]["steps"][0]["if"] = "github.event_name != 'pull_request'"
     elif mutation == "windows-filter":
         jobs["changes"]["outputs"]["mkfs"] = "${{ steps.filter.outputs.mkfs }}"
     elif mutation == "missing-fixtures":
         jobs.pop("windows-native-read-fixtures")
     elif mutation == "missing-platform":
-        jobs["test"]["strategy"]["matrix"]["os"].remove("ubuntu-24.04-arm")
+        jobs.pop("test-linux-arm64")
     elif mutation == "missing-darwin":
         jobs.pop("darwin-cross")
     elif mutation == "missing-darwin-build":

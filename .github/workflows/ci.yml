@@ -236,35 +236,24 @@ jobs:
             tmp/logs/readonly-test.sha256
           if-no-files-found: error
 
-  test-gate:
-    needs: changes
+  test-linux-x64-gate:
+    needs: [changes]
     runs-on: antimatter-vps-gate
     timeout-minutes: 1
     outputs:
-      ubuntu-latest: ${{ steps.pick-linux-x64.outputs.runner }}
-      ubuntu-24.04-arm: ${{ steps.pick-linux-arm64.outputs.runner }}
+      runner: ${{ steps.pick.outputs.runner }}
     steps:
-      - id: pick-linux-x64
+      - id: pick
         run: runner-gate pick linux-x64
-      - id: pick-linux-arm64
-        run: runner-gate pick linux-arm64
 
-  test:
-    name: test-${{ matrix.os }}
-    runs-on: ${{ needs.test-gate.outputs[matrix.os] }}
+  test-linux-x64:
+    name: test-ubuntu-latest
+    runs-on: ${{ needs.test-linux-x64-gate.outputs.runner }}
     env:
       CARGO_BUILD_JOBS: 2
     # Every pull request runs both Linux architectures and the Darwin build below.
     # Only a push to main uses quick Linux checks, after the queue validated the tree.
-    needs: [changes, test-gate]
-    strategy:
-      fail-fast: false
-      matrix:
-        # ubuntu-24.04-arm is native ARM64, not a cross-check: `c_char` is
-        # `u8` on aarch64 Linux and `i8` on x86_64 and macOS, so a lint
-        # about a C-ABI pointer cast can fail on one and not the other (#268).
-        os: [ubuntu-latest, ubuntu-24.04-arm]
-        exclude: ${{ fromJSON(needs.changes.outputs.code == 'false' && '[{"os":"ubuntu-24.04-arm"}]' || '[]') }}
+    needs: [changes, test-linux-x64-gate]
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux build tools
@@ -276,12 +265,11 @@ jobs:
       - name: tools, without root
         uses: ./.github/actions/user-tools
         with:
-          tools: ${{ matrix.os == 'ubuntu-latest' && 'chore pwsh ntfs-3g pyyaml' || 'chore' }}
+          tools: chore pwsh ntfs-3g pyyaml
       # tests/scripts/linux-harness-profile.sh resolves the ntfs3 run profile
       # with the harness's own scripts/run-profile.rb. Hosted runners ship
       # Ruby; the antimatter-vps runner image does not, and allows sudo apt.
       - name: ruby for the harness's run-profile resolver
-        if: matrix.os == 'ubuntu-latest'
         run: command -v ruby >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq ruby; }
       - name: check out sibling repos
         # Replaces `submodules: recursive`. The pins live in chores.yml,
@@ -310,19 +298,18 @@ jobs:
       - run: cargo fmt --check
 
       - name: Retain independent physical positions in the immutable Windows log
-        if: matrix.os == 'ubuntu-latest'
         timeout-minutes: 8
         env:
           CARGO_BUILD_JOBS: 2
         run: nice -n 10 cargo test --locked --manifest-path scripts/logfile-record-oracle/Cargo.toml --test physical_position -- --nocapture
       - name: Diagnose immutable raw locations and reject pointer and torn-page controls
-        if: always() && matrix.os == 'ubuntu-latest'
+        if: always()
         timeout-minutes: 8
         env:
           CARGO_BUILD_JOBS: 2
         run: nice -n 10 cargo test --locked --manifest-path scripts/logfile-record-oracle/Cargo.toml --test raw_location -- --nocapture
       - name: Upload raw Windows record-position evidence
-        if: always() && matrix.os == 'ubuntu-latest'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: logfile-physical-position
@@ -342,15 +329,12 @@ jobs:
       # inside the container tries to install `1.95.0-musl` and dies.
       # Running on the runner reuses the toolchain installed above.
       - name: Install cargo-deny
-        if: matrix.os == 'ubuntu-latest'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
       - name: cargo-deny check
-        if: matrix.os == 'ubuntu-latest'
         run: cargo deny --all-features check
       - name: Independent decoder licence allowlist and formatting
-        if: matrix.os == 'ubuntu-latest'
         run: |
           cargo deny --manifest-path scripts/logfile-record-oracle/Cargo.toml check licenses
           cargo fmt --manifest-path scripts/logfile-record-oracle/Cargo.toml --check
@@ -361,7 +345,6 @@ jobs:
       # alone), run in place from ../rust-fs-core. The non-gating declaration
       # lives in the chore task, once. Once, on ubuntu: neither varies by OS.
       - name: family scripts and the one required check
-        if: matrix.os == 'ubuntu-latest'
         run: |
           bash ../rust-fs-core/scripts/family-check.sh
           chore check:ci-gate
@@ -374,13 +357,11 @@ jobs:
       # `u8`, so ubuntu-latest alone passed while aarch64 failed (#268).
       # Run it on both Linux architectures; Darwin is cross-built below.
       - name: cargo clippy
-        if: matrix.os == 'ubuntu-latest' || matrix.os == 'ubuntu-24.04-arm'
         run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness -- -D warnings
 
       # Unix-only mutations can leave unused mut bindings on Windows (#617).
       # Clippy cross-checks every target without needing a Windows linker.
       - name: cargo clippy (Windows all targets)
-        if: matrix.os == 'ubuntu-latest'
         run: |
           rustup target add x86_64-pc-windows-msvc
           mv tmp/logs/clippy.log tmp/logs/clippy-host.log
@@ -393,7 +374,6 @@ jobs:
       # so the scripts row of tier-budgets.txt is enforced here and the run is
       # kept in tmp/logs/scripts.log, in the test-logs artifact (#1264).
       - name: shell tests
-        if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips scripts -- scripts/run-script-tests.sh tests/scripts
 
@@ -401,13 +381,11 @@ jobs:
       # chkdsk's real reports so it is tested on every pull request rather
       # than only when someone dispatches a capture (#137).
       - name: capture script tests
-        if: matrix.os == 'ubuntu-latest'
         shell: pwsh
         run: pwsh -NoProfile -File tests/scripts/capture-chkdsk.ps1
 
       # Also runs on dispatched red refs before the collector is supplied.
       - name: Windows format geometry collector contracts (60 checks)
-        if: matrix.os == 'ubuntu-latest'
         shell: pwsh
         run: pwsh -NoProfile -File tests/scripts/windows-format-geometry.ps1
 
@@ -416,19 +394,16 @@ jobs:
       # failed dismount stops the copy. Linux only: the test stands an
       # ordinary file in for \\.\PhysicalDriveN, which is a device on Windows.
       - name: Sync-VhdToImg order test
-        if: matrix.os == 'ubuntu-latest'
         shell: pwsh
         run: pwsh -NoProfile -File tests/scripts/sync-vhd-order.ps1
 
       # An owner's quota usage, through the real function with fsutil and WMI
       # mocked, from the text fsutil printed on Windows (#867).
       - name: quota owner usage test
-        if: matrix.os == 'ubuntu-latest'
         shell: pwsh
         run: pwsh -NoProfile -File tests/scripts/quota-owner-usage.ps1
 
       - name: Windows fixture lifecycle test
-        if: matrix.os == 'ubuntu-latest'
         shell: pwsh
         timeout-minutes: 5
         run: pwsh -NoProfile -File tests/scripts/windows-fixture-phases.ps1
@@ -595,18 +570,16 @@ jobs:
           grep -Fxq 'test the_gate_covers_every_explorer_target ... ok' tmp/logs/fuzz-coverage.log
 
       - name: Operation sequences against ntfs-3g
-        if: matrix.os == 'ubuntu-latest'
         timeout-minutes: 10
         run: chore test:op-sequence-oracle
 
       # #1034: the boundary geometries, streams and EAs each leave their
       # image beside geometry.txt and ntfsfix.txt for chkdsk to grade (#1035).
       - name: Retained operation samples are complete
-        if: matrix.os == 'ubuntu-latest'
         run: bash scripts/check-op-sequence-samples.sh
 
       - name: Keep operation sequence reproducers and refusal statistics
-        if: always() && matrix.os == 'ubuntu-latest'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: op-sequence-model
@@ -655,7 +628,202 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-logs-${{ matrix.os }}
+          name: test-logs-ubuntu-latest
+          path: tmp/logs/
+          if-no-files-found: ignore
+
+  test-linux-arm64-gate:
+    needs: [changes]
+    if: needs.changes.outputs.code != 'false'
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-arm64
+
+  test-linux-arm64:
+    name: test-ubuntu-24.04-arm
+    runs-on: ${{ needs.test-linux-arm64-gate.outputs.runner }}
+    env:
+      CARGO_BUILD_JOBS: 2
+    # Every pull request runs both Linux architectures and the Darwin build below.
+    # Only a push to main uses quick Linux checks, after the queue validated the tree.
+    needs: [changes, test-linux-arm64-gate]
+    if: needs.changes.outputs.code != 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential gh shellcheck python3-yaml
+      # Tools come from scripts/install-user-tools.sh, the script developers
+      # run as `chore tools`, so CI and a developer's machine set up the same
+      # way. PowerShell and chore use the existing cached user installation.
+      # What a runner already has is left alone, and the rest is cached.
+      - name: tools, without root
+        uses: ./.github/actions/user-tools
+        with:
+          tools: chore
+      # tests/scripts/linux-harness-profile.sh resolves the ntfs3 run profile
+      # with the harness's own scripts/run-profile.rb. Hosted runners ship
+      # Ruby; the antimatter-vps runner image does not, and allows sudo apt.
+      - name: check out sibling repos
+        # Replaces `submodules: recursive`. The pins live in chores.yml,
+        # so CI and a developer's machine read the same declaration
+        # instead of restating it in YAML.
+        run: chore siblings
+      - name: Install Rust
+        # Keep in sync with rust-toolchain.toml. Explicit version here
+        # guards against rust-toolchain.toml being deleted and silently
+        # tracking a newer stable (which can introduce breaking clippy
+        # lints on unchanged code).
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+          components: rustfmt, clippy
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # runner.arch: both Linux legs report runner.os == Linux, and a
+          # shared key would restore one architecture's target/ on the other.
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - run: cargo fmt --check
+
+      - name: cargo clippy
+        run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips clippy -- cargo clippy --locked --all-targets --features cli,harness -- -D warnings
+
+      # Unix-only mutations can leave unused mut bindings on Windows (#617).
+      # Clippy cross-checks every target without needing a Windows linker.
+      - name: unit tests (test-opt) with an executed-test floor
+        run: |
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips unit -- cargo test --profile test-opt --locked --lib
+          # The #1043 contract passed with 790 unit cases via local-unit.sh on 2026-10-18.
+          # Previous floor 601 plus two listed-directory index contracts in #816.
+          # The two contracts ran with 777 unit cases on 2026-10-18.
+          # The #817, #821, #822, #1040 and #1043 contracts add five cases: floor 608.
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/unit.log | awk '{s+=$4} END{print s+0}')
+          echo "tests executed: $n (floor 608)"
+          if [ "$n" -lt 608 ]; then
+              echo "::error::only $n unit tests executed, floor is 608 -- 637 ran on 2026-09-17 in run 34985102618, plus the directory-stream contract in #815 and two directory-index contracts in #816 and one fold-back contract in #817 and one entry-identity contract in #821 and one unlisted-extension contract in #822 and one self-entry contract in #1040 and one type-order contract in #1043, and a run that executes less than that stopped early rather than passed"
+              exit 1
+          fi
+      # The floor here is 15 out of a measured 16, which looks like no margin at
+      # all and is the right number anyway: this selection is two named test
+      # binaries, so it does not drift the way a `--lib` count does, and what
+      # the floor has to catch is the drop to ZERO -- a renamed file leaving
+      # `--test mkfs_roundtrip` selecting nothing, which `cargo test` reports
+      # as a clean pass. A small floor above zero catches that; a floor of
+      # zero catches nothing. Raise it when the files grow.
+      - name: fixture-free repair journal framing and torn-tail tests
+        run: bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --profile test-opt --locked --features plan-file --test repair_journal
+      - name: fixture-free integration tests with an executed-test floor
+        run: |
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips mkfs -- cargo test --profile test-opt --locked --features cli,harness --test mkfs_roundtrip --test mkfs_bin_smoke
+          # Measured 16 executed (mkfs_roundtrip 9 + mkfs_bin_smoke 7) on
+          # 2026-09-29, when mkfs_bin_smoke gained the --version test. Floor 15;
+          # 16 since mkfs_bin_smoke gained the acl catalog test (#606).
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/mkfs.log | awk '{s+=$4} END{print s+0}')
+          echo "tests executed: $n (floor 16)"
+          if [ "$n" -lt 16 ]; then
+              echo "::error::only $n tests executed, floor is 16 -- 16 ran on 2026-09-29 and the acl catalog test (#606) adds one, and a run that executes less than that stopped early rather than passed"
+              exit 1
+          fi
+      # The same features as the step above, so it reuses that build. Measured
+      # 5 executed on 2026-11-04; the floor catches the drop to zero.
+      - name: fixture-free copy-repair tests with an executed-test floor
+        run: |
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --profile test-opt --locked --features cli,harness --test repair_plan_copy
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
+          echo "tests executed: $n (floor 5)"
+          if [ "$n" -lt 5 ]; then
+              echo "::error::only $n tests executed, floor is 5 -- 5 ran on 2026-11-04, and a run that executes less than that stopped early rather than passed"
+              exit 1
+          fi
+
+      - name: fixture-free copy-repair tests with an executed-test floor
+        run: |
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored suite -- cargo test --profile test-opt --locked --features cli,harness --test repair_plan_copy
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/suite.log | awk '{s+=$4} END{print s+0}')
+          echo "tests executed: $n (floor 5)"
+          if [ "$n" -lt 5 ]; then
+              echo "::error::only $n tests executed, floor is 5 -- 5 tests are required on 2026-11-04, including the unordered-target refusals for #1253"
+              exit 1
+          fi
+
+      - name: Independent operation model contract
+        run: |
+          # Reuse the measured fixture-free budget, keeping a distinct log.
+          read -r lines bytes < <(awk '$1 == "mkfs" { print $2, $3 }' scripts/tier-budgets.txt)
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored \
+            op-sequence-reference-model op-sequence-reference-model "$lines" "$bytes" -- \
+            cargo test --profile test-opt --locked --test op_sequence_reference_model
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/op-sequence-reference-model.log | awk '{s+=$4} END{print s+0}')
+          # Eight declared contracts in #680, #731's named streams and #732's
+          # EAs; zero selected is never a pass.
+          test "$n" -ge 10 || { echo "::error::model contracts: $n executed, floor 10"; exit 1; }
+
+      - name: Arbitrary-input operation generator and replay contracts
+        run: |
+          read -r lines bytes < <(awk '$1 == "mkfs" { print $2, $3 }' scripts/tier-budgets.txt)
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored \
+            op-sequence-generator op-sequence-generator "$lines" "$bytes" -- \
+            cargo test --profile test-opt --locked --test op_sequence_generator
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/op-sequence-generator.log | awk '{s+=$4} END{print s+0}')
+          # Eight declared fixture-free contracts in #681, #684's pin format,
+          # #731's stream opcodes and #732's EA opcodes, on every host leg,
+          # #1024's input geometry and #1025's refused geometry.
+          test "$n" -ge 13 || { echo "::error::generator contracts: $n executed, floor 13"; exit 1; }
+
+      - name: Generated operations and fresh-reopen comparisons
+        run: |
+          read -r lines bytes < <(awk '$1 == "mkfs" { print $2, $3 }' scripts/tier-budgets.txt)
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored \
+            op-sequence-readback op-sequence-readback "$lines" "$bytes" -- \
+            cargo test --profile test-opt --locked --test op_sequence_readback
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/op-sequence-readback.log | awk '{s+=$4} END{print s+0}')
+          # Four original seeds, four declared #682 image-harness contracts,
+          # #683's corpus replay, #684's three shrink and capture contracts,
+          # #731's named-stream case, #732's EA case and #1025's refused
+          # geometry. #1026 adds four fixed cluster/record boundary replays
+          # and the contract that every committed seed names its geometry.
+          # #1031 adds the refusals-by-operation-and-reason case.
+          test "$n" -ge 21 || { echo "::error::readback contracts: $n executed, floor 21"; exit 1; }
+
+      - name: Every explorer has a stable corpus gate
+        run: |
+          read -r lines bytes < <(awk '$1 == "mkfs" { print $2, $3 }' scripts/tier-budgets.txt)
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored \
+            fuzz-coverage fuzz-coverage "$lines" "$bytes" -- \
+            cargo test --profile test-opt --locked --features cli,harness --test fuzz_decoders \
+              the_gate_covers_every_explorer_target -- --exact
+          grep -Fxq 'test the_gate_covers_every_explorer_target ... ok' tmp/logs/fuzz-coverage.log
+
+      - name: unit tests (debug, overflow checks armed) with an executed-test floor
+        run: |
+          bash ../rust-fs-core/scripts/tier.sh --refuse-skips unit-debug -- cargo test --locked --lib
+          # Previous floor 601 plus two listed-directory index contracts in #816.
+          # The two contracts ran with 777 unit cases on 2026-10-18.
+          # The #817, #821, #822, #1040 and #1043 contracts add five cases: floor 608.
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' tmp/logs/unit-debug.log | awk '{s+=$4} END{print s+0}')
+          echo "tests executed: $n (floor 608)"
+          if [ "$n" -lt 608 ]; then
+              echo "::error::only $n unit tests executed under overflow checks, floor is 608 -- 637 ran on 2026-09-17 in run 34985102618, plus the directory-stream contract in #815 and two directory-index contracts in #816 and one fold-back contract in #817 and one entry-identity contract in #821 and one unlisted-extension contract in #822 and one self-entry contract in #1040 and one type-order contract in #1043, and a run that executes less than that stopped early rather than passed"
+              exit 1
+          fi
+        env:
+          EXPECT_OVERFLOW_CHECKS: "1"
+      # The whole of every tier, kept: the terminal got a verdict line and a
+      # failure's tail, and this is the rest. always(), because a failed run
+      # is when somebody wants it.
+      - name: upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-ubuntu-24.04-arm
           path: tmp/logs/
           if-no-files-found: ignore
 
@@ -689,7 +857,7 @@ jobs:
         run: cargo build --locked --release --lib --target aarch64-apple-darwin
 
   op-sequence-chkdsk-gate:
-    needs: [changes, test]
+    needs: [changes, test-linux-x64, test-linux-arm64]
     if: needs.changes.outputs.code == 'true'
     runs-on: antimatter-vps-gate
     timeout-minutes: 1
@@ -703,7 +871,7 @@ jobs:
     name: Windows chkdsk grades retained operation samples
     # #1035: the samples the ntfs-3g oracle run kept (#1034) graded by
     # Windows chkdsk, the same bytes ntfs-3g reported on.
-    needs: [changes, test, op-sequence-chkdsk-gate]
+    needs: [changes, test-linux-x64, test-linux-arm64, op-sequence-chkdsk-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ needs.op-sequence-chkdsk-gate.outputs.runner }}
     timeout-minutes: 20
@@ -1700,7 +1868,7 @@ jobs:
   # This was `name: unit tests`, and a job's `name:` IS its check-run
   # name, so `unit tests` was what branch protection required and what a
   # reviewer read. It is not the unit tests -- those are the `test`
-  # matrix above, reporting as test-ubuntu-latest, test-ubuntu-24.04-arm
+  # jobs above, reporting as test-ubuntu-latest, test-ubuntu-24.04-arm
   # and the Darwin cross-build. A green `unit tests` tick here would have
   # stayed green with the cargo invocation below deleted.
   #
@@ -2688,6 +2856,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: C toolchain for the gated runner
+        # Only a self-hosted Linux runner lacks it; the hosted image has it.
+        run: |
+          if [ "$RUNNER_OS" = Linux ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
+            sudo apt-get update && sudo apt-get install -y build-essential
+          fi
       - name: Install chore and check out sibling repos
         shell: bash
         run: |
@@ -2879,7 +3053,7 @@ jobs:
         run: bash scripts/ci-verdict.sh windows
 
   ci-ok-gate:
-    needs: [readonly-file-name, test, darwin-cross, windows-native-read-fixtures, windows-4kn-fixture, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows, op-sequence-chkdsk, interrupted-bootstrap-gate, python-abi-gate, python-volume-info-windows-gate, readonly-file-name-gate, test-gate, darwin-cross-gate, op-sequence-chkdsk-gate, windows-native-read-fixtures-gate, windows-4kn-fixture-gate, integration-gate, changes-gate, cli-gate, kernel-gate, semver-gate, validate-mkfs-windows-gate]
+    needs: [readonly-file-name, test-linux-x64, test-linux-arm64, darwin-cross, windows-native-read-fixtures, windows-4kn-fixture, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows, op-sequence-chkdsk, interrupted-bootstrap-gate, python-abi-gate, python-volume-info-windows-gate, readonly-file-name-gate, test-linux-x64-gate, test-linux-arm64-gate, darwin-cross-gate, op-sequence-chkdsk-gate, windows-native-read-fixtures-gate, windows-4kn-fixture-gate, integration-gate, changes-gate, cli-gate, kernel-gate, semver-gate, validate-mkfs-windows-gate]
     if: always()
     runs-on: antimatter-vps-gate
     timeout-minutes: 1
@@ -2898,7 +3072,7 @@ jobs:
     name: ci-ok
     runs-on: ${{ needs.ci-ok-gate.outputs.runner || 'ubuntu-latest' }}
     if: always()
-    needs: [readonly-file-name, test, darwin-cross, windows-native-read-fixtures, windows-4kn-fixture, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows, op-sequence-chkdsk, interrupted-bootstrap-gate, python-abi-gate, python-volume-info-windows-gate, readonly-file-name-gate, test-gate, darwin-cross-gate, op-sequence-chkdsk-gate, windows-native-read-fixtures-gate, windows-4kn-fixture-gate, integration-gate, changes-gate, cli-gate, kernel-gate, semver-gate, validate-mkfs-windows-gate, ci-ok-gate]
+    needs: [readonly-file-name, test-linux-x64, test-linux-arm64, darwin-cross, windows-native-read-fixtures, windows-4kn-fixture, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows, op-sequence-chkdsk, interrupted-bootstrap-gate, python-abi-gate, python-volume-info-windows-gate, readonly-file-name-gate, test-linux-x64-gate, test-linux-arm64-gate, darwin-cross-gate, op-sequence-chkdsk-gate, windows-native-read-fixtures-gate, windows-4kn-fixture-gate, integration-gate, changes-gate, cli-gate, kernel-gate, semver-gate, validate-mkfs-windows-gate, ci-ok-gate]
     steps:
       - uses: actions/checkout@v4
       - name: Check every gating job

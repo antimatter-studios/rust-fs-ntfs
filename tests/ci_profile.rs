@@ -143,22 +143,18 @@ fn ci_runs_strict_clippy_on_native_arm64() {
     let source = read_or_panic(&path);
     let documents = Yaml::load_from_str(&source).expect("ci.yml must parse as YAML");
     let workflow = documents.first().expect("ci.yml must contain a document");
-    let test_job = field(field(workflow, "jobs").expect("jobs"), "test").expect("test job");
-    let operating_systems = field(
-        field(
-            field(test_job, "strategy").expect("test strategy"),
-            "matrix",
-        )
-        .expect("test matrix"),
-        "os",
-    )
-    .and_then(Yaml::as_sequence)
-    .expect("test matrix os sequence");
+    // The native ARM64 leg is its own job, with its own runner gate.
+    let test_job = field(field(workflow, "jobs").expect("jobs"), "test-linux-arm64")
+        .expect("the native ARM64 test job");
     assert!(
-        operating_systems
-            .iter()
-            .any(|os| os.as_str() == Some("ubuntu-24.04-arm")),
-        "{} does not compile and lint on GitHub's native ARM64 runner",
+        field(test_job, "strategy").is_none(),
+        "{} runs ARM64 as one leg of a matrix, so its gate would pick for the other legs too",
+        path.display()
+    );
+    assert_eq!(
+        field(test_job, "runs-on").and_then(Yaml::as_str),
+        Some("${{ needs.test-linux-arm64-gate.outputs.runner }}"),
+        "{} does not take the ARM64 job's runner from its own gate",
         path.display()
     );
 
@@ -172,33 +168,12 @@ fn ci_runs_strict_clippy_on_native_arm64() {
                 .is_some_and(|run| run.contains("cargo clippy") && run.contains("-D warnings"))
         })
         .expect("strict cargo clippy step");
-    let condition = field(clippy, "if")
-        .and_then(Yaml::as_str)
-        .expect("strict cargo clippy architecture condition");
-    // Only a disjunction of plain `matrix.os == '<leg>'` equalities is
-    // accepted, because a substring cannot tell an enabled branch from a
-    // disabled one: `matrix.os != 'ubuntu-24.04-arm'` and
-    // `matrix.os == 'ubuntu-24.04-arm' && false` both name the leg and
-    // both skip it. Anything else is refused rather than interpreted.
-    let legs: Vec<&str> = condition
-        .split("||")
-        .map(|term| {
-            term.trim()
-                .strip_prefix("matrix.os == '")
-                .and_then(|rest| rest.strip_suffix('\''))
-                .filter(|leg| !leg.contains('\''))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "strict Clippy condition is not a disjunction of \
-                         `matrix.os == '<leg>'` equalities, so this guard cannot \
-                         tell which legs it enables: {condition}"
-                    )
-                })
-        })
-        .collect();
+    // The job is the ARM64 leg, so the step needs no architecture condition;
+    // any condition at all could skip it, so none is accepted.
     assert!(
-        legs.contains(&"ubuntu-24.04-arm"),
-        "strict Clippy is present but excludes the ARM64 matrix leg: {condition}"
+        field(clippy, "if").is_none(),
+        "strict Clippy on the native ARM64 job is conditional, so it can be skipped: {:?}",
+        field(clippy, "if")
     );
 }
 
@@ -916,7 +891,8 @@ fn ci_ok_covers_every_gating_job_and_preserves_windows_filter() {
         needs(job("ci-ok")),
         [
             "readonly-file-name",
-            "test",
+            "test-linux-x64",
+            "test-linux-arm64",
             "darwin-cross",
             "windows-native-read-fixtures",
             "windows-4kn-fixture",
@@ -934,7 +910,8 @@ fn ci_ok_covers_every_gating_job_and_preserves_windows_filter() {
             "python-abi-gate",
             "python-volume-info-windows-gate",
             "readonly-file-name-gate",
-            "test-gate",
+            "test-linux-x64-gate",
+            "test-linux-arm64-gate",
             "darwin-cross-gate",
             "op-sequence-chkdsk-gate",
             "windows-native-read-fixtures-gate",

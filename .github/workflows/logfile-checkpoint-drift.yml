@@ -77,6 +77,12 @@ jobs:
       LOGFILE_CHECKPOINTS: live
     steps:
       - uses: actions/checkout@v4
+      - name: C toolchain for the gated runner
+        # Only a self-hosted Linux runner lacks it; the hosted image has it.
+        run: |
+          if [ "$RUNNER_OS" = Linux ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
+            sudo apt-get update && sudo apt-get install -y build-essential
+          fi
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:

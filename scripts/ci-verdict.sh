@@ -32,7 +32,7 @@ case "${1:-}" in
         # job in ci.yml.
         filter='def full: ["windows-native-read-fixtures", "windows-4kn-fixture", "integration",
                 "cli", "kernel", "python-volume-info-windows",
-                "op-sequence-chkdsk"];
+                "op-sequence-chkdsk", "test-linux-arm64"];
             # A gate job only picks the runner of its job. It runs and skips
             # exactly when that job does, so it is judged as that job is: a gate
             # that failed or was skipped when the job had to run is the job failing.
@@ -45,7 +45,7 @@ case "${1:-}" in
             (.changes.result == "success") and
             (to_entries | all(.value | type == "object") and
                 all(.value as $v | .key as $k | $v | ok($k))) and
-            (["test", "windows-native-read-fixtures", "integration",
+            (["test-linux-x64", "test-linux-arm64", "windows-native-read-fixtures", "integration",
               "changes", "validate-mkfs-windows", "cli", "kernel",
               "semver"] | all(. as $k | $needs | has($k) and
                 (.[$k] | ok($k))))'

@@ -93,11 +93,11 @@ def picked(workflow, gate):
     return [s["run"].split()[-1] for s in workflow[gate]["steps"]]
 
 
-assert picked(ci, "test-gate") == ["linux-x64", "linux-arm64"], "the ARM leg stays native ARM"
-assert ci["test-gate"]["outputs"] == {
-    "ubuntu-latest": "${{ steps.pick-linux-x64.outputs.runner }}",
-    "ubuntu-24.04-arm": "${{ steps.pick-linux-arm64.outputs.runner }}",
-}
+# Each native Linux architecture is its own job with its own gate: a gate picks one runner.
+assert picked(ci, "test-linux-x64-gate") == ["linux-x64"], "the x86_64 job runs on an x86_64 runner"
+assert picked(ci, "test-linux-arm64-gate") == ["linux-arm64"], "the ARM job stays native ARM"
+for gate in ("test-linux-x64-gate", "test-linux-arm64-gate"):
+    assert set(ci[gate]["outputs"]) == {"runner"}, gate
 for job in ("windows-native-read-fixtures", "windows-4kn-fixture", "op-sequence-chkdsk", "validate-mkfs-windows-run"):
     assert picked(ci, f"{job}-gate") == ["windows-x64"], job
 for job in ("integration", "cli", "kernel"):
