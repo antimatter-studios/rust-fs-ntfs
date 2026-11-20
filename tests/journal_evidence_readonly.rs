@@ -33,7 +33,6 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
 
 const USN_IMG: &str = "test-disks/ntfs-usnjrnl.img";
 const USN_QUERY: &str = "test-disks/ntfs-usnjrnl.query.txt";
@@ -58,26 +57,26 @@ const CAPTURES: [&str; 15] = [
     "freed",
 ];
 
-/// A device that can only be read.
-#[derive(Clone)]
-struct Image(Arc<Vec<u8>>);
+/// A device that can only be read: the image file, read a span at a time.
+type Image = common::PatchedImage;
 
-impl BlockRead for Image {
-    fn read_at(&self, offset: u64, output: &mut [u8]) -> fs_core::Result<()> {
-        let range = usize::try_from(offset)
-            .ok()
-            .and_then(|start| Some(start..start.checked_add(output.len())?))
-            .and_then(|range| self.0.get(range));
-        output.copy_from_slice(range.ok_or(fs_core::Error::OutOfBounds {
-            offset,
-            len: output.len() as u64,
-            size: self.0.len() as u64,
-        })?);
-        Ok(())
+/// Whether `device` reads, chunk for chunk, as the image file at `path`.
+fn reads_as(device: &dyn BlockRead, path: &str) -> bool {
+    let size = std::fs::metadata(path).unwrap().len();
+    if device.size_bytes() != size {
+        return false;
     }
-    fn size_bytes(&self) -> u64 {
-        self.0.len() as u64
+    let mut chunk = vec![0; common::IMAGE_CHUNK_SIZE];
+    let mut at = 0;
+    while at < size {
+        let count = (size - at).min(chunk.len() as u64) as usize;
+        device.read_at(at, &mut chunk[..count]).unwrap();
+        if chunk[..count] != common::read_image_region(path, at, count).unwrap()[..] {
+            return false;
+        }
+        at += count as u64;
     }
+    true
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -141,9 +140,8 @@ fn the_change_journal_reads_as_fsutil_reported_from_a_read_only_device() {
             "missing {path}; run test-disks/build-windows-native-read-fixtures.ps1 on Windows"
         );
     }
-    let bytes = Arc::new(std::fs::read(USN_IMG).unwrap());
-    let before = sha256(&bytes);
-    let device = Image(bytes.clone());
+    let before = common::image_digest(USN_IMG).unwrap();
+    let device = Image::open(USN_IMG).unwrap();
     let query = std::fs::read_to_string(USN_QUERY).unwrap();
 
     let JournalState::Active(journal) = usn_journal_state(&device).unwrap() else {
@@ -186,24 +184,29 @@ fn the_change_journal_reads_as_fsutil_reported_from_a_read_only_device() {
         windows.len()
     );
     assert_eq!(ours, windows);
-    assert_eq!(sha256(&bytes), before, "the device changed");
+    assert_eq!(
+        common::image_digest(USN_IMG).unwrap(),
+        before,
+        "the device changed"
+    );
 }
 
-fn unpack(name: &str) -> Vec<u8> {
-    let output = Command::new("gzip")
+/// The capture, decompressed to a scratch file, never held whole.
+fn unpack(name: &str) -> String {
+    let path = common::temp_image_path(name.replace('.', "_"));
+    let out = std::fs::File::create(&path).expect("create the image copy");
+    let status = Command::new("gzip")
         .args(["-dc", &format!("test-disks/{name}.img.gz")])
-        .output()
+        .stdout(std::process::Stdio::from(out))
+        .status()
         .expect("run gzip");
-    assert!(
-        output.status.success(),
-        "decompress test-disks/{name}.img.gz"
-    );
+    assert!(status.success(), "decompress test-disks/{name}.img.gz");
     assert_eq!(
-        output.stdout.len(),
+        std::fs::metadata(&path).unwrap().len(),
         133_103_616,
         "{name} is the captured partition"
     );
-    output.stdout
+    path
 }
 
 /// Windows' manifest: path -> (size, SHA-256).
@@ -259,8 +262,8 @@ fn workload<D: BlockRead>(volume: &Volume<D>) -> BTreeMap<String, (u64, String)>
 #[test]
 fn the_log_windows_left_is_walked_from_a_read_only_device() {
     for capture in CAPTURES {
-        let bytes = Arc::new(unpack(&format!("windows-interrupted-{capture}")));
-        let device = Image(bytes.clone());
+        let path = unpack(&format!("windows-interrupted-{capture}"));
+        let device = Image::open(&path).unwrap();
         assert!(
             logfile_state(&device).unwrap().needs_replay(),
             "{capture}: the log holds no work"
@@ -273,6 +276,8 @@ fn the_log_windows_left_is_walked_from_a_read_only_device() {
                 .all(|pair| pair[0].view.lsn < pair[1].view.lsn),
             "{capture}: the walk is not in LSN order"
         );
+        drop(device);
+        std::fs::remove_file(&path).unwrap();
     }
 }
 
@@ -280,10 +285,10 @@ fn the_log_windows_left_is_walked_from_a_read_only_device() {
 fn a_replay_held_in_memory_reaches_what_windows_recovered_and_writes_nothing() {
     for capture in CAPTURES {
         let name = format!("windows-interrupted-{capture}");
-        let bytes = Arc::new(unpack(&name));
-        let before = sha256(&bytes);
+        let path = unpack(&name);
+        let before = common::image_digest(&path).unwrap();
 
-        let replayed = replay_logfile_in_memory(Image(bytes.clone()))
+        let replayed = replay_logfile_in_memory(Image::open(&path).unwrap())
             .unwrap_or_else(|error| panic!("{capture}: replay: {error}"));
         let report = replayed.report().cloned().expect("a replay ran");
         assert!(report.records > 0, "{capture}: {report:?}");
@@ -294,35 +299,37 @@ fn a_replay_held_in_memory_reaches_what_windows_recovered_and_writes_nothing() {
         );
 
         // The same bytes the replay fsck writes to a copy.
-        let mut ours = vec![0; bytes.len()];
-        replayed.read_at(0, &mut ours).unwrap();
         let copy = common::temp_image_path(format!("evidence-{capture}"));
-        std::fs::write(&copy, bytes.as_slice()).unwrap();
+        std::fs::copy(&path, &copy).unwrap();
         let written = fsck::replay_logfile(&copy)
             .unwrap_or_else(|error| panic!("{capture}: fsck replay: {error}"));
         assert_eq!(written, report, "{capture}");
-        let on_disk = std::fs::read(&copy).unwrap();
-        std::fs::remove_file(&copy).unwrap();
         assert!(
-            ours == on_disk,
+            reads_as(&replayed, &copy),
             "{capture}: the replay in memory differs from the one fsck wrote"
         );
+        std::fs::remove_file(&copy).unwrap();
 
         // The files Windows listed after its own restart pass.
         let volume = Volume::open(replayed).unwrap();
         assert_eq!(workload(&volume), manifest(capture), "{capture}");
 
-        assert_eq!(sha256(&bytes), before, "{capture}: the device changed");
+        assert_eq!(
+            common::image_digest(&path).unwrap(),
+            before,
+            "{capture}: the device changed"
+        );
+        std::fs::remove_file(&path).unwrap();
     }
 }
 
 #[test]
 fn a_clean_log_replays_to_the_device_unchanged() {
-    let recovered = Arc::new(unpack("windows-interrupted-1.recovered"));
-    let replayed = replay_logfile_in_memory(Image(recovered.clone())).unwrap();
+    let recovered = unpack("windows-interrupted-1.recovered");
+    let replayed = replay_logfile_in_memory(Image::open(&recovered).unwrap()).unwrap();
     assert!(replayed.report().is_none());
     assert!(replayed.changed_ranges().is_empty());
-    let mut view = vec![0; recovered.len()];
-    replayed.read_at(0, &mut view).unwrap();
-    assert!(view == *recovered);
+    assert!(reads_as(&replayed, &recovered));
+    drop(replayed);
+    std::fs::remove_file(&recovered).unwrap();
 }
