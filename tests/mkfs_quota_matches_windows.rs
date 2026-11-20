@@ -37,7 +37,7 @@ fn le(b: &[u8], at: usize, n: usize) -> u64 {
     (0..n).rev().fold(0, |v, i| (v << 8) | b[at + i] as u64)
 }
 
-fn unpack(name: &str) -> Vec<u8> {
+fn unpack(name: &str) -> common::ImageBytes {
     let path = common::temp_image_path(format!("mkfs_quota_{name}"));
     let out = File::create(&path).expect("create image copy");
     let status = Command::new("gzip")
@@ -46,12 +46,12 @@ fn unpack(name: &str) -> Vec<u8> {
         .status()
         .expect("run gzip");
     assert!(status.success(), "decompress test-disks/{name}.img.gz");
-    let bytes = std::fs::read(&path).expect("read image copy");
+    let bytes = common::snapshot_image(&path).expect("read image copy");
     let _ = std::fs::remove_file(&path);
-    bytes
+    common::ImageBytes::Image(bytes)
 }
 
-fn formatted(cluster: u32) -> Vec<u8> {
+fn formatted(cluster: u32) -> common::ImageBytes {
     let path = common::temp_image_path(format!("mkfs_quota_ours_{cluster}"));
     File::create(&path)
         .and_then(|f| f.set_len(VOL_SIZE))
@@ -61,20 +61,21 @@ fn formatted(cluster: u32) -> Vec<u8> {
         .expect("format_filesystem");
     <PathIo as BlockIo>::sync(&mut io).expect("sync");
     drop(io);
-    let bytes = std::fs::read(&path).expect("read image");
+    let bytes = common::snapshot_image(&path).expect("read image");
     let _ = std::fs::remove_file(&path);
-    bytes
+    common::ImageBytes::Image(bytes)
 }
 
 /// Each entry of `$Quota`'s index root named `index` (the first in-use MFT
 /// record with a `$Q` root), LAST sentinel included, as raw entry bytes.
-fn root_entries(vol: &[u8], index: &str) -> Vec<Vec<u8>> {
-    let cluster = le(vol, 0x0B, 2) * le(vol, 0x0D, 1);
-    let c = vol[0x40] as i8;
+fn root_entries(vol: &common::ImageBytes, index: &str) -> Vec<Vec<u8>> {
+    let boot = vol.read(0..512);
+    let cluster = le(&boot, 0x0B, 2) * le(&boot, 0x0D, 1);
+    let c = boot[0x40] as i8;
     let size = if c > 0 { c as u64 * cluster } else { 1 << -c } as usize;
-    let mft = (le(vol, 0x30, 8) * cluster) as usize;
+    let mft = (le(&boot, 0x30, 8) * cluster) as usize;
     for n in 0..64 {
-        let mut rec = vol[mft + n * size..mft + (n + 1) * size].to_vec();
+        let mut rec = vol.read(mft + n * size..mft + (n + 1) * size);
         if &rec[..4] != b"FILE" || le(&rec, 0x16, 2) & 1 == 0 {
             continue;
         }

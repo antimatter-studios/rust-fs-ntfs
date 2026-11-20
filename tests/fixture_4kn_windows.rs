@@ -25,13 +25,9 @@ const CLI_READ_HASHES: &str = "test-disks/ntfs-cli-read.sha256.tsv";
 const CLI_READ_PROVIDER: &str = "test-disks/build-windows-native-read-fixtures.ps1";
 const SECTOR: u64 = 4096;
 
-fn read(path: &str, provider: &str) -> Vec<u8> {
-    std::fs::read(path)
-        .unwrap_or_else(|e| panic!("{path}: {e}; {provider} builds it on an elevated Windows host"))
-}
-
 fn text(path: &str, provider: &str) -> String {
-    String::from_utf8(read(path, provider)).unwrap_or_else(|e| panic!("{path} is not UTF-8: {e}"))
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("{path}: {e}; {provider} builds it on an elevated Windows host"))
 }
 
 /// `key : value` lines of the record, keys as fsutil prints them.
@@ -105,13 +101,38 @@ fn le64(b: &[u8], at: usize) -> u64 {
 
 #[test]
 fn windows_formats_the_4kn_fixture_in_4096_byte_sectors() {
-    let image = read(IMAGE, PROVIDER);
+    // The image is streamed in 1 MiB chunks: only its length, its boot
+    // sector and its digest are kept.
+    let (image_len, boot_sector, digest) = {
+        use std::io::Read;
+        let mut file = std::fs::File::open(IMAGE).unwrap_or_else(|e| {
+            panic!("{IMAGE}: {e}; {PROVIDER} builds it on an elevated Windows host")
+        });
+        let mut hasher = Sha256::new();
+        let mut boot_sector = Vec::new();
+        let mut len = 0u64;
+        let mut chunk = vec![0u8; 1024 * 1024];
+        loop {
+            let n = file.read(&mut chunk).expect("read the image");
+            if n == 0 {
+                break;
+            }
+            if boot_sector.len() < 512 {
+                let want = (512 - boot_sector.len()).min(n);
+                boot_sector.extend_from_slice(&chunk[..want]);
+            }
+            hasher.update(&chunk[..n]);
+            len += n as u64;
+        }
+        let digest: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        (len, boot_sector, digest)
+    };
     let fields = record_fields(&text(RECORD, PROVIDER));
 
-    let digest: String = Sha256::digest(&image)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
     assert_eq!(
         fields.get("image sha256").map(String::as_str),
         Some(digest.as_str()),
@@ -123,15 +144,18 @@ fn windows_formats_the_4kn_fixture_in_4096_byte_sectors() {
         "fsutil's Bytes Per Sector for the volume Windows formatted"
     );
     assert!(
-        !image.is_empty() && (image.len() as u64).is_multiple_of(SECTOR),
-        "{IMAGE} is {} bytes, not a whole number of 4096-byte sectors",
-        image.len()
+        image_len > 0 && image_len.is_multiple_of(SECTOR),
+        "{IMAGE} is {image_len} bytes, not a whole number of 4096-byte sectors"
     );
 
     // The boot sector by its published offsets: OEM ID at 3, bytes per
     // sector at 11, sectors per cluster at 13, total sectors at 40, the
     // $MFT cluster at 48, and the 0x55 0xAA signature at 510.
-    let boot = &image[..512];
+    assert!(
+        boot_sector.len() >= 512,
+        "{IMAGE} is shorter than a boot sector"
+    );
+    let boot = &boot_sector[..512];
     assert_eq!(
         &boot[3..11],
         b"NTFS    ",
@@ -167,7 +191,7 @@ fn windows_formats_the_4kn_fixture_in_4096_byte_sectors() {
     );
     let sectors = le64(boot, 40);
     assert!(
-        sectors > 0 && sectors * sector <= image.len() as u64,
+        sectors > 0 && sectors * sector <= image_len,
         "the boot sector's {sectors} sectors do not fit in {IMAGE}"
     );
 

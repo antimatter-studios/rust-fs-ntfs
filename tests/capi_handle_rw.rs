@@ -93,7 +93,7 @@ fn make_ctx(path: &str) -> (FileCtx, u64) {
 fn callback_dirty_volume_mounts_ro_but_refuses_rw_without_writes() {
     let img = copy_fixture("dirty_refuse");
     fsck::set_dirty(&img).expect("mark dirty");
-    let before = std::fs::read(&img).expect("snapshot image");
+    let before = common::snapshot_image(&img).expect("snapshot image");
     let (ctx, size) = make_ctx(&img);
     let mut cfg = FsNtfsBlockdevCfg {
         read: read_cb,
@@ -109,7 +109,7 @@ fn callback_dirty_volume_mounts_ro_but_refuses_rw_without_writes() {
     let rw = fs_ntfs_mount_with_callbacks(&cfg);
     assert!(rw.is_null(), "dirty read-write callback mount must fail");
     drop(ctx);
-    assert_eq!(std::fs::read(&img).expect("read image"), before);
+    common::assert_images_equal(&img, before.path(), "image contents");
 }
 
 #[test]

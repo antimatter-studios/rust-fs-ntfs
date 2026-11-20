@@ -71,7 +71,7 @@ fn the_windows_volume_is_rescued_and_exported_for_windows_to_grade() {
 
 /// The Windows image's bytes, its sectors at the `bad` byte offsets unreadable.
 struct Damaged {
-    bytes: Vec<u8>,
+    bytes: common::ImageBytes,
     bad: Vec<u64>,
     sector: u64,
 }
@@ -92,26 +92,27 @@ impl RescueSource for Damaged {
                 "injected bad sector at byte {bad}"
             )));
         }
-        buf.copy_from_slice(&self.bytes[offset as usize..end as usize]);
+        buf.copy_from_slice(&self.bytes.read(offset as usize..end as usize));
         Ok(())
     }
 }
 
 #[test]
 fn a_missing_span_inside_a_windows_mft_record_names_that_record() {
-    let bytes =
-        std::fs::read(IMAGE).unwrap_or_else(|e| panic!("{IMAGE}: {e}; run {PROVIDER} to make it"));
+    let bytes = common::ImageBytes::snapshot(IMAGE)
+        .unwrap_or_else(|e| panic!("{IMAGE}: {e}; run {PROVIDER} to make it"));
     // Record 3 ($Volume) placed from the boot sector Windows wrote: the
     // $MFT cluster and the record size, never this crate's MFT reader.
     let le = |at: usize, n: usize| {
-        bytes[at..at + n]
+        bytes
+            .read(at..at + n)
             .iter()
             .rev()
             .fold(0u64, |v, &b| (v << 8) | u64::from(b))
     };
     let sector = le(0x0B, 2);
     let cluster = sector * le(0x0D, 1);
-    let per = bytes[0x40] as i8;
+    let per = bytes.read(0x40..0x41)[0] as i8;
     let record = if per > 0 {
         per as u64 * cluster
     } else {
@@ -227,8 +228,8 @@ fn an_incomplete_windows_export_is_written_for_windows_to_grade() {
     let bad = vec![data + cluster, data + 4 * cluster - sector];
     let injected: Vec<(u64, u64)> = bad.iter().map(|&at| (at, sector)).collect();
 
-    let bytes =
-        std::fs::read(IMAGE).unwrap_or_else(|e| panic!("{IMAGE}: {e}; run {PROVIDER} to make it"));
+    let bytes = common::ImageBytes::snapshot(IMAGE)
+        .unwrap_or_else(|e| panic!("{IMAGE}: {e}; run {PROVIDER} to make it"));
     let mut source = Damaged { bytes, bad, sector };
     let archive = common::temp_image_path("rescue_export_windows_incomplete");
     let mut out = std::fs::OpenOptions::new()

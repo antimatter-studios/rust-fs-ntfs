@@ -47,6 +47,8 @@
 //! fuzzer is about to mutate. They read the `mft_record` corpus rather
 //! than each keeping an identical copy of it.
 
+use common::ImageBytes;
+use operation_sequence::common;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -213,14 +215,18 @@ fn targets() -> Vec<Target> {
 
 // ---------------------------------------------------------------- corpus
 
-fn seeds(corpus: &str) -> Vec<(String, Vec<u8>)> {
+fn seeds(corpus: &str) -> Vec<(String, ImageBytes)> {
     let dir = corpus_root().join(corpus);
-    let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir)
+    let mut out: Vec<(String, ImageBytes)> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("reading the corpus directory {}: {e}", dir.display()))
         .map(|entry| {
             let path = entry.expect("corpus directory entry").path();
-            let bytes = std::fs::read(&path)
-                .unwrap_or_else(|e| panic!("reading the seed {}: {e}", path.display()));
+            let bytes = if corpus == "image" {
+                ImageBytes::snapshot(&path)
+            } else {
+                common::read_small_file(&path).map(ImageBytes::from)
+            }
+            .unwrap_or_else(|e| panic!("reading the seed {}: {e}", path.display()));
             let name = path
                 .file_name()
                 .expect("seed file name")
@@ -271,9 +277,9 @@ impl Rng {
 /// file nine times out of ten, where nothing parses it. Half the
 /// mutations are aimed at the first two blocks, which is where the
 /// superblock, the inode table and the directory blocks are.
-fn mutate(seed: &[u8], rng: &mut Rng) -> Vec<u8> {
-    let mut out = seed.to_vec();
-    if out.is_empty() {
+fn mutate(seed: &ImageBytes, rng: &mut Rng) -> ImageBytes {
+    let mut out = seed.clone();
+    if out.len() == 0 {
         return out;
     }
     let metadata_end = out.len().min(8192);
@@ -287,14 +293,14 @@ fn mutate(seed: &[u8], rng: &mut Rng) -> Vec<u8> {
         0 => {
             for _ in 0..=rng.below(8) {
                 let at = rng.below(region);
-                out[at] ^= 1u8 << rng.below(8);
+                out.xor(at, 1u8 << rng.below(8));
             }
         }
         1 => {
             let at = rng.below(region);
             let len = 1 + rng.below(16.min(out.len() - at));
             let fill = if rng.next() & 1 == 0 { 0x00 } else { 0xff };
-            out[at..at + len].fill(fill);
+            out.write(at..at + len, &vec![fill; len]).unwrap();
         }
         2 => {
             let width = [2usize, 4, 8][rng.below(3)];
@@ -308,7 +314,8 @@ fn mutate(seed: &[u8], rng: &mut Rng) -> Vec<u8> {
                         _ => rng.next(),
                     };
                     // Little-endian: every multi-byte field in partition table is.
-                    out[at..at + width].copy_from_slice(&value.to_le_bytes()[..width]);
+                    out.write(at..at + width, &value.to_le_bytes()[..width])
+                        .unwrap();
                 }
             }
         }
@@ -318,7 +325,10 @@ fn mutate(seed: &[u8], rng: &mut Rng) -> Vec<u8> {
                 let b = rng.below(region / 4) * 4;
                 if a + 4 <= out.len() && b + 4 <= out.len() {
                     for i in 0..4 {
-                        out.swap(a + i, b + i);
+                        let left = out.read(a + i..a + i + 1);
+                        let right = out.read(b + i..b + i + 1);
+                        out.write(a + i..a + i + 1, &right).unwrap();
+                        out.write(b + i..b + i + 1, &left).unwrap();
                     }
                 }
             }
@@ -327,10 +337,11 @@ fn mutate(seed: &[u8], rng: &mut Rng) -> Vec<u8> {
             if out.len() >= 4 {
                 let at = rng.below(region / 4) * 4;
                 if at + 4 <= out.len() {
-                    let word = u32::from_le_bytes(out[at..at + 4].try_into().expect("4 bytes"));
+                    let word =
+                        u32::from_le_bytes(out.read(at..at + 4).try_into().expect("4 bytes"));
                     let delta = [1i64, -1, 2, -2, 255, -255][rng.below(6)];
                     let changed = (i64::from(word).wrapping_add(delta)) as u32;
-                    out[at..at + 4].copy_from_slice(&changed.to_le_bytes());
+                    out.write(at..at + 4, &changed.to_le_bytes()).unwrap();
                 }
             }
         }
@@ -381,7 +392,7 @@ fn every_committed_volume_reads_its_geometry_and_finds_its_mft() {
     );
 
     for (name, bytes) in images {
-        let mut io = Bytes(bytes);
+        let mut io = bytes;
         let params = fs_ntfs::mft_io::read_boot_params_io(&mut io)
             .unwrap_or_else(|e| panic!("{name}: a volume mkntfs wrote would not read: {e}"));
 
@@ -417,8 +428,11 @@ fn every_committed_record_has_attributes_to_walk() {
 
     let mut with_attributes = 0;
     for (name, bytes) in records {
-        assert_eq!(&bytes[..4], b"FILE", "{name}: not an MFT record");
-        if fs_ntfs::attr_io::iter_attributes(&bytes).next().is_some() {
+        assert_eq!(&bytes.small()[..4], b"FILE", "{name}: not an MFT record");
+        if fs_ntfs::attr_io::iter_attributes(bytes.small())
+            .next()
+            .is_some()
+        {
             with_attributes += 1;
         }
     }
@@ -451,8 +465,12 @@ fn deterministic_mutations_of_real_structures_are_survived() {
                     for case in 0..target.cases {
                         *worker_current.lock().expect("progress lock") =
                             format!("{} / {seed_name} / seed {start} / case {case}", target.name);
-                        let mutated = mutate(&bytes, &mut rng);
-                        (target.run)(&mutated);
+                        let mut mutated = mutate(&bytes, &mut rng);
+                        if target.name == "image" {
+                            walk_io(&mut mutated);
+                        } else {
+                            (target.run)(mutated.small());
+                        }
                         worker_cases.fetch_add(1, Ordering::Relaxed);
                     }
                 }

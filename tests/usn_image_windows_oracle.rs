@@ -25,7 +25,6 @@ use fs_ntfs::usn_cursor::{CursorAdmission, UsnCursor};
 use fs_ntfs::usn_image::{
     journal_state_io, read_records_io, ImageJournal, JournalReadError, JournalState,
 };
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 const IMG: &str = "test-disks/ntfs-usnjrnl.img";
@@ -111,7 +110,7 @@ fn listed_records() -> Vec<Listed> {
 }
 
 fn image_sha256() -> [u8; 32] {
-    Sha256::digest(std::fs::read(IMG).expect("read the fixture")).into()
+    common::image_digest(IMG).expect("digest the fixture")
 }
 
 fn active_journal(io: &mut PathIo) -> ImageJournal {

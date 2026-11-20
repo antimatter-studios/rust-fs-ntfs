@@ -59,19 +59,22 @@ pub const RECORD_BUDGET: u64 = 48;
 /// memory.
 pub fn walk(image: &[u8]) {
     let mut io = Bytes(image.to_vec());
+    walk_io(&mut io);
+}
 
-    let Ok(params) = fs_ntfs::mft_io::read_boot_params_io(&mut io) else {
+pub fn walk_io(io: &mut dyn BlockIo) {
+    let Ok(params) = fs_ntfs::mft_io::read_boot_params_io(io) else {
         return;
     };
 
     for record_number in 0..RECORD_BUDGET {
         let _ = fs_ntfs::mft_io::mft_record_offset(&params, record_number);
-        let _ = fs_ntfs::read::read_stat(&mut io, record_number);
+        let _ = fs_ntfs::read::read_stat(io, record_number);
     }
 
     // Path resolution walks the root directory's index, which is the
     // structure a lookup actually touches.
     for path in ["/", "/$MFT", "/nowhere", "/a/b/c"] {
-        let _ = fs_ntfs::read::resolve_path(&mut io, path);
+        let _ = fs_ntfs::read::resolve_path(io, path);
     }
 }

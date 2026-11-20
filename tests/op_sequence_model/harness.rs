@@ -892,7 +892,8 @@ pub fn capture<M: Expected>(
             original.display()
         )
     };
-    let input = fs::read(original).map_err(|e| format!("{}: {e}", original.display()))?;
+    let input =
+        common::read_small_file(original).map_err(|e| format!("{}: {e}", original.display()))?;
     let scratch = format!("capture-{name}");
     let scratch_dir = Path::new("tmp/op-sequence-model").join(&scratch);
     if let (Ok(file), Ok(dir)) = (fs::canonicalize(original), fs::canonicalize(&scratch_dir)) {

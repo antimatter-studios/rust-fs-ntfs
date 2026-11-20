@@ -24,7 +24,6 @@ mod common;
 use common::fn_fields_windows::{observed, Fields, WINDOWS};
 use ntfs::structured_values::NtfsFileName;
 use ntfs::Ntfs;
-use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -99,8 +98,8 @@ fn image(step: usize) -> PathBuf {
 }
 
 fn sha256(path: &Path) -> String {
-    let bytes = std::fs::read(path).expect("read image");
-    Sha256::digest(&bytes)
+    common::image_digest(path)
+        .expect("digest image")
         .iter()
         .fold(String::new(), |mut s, b| {
             let _ = write!(s, "{b:02x}");
@@ -179,7 +178,7 @@ fn the_three_file_name_fields_match_the_expectations_for_all_six_windows_steps()
         );
         hashes.push(hash.clone());
 
-        let bytes = std::fs::read(&path).expect("read image");
+        let bytes = common::read_image_region(&path, 0, 512).expect("read boot sector");
         assert_eq!(
             &bytes[3..11],
             b"NTFS    ",

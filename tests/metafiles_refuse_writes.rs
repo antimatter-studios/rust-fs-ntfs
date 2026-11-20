@@ -81,7 +81,7 @@ fn every_write_to_a_metafile_is_refused_and_the_volume_is_unchanged() {
             "{must} is not among the metafiles found: {paths:?}"
         );
     }
-    let before = std::fs::read(&img).expect("read image");
+    let before = common::snapshot_image(&img).expect("snapshot image");
 
     for p in &paths {
         refused(&format!("unlink {p}"), write::unlink_io(&mut io, p));
@@ -141,8 +141,7 @@ fn every_write_to_a_metafile_is_refused_and_the_volume_is_unchanged() {
     );
     <PathIo as BlockIo>::sync(&mut io).expect("sync");
 
-    let after = std::fs::read(&img).expect("read image");
-    let first_change = before.iter().zip(&after).position(|(a, b)| a != b);
+    let first_change = common::first_image_difference(before.path(), &img).expect("compare images");
     assert!(
         first_change.is_none(),
         "a refused write changed the image, first at byte {first_change:?}"

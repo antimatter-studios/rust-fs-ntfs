@@ -182,7 +182,7 @@ fn dirty_rw_mount_refuses_before_upgrade_and_ro_mount_still_works() {
     file.write_all(&[1, 2]).expect("set upgradeable version");
     file.sync_all().expect("sync version");
 
-    let before = std::fs::read(&img).expect("snapshot image");
+    let before = common::snapshot_image(&img).expect("snapshot image");
     let ro = Filesystem::mount(&img).expect("dirty read-only mount");
     assert!(ro.is_dirty().expect("dirty flag"));
     let err = Filesystem::mount_rw(&img).expect_err("dirty RW mount must fail");
@@ -192,16 +192,16 @@ fn dirty_rw_mount_refuses_before_upgrade_and_ro_mount_still_works() {
         fs_ntfs_mount(c_path.as_ptr()).is_null(),
         "writable C path mount must reject dirty volume"
     );
-    assert_eq!(std::fs::read(&img).expect("read image"), before);
+    common::assert_images_equal(&img, before.path(), "image contents");
 }
 
 #[test]
 fn fsck_preserves_dirty_volume_with_nonempty_log() {
     let img = dirty_copy("refuse_nonempty_log", true, true);
-    let before = std::fs::read(&img).expect("snapshot image");
+    let before = common::snapshot_image(&img).expect("snapshot image");
     let err = fsck::fsck(&img).expect_err("fsck must refuse pending log data");
     assert!(err.contains("$LogFile"), "unexpected error: {err}");
-    assert_eq!(std::fs::read(&img).expect("read image"), before);
+    common::assert_images_equal(&img, before.path(), "image contents");
     assert!(read_volume_flags(&img).contains(NtfsVolumeFlags::IS_DIRTY));
 }
 
@@ -218,11 +218,11 @@ fn fsck_checks_entire_dirty_log_before_writing() {
         .expect("seek log tail");
     file.write_all(&[0]).expect("write log tail");
     file.sync_all().expect("sync log");
-    let before = std::fs::read(&img).expect("snapshot image");
+    let before = common::snapshot_image(&img).expect("snapshot image");
 
     let err = fsck::fsck(&img).expect_err("late log data must be preserved");
     assert!(err.contains("$LogFile"), "unexpected error: {err}");
-    assert_eq!(std::fs::read(&img).expect("read image"), before);
+    common::assert_images_equal(&img, before.path(), "image contents");
 }
 
 #[test]
