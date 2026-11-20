@@ -15,58 +15,26 @@
 //! refused by name.
 #![cfg(windows)]
 
-use fs_core::{BlockDevice, BlockRead};
 use fs_ntfs::file::FileAPI;
 use fs_ntfs::primitives::PrimitiveAPI;
 use fs_ntfs::volume::{RawVolume, Volume, VolumeAPI};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
 
 const IMAGE: &str = "test-disks/ntfs-4kn-read.img";
 const HASHES: &str = "test-disks/ntfs-4kn-read.sha256.tsv";
 const RECORD: &str = "test-disks/ntfs-4kn-read.ntfsinfo.txt";
 const PROVIDER: &str = "test-disks/build-windows-4kn-fixture.ps1";
 
-#[derive(Clone)]
-struct Image(Arc<Mutex<Vec<u8>>>);
+mod common;
 
-impl BlockRead for Image {
-    fn read_at(&self, offset: u64, output: &mut [u8]) -> fs_core::Result<()> {
-        let data = self.0.lock().unwrap();
-        let range = usize::try_from(offset)
-            .ok()
-            .and_then(|start| Some(start..start.checked_add(output.len())?))
-            .and_then(|range| data.get(range));
-        output.copy_from_slice(range.ok_or(fs_core::Error::OutOfBounds {
-            offset,
-            len: output.len() as u64,
-            size: data.len() as u64,
-        })?);
-        Ok(())
-    }
-    fn size_bytes(&self) -> u64 {
-        self.0.lock().unwrap().len() as u64
-    }
-}
-
-impl BlockDevice for Image {
-    fn write_at(&self, offset: u64, input: &[u8]) -> fs_core::Result<()> {
-        let mut data = self.0.lock().unwrap();
-        let start = offset as usize;
-        data[start..start + input.len()].copy_from_slice(input);
-        Ok(())
-    }
-    fn is_writable(&self) -> bool {
-        true
-    }
-}
+/// The image file read a span at a time; writes go to memory, never to it.
+type Image = common::PatchedImage;
 
 fn image() -> Image {
-    let bytes = std::fs::read(IMAGE).unwrap_or_else(|e| {
+    Image::open(IMAGE).unwrap_or_else(|e| {
         panic!("{IMAGE}: {e}; {PROVIDER} builds it on an elevated Windows host")
-    });
-    Image(Arc::new(Mutex::new(bytes)))
+    })
 }
 
 /// `(path, size, sha256)` of every file Windows wrote.
@@ -187,8 +155,8 @@ fn a_torn_stride_of_a_record_smaller_than_its_sector_is_still_detected() {
     let record = volume.inspect_mft_record(number).unwrap();
     assert!(record.issues.is_empty(), "{:?}", record.issues);
     for stride_end in [510usize, 1022] {
-        let damaged = Image(Arc::new(Mutex::new(device.0.lock().unwrap().clone())));
-        damaged.0.lock().unwrap()[record.offset as usize + stride_end] ^= 0xff;
+        let mut damaged = device.clone();
+        damaged.update(record.offset + stride_end as u64, |byte| byte ^ 0xff);
         let torn = Volume::open_for_salvage(damaged)
             .unwrap()
             .inspect_mft_record(number)
@@ -235,11 +203,11 @@ fn a_salvage_read_follows_the_same_records() {
 #[test]
 fn a_writable_mount_of_records_smaller_than_a_sector_is_refused_and_writes_nothing() {
     let device = image();
-    let before = sha256(&device.0.lock().unwrap());
+    let before = device.digest();
     let error = match Volume::open_writable(device.clone()) {
         Ok(_) => panic!("a writable mount was admitted"),
         Err(error) => error.to_string(),
     };
     assert!(error.contains("smaller than"), "{error}");
-    assert_eq!(sha256(&device.0.lock().unwrap()), before);
+    assert_eq!(device.digest(), before);
 }
