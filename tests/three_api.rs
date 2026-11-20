@@ -1,9 +1,9 @@
 use fs_core::{BlockDevice, BlockRead};
 use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::block_io::BlockIo;
-use fs_ntfs::file::FileAPI;
-use fs_ntfs::primitives::{inspect_file_record, AttributeValue, PrimitiveAPI};
-use fs_ntfs::volume::{RawVolume, Volume, VolumeAPI};
+use fs_ntfs::file::NtfsFileAPI;
+use fs_ntfs::primitives::{inspect_file_record, AttributeValue, NtfsPrimitiveAPI};
+use fs_ntfs::volume::{NtfsVolumeAPI, RawVolume, Volume};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]

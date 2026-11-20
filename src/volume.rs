@@ -10,7 +10,7 @@ static NEXT_VOLUME: AtomicU64 = AtomicU64::new(1);
 type WriteAt<Device> = fn(&Device, u64, &[u8]) -> Result<(), Error>;
 type Flush<Device> = fn(&Device) -> Result<(), Error>;
 
-pub trait VolumeAPI {
+pub trait NtfsVolumeAPI {
     fn size_bytes(&self) -> u64;
     fn geometry(&self) -> Result<BootParams, Error>;
     fn read_volume_bytes(&self, offset: u64, output: &mut [u8]) -> Result<(), Error>;
@@ -36,6 +36,11 @@ impl<Device: BlockRead> RawVolume<Device> {
         }
     }
 
+    /// The device the volume reads.
+    pub(crate) fn device(&self) -> &Device {
+        &self.device
+    }
+
     pub(crate) fn with_io<T>(
         &self,
         operation: impl FnOnce(&mut Transport<'_, Device>) -> Result<T, Error>,
@@ -50,7 +55,7 @@ impl<Device: BlockRead> RawVolume<Device> {
     fn check_range(&self, offset: u64, length: usize) -> Result<(), Error> {
         offset
             .checked_add(length as u64)
-            .filter(|end| *end <= self.size_bytes())
+            .filter(|end| *end <= NtfsVolumeAPI::size_bytes(self))
             .map(|_| ())
             .ok_or_else(|| Error::invalid("volume byte range exceeds source"))
     }
@@ -74,7 +79,7 @@ impl<Device: BlockDevice> RawVolume<Device> {
     }
 }
 
-impl<Device: BlockRead> VolumeAPI for RawVolume<Device> {
+impl<Device: BlockRead> NtfsVolumeAPI for RawVolume<Device> {
     fn size_bytes(&self) -> u64 {
         self.device.size_bytes()
     }
@@ -120,23 +125,19 @@ pub(crate) struct Transport<'volume, Device: BlockRead> {
 
 impl<Device: BlockRead> BlockIo for Transport<'_, Device> {
     fn read_exact_at(&mut self, offset: u64, output: &mut [u8]) -> Result<(), String> {
-        self.volume
-            .read_volume_bytes(offset, output)
-            .map_err(Into::into)
+        NtfsVolumeAPI::read_volume_bytes(self.volume, offset, output).map_err(Into::into)
     }
     fn write_all_at(&mut self, offset: u64, data: &[u8]) -> Result<(), String> {
-        self.volume
-            .write_volume_bytes(offset, data)
-            .map_err(Into::into)
+        NtfsVolumeAPI::write_volume_bytes(self.volume, offset, data).map_err(Into::into)
     }
     fn size(&self) -> u64 {
-        self.volume.size_bytes()
+        NtfsVolumeAPI::size_bytes(self.volume)
     }
     fn sync(&mut self) -> Result<(), String> {
-        self.volume.flush().map_err(Into::into)
+        NtfsVolumeAPI::flush(self.volume).map_err(Into::into)
     }
     fn can_sync(&self) -> bool {
-        self.volume.is_writable()
+        NtfsVolumeAPI::is_writable(self.volume)
     }
 }
 
@@ -159,8 +160,18 @@ impl<Device: BlockRead> Volume<Device> {
         Self::from_raw(RawVolume::open(device))
     }
 
+    /// A volume read with boot parameters the caller already validated,
+    /// such as the backup boot sector's.
+    pub(crate) fn with_boot(raw: RawVolume<Device>, boot: BootParams) -> Self {
+        Self {
+            raw,
+            boot,
+            id: NEXT_VOLUME.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
     fn from_raw(raw: RawVolume<Device>) -> Result<Self, Error> {
-        let boot = raw.geometry()?;
+        let boot = NtfsVolumeAPI::geometry(&raw)?;
         Ok(Self {
             raw,
             boot,
@@ -179,7 +190,7 @@ impl<Device: BlockRead> Volume<Device> {
     pub fn cluster_offset(&self, cluster: u64) -> Result<u64, Error> {
         cluster
             .checked_mul(self.boot.cluster_size)
-            .filter(|offset| *offset < self.size_bytes())
+            .filter(|offset| *offset < NtfsVolumeAPI::size_bytes(self))
             .ok_or_else(|| Error::invalid("cluster outside NTFS volume"))
     }
 
@@ -199,9 +210,11 @@ impl<Device: BlockDevice> Volume<Device> {
     }
 }
 
-impl<Device: BlockRead> VolumeAPI for Volume<Device> {
+impl<Device: BlockRead> NtfsVolumeAPI for Volume<Device> {
     fn size_bytes(&self) -> u64 {
-        self.boot.volume_bytes().min(self.raw.size_bytes())
+        self.boot
+            .volume_bytes()
+            .min(NtfsVolumeAPI::size_bytes(&self.raw))
     }
     fn geometry(&self) -> Result<BootParams, Error> {
         Ok(self.boot)
@@ -209,21 +222,52 @@ impl<Device: BlockRead> VolumeAPI for Volume<Device> {
     fn read_volume_bytes(&self, offset: u64, output: &mut [u8]) -> Result<(), Error> {
         offset
             .checked_add(output.len() as u64)
-            .filter(|end| *end <= self.size_bytes())
+            .filter(|end| *end <= NtfsVolumeAPI::size_bytes(self))
             .ok_or_else(|| Error::invalid("read exceeds declared NTFS volume"))?;
-        self.raw.read_volume_bytes(offset, output)
+        NtfsVolumeAPI::read_volume_bytes(&self.raw, offset, output)
     }
     fn write_volume_bytes(&self, offset: u64, data: &[u8]) -> Result<(), Error> {
         offset
             .checked_add(data.len() as u64)
-            .filter(|end| *end <= self.size_bytes())
+            .filter(|end| *end <= NtfsVolumeAPI::size_bytes(self))
             .ok_or_else(|| Error::invalid("write exceeds declared NTFS volume"))?;
-        self.raw.write_volume_bytes(offset, data)
+        NtfsVolumeAPI::write_volume_bytes(&self.raw, offset, data)
     }
     fn is_writable(&self) -> bool {
-        self.raw.is_writable()
+        NtfsVolumeAPI::is_writable(&self.raw)
     }
     fn flush(&self) -> Result<(), Error> {
-        self.raw.flush()
+        NtfsVolumeAPI::flush(&self.raw)
     }
 }
+
+/// The name [`NtfsVolumeAPI`] had before rust-fs-core's shared `VolumeAPI`
+/// (`fs_core::layers`), which [`crate::layers::NtfsVolume`] implements.
+/// Kept for one release.
+#[deprecated(
+    since = "0.12.0",
+    note = "use fs_ntfs::layers::NtfsVolume through fs_core::layers::VolumeAPI, or NtfsVolumeAPI for the NTFS-specific surface"
+)]
+pub trait VolumeAPI: NtfsVolumeAPI {
+    fn size_bytes(&self) -> u64 {
+        NtfsVolumeAPI::size_bytes(self)
+    }
+    fn geometry(&self) -> Result<BootParams, Error> {
+        NtfsVolumeAPI::geometry(self)
+    }
+    fn read_volume_bytes(&self, offset: u64, output: &mut [u8]) -> Result<(), Error> {
+        NtfsVolumeAPI::read_volume_bytes(self, offset, output)
+    }
+    fn write_volume_bytes(&self, offset: u64, data: &[u8]) -> Result<(), Error> {
+        NtfsVolumeAPI::write_volume_bytes(self, offset, data)
+    }
+    fn is_writable(&self) -> bool {
+        NtfsVolumeAPI::is_writable(self)
+    }
+    fn flush(&self) -> Result<(), Error> {
+        NtfsVolumeAPI::flush(self)
+    }
+}
+
+#[allow(deprecated)]
+impl<T: NtfsVolumeAPI + ?Sized> VolumeAPI for T {}

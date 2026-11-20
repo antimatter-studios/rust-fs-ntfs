@@ -65,6 +65,7 @@ pub mod fsck;
 pub mod idx_block;
 pub mod index_io;
 mod index_slack;
+pub mod layers;
 pub mod logfile;
 pub mod logfile_replay;
 pub mod logfile_write;
@@ -92,9 +93,11 @@ pub mod view_index;
 pub mod volume;
 pub mod write;
 
-pub use file::FileAPI;
-pub use primitives::PrimitiveAPI;
-pub use volume::{RawVolume, Volume, VolumeAPI};
+pub use file::NtfsFileAPI;
+pub use primitives::NtfsPrimitiveAPI;
+pub use volume::{NtfsVolumeAPI, RawVolume, Volume};
+#[allow(deprecated)]
+pub use {file::FileAPI, primitives::PrimitiveAPI, volume::VolumeAPI};
 
 #[cfg(test)]
 mod test_image;

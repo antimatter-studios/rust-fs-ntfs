@@ -15,9 +15,9 @@
 //! refused by name.
 #![cfg(windows)]
 
-use fs_ntfs::file::FileAPI;
-use fs_ntfs::primitives::PrimitiveAPI;
-use fs_ntfs::volume::{RawVolume, Volume, VolumeAPI};
+use fs_ntfs::file::NtfsFileAPI;
+use fs_ntfs::primitives::NtfsPrimitiveAPI;
+use fs_ntfs::volume::{NtfsVolumeAPI, RawVolume, Volume};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
@@ -210,4 +210,24 @@ fn a_writable_mount_of_records_smaller_than_a_sector_is_refused_and_writes_nothi
     };
     assert!(error.contains("smaller than"), "{error}");
     assert_eq!(device.digest(), before);
+}
+
+#[test]
+fn the_shared_layers_read_the_volume_windows_formatted() {
+    use fs_core::layers::conformance::{self, Limits};
+    use fs_core::layers::{FileAPI, OpenVolume};
+    use fs_ntfs::layers::NtfsVolume;
+    let volume = NtfsVolume::open(image()).unwrap();
+    let limits = Limits {
+        max_lookups: 256,
+        ..Limits::default()
+    };
+    conformance::check_healthy(&volume, &[], &limits).assert_passed();
+    for (path, size, digest) in windows_files() {
+        let node = volume.lookup(&path).unwrap();
+        let mut bytes = Vec::new();
+        volume.copy_to(&node, &mut bytes).unwrap();
+        assert_eq!(bytes.len() as u64, size, "{path}");
+        assert_eq!(sha256(&bytes), digest, "{path}");
+    }
 }

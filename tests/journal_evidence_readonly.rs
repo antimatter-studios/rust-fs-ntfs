@@ -25,7 +25,7 @@ use fs_core::BlockRead;
 use fs_ntfs::evidence::{
     logfile_state, read_usn_records, replay_logfile_in_memory, usn_journal_state, walk_logfile,
 };
-use fs_ntfs::file::FileAPI;
+use fs_ntfs::file::NtfsFileAPI;
 use fs_ntfs::fsck;
 use fs_ntfs::usn_image::JournalState;
 use fs_ntfs::volume::Volume;

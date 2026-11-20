@@ -10,7 +10,7 @@
 
 use super::{
     decode_file_name, inspect_file_record, AttributeEvidence, AttributeValue, FileNameEvidence,
-    PrimitiveAPI, RecordEvidence, MAX_RECORD_BYTES,
+    NtfsPrimitiveAPI, RecordEvidence, MAX_RECORD_BYTES,
 };
 use crate::attr_io::{attr_flags, AttrType};
 use crate::compression;
@@ -596,7 +596,7 @@ fn entry_names(entry: &ListEntry, attribute: &AttributeEvidence) -> bool {
         && attribute_vcn(attribute) == entry.starting_vcn
 }
 
-pub(super) fn read_mapped_record<V: PrimitiveAPI + ?Sized>(
+pub(super) fn read_mapped_record<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     map: &MftMap,
     number: u64,
@@ -613,7 +613,7 @@ pub(super) fn read_mapped_record<V: PrimitiveAPI + ?Sized>(
     Ok(inspect_file_record(pieces[0].0, raw, map.sector_size))
 }
 
-pub(super) fn read_mft_map<V: PrimitiveAPI + ?Sized>(
+pub(super) fn read_mft_map<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     mft_offset: u64,
     record_size: usize,
@@ -633,7 +633,7 @@ pub(super) fn read_mft_map<V: PrimitiveAPI + ?Sized>(
     Ok(map)
 }
 
-pub(super) fn read_mft_map_from_mirror<V: PrimitiveAPI + ?Sized>(
+pub(super) fn read_mft_map_from_mirror<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     boot: &BootParams,
 ) -> Result<MftMap, Error> {
@@ -662,7 +662,7 @@ pub(super) fn read_mft_map_from_mirror<V: PrimitiveAPI + ?Sized>(
     Ok(map)
 }
 
-pub(super) fn read_mirror_record<V: PrimitiveAPI + ?Sized>(
+pub(super) fn read_mirror_record<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     boot: &BootParams,
     number: u64,
@@ -686,7 +686,7 @@ pub(super) fn read_mirror_record<V: PrimitiveAPI + ?Sized>(
 
 /// A map from `$MFT`'s own record 0, wherever that copy was read, following
 /// its attribute list when it has one.
-fn map_from_record_zero<V: PrimitiveAPI + ?Sized>(
+fn map_from_record_zero<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     record: &RecordEvidence,
     record_size: usize,
@@ -758,7 +758,7 @@ fn map_from_record_zero<V: PrimitiveAPI + ?Sized>(
     Ok(map)
 }
 
-pub(super) fn resolve_salvage_record<V: PrimitiveAPI + ?Sized>(
+pub(super) fn resolve_salvage_record<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     base: &RecordEvidence,
     map: &MftMap,
@@ -955,7 +955,7 @@ pub(super) fn resolve_salvage_record<V: PrimitiveAPI + ?Sized>(
     Ok(resolved)
 }
 
-pub(super) fn read_stream_at<V: PrimitiveAPI + ?Sized>(
+pub(super) fn read_stream_at<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     stream: &SalvageStream,
     cluster_size: u64,
@@ -1022,7 +1022,7 @@ pub(super) fn read_stream_at<V: PrimitiveAPI + ?Sized>(
     Ok(count)
 }
 
-fn read_plain<V: PrimitiveAPI + ?Sized>(
+fn read_plain<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     stream: &SalvageStream,
     cluster_size: u64,
@@ -1065,7 +1065,7 @@ fn read_plain<V: PrimitiveAPI + ?Sized>(
 /// some leading clusters allocated and the rest a hole, LZNT1-compressed into
 /// the allocated ones; no cluster allocated, all zeros. Bytes past the
 /// initialized size read as zeros, as they do uncompressed.
-fn read_compressed<V: PrimitiveAPI + ?Sized>(
+fn read_compressed<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     stream: &SalvageStream,
     cluster_size: u64,
