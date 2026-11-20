@@ -1125,6 +1125,8 @@ jobs:
             test-disks/usn-journal-data.tsv
             test-disks/usn-read-probe.tsv
             test-disks/ntfs-attrlist.img
+            test-disks/ntfs-salvage-streams.img
+            test-disks/ntfs-salvage-streams.tsv
             test-disks/ntfs-attrlist.streams.tsv
             test-disks/ntfs-attrlist.streams.tsv.bytes/
             test-disks/ntfs-attrlist-names.img

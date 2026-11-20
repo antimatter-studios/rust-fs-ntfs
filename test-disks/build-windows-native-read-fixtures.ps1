@@ -19,6 +19,9 @@
 #     reports of the journal and of every record in it
 #   * ntfs-stat.img: one of each thing `fs.ntfs stat` reports on, plus
 #     ntfs-stat.windows.tsv, what Windows reports for each path
+#   * ntfs-salvage-streams.img and ntfs-salvage-streams.tsv, built by
+#     build-windows-salvage-stream-fixtures.ps1: streams and names held in
+#     extension records, and compressed streams, for salvage reads
 #
 # Run from the repository root on an elevated Windows host. rust-img-vhd must be
 # on PATH; CI installs the pinned rust-img-vhd release before invoking this.
@@ -755,5 +758,7 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-ls-recursive.img' -Label 'LSRECUR
     [IO.File]::WriteAllText($walkReport, (($lines -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
 }
 
-Get-Item test-disks/ntfs-attrlist.img,test-disks/ntfs-attrlist-names.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img,test-disks/ntfs-format-64k.img,test-disks/ntfs-usnjrnl.img,test-disks/ntfs-inventory.img,test-disks/ntfs-stat.img,test-disks/ntfs-ls-recursive.img |
+& "$PSScriptRoot\build-windows-salvage-stream-fixtures.ps1"
+
+Get-Item test-disks/ntfs-salvage-streams.img,test-disks/ntfs-attrlist.img,test-disks/ntfs-attrlist-names.img,test-disks/ntfs-compressed.img,test-disks/ntfs-symlink.img,test-disks/ntfs-cli-read.img,test-disks/ntfs-ea.img,test-disks/ntfs-format-64k.img,test-disks/ntfs-usnjrnl.img,test-disks/ntfs-inventory.img,test-disks/ntfs-stat.img,test-disks/ntfs-ls-recursive.img |
     Format-Table Name,Length
