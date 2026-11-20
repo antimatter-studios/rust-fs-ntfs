@@ -7,54 +7,36 @@
 //! damages a copy of it in memory and reads through `PrimitiveAPI` on a
 //! `RawVolume`, as a salvage tool does.
 
-use fs_core::BlockRead;
 use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::mft_io::{parse_boot_sector, BootParams};
 use fs_ntfs::primitives::{AttributeValue, PrimitiveAPI};
 use fs_ntfs::volume::RawVolume;
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use std::sync::Arc;
 
 const IMAGE: &str = "test-disks/ntfs-salvage-streams.img";
 const REPORT: &str = "test-disks/ntfs-salvage-streams.tsv";
 const PROVIDER: &str = "test-disks/build-windows-salvage-stream-fixtures.ps1";
 
-#[derive(Clone)]
-struct Image(Arc<Vec<u8>>);
+mod common;
 
-impl BlockRead for Image {
-    fn read_at(&self, offset: u64, output: &mut [u8]) -> fs_core::Result<()> {
-        let range = usize::try_from(offset)
-            .ok()
-            .and_then(|start| Some(start..start.checked_add(output.len())?))
-            .and_then(|range| self.0.get(range));
-        output.copy_from_slice(range.ok_or(fs_core::Error::OutOfBounds {
-            offset,
-            len: output.len() as u64,
-            size: self.0.len() as u64,
-        })?);
-        Ok(())
-    }
-    fn size_bytes(&self) -> u64 {
-        self.0.len() as u64
-    }
-}
+/// The image file read a span at a time, damage laid over it in memory.
+type Image = common::PatchedImage;
 
-fn windows_image() -> (Vec<u8>, BootParams) {
+fn windows_image() -> (Image, BootParams) {
     for path in [IMAGE, REPORT] {
         assert!(
             Path::new(path).exists(),
             "missing {path}; run {PROVIDER} on Windows"
         );
     }
-    let bytes = std::fs::read(IMAGE).unwrap();
-    let boot = parse_boot_sector(&bytes[..512]).unwrap();
-    (bytes, boot)
+    let image = Image::open(IMAGE).unwrap();
+    let boot = parse_boot_sector(&image.read(0, 512)).unwrap();
+    (image, boot)
 }
 
-fn volume(bytes: Vec<u8>) -> RawVolume<Image> {
-    RawVolume::open(Image(Arc::new(bytes)))
+fn volume(image: Image) -> RawVolume<Image> {
+    RawVolume::open(image)
 }
 
 fn mft_offset(boot: &BootParams) -> usize {
@@ -62,13 +44,11 @@ fn mft_offset(boot: &BootParams) -> usize {
 }
 
 /// `$MFT`'s first four records overwritten.
-fn with_first_records_destroyed(mut bytes: Vec<u8>, boot: &BootParams) -> Vec<u8> {
-    let start = mft_offset(boot);
+fn with_first_records_destroyed(mut image: Image, boot: &BootParams) -> Image {
     let length = 4 * boot.file_record_size as usize;
-    for (i, byte) in bytes[start..start + length].iter_mut().enumerate() {
-        *byte = (i * 31 + 7) as u8;
-    }
-    bytes
+    let pattern: Vec<u8> = (0..length).map(|i| (i * 31 + 7) as u8).collect();
+    image.write(mft_offset(boot) as u64, &pattern);
+    image
 }
 
 #[test]
@@ -187,11 +167,11 @@ fn files_are_found_through_a_map_built_from_the_mirror() {
 #[test]
 fn an_unreadable_mirror_is_reported_as_damage() {
     let (bytes, boot) = windows_image();
-    let mirror = (boot.mft_mirror_lcn * boot.cluster_size) as usize;
+    let mirror = boot.mft_mirror_lcn * boot.cluster_size;
 
     // Torn: the records are there, and fail their fixups.
     let mut torn = bytes.clone();
-    torn[mirror + 510] ^= 0xff;
+    torn.update(mirror + 510, |byte| byte ^ 0xff);
     let raw = volume(torn);
     let record = raw.read_mirror_record(&boot, 0).unwrap();
     assert!(record.fixed.is_none());
@@ -200,7 +180,7 @@ fn an_unreadable_mirror_is_reported_as_damage() {
 
     // Gone: zeros where the mirror was.
     let mut zeroed = bytes.clone();
-    zeroed[mirror..mirror + 4 * boot.file_record_size as usize].fill(0);
+    zeroed.fill(mirror, 4 * boot.file_record_size as usize, 0);
     let record = volume(zeroed).read_mirror_record(&boot, 1).unwrap();
     assert!(record.fixed.is_none() && !record.issues.is_empty());
 
