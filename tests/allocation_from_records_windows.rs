@@ -9,41 +9,23 @@
 //! records has to equal it; then `$Bitmap` and some `$MFT` records are
 //! destroyed on copies, and the rebuild has to go on and name what it lost.
 
-use fs_core::BlockRead;
 use fs_ntfs::mft_io::{parse_boot_sector, BootParams};
 use fs_ntfs::primitives::{MftMap, PrimitiveAPI};
 use fs_ntfs::volume::RawVolume;
 use std::path::Path;
-use std::sync::Arc;
 
 const IMAGE: &str = "test-disks/ntfs-salvage-streams.img";
 const PROVIDER: &str = "test-disks/build-windows-salvage-stream-fixtures.ps1";
 const BITMAP_RECORD: u64 = 6;
 const BADCLUS_RECORD: u64 = 8;
 
-#[derive(Clone)]
-struct Image(Arc<Vec<u8>>);
+mod common;
 
-impl BlockRead for Image {
-    fn read_at(&self, offset: u64, output: &mut [u8]) -> fs_core::Result<()> {
-        let range = usize::try_from(offset)
-            .ok()
-            .and_then(|start| Some(start..start.checked_add(output.len())?))
-            .and_then(|range| self.0.get(range));
-        output.copy_from_slice(range.ok_or(fs_core::Error::OutOfBounds {
-            offset,
-            len: output.len() as u64,
-            size: self.0.len() as u64,
-        })?);
-        Ok(())
-    }
-    fn size_bytes(&self) -> u64 {
-        self.0.len() as u64
-    }
-}
+/// The image file read a span at a time, damage laid over it in memory.
+type Image = common::PatchedImage;
 
 struct Fixture {
-    bytes: Vec<u8>,
+    bytes: Image,
     boot: BootParams,
     clusters: u64,
 }
@@ -53,8 +35,8 @@ fn fixture() -> Fixture {
         Path::new(IMAGE).exists(),
         "missing {IMAGE}; run {PROVIDER} on Windows"
     );
-    let bytes = std::fs::read(IMAGE).unwrap();
-    let boot = parse_boot_sector(&bytes[..512]).unwrap();
+    let bytes = Image::open(IMAGE).unwrap();
+    let boot = parse_boot_sector(&bytes.read(0, 512)).unwrap();
     let clusters = boot.total_sectors * u64::from(boot.bytes_per_sector) / boot.cluster_size;
     Fixture {
         bytes,
@@ -64,8 +46,8 @@ fn fixture() -> Fixture {
 }
 
 impl Fixture {
-    fn volume(&self, bytes: Vec<u8>) -> RawVolume<Image> {
-        RawVolume::open(Image(Arc::new(bytes)))
+    fn volume(&self, bytes: Image) -> RawVolume<Image> {
+        RawVolume::open(bytes)
     }
 
     fn map(&self, volume: &RawVolume<Image>) -> MftMap {
@@ -227,7 +209,7 @@ fn bad_clusters_are_claimed_through_badclus() {
     fs_ntfs::mft_io::apply_fixup_on_write(&mut fixed, fixture.boot.bytes_per_sector).unwrap();
     let mut bytes = fixture.bytes.clone();
     let offset = fixture.record_offset(&map, BADCLUS_RECORD);
-    bytes[offset..offset + fixed.len()].copy_from_slice(&fixed);
+    bytes.write(offset as u64, &fixed);
 
     let damaged = fixture.volume(bytes);
     let after = damaged
@@ -255,8 +237,7 @@ fn a_destroyed_bitmap_does_not_stop_the_rebuild() {
     let mut bytes = fixture.bytes.clone();
     let cluster = fixture.boot.cluster_size as usize;
     for (lcn, length) in fixture.bitmap_clusters() {
-        let at = lcn as usize * cluster;
-        bytes[at..at + length as usize * cluster].fill(0xa5);
+        bytes.fill(lcn * cluster as u64, length as usize * cluster, 0xa5);
     }
     let volume = fixture.volume(bytes.clone());
     let derived = volume
@@ -269,7 +250,7 @@ fn a_destroyed_bitmap_does_not_stop_the_rebuild() {
     // record it lost, and that it is not complete.
     let map = fixture.map(&volume);
     let at = fixture.record_offset(&map, BITMAP_RECORD);
-    bytes[at..at + fixture.boot.file_record_size as usize].fill(0);
+    bytes.fill(at as u64, fixture.boot.file_record_size as usize, 0);
     let volume = fixture.volume(bytes);
     let derived = volume
         .derive_allocation(&fixture.map(&volume), fixture.clusters)
@@ -305,9 +286,8 @@ fn destroyed_records_are_named_and_record_zero_is_walked_through_the_mirror() {
     let size = fixture.boot.file_record_size as usize;
     for number in [0u64, 40, 41, 42, 90] {
         let at = fixture.record_offset(&map, number);
-        for (i, byte) in bytes[at..at + size].iter_mut().enumerate() {
-            *byte = (i * 13 + 1) as u8;
-        }
+        let pattern: Vec<u8> = (0..size).map(|i| (i * 13 + 1) as u8).collect();
+        bytes.write(at as u64, &pattern);
     }
     let damaged = fixture.volume(bytes);
     assert!(damaged
