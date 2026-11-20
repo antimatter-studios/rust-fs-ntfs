@@ -23,10 +23,20 @@ permissions:
   contents: read
 
 jobs:
+  interrupted-bootstrap-gate:
+    needs: changes
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   interrupted-bootstrap:
     name: interrupted fixture bootstrap guard
-    needs: changes
-    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['interrupted-bootstrap'] || 'ubuntu-24.04' }}
+    needs: [changes, interrupted-bootstrap-gate]
+    runs-on: ${{ needs.interrupted-bootstrap-gate.outputs.runner }}
     # A gated runner installs PowerShell and PyYAML first, and the preservation test alone takes
     # about 75 s there, so 3 minutes ran out in the scrub step on two merge-group runs.
     timeout-minutes: 8
@@ -52,10 +62,20 @@ jobs:
         shell: pwsh
         run: ./tests/scripts/scrub-bootstrap.ps1
 
+  python-abi-gate:
+    needs: changes
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   python-abi:
     name: Python ctypes client over the shared C ABI
-    needs: changes
-    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['python-abi'] || 'ubuntu-24.04' }}
+    needs: [changes, python-abi-gate]
+    runs-on: ${{ needs.python-abi-gate.outputs.runner }}
     timeout-minutes: 15
     env:
       CARGO_BUILD_JOBS: 2
@@ -94,12 +114,22 @@ jobs:
           FS_NTFS_FIXTURE: ${{ github.workspace }}/target/python-abi.img
         run: python3 -m unittest -v tests/python/test_dir_listing.py
 
+  python-volume-info-windows-gate:
+    needs: [changes, windows-native-read-fixtures]
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   # The same Python client graded against Windows' own fsutil record of the
   # volume it formatted, bound to that image's SHA-256.
   python-volume-info-windows:
     name: Python volume info matches Windows fsutil
-    needs: [changes, windows-native-read-fixtures]
-    runs-on: ${{ fromJSON(needs.windows-native-read-fixtures.outputs.runners || '{}')['python-volume-info-windows'] || 'ubuntu-24.04' }}
+    needs: [changes, windows-native-read-fixtures, python-volume-info-windows-gate]
+    runs-on: ${{ needs.python-volume-info-windows-gate.outputs.runner }}
     timeout-minutes: 15
     env:
       CARGO_BUILD_JOBS: 2
@@ -137,10 +167,20 @@ jobs:
           FS_NTFS_EXPECTED_HEAD: ${{ github.sha }}
         run: python3 tests/python/test_dir_listing_windows.py
 
+  readonly-file-name-gate:
+    needs: changes
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   readonly-file-name:
     name: focused readonly FILE_NAME regression
-    needs: changes
-    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['readonly-file-name'] || 'ubuntu-24.04' }}
+    needs: [changes, readonly-file-name-gate]
+    runs-on: ${{ needs.readonly-file-name-gate.outputs.runner }}
     timeout-minutes: 15
     env:
       CARGO_BUILD_JOBS: 2
@@ -196,14 +236,27 @@ jobs:
             tmp/logs/readonly-test.sha256
           if-no-files-found: error
 
+  test-gate:
+    needs: changes
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      ubuntu-latest: ${{ steps.pick-linux-x64.outputs.runner }}
+      ubuntu-24.04-arm: ${{ steps.pick-linux-arm64.outputs.runner }}
+    steps:
+      - id: pick-linux-x64
+        run: runner-gate pick linux-x64
+      - id: pick-linux-arm64
+        run: runner-gate pick linux-arm64
+
   test:
     name: test-${{ matrix.os }}
-    runs-on: ${{ matrix.os == 'ubuntu-latest' && (fromJSON(needs.changes.outputs.runners)['test-ubuntu-latest'] || 'ubuntu-24.04') || matrix.os }}
+    runs-on: ${{ needs.test-gate.outputs[matrix.os] }}
     env:
       CARGO_BUILD_JOBS: 2
     # Every pull request runs both Linux architectures and the Darwin build below.
     # Only a push to main uses quick Linux checks, after the queue validated the tree.
-    needs: changes
+    needs: [changes, test-gate]
     strategy:
       fail-fast: false
       matrix:
@@ -606,10 +659,20 @@ jobs:
           path: tmp/logs/
           if-no-files-found: ignore
 
+  darwin-cross-gate:
+    needs: changes
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   darwin-cross:
     name: cross-build aarch64-apple-darwin
-    needs: changes
-    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['darwin-cross'] || 'ubuntu-24.04' }}
+    needs: [changes, darwin-cross-gate]
+    runs-on: ${{ needs.darwin-cross-gate.outputs.runner }}
     timeout-minutes: 15
     env:
       CARGO_BUILD_JOBS: 2
@@ -625,13 +688,24 @@ jobs:
       - name: Build the Darwin library
         run: cargo build --locked --release --lib --target aarch64-apple-darwin
 
+  op-sequence-chkdsk-gate:
+    needs: [changes, test]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
+
   op-sequence-chkdsk:
     name: Windows chkdsk grades retained operation samples
     # #1035: the samples the ntfs-3g oracle run kept (#1034) graded by
     # Windows chkdsk, the same bytes ntfs-3g reported on.
-    needs: [changes, test]
+    needs: [changes, test, op-sequence-chkdsk-gate]
     if: needs.changes.outputs.code == 'true'
-    runs-on: windows-latest
+    runs-on: ${{ needs.op-sequence-chkdsk-gate.outputs.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -694,14 +768,23 @@ jobs:
             tmp/op-sequence-model/*/geometry.txt
           if-no-files-found: error
 
+  windows-native-read-fixtures-gate:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
+
   windows-native-read-fixtures:
     name: Windows-authored native read fixtures
     # Skipped, with integration and cli after it, only on a push to main.
-    needs: changes
+    needs: [changes, windows-native-read-fixtures-gate]
     if: needs.changes.outputs.code == 'true'
-    runs-on: windows-latest
-    outputs:
-      runners: ${{ steps.runners.outputs.runners || '{}' }}
+    runs-on: ${{ needs.windows-native-read-fixtures-gate.outputs.runner }}
     # The expanded producer took 14m46s in run 39483906221 and exceeded the
     # old 15-minute limit in run 39540070558 (#1156). Run 43228476645 then hit
     # the 30-minute limit at step 28 of 34. Allow cold Rust builds and every
@@ -1167,35 +1250,17 @@ jobs:
             test-disks/usn-measure-*.img
           if-no-files-found: warn
           retention-days: 7
-      - name: Pick runners
-        id: runners
-        shell: bash
-        env:
-          ORG: ${{ github.repository_owner }}
-          ACTOR: ${{ github.triggering_actor }}
-          AUTHOR: ${{ github.event.pull_request.user.login }}
-          SENDER: ${{ github.event.sender.login }}
-          GH_ACTOR: ${{ github.actor }}
-          JOBS: python-volume-info-windows
-        run: |
-          set -euo pipefail
-          ours=true
-          for who in "$ACTOR" "$GH_ACTOR" "$SENDER" "$AUTHOR"; do
-            [ -z "$who" ] || [ "$who" = christhomas ] || ours=false
-          done
-          pick() {
-            $ours || { echo ubuntu-24.04; return; }
-            r=$(curl -fsS --max-time 10 --get https://runner-gate.antimatter-studios.com/pick \
-                  --data-urlencode "org=$ORG" --data-urlencode prefer=antimatter-vps-linux-x64 \
-                  --data-urlencode fallback=ubuntu-24.04 --data-urlencode "actor=$ACTOR" --data-urlencode "author=$AUTHOR" \
-                  --data-urlencode "run=${{ github.run_id }}" --data-urlencode "attempt=${{ github.run_attempt }}" \
-                  --data-urlencode "job=$1") || r=ubuntu-24.04
-            case "$r" in antimatter-vps-linux-x64|ubuntu-24.04) echo "$r" ;; *) echo ubuntu-24.04 ;; esac
-          }
-          runners='{}'
-          for job in $JOBS; do runners=$(jq -c --arg j "$job" --arg r "$(pick "$job")" '. + {($j): $r}' <<<"$runners"); done
-          echo "$runners" | jq . | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "runners=$runners" >> "$GITHUB_OUTPUT"
+
+  windows-4kn-fixture-gate:
+    needs: [changes, windows-native-read-fixtures]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
 
   # A VHD always presents 512-byte sectors, so the 4Kn fixture is not among
   # the native read fixtures: Windows formats a VHDX presenting 4096-byte
@@ -1213,9 +1278,9 @@ jobs:
   windows-4kn-fixture:
     name: Windows 4096-byte sector fixture
     # Skipped only on a push to main, like the native fixtures it builds on.
-    needs: [changes, windows-native-read-fixtures]
+    needs: [changes, windows-native-read-fixtures, windows-4kn-fixture-gate]
     if: needs.changes.outputs.code == 'true'
-    runs-on: windows-latest
+    runs-on: ${{ needs.windows-4kn-fixture-gate.outputs.runner }}
     # A cold build of one test binary and fourteen phases of a few seconds
     # each, every phase bounded at two minutes.
     timeout-minutes: 20
@@ -1386,6 +1451,16 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  integration-gate:
+    needs: [changes, windows-native-read-fixtures]
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64-kvm
+
   # Full integration suite — every unit AND integration test, with the
   # read-path .img fixtures generated on the runner via ntfs-3g/mkntfs.
   # This is the SAME gate as release.yml's `crates-test`, run here on
@@ -1400,8 +1475,8 @@ jobs:
     # Hosted only: it mounts images with ntfs-3g through FUSE, which the
     # unprivileged antimatter-vps pods cannot open (/dev/fuse: Operation not
     # permitted, merge-group run 43569142215).
-    runs-on: ubuntu-24.04
-    needs: [changes, windows-native-read-fixtures]
+    runs-on: ${{ needs.integration-gate.outputs.runner }}
+    needs: [changes, windows-native-read-fixtures, integration-gate]
     env:
       CARGO_BUILD_JOBS: 2
     steps:
@@ -1590,6 +1665,17 @@ jobs:
           path: tmp/logs/
           if-no-files-found: ignore
 
+  asan-gate:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   # NTFS validation runs ONLY on the Windows side via Microsoft's
   # chkdsk. That is the only authoritative validator for NTFS, full
   # stop. Our own crate's read-path round-trip runs on every PR via
@@ -1636,9 +1722,9 @@ jobs:
   # cannot go red is not one.
   asan:
     name: unit tests under ASan (nightly toolchain, advisory)
-    needs: changes
+    needs: [changes, asan-gate]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['asan'] || 'ubuntu-24.04' }}
+    runs-on: ${{ needs.asan-gate.outputs.runner }}
     # ADVISORY, DECLARED (#409). ci-ok does not need this job, by decision: a
     # pinned nightly can break independently of stable. Job-level
     # continue-on-error is how that decision is written down where a check
@@ -1760,6 +1846,15 @@ jobs:
           path: tmp/logs/
           if-no-files-found: ignore
 
+  changes-gate:
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   # Windows-side validation: chkdsk is the canonical "is this a valid
   # NTFS volume?" check, against the same code Microsoft ships.
   # Triggers:
@@ -1800,11 +1895,11 @@ jobs:
   # The Windows decision follows the same plan without a changed-path filter.
   changes:
     name: CI validation depth
-    runs-on: ubuntu-latest
+    needs: changes-gate
+    runs-on: ${{ needs.changes-gate.outputs.runner }}
     outputs:
       mkfs: ${{ steps.code.outputs.code }}
       code: ${{ steps.code.outputs.code }}
-      runners: ${{ steps.runners.outputs.runners || '{}' }}
     steps:
       - uses: actions/checkout@v4
       - id: code
@@ -1812,47 +1907,28 @@ jobs:
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
         run: bash scripts/ci-plan.sh
-      - name: Pick runners
-        id: runners
-        env:
-          ORG: ${{ github.repository_owner }}
-          ACTOR: ${{ github.triggering_actor }}
-          AUTHOR: ${{ github.event.pull_request.user.login }}
-          SENDER: ${{ github.event.sender.login }}
-          GH_ACTOR: ${{ github.actor }}
-          JOBS: interrupted-bootstrap python-abi readonly-file-name test-ubuntu-latest darwin-cross asan semver
-        run: |
-          set -euo pipefail
-          ours=true
-          for who in "$ACTOR" "$GH_ACTOR" "$SENDER" "$AUTHOR"; do
-            [ -z "$who" ] || [ "$who" = christhomas ] || ours=false
-          done
-          pick() {
-            $ours || { echo ubuntu-24.04; return; }
-            r=$(curl -fsS --max-time 10 --get https://runner-gate.antimatter-studios.com/pick \
-                  --data-urlencode "org=$ORG" --data-urlencode prefer=antimatter-vps-linux-x64 \
-                  --data-urlencode fallback=ubuntu-24.04 --data-urlencode "actor=$ACTOR" --data-urlencode "author=$AUTHOR" \
-                  --data-urlencode "run=${{ github.run_id }}" --data-urlencode "attempt=${{ github.run_attempt }}" \
-                  --data-urlencode "job=$1") || r=ubuntu-24.04
-            case "$r" in antimatter-vps-linux-x64|ubuntu-24.04) echo "$r" ;; *) echo ubuntu-24.04 ;; esac
-          }
-          runners='{}'
-          for job in $JOBS; do runners=$(jq -c --arg j "$job" --arg r "$(pick "$job")" '. + {($j): $r}' <<<"$runners"); done
-          echo "$runners" | jq . | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "runners=$runners" >> "$GITHUB_OUTPUT"
+
+  validate-mkfs-windows-run-gate:
+    needs: [changes]
+    if: needs.changes.outputs.mkfs == 'true'
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
 
   validate-mkfs-windows-run:
     name: Windows chkdsk execution
-    runs-on: windows-latest
-    outputs:
-      runners: ${{ steps.runners.outputs.runners || '{}' }}
+    runs-on: ${{ needs.validate-mkfs-windows-run-gate.outputs.runner }}
     # Run 43117610604 hit the 85-minute limit with the CLI matrix still
     # progressing (last heartbeat: 26/34 complete), without a failed scenario.
     # Earlier steps took 69.6 minutes before CLI validation started. Budget
     # 70 before CLI, 30 for CLI, and 20 for trailing chkdsk/round-trip checks
     # and runner variance, retaining a finite hung-runner bound (#388).
     timeout-minutes: 120
-    needs: [changes]
+    needs: [changes, validate-mkfs-windows-run-gate]
     if: needs.changes.outputs.mkfs == 'true'
     # Every run-matrix.sh step replaces test-diagnostics/matrix/, so each one
     # first carries the group before it here, with its VM report. Set on the job
@@ -2479,35 +2555,16 @@ jobs:
           chkdsk_after_outcome: ${{ steps.chkdsk_after.outcome }}
           chkdsk_after_exit: ${{ steps.chkdsk_after.outputs.scan_exit }}
           seal_outcome: ${{ steps.seal.outcome }}
-      - name: Pick runners
-        id: runners
-        shell: bash
-        env:
-          ORG: ${{ github.repository_owner }}
-          ACTOR: ${{ github.triggering_actor }}
-          AUTHOR: ${{ github.event.pull_request.user.login }}
-          SENDER: ${{ github.event.sender.login }}
-          GH_ACTOR: ${{ github.actor }}
-          JOBS: validate-mkfs-windows
-        run: |
-          set -euo pipefail
-          ours=true
-          for who in "$ACTOR" "$GH_ACTOR" "$SENDER" "$AUTHOR"; do
-            [ -z "$who" ] || [ "$who" = christhomas ] || ours=false
-          done
-          pick() {
-            $ours || { echo ubuntu-24.04; return; }
-            r=$(curl -fsS --max-time 10 --get https://runner-gate.antimatter-studios.com/pick \
-                  --data-urlencode "org=$ORG" --data-urlencode prefer=antimatter-vps-linux-x64 \
-                  --data-urlencode fallback=ubuntu-24.04 --data-urlencode "actor=$ACTOR" --data-urlencode "author=$AUTHOR" \
-                  --data-urlencode "run=${{ github.run_id }}" --data-urlencode "attempt=${{ github.run_attempt }}" \
-                  --data-urlencode "job=$1") || r=ubuntu-24.04
-            case "$r" in antimatter-vps-linux-x64|ubuntu-24.04) echo "$r" ;; *) echo ubuntu-24.04 ;; esac
-          }
-          runners='{}'
-          for job in $JOBS; do runners=$(jq -c --arg j "$job" --arg r "$(pick "$job")" '. + {($j): $r}' <<<"$runners"); done
-          echo "$runners" | jq . | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "runners=$runners" >> "$GITHUB_OUTPUT"
+
+  cli-gate:
+    needs: [changes, windows-native-read-fixtures]
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64-kvm
 
   # THE COMMAND-LINE TOOLS, AS INSTALLED. The multi-call binary is built in
   # release mode and staged by `chore cli:install` under every name it
@@ -2532,10 +2589,10 @@ jobs:
     # Hosted only: its man-page checks need a real `man`; the antimatter-vps
     # image is minimized and `man -w` answers with the minimization notice
     # (merge-group run 43569142215).
-    runs-on: ubuntu-24.04
+    runs-on: ${{ needs.cli-gate.outputs.runner }}
     # The Windows-authored volumes are the oracle for the read verbs
     # (tests/cli-oracle/); only a Windows runner can make them.
-    needs: [changes, windows-native-read-fixtures]
+    needs: [changes, windows-native-read-fixtures, cli-gate]
     env:
       CARGO_BUILD_JOBS: 2
     steps:
@@ -2613,10 +2670,21 @@ jobs:
           path: tmp/logs/*.log
           if-no-files-found: error
 
+  box-cache-gate:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   box-cache:
     name: pinned Vagrant box cache on main
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    needs: box-cache-gate
+    runs-on: ${{ needs.box-cache-gate.outputs.runner }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -2656,6 +2724,17 @@ jobs:
           test -n "$box_version"
           vagrant box add "$box" --box-version "$box_version" --provider libvirt --architecture amd64
 
+  kernel-gate:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64-kvm
+
   kernel:
     # `chore test:kernel`: Linux's ntfs3 mounts what this crate wrote and
     # writes what this crate must read, in the fs-linux-test-harness VM
@@ -2663,12 +2742,15 @@ jobs:
     # an x86_64 runner has KVM; ci-setup-linux.sh is the harness's one setup
     # for it, run from the sibling checkout as every consumer does.
     name: kernel oracle (Linux ntfs3, harness VM, x86_64 KVM)
-    needs: changes
+    needs: [changes, kernel-gate]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ needs.kernel-gate.outputs.runner }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - name: C toolchain for the gated runner
+        if: runner.environment == 'self-hosted'
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - name: Install chore and check out sibling repos
         shell: bash
         run: |
@@ -2712,6 +2794,16 @@ jobs:
           path: tmp/logs/*.log
           if-no-files-found: error
 
+  semver-gate:
+    needs: changes
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   # Keep the existing required-check name while making an intentional Windows
   # skip report as success. A failed or missing run must report failure.
   semver:
@@ -2719,8 +2811,8 @@ jobs:
     # on crates.io, refusing a break the version in Cargo.toml does not
     # declare (#399). No fixtures, no VM -- only the registry.
     name: semver (public API against crates.io)
-    needs: changes
-    runs-on: ${{ fromJSON(needs.changes.outputs.runners)['semver'] || 'ubuntu-24.04' }}
+    needs: [changes, semver-gate]
+    runs-on: ${{ needs.semver-gate.outputs.runner }}
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: 2
@@ -2760,12 +2852,23 @@ jobs:
       - name: chore check:semver
         run: chore check:semver
 
+  validate-mkfs-windows-gate:
+    needs: [changes, validate-mkfs-windows-run]
+    if: always()
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   validate-mkfs-windows:
     name: validate rust-ntfs format (Windows chkdsk)
-    runs-on: ${{ fromJSON(needs.validate-mkfs-windows-run.outputs.runners || '{}')['validate-mkfs-windows'] || 'ubuntu-24.04' }}
+    runs-on: ${{ needs.validate-mkfs-windows-gate.outputs.runner || 'ubuntu-24.04' }}
     timeout-minutes: 3
     if: always()
-    needs: [changes, validate-mkfs-windows-run]
+    needs: [changes, validate-mkfs-windows-run, validate-mkfs-windows-gate]
     steps:
       - uses: actions/checkout@v4
       - name: Check the Windows verdict
@@ -2775,6 +2878,17 @@ jobs:
           GATE_NEEDS_JSON: ${{ toJSON(needs) }}
         run: bash scripts/ci-verdict.sh windows
 
+  ci-ok-gate:
+    needs: [readonly-file-name, test, darwin-cross, windows-native-read-fixtures, windows-4kn-fixture, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows, op-sequence-chkdsk, interrupted-bootstrap-gate, python-abi-gate, python-volume-info-windows-gate, readonly-file-name-gate, test-gate, darwin-cross-gate, op-sequence-chkdsk-gate, windows-native-read-fixtures-gate, windows-4kn-fixture-gate, integration-gate, changes-gate, cli-gate, kernel-gate, semver-gate, validate-mkfs-windows-gate]
+    if: always()
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   # ASan stays advisory: it is deliberately not a dependency here, and it
   # carries `continue-on-error: true` to say so where ci-gate can read it.
   # `windows-native-read-fixtures` is needed directly rather than only
@@ -2782,9 +2896,9 @@ jobs:
   # take it out of the gate (#409).
   ci-ok:
     name: ci-ok
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.ci-ok-gate.outputs.runner || 'ubuntu-latest' }}
     if: always()
-    needs: [readonly-file-name, test, darwin-cross, windows-native-read-fixtures, windows-4kn-fixture, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows, op-sequence-chkdsk]
+    needs: [readonly-file-name, test, darwin-cross, windows-native-read-fixtures, windows-4kn-fixture, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows, op-sequence-chkdsk, interrupted-bootstrap-gate, python-abi-gate, python-volume-info-windows-gate, readonly-file-name-gate, test-gate, darwin-cross-gate, op-sequence-chkdsk-gate, windows-native-read-fixtures-gate, windows-4kn-fixture-gate, integration-gate, changes-gate, cli-gate, kernel-gate, semver-gate, validate-mkfs-windows-gate, ci-ok-gate]
     steps:
       - uses: actions/checkout@v4
       - name: Check every gating job

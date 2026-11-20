@@ -49,6 +49,20 @@ done
 # kernel oracle, because the merge queue already validated that tree.
 docs_only="$(jq -c '.["windows-native-read-fixtures"].result="skipped" | .integration.result="skipped" | .cli.result="skipped" | .kernel.result="skipped"' <<< "$aggregate")"
 check aggregate-docs-only-skips aggregate pass "$docs_only" false
+# Each job's `<job>-gate` picks its runner and is judged as the job is: a gate
+# that failed or was skipped when its job had to run is that job failing.
+gated="$(jq -c '. + {"test-gate":{"result":"success"},"cli-gate":{"result":"success"},"changes-gate":{"result":"success"},"ci-ok-gate":{"result":"success"}}' <<< "$aggregate")"
+check aggregate-gates-green aggregate pass "$gated" true
+for gate in test-gate cli-gate changes-gate ci-ok-gate; do
+    for result in failure cancelled skipped; do
+        check "aggregate-$gate-$result" aggregate fail \
+            "$(jq -c --arg gate "$gate" --arg result "$result" '.[$gate].result=$result' <<< "$gated")" true
+    done
+done
+# A full job's gate is skipped with the job on a push to main; a quick job's never is.
+quick_gated="$(jq -c '. + {"cli-gate":{"result":"skipped"},"test-gate":{"result":"success"}}' <<< "$docs_only")"
+check aggregate-docs-only-skips-the-gate aggregate pass "$quick_gated" false
+check aggregate-docs-only-quick-gate-skipped aggregate fail "$(jq -c '.["test-gate"].result="skipped"' <<< "$quick_gated")" false
 check aggregate-code-skips aggregate fail "$docs_only" true
 check aggregate-unknown-code-skips aggregate fail "$docs_only"
 check aggregate-docs-only-failure aggregate fail "$(jq -c '.cli.result="failure"' <<< "$docs_only")" false

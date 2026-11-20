@@ -43,7 +43,7 @@ def validate(configuration):
         require("pull_request" in triggers, f"{name}: pull_request trigger is missing")
         require(triggers["pull_request"] in (None, "", {}), f"{name}: PR trigger must be unfiltered")
         for job_name, job in workflow["jobs"].items():
-            if name == "ci.yml" and job_name == "box-cache":
+            if name == "ci.yml" and job_name in ("box-cache", "box-cache-gate"):
                 continue
             # !cancelled() is a lifecycle gate, not a filter: the job runs
             # after a failed dependency (always() does too) and is skipped

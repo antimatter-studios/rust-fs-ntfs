@@ -8,8 +8,19 @@ permissions:
   contents: read
 
 jobs:
+
+  directory-abi-gate:
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   directory-abi:
-    runs-on: ubuntu-latest
+    needs: directory-abi-gate
+    runs-on: ${{ needs.directory-abi-gate.outputs.runner }}
     timeout-minutes: 10
     env:
       CARGO_BUILD_JOBS: 2

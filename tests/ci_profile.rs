@@ -893,13 +893,20 @@ fn ci_ok_covers_every_gating_job_and_preserves_windows_filter() {
             .and_then(Yaml::as_str),
         Some("${{ steps.code.outputs.code }}")
     );
-    assert_eq!(needs(job("validate-mkfs-windows-run")), ["changes"]);
+    assert_eq!(
+        needs(job("validate-mkfs-windows-run")),
+        ["changes", "validate-mkfs-windows-run-gate"]
+    );
     assert!(field(job("validate-mkfs-windows-run"), "if")
         .and_then(Yaml::as_str)
         .is_some_and(|condition| condition.contains("needs.changes.outputs.mkfs == 'true'")));
     assert_eq!(
         needs(job("validate-mkfs-windows")),
-        ["changes", "validate-mkfs-windows-run"]
+        [
+            "changes",
+            "validate-mkfs-windows-run",
+            "validate-mkfs-windows-gate"
+        ]
     );
     assert_eq!(
         field(job("validate-mkfs-windows"), "if").and_then(Yaml::as_str),
@@ -922,7 +929,23 @@ fn ci_ok_covers_every_gating_job_and_preserves_windows_filter() {
             "interrupted-bootstrap",
             "python-abi",
             "python-volume-info-windows",
-            "op-sequence-chkdsk"
+            "op-sequence-chkdsk",
+            "interrupted-bootstrap-gate",
+            "python-abi-gate",
+            "python-volume-info-windows-gate",
+            "readonly-file-name-gate",
+            "test-gate",
+            "darwin-cross-gate",
+            "op-sequence-chkdsk-gate",
+            "windows-native-read-fixtures-gate",
+            "windows-4kn-fixture-gate",
+            "integration-gate",
+            "changes-gate",
+            "cli-gate",
+            "kernel-gate",
+            "semver-gate",
+            "validate-mkfs-windows-gate",
+            "ci-ok-gate"
         ]
     );
     assert_eq!(

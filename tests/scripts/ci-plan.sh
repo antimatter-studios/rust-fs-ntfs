@@ -78,19 +78,20 @@ done
 # and `pipefail` reports that as the pipeline's status, so a match it found
 # reads as a failure. Seen on a runner as `printf: write error: Broken pipe`
 # above a `FAIL` for an assertion that had matched.
-box_cache="$(sed -n '/^  box-cache:/,/^  kernel:/p' "$CI")"
+box_cache="$(sed -n '/^  box-cache:/,/^  kernel-gate:/p' "$CI")"
 grep -q "^    if: github.event_name == 'push' && github.ref == 'refs/heads/main'$" <<<"$box_cache" && ok || bad "box cache must run only on a push to main"
 grep -q '^          chore siblings$' <<<"$box_cache" && ok || bad "box cache does not use the pinned siblings"
 grep -q 'ci-setup-linux.sh --box-cache-key' <<<"$box_cache" && ok || bad "box cache key does not come from the pinned harness"
 grep -q 'key: \${{ steps.vm-host.outputs.box-cache-key }}' <<<"$box_cache" && ok || bad "box cache key differs from the kernel job"
 grep -q 'path: ~/.vagrant.d/boxes' <<<"$box_cache" && ok || bad "box cache path differs from the kernel job"
 grep -q 'vagrant box add "$box" --box-version "$box_version" --provider libvirt --architecture amd64' <<<"$box_cache" && ok || bad "box cache does not fetch the pinned Linux box"
-if printf '%s\n' "$box_cache" | grep -Eq 'needs:|vagrant up|chore (test|linux:up|vm:up)'; then
+# Its only `needs:` is its own runner gate: the gate reads nothing from a suite.
+if printf '%s\n' "$box_cache" | grep -v '^    needs: box-cache-gate$' | grep -Eq 'needs:|vagrant up|chore (test|linux:up|vm:up)'; then
     bad "box cache must not depend on a suite or boot a VM"
 else
     ok
 fi
-grep -q "CI_GATE_NON_GATING='asan box-cache validate-mkfs-windows'" "$ROOT/chores.yml" && ok || bad "main-only box cache is not declared non-gating"
+grep -q "CI_GATE_NON_GATING='asan asan-gate box-cache box-cache-gate validate-mkfs-windows validate-mkfs-windows-gate ci-ok-gate'" "$ROOT/chores.yml" && ok || bad "main-only box cache is not declared non-gating"
 if sed -n '/^  ci-ok:/,$p' "$CI" | grep -q 'needs:.*box-cache'; then
     bad "box cache must not lengthen the merge queue path"
 else
