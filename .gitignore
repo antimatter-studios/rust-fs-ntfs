@@ -46,6 +46,8 @@ test-disks/usn-journal-measurements.txt
 test-disks/*.windows.tsv
 # What Windows reports of ntfs-salvage-streams.img's streams and names (#1379).
 test-disks/ntfs-salvage-streams.tsv
+# fsutil fsinfo ntfsinfo of a fixture volume, bound to its image (#1150).
+test-disks/*.ntfsinfo.txt
 !test-disks/.gitkeep
 
 # Local Windows-VM test pipeline outputs. The orchestrator
