@@ -2846,7 +2846,7 @@ jobs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
       - id: pick
-        run: runner-gate pick linux-x64
+        run: runner-gate pick linux-x64-kvm
 
   box-cache:
     name: pinned Vagrant box cache on main
