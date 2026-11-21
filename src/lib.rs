@@ -57,6 +57,7 @@ pub mod compression;
 pub mod data_runs;
 pub mod ea_io;
 pub mod error;
+pub mod evidence;
 pub mod facade;
 pub mod file;
 pub mod fs_core_bridge;
