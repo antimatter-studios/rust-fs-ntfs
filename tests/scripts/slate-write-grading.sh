@@ -47,9 +47,9 @@ job = job.group(1) if job else ""
 if not job:
     problems.append("the workflow has no slate-writes-windows job")
 for want, why in [
-    (r"\n    needs: slate-check\n", "does not run after slate-check, which writes the copies"),
+    (r"\n    needs: \[slate-check, slate-writes-windows-gate\]\n", "does not run after slate-check, which writes the copies"),
     (r"\n    if: \$\{\{ !cancelled\(\) \}\}\n", "is skipped when the comparison disagreed"),
-    (r"\n    runs-on: windows-latest\n", "does not run on Windows"),
+    (r"\n    runs-on: \$\{\{ needs\.slate-writes-windows-gate\.outputs\.runner \|\| 'windows-latest' \}\}\n", "does not run on Windows"),
     (r"\n    timeout-minutes: \d+\n", "has no timeout"),
     (r"name: slate-oracle-writes-\$\{\{ github\.sha \}\}\n\s+path: tmp/slate-writes-input\n",
      "does not download the slate-oracle-writes artifact"),

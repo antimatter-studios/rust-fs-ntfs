@@ -8,8 +8,19 @@ on:
 permissions:
   contents: read
 jobs:
+
+  descriptor-oracle-gate:
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
+
   descriptor-oracle:
-    runs-on: windows-latest
+    needs: descriptor-oracle-gate
+    runs-on: ${{ needs.descriptor-oracle-gate.outputs.runner }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -38,8 +49,19 @@ jobs:
             security-descriptor-zero-flag.bin
             tmp/logs/unit.log
           if-no-files-found: error
+
+  acl-show-oracle-gate:
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
+
   acl-show-oracle:
-    runs-on: windows-latest
+    needs: acl-show-oracle-gate
+    runs-on: ${{ needs.acl-show-oracle-gate.outputs.runner }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -85,12 +107,23 @@ jobs:
             tmp/acl-oracle/*.json
             tmp/acl-catalog-oracle/*.json
           if-no-files-found: error
+
+  filename-fields-capture-gate:
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
+
   filename-fields-capture:
     # Issue #629: runs the six-step FILE_NAME producer on an elevated hosted
     # Windows runner and grades what Windows wrote against the table in
     # tests/common/fn_fields_windows.rs, which field_exhaustion_fn holds this
     # crate's writer to.
-    runs-on: windows-latest
+    needs: filename-fields-capture-gate
+    runs-on: ${{ needs.filename-fields-capture-gate.outputs.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

@@ -489,9 +489,13 @@ tasks:
     #                         Windows run into a verdict; it IS in ci-ok's
     #                         needs, and declaring it says that its condition
     #                         is deliberate rather than a job quietly skipped.
+    # Each of them has a `<job>-gate` that picks its runner and carries the same
+    # condition, so each gate is declared too: asan-gate, box-cache-gate,
+    # validate-mkfs-windows-gate, and ci-ok-gate (`if: always()`, in ci-ok's needs
+    # because ci-ok takes its runner from it).
     # A job added to ci.yml goes into ci-ok's needs, or here with a reason.
     cmds:
-      - "CI_GATE_NON_GATING='asan box-cache validate-mkfs-windows' bash ../rust-fs-core/scripts/ci-gate.sh"
+      - "CI_GATE_NON_GATING='asan asan-gate box-cache box-cache-gate validate-mkfs-windows validate-mkfs-windows-gate ci-ok-gate' bash ../rust-fs-core/scripts/ci-gate.sh"
 
   build:
     desc: Debug build

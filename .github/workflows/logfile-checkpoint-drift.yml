@@ -26,9 +26,20 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+
+  capture-gate:
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
+
   capture:
     name: fresh Windows checkpoint captures
-    runs-on: windows-latest
+    needs: capture-gate
+    runs-on: ${{ needs.capture-gate.outputs.runner }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -47,15 +58,31 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  compare-gate:
+    needs: capture
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   compare:
     name: the pinned comparisons over fresh captures
-    needs: capture
-    runs-on: ubuntu-latest
+    needs: [capture, compare-gate]
+    runs-on: ${{ needs.compare-gate.outputs.runner }}
     timeout-minutes: 30
     env:
       LOGFILE_CHECKPOINTS: live
     steps:
       - uses: actions/checkout@v4
+      - name: C toolchain for the gated runner
+        # Only a self-hosted Linux runner lacks it; the hosted image has it.
+        run: |
+          if [ "$RUNNER_OS" = Linux ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
+            sudo apt-get update && sudo apt-get install -y build-essential
+          fi
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
