@@ -8,6 +8,77 @@ Mount + write of freshly-formatted volumes is validated end-to-end
 against Microsoft's `chkdsk` running on real Windows VMs — that's
 the test contract, not byte-equivalence with any third-party tool.
 
+## Three complementary Rust APIs
+
+The Rust interface separates ordinary filesystem use, forensic interpretation, and
+volume I/O. All three use the same existing NTFS decoders and storage transport;
+the C ABI, command-line tools, and legacy `facade` remain compatible.
+
+- **FileAPI** (`file::FileAPI`) provides normal directory listing, path lookup,
+  metadata, file handles, ranged file and named-stream reads, and explicit writable
+  operations: create, mkdir, write, truncate, rename, unlink, and rmdir. Handles
+  belong to one volume instance and retain the MFT sequence number, so another
+  volume or a recycled/deleted record cannot silently satisfy a read.
+- **PrimitiveAPI** (`primitives::PrimitiveAPI`) provides bounded FILE-record
+  inspection and stream extraction without requiring a functioning namespace.
+  It preserves original bytes separately from update-sequence-fixed bytes and
+  reports invalid fixups, malformed attributes, and incomplete attribute chains.
+  Deleted records remain inspectable. Resident data and complete, uncompressed,
+  unencrypted non-resident mapping pairs can be read, including sparse holes and
+  initialized-size zero filling. Torn records and unresolved attribute-list
+  extents are not silently presented as recoverable files.
+- **VolumeAPI** (`volume::VolumeAPI`) provides source size, fallible geometry,
+  bounded volume-relative reads, and capability-checked writes and flushes.
+  `RawVolume::open` requires no valid boot sector or MFT: invalid and unrecognised
+  bytes remain readable. `Volume::open_for_salvage` requires valid boot geometry,
+  but not an intact MFT or directory tree. `Volume::open` additionally validates
+  the normal filesystem metadata.
+
+`VolumeAPI::size_bytes` on a validated volume bounds I/O to the smaller of its
+declared extent and the supplied device. The boot geometry retains the original
+declared length: truncated images may still open through the existing reader,
+but missing bytes are never invented or read beyond the source.
+
+`Volume`, `RawVolume`, and the three traits are re-exported at the crate root.
+The device is retained for the handle's lifetime rather than reopening a path
+per operation. Normal file operations are serialized on that volume handle;
+existing read routines still validate metadata during their operations.
+
+```rust
+use fs_ntfs::{FileAPI, PrimitiveAPI, RawVolume, Volume, VolumeAPI};
+
+let filesystem = Volume::open(read_device)?;
+let file = filesystem.open_file("/documents/note.txt")?;
+let mut bytes = [0; 4096];
+let count = filesystem.read_file_at(&file, 0, &mut bytes)?;
+
+let raw = RawVolume::open(damaged_device);
+let evidence = raw.read_file_record_at(record_offset, 1024, 512)?;
+let count = raw.read_salvage_stream_at(
+    &evidence, attribute_index, hypothesised_cluster_size, 0, &mut bytes,
+)?;
+```
+
+Read-only constructors never acquire write capabilities, even if the supplied
+device could write. `Volume::open_writable` requires `fs_core::BlockDevice` and
+performs the existing safe read-write mount checks; it does not implicitly replay
+a pending log. `RawVolume::open_writable` is an explicit low-level byte-writing
+capability, not a safe filesystem mount. The caller must retain exclusive access
+for writes, including against other handles and processes. Recovery consumers
+should only use the read-only constructors.
+
+For a raw record, offsets are relative to the selected volume, not necessarily
+the whole physical disk. The sector size and cluster size supplied for recovery
+are hypotheses about the original filesystem. Surviving metadata does not prove
+that the referenced data clusters have not been reused. Missing or unsupported
+metadata is reported as a limitation, not replaced with guessed file locations.
+
+`tests/three_api.rs` checks the new interfaces against the independent `ntfs`
+reader, read-only source snapshots, normal writes, deleted records, destroyed
+boot/MFT metadata, torn fixups, named streams, sparse ranges, and malformed input.
+It supplements the existing suite; it does not replace its regression tests or
+the Windows/kernel oracle gates.
+
 ## Status
 
 In active development, not yet 1.0. Reading covers resident, non-resident,
