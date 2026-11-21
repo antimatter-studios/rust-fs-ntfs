@@ -29,6 +29,16 @@ FILE/INDX/RSTR/RCRD records, including records equal to one sector. Compare the
 same bytes before and after a real Windows metadata mutation. A synthetic record
 using our own stride proves only internal consistency.
 
+**Measured (#1384).** Windows 11 formatting a disk presenting 4096-byte logical
+sectors with `Format-Volume` defaults chose 1024-byte file records and 4096-byte
+index blocks, and every FILE, INDX, RSTR and RCRD array it wrote keeps one word per
+512 bytes: three words in a file record, nine in an index block or log page. The
+readers now take the stride from each record's own array, the sector or 512 bytes;
+the writers still build arrays with the sector stride, so a writable mount of
+records smaller than their sector is refused. Whether Windows' 4096-byte records on
+such a disk also use 512-byte strides, and whether a write keeping them would pass
+chkdsk, is still open.
+
 ### Q02 — Boot-copy location and arbitration
 
 **Evidence and implementation gaps.** The formatter writes the backup at the final

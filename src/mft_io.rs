@@ -274,32 +274,16 @@ pub(crate) fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParam
             "file_record_size {file_record_size} out of plausible range"
         )));
     }
-    // THE FIXUP CHECK NEEDS AT LEAST TWO STRIDES TO CHECK ANYTHING.
-    // NTFS's update sequence array is the torn-write detector: the last
-    // two bytes of every `bytes_per_sector` stride hold a copy of the
-    // record's USN, and a stride whose tail does not match means the
-    // write was partial. With `bytes_per_sector >= file_record_size` a
-    // record is one stride, the array has one entry, and the check
-    // becomes "the record's own USN equals itself" -- it passes on
-    // every record, torn or not, and nothing says the detector is off
-    // (#154).
-    //
-    // Both fields come off the disk, so a volume can present this, and
-    // a real one cannot: NTFS requires a record to hold at least two
-    // sectors' worth of strides for the array to mean anything.
-    // `>` and not `>=`: a record EQUAL to one sector is the ordinary 4Kn
-    // shape (4096-byte sectors, 4096-byte records) and its array still
-    // works -- one USN plus one stride, and the stride's tail is checked
-    // against the USN. What cannot work is a record SMALLER than a
-    // sector: no stride fits, the array has nothing to check, and the
-    // detector passes on every record, torn or not.
-    if bytes_per_sector as u64 > file_record_size {
-        return Err(Error::io(format!(
-            "bytes_per_sector {bytes_per_sector} is larger than file_record_size \
-             {file_record_size}: no fixup stride fits in a record, so the torn-write check \
-             has nothing to compare and would pass on a record written in half"
-        )));
-    }
+    // A RECORD SMALLER THAN A SECTOR IS STILL CHECKED. The update sequence
+    // array keeps the last two bytes of each stride of a record, and the
+    // stride is not always the sector: Windows formats a disk presenting
+    // 4096-byte sectors with 1024-byte records and keeps one word per 512
+    // bytes (three words in a file record, nine in a 4096-byte index block;
+    // tests/small_records_4kn_windows.rs, #1384). The readers take the
+    // stride from each record's own array (`validate_usa_geometry`), so the
+    // torn-write check still compares two tails in such a record. The
+    // writers build arrays from the sector size, so a writable mount of this
+    // geometry is refused in `refuse_unwritable_geometry`.
 
     // Same signed encoding as clusters_per_mft_record.
     let cpib = boot[BOOT_OFF_CLUSTERS_PER_INDEX_BLOCK] as i8;
@@ -628,12 +612,12 @@ pub fn apply_fixup_on_read_magic(
         )));
     }
     let (usa_offset, usa_count) = read_usa_header(record)?;
-    validate_usa_geometry(record.len(), bytes_per_sector, usa_offset, usa_count)?;
+    let stride = validate_usa_geometry(record.len(), bytes_per_sector, usa_offset, usa_count)?;
 
     let usn_bytes = [record[usa_offset], record[usa_offset + 1]];
     let sectors = usa_count - 1;
     for sector in 0..sectors {
-        let sector_end = (sector + 1) * bytes_per_sector as usize;
+        let sector_end = (sector + 1) * stride;
         let check = sector_end - SECTOR_TAIL_BYTES;
         if record[check..check + SECTOR_TAIL_BYTES] != usn_bytes {
             return Err(Error::io(format!(
@@ -679,8 +663,22 @@ pub fn apply_fixup_on_write_magic(
             &record[0..4]
         )));
     }
+    if record.len() < bytes_per_sector as usize {
+        return Err(Error::refused(format!(
+            "a record of {} bytes is smaller than a {bytes_per_sector}-byte sector, and this \
+             crate writes update sequence arrays with the sector stride only (rust-fs-ntfs#1384)",
+            record.len()
+        )));
+    }
     let (usa_offset, usa_count) = read_usa_header(record)?;
-    validate_usa_geometry(record.len(), bytes_per_sector, usa_offset, usa_count)?;
+    if validate_usa_geometry(record.len(), bytes_per_sector, usa_offset, usa_count)?
+        != bytes_per_sector as usize
+    {
+        return Err(Error::refused(format!(
+            "the record's update sequence array has 512-byte strides, and this crate writes \
+             arrays with the {bytes_per_sector}-byte sector stride only (rust-fs-ntfs#1384)"
+        )));
+    }
 
     // Bump USN, skipping 0 (some NTFS drivers treat 0 as "uninitialized").
     let old_usn = u16::from_le_bytes([record[usa_offset], record[usa_offset + 1]]);
@@ -723,9 +721,7 @@ fn validate_usa_geometry(
     bytes_per_sector: u16,
     usa_offset: usize,
     usa_count: usize,
-) -> Result<(), Error> {
-    let bps = bytes_per_sector as usize;
-    let sectors_expected = record_len / bps;
+) -> Result<usize, Error> {
     // USA needs usa_count slots of 2 bytes each starting at usa_offset.
     let usa_end = usa_offset
         .checked_add(
@@ -740,11 +736,41 @@ fn validate_usa_geometry(
             usa_offset, usa_end, record_len
         )));
     }
-    if usa_count - 1 != sectors_expected {
-        return Err(Error::io(format!(
-            "USA count {usa_count} inconsistent with record size {record_len} \
-             / bytes_per_sector {bytes_per_sector} (expected {} slots)",
-            sectors_expected + 1
+    // The stride is the sector, as this crate writes, or 512 bytes, as
+    // Windows writes inside sectors larger than that (#1384). The array
+    // has to name one of them exactly: a stride either way covers every
+    // byte of the record, so the check never passes over a torn tail.
+    let strides = usa_count - 1;
+    for stride in [bytes_per_sector as usize, USA_STRIDE] {
+        if stride != 0
+            && record_len >= stride
+            && record_len.is_multiple_of(stride)
+            && strides == record_len / stride
+        {
+            return Ok(stride);
+        }
+    }
+    Err(Error::io(format!(
+        "USA count {usa_count} inconsistent with record size {record_len} \
+         / bytes_per_sector {bytes_per_sector} (expected {} slots, or {} for 512-byte strides)",
+        record_len / bytes_per_sector.max(1) as usize + 1,
+        record_len / USA_STRIDE + 1
+    )))
+}
+
+/// The stride Windows keeps an update sequence word for inside sectors
+/// larger than it (#1384).
+const USA_STRIDE: usize = 512;
+
+/// Refuses a writable mount of a volume whose file records are smaller
+/// than its sectors: Windows protects them in 512-byte strides, and this
+/// crate's writers build arrays from the sector size (#1384).
+pub fn refuse_unwritable_geometry(params: &BootParams) -> Result<(), Error> {
+    if u64::from(params.bytes_per_sector) > params.file_record_size {
+        return Err(Error::refused(format!(
+            "file records of {} bytes are smaller than the volume's {}-byte sectors: they are \
+             read, and writing them is not supported (rust-fs-ntfs#1384)",
+            params.file_record_size, params.bytes_per_sector
         )));
     }
     Ok(())
@@ -1274,19 +1300,57 @@ mod tests {
         assert_eq!(bp.file_record_size, 4096);
     }
 
-    /// A record smaller than a sector switches the torn-write detector
-    /// off, so the parse refuses the volume rather than reading it with
-    /// a check that cannot fail (#154).
+    /// Windows formats a disk presenting 4096-byte sectors with 1024-byte
+    /// records, and keeps one update sequence word per 512 bytes of each
+    /// record (`tests/small_records_4kn_windows.rs`, #1384): the record holds
+    /// two strides, and the torn-write check still has two tails to compare.
     #[test]
-    fn a_record_smaller_than_a_sector_is_refused() {
-        // 4096-byte sectors, 1024-byte records: no fixup stride fits.
+    fn a_record_smaller_than_a_sector_is_read_with_512_byte_strides() {
         let boot = synth_boot(4096, 1, 4, -10);
-        let err = parse_boot_params_from_bytes(&boot)
-            .expect_err("a record smaller than a sector has no usable fixup array");
-        assert!(
-            err.contains("no fixup stride fits"),
-            "the error says what is wrong with the geometry, got: {err}"
-        );
+        let bp = parse_boot_params_from_bytes(&boot).expect("Windows formats this geometry");
+        assert_eq!((bp.bytes_per_sector, bp.file_record_size), (4096, 1024));
+    }
+
+    /// A FILE record of `len` bytes whose array starts at 0x30 with one word
+    /// per `stride` bytes, protected as a writer with that stride leaves it.
+    fn protected_record(len: usize, stride: usize) -> Vec<u8> {
+        let mut record: Vec<u8> = (0..len).map(|i| (i * 7) as u8).collect();
+        record[..4].copy_from_slice(FILE_MAGIC);
+        record[OFF_USA_OFFSET..OFF_USA_OFFSET + 2].copy_from_slice(&0x30u16.to_le_bytes());
+        record[OFF_USA_COUNT..OFF_USA_COUNT + 2]
+            .copy_from_slice(&((len / stride + 1) as u16).to_le_bytes());
+        apply_fixup_on_write(&mut record, stride as u16).unwrap();
+        record
+    }
+
+    #[test]
+    fn a_512_byte_stride_inside_a_larger_sector_is_read_and_checked() {
+        for (len, sector) in [(1024, 4096u16), (4096, 4096)] {
+            let record = protected_record(len, 512);
+            let mut fixed = record.clone();
+            apply_fixup_on_read(&mut fixed, sector)
+                .unwrap_or_else(|e| panic!("{len}-byte record, {sector}-byte sector: {e}"));
+            for tail in (510..len).step_by(512) {
+                let mut torn = record.clone();
+                torn[tail] ^= 0xff;
+                assert!(
+                    apply_fixup_on_read(&mut torn, sector).is_err(),
+                    "a torn stride ending at {tail} of a {len}-byte record was accepted"
+                );
+            }
+        }
+        // A stride of the sector itself still reads, as this crate writes 4Kn.
+        let mut fixed = protected_record(4096, 4096);
+        apply_fixup_on_read(&mut fixed, 4096).unwrap();
+    }
+
+    /// The writers build arrays from the sector size, so a record smaller
+    /// than its sector is refused rather than written with no stride.
+    #[test]
+    fn a_record_smaller_than_a_sector_is_not_written() {
+        let mut record = protected_record(1024, 512);
+        let error = apply_fixup_on_write(&mut record, 4096).unwrap_err();
+        assert!(error.contains("smaller than"), "{error}");
     }
 
     /// The boundary is real and legitimate: 4Kn volumes put a 4096-byte
@@ -1304,12 +1368,9 @@ mod tests {
         // 4 KiB native-sector ("4Kn") drive: bytes_per_sector=4096, spc=1
         // → cluster_size=4096.  BPB is otherwise identical to 512e volumes.
         //
-        // RECORDS ARE 4096 HERE (cpmr -12), not 1024. A 1024-byte record
-        // on a 4096-byte sector is not a volume Windows can write: the
-        // fixup stride is one sector, so no stride fits in the record and
-        // the torn-write check has nothing to check (#154). The parse
-        // refuses that now, and this test says 4Kn rather than
-        // 4Kn-with-an-impossible-record-size.
+        // Records are 4096 here (cpmr -12); 1024-byte records on 4096-byte
+        // sectors, Windows' own default, are covered by
+        // a_record_smaller_than_a_sector_is_read_with_512_byte_strides.
         let boot = synth_boot(4096, 1, 4, -12);
         let bp = parse_boot_params_from_bytes(&boot).unwrap();
         assert_eq!(bp.bytes_per_sector, 4096);
