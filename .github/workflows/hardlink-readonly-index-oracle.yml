@@ -5,8 +5,19 @@ on:
 permissions:
   contents: read
 jobs:
+
+  hardlink-readonly-index-gate:
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
+
   hardlink-readonly-index:
-    runs-on: windows-latest
+    needs: hardlink-readonly-index-gate
+    runs-on: ${{ needs.hardlink-readonly-index-gate.outputs.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

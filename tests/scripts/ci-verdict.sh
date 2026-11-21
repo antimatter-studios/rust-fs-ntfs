@@ -22,7 +22,7 @@ check() {
 
 windows_true='{"changes":{"result":"success","outputs":{"mkfs":"true"}},"validate-mkfs-windows-run":{"result":"success"}}'
 windows_false='{"changes":{"result":"success","outputs":{"mkfs":"false"}},"validate-mkfs-windows-run":{"result":"skipped"}}'
-aggregate='{"test":{"result":"success"},"windows-native-read-fixtures":{"result":"success"},"integration":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"},"cli":{"result":"success"},"kernel":{"result":"success"},"semver":{"result":"success"}}'
+aggregate='{"test-linux-x64":{"result":"success"},"test-linux-arm64":{"result":"success"},"windows-native-read-fixtures":{"result":"success"},"integration":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"},"cli":{"result":"success"},"kernel":{"result":"success"},"semver":{"result":"success"}}'
 
 check windows-required-ran windows pass "$windows_true"
 check windows-unneeded-skipped windows pass "$windows_false"
@@ -39,7 +39,7 @@ check aggregate-green aggregate pass "$aggregate" true
 # semver and windows-native-read-fixtures are in ci-ok's `needs:` and were
 # once absent from the verdict's list, so a failing semver job left ci-ok
 # green (#409).
-for job in test windows-native-read-fixtures integration changes validate-mkfs-windows cli kernel semver; do
+for job in test-linux-x64 test-linux-arm64 windows-native-read-fixtures integration changes validate-mkfs-windows cli kernel semver; do
     for result in failure cancelled skipped; do
         check "aggregate-$job-$result" aggregate fail \
             "$(jq -c --arg job "$job" --arg result "$result" '.[$job].result=$result' <<< "$aggregate")" true
@@ -47,14 +47,28 @@ for job in test windows-native-read-fixtures integration changes validate-mkfs-w
 done
 # A push to main skips the Windows fixtures and what reads them, and the
 # kernel oracle, because the merge queue already validated that tree.
-docs_only="$(jq -c '.["windows-native-read-fixtures"].result="skipped" | .integration.result="skipped" | .cli.result="skipped" | .kernel.result="skipped"' <<< "$aggregate")"
+docs_only="$(jq -c '.["windows-native-read-fixtures"].result="skipped" | .integration.result="skipped" | .cli.result="skipped" | .kernel.result="skipped" | .["test-linux-arm64"].result="skipped"' <<< "$aggregate")"
 check aggregate-docs-only-skips aggregate pass "$docs_only" false
+# Each job's `<job>-gate` picks its runner and is judged as the job is: a gate
+# that failed or was skipped when its job had to run is that job failing.
+gated="$(jq -c '. + {"test-linux-x64-gate":{"result":"success"},"test-linux-arm64-gate":{"result":"success"},"cli-gate":{"result":"success"},"changes-gate":{"result":"success"},"ci-ok-gate":{"result":"success"}}' <<< "$aggregate")"
+check aggregate-gates-green aggregate pass "$gated" true
+for gate in test-linux-x64-gate test-linux-arm64-gate cli-gate changes-gate ci-ok-gate; do
+    for result in failure cancelled skipped; do
+        check "aggregate-$gate-$result" aggregate fail \
+            "$(jq -c --arg gate "$gate" --arg result "$result" '.[$gate].result=$result' <<< "$gated")" true
+    done
+done
+# A full job's gate is skipped with the job on a push to main; a quick job's never is.
+quick_gated="$(jq -c '. + {"cli-gate":{"result":"skipped"},"test-linux-arm64-gate":{"result":"skipped"},"test-linux-x64-gate":{"result":"success"}}' <<< "$docs_only")"
+check aggregate-docs-only-skips-the-gate aggregate pass "$quick_gated" false
+check aggregate-docs-only-quick-gate-skipped aggregate fail "$(jq -c '.["test-linux-x64-gate"].result="skipped"' <<< "$quick_gated")" false
 check aggregate-code-skips aggregate fail "$docs_only" true
 check aggregate-unknown-code-skips aggregate fail "$docs_only"
 check aggregate-docs-only-failure aggregate fail "$(jq -c '.cli.result="failure"' <<< "$docs_only")" false
 check aggregate-docs-only-changes-skipped aggregate fail "$(jq -c '.changes.result="skipped"' <<< "$docs_only")" false
-check aggregate-missing-integration aggregate fail '{"test":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"},"cli":{"result":"success"}}' true
-check aggregate-missing-cli aggregate fail '{"test":{"result":"success"},"integration":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"}}' true
+check aggregate-missing-integration aggregate fail '{"test-linux-x64":{"result":"success"},"test-linux-arm64":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"},"cli":{"result":"success"}}' true
+check aggregate-missing-cli aggregate fail '{"test-linux-x64":{"result":"success"},"test-linux-arm64":{"result":"success"},"integration":{"result":"success"},"changes":{"result":"success"},"validate-mkfs-windows":{"result":"success"}}' true
 check aggregate-missing-semver aggregate fail "$(jq -c 'del(.semver)' <<< "$aggregate")" true
 check aggregate-missing-kernel aggregate fail "$(jq -c 'del(.kernel)' <<< "$aggregate")" true
 # A job added to ci-ok's `needs:` is judged even before this list learns it.
@@ -72,11 +86,11 @@ check aggregate-other-branch-quick-skips aggregate fail "$docs_only" false push 
 check aggregate-unknown-event-quick-skips aggregate fail "$docs_only" false '' ''
 # A quick run (only a push to main) excuses only the full
 # jobs' skip. A quick job skipped, and any job failed or cancelled, is red.
-for job in test changes validate-mkfs-windows semver; do
+for job in test-linux-x64 changes validate-mkfs-windows semver; do
     check "aggregate-quick-$job-skipped" aggregate fail \
         "$(jq -c --arg job "$job" '.[$job].result="skipped"' <<< "$docs_only")" false
 done
-for job in test windows-native-read-fixtures integration changes validate-mkfs-windows cli kernel semver; do
+for job in test-linux-x64 test-linux-arm64 windows-native-read-fixtures integration changes validate-mkfs-windows cli kernel semver; do
     for result in failure cancelled; do
         check "aggregate-quick-$job-$result" aggregate fail \
             "$(jq -c --arg job "$job" --arg result "$result" '.[$job].result=$result' <<< "$docs_only")" false

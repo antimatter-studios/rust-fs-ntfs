@@ -8,17 +8,40 @@ permissions:
   contents: read
 
 jobs:
+
+  directory-abi-gate:
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   directory-abi:
-    runs-on: ubuntu-latest
+    needs: directory-abi-gate
+    runs-on: ${{ needs.directory-abi-gate.outputs.runner }}
     timeout-minutes: 10
     env:
       CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v4
+      - name: Install the reference reader and C toolchain
+        run: |
+          packages=(ntfs-3g)
+          apt_options=(-o Acquire::Retries=3)
+          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
+            packages+=(build-essential)
+            sources="$RUNNER_TEMP/directory-abi-ubuntu.sources"
+            sed -E 's@http://(archive|security|ports)[.]ubuntu[.]com/@https://\1.ubuntu.com/@g' \
+              /etc/apt/sources.list.d/ubuntu.sources > "$sources"
+            apt_options+=(-o "Dir::Etc::sourcelist=$sources" -o Dir::Etc::sourceparts=-)
+          fi
+          sudo apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+          sudo apt-get "${apt_options[@]}" install -y "${packages[@]}"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
-      - run: sudo apt-get update && sudo apt-get install -y ntfs-3g
       - run: nice -n 10 cargo rustc --profile test-opt --locked --lib --crate-type cdylib
       - run: cc -std=c11 -Wall -Werror -Iinclude tests/python/abi_dir_listing.c -Ltarget/test-opt -lfs_ntfs -Wl,-rpath,"$PWD/target/test-opt" -o target/abi_dir_listing
       - run: gunzip -c test-disks/windows-interrupted-1.recovered.img.gz > target/python-abi.img

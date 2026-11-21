@@ -43,7 +43,7 @@ def validate(configuration):
         require("pull_request" in triggers, f"{name}: pull_request trigger is missing")
         require(triggers["pull_request"] in (None, "", {}), f"{name}: PR trigger must be unfiltered")
         for job_name, job in workflow["jobs"].items():
-            if name == "ci.yml" and job_name == "box-cache":
+            if name == "ci.yml" and job_name in ("box-cache", "box-cache-gate"):
                 continue
             # !cancelled() is a lifecycle gate, not a filter: the job runs
             # after a failed dependency (always() does too) and is skipped
@@ -58,14 +58,16 @@ def validate(configuration):
                 require("github.event_name" not in condition and "github.ref" not in condition,
                         f"{name}/{job_name}: validation step has an event/ref gate")
     jobs = configuration["ci.yml"]["jobs"]
-    for job_name in ("test", "darwin-cross", "windows-native-read-fixtures", "integration", "cli", "kernel", "asan",
+    for job_name in ("test-linux-x64", "test-linux-arm64", "darwin-cross", "windows-native-read-fixtures", "integration", "cli", "kernel", "asan",
                      "validate-mkfs-windows-run", "validate-mkfs-windows", "ci-ok"):
         require(job_name in jobs, f"ci.yml: full-pipeline job {job_name} is missing")
-    matrix = jobs["test"]["strategy"]["matrix"]
-    require(matrix["os"] == ["ubuntu-latest", "ubuntu-24.04-arm"],
-            "ci.yml: native Linux x86_64 and ARM64 tests must both run")
-    allowed_exclusion = "${{ fromJSON(needs.changes.outputs.code == 'false' && '[{\"os\":\"ubuntu-24.04-arm\"}]' || '[]') }}"
-    require(matrix.get("exclude") in (None, allowed_exclusion), "ci.yml: unexpected platform exclusion")
+    # Each native Linux architecture is its own job, with its own runner gate.
+    # Only a push to main, after the queue validated the tree, skips ARM64.
+    require("strategy" not in jobs["test-linux-x64"] and "if" not in jobs["test-linux-x64"],
+            "ci.yml: the native x86_64 Linux test must run on every event")
+    for job_name in ("test-linux-arm64-gate", "test-linux-arm64"):
+        require(jobs[job_name].get("if") == "needs.changes.outputs.code == 'true'",
+                f"ci.yml/{job_name}: ARM64 must run only when the planner requests full validation")
     darwin = jobs["darwin-cross"]
     require("if" not in darwin, "ci.yml: the Darwin build must run on every event")
     require(any(step.get("run") == "rustup target add aarch64-apple-darwin"
@@ -87,7 +89,8 @@ validate(workflows)
 rejected = 0
 for mutation in ("missing-trigger", "path-filter", "branch-filter", "job-gate", "step-gate",
                  "lifecycle-gate-narrowed", "windows-filter", "missing-fixtures",
-                 "missing-platform", "missing-darwin", "missing-darwin-build", "ungated-darwin"):
+                 "missing-platform", "unplanned-arm-worker", "unplanned-arm-gate",
+                 "missing-darwin", "missing-darwin-build", "ungated-darwin"):
     changed = copy.deepcopy(workflows)
     jobs = changed["ci.yml"]["jobs"]
     if mutation == "missing-trigger":
@@ -102,13 +105,17 @@ for mutation in ("missing-trigger", "path-filter", "branch-filter", "job-gate", 
         changed["slate-oracle.yml"]["jobs"]["slate-writes-windows"]["if"] = (
             "${{ !cancelled() && github.event_name != 'pull_request' }}")
     elif mutation == "step-gate":
-        jobs["test"]["steps"][0]["if"] = "github.event_name != 'pull_request'"
+        jobs["test-linux-x64"]["steps"][0]["if"] = "github.event_name != 'pull_request'"
     elif mutation == "windows-filter":
         jobs["changes"]["outputs"]["mkfs"] = "${{ steps.filter.outputs.mkfs }}"
     elif mutation == "missing-fixtures":
         jobs.pop("windows-native-read-fixtures")
     elif mutation == "missing-platform":
-        jobs["test"]["strategy"]["matrix"]["os"].remove("ubuntu-24.04-arm")
+        jobs.pop("test-linux-arm64")
+    elif mutation == "unplanned-arm-worker":
+        jobs["test-linux-arm64"].pop("if")
+    elif mutation == "unplanned-arm-gate":
+        jobs["test-linux-arm64-gate"]["if"] = "needs.changes.outputs.code != 'false'"
     elif mutation == "missing-darwin":
         jobs.pop("darwin-cross")
     elif mutation == "missing-darwin-build":
