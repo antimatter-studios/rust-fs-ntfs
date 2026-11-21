@@ -496,3 +496,168 @@ fn primitive_streams_accept_large_ntfs_cluster_hypotheses() {
         assert_eq!(&output, b"large");
     }
 }
+
+#[test]
+fn record_evidence_decodes_names_times_and_number_like_the_independent_reader() {
+    let (device, number) = populated(&vec![0x42; 9000]);
+    let volume = Volume::open_for_salvage(device.clone()).unwrap();
+    let record = volume.inspect_mft_record(number).unwrap();
+    assert_eq!(record.record_number, Some(number));
+    assert!(!record.has_attribute_list());
+
+    let bytes = device.0.lock().unwrap().clone();
+    let mut cursor = std::io::Cursor::new(bytes);
+    let independent = ntfs::Ntfs::new(&mut cursor).unwrap();
+    let file = independent.file(&mut cursor, number).unwrap();
+    assert_eq!(file.file_record_number(), number);
+    assert_eq!(
+        u64::from(file.sequence_number()),
+        u64::from(record.sequence)
+    );
+
+    let info = file.info().unwrap();
+    let decoded = record.standard_information().unwrap();
+    assert_eq!(decoded.created_nt, info.creation_time().nt_timestamp());
+    assert_eq!(decoded.modified_nt, info.modification_time().nt_timestamp());
+    assert_eq!(
+        decoded.mft_modified_nt,
+        info.mft_record_modification_time().nt_timestamp()
+    );
+    assert_eq!(decoded.accessed_nt, info.access_time().nt_timestamp());
+    assert_eq!(decoded.file_attributes, info.file_attributes().bits());
+
+    let names = record.file_names();
+    assert!(!names.is_empty());
+    let reference = file
+        .name(&mut cursor, None, None)
+        .expect("the file has a name")
+        .unwrap();
+    let expected = names
+        .iter()
+        .find(|name| name.name == reference.name().to_string_lossy())
+        .expect("the independent reader's name was decoded");
+    assert!(expected.name_valid);
+    assert_eq!(expected.name, "treasure.txt");
+    assert_eq!(
+        expected.parent_record,
+        reference.parent_directory_reference().file_record_number()
+    );
+    assert_eq!(
+        expected.parent_sequence,
+        reference.parent_directory_reference().sequence_number()
+    );
+    assert_eq!(
+        expected.created_nt,
+        reference.creation_time().nt_timestamp()
+    );
+    assert_eq!(expected.allocated_size, reference.allocated_size());
+    assert_eq!(expected.real_size, reference.data_size());
+    assert_eq!(expected.flags, reference.file_attributes().bits());
+    assert_eq!(expected.parent_record, 5, "created in the root directory");
+}
+
+#[test]
+fn record_evidence_decoders_refuse_what_the_attribute_cannot_hold() {
+    let (device, number) = populated(b"small");
+    let volume = Volume::open_for_salvage(device).unwrap();
+    let mut record = volume.inspect_mft_record(number).unwrap();
+    for attribute in &mut record.attributes {
+        if attribute.type_code == AttrType::FileName as u32 {
+            // A name length that runs past the value is skipped, not guessed at.
+            if let AttributeValue::Resident(value) = &mut attribute.value {
+                value[64] = 255;
+            }
+        }
+        if attribute.type_code == AttrType::StandardInformation as u32 {
+            if let AttributeValue::Resident(value) = &mut attribute.value {
+                value.truncate(40);
+            }
+        }
+    }
+    assert!(record.file_names().is_empty());
+    assert!(record.standard_information().is_none());
+    let mut unpaired = volume.inspect_mft_record(number).unwrap();
+    for attribute in &mut unpaired.attributes {
+        if attribute.type_code == AttrType::FileName as u32 {
+            if let AttributeValue::Resident(value) = &mut attribute.value {
+                value[66..68].copy_from_slice(&0xd800u16.to_le_bytes());
+            }
+        }
+    }
+    let name = &unpaired.file_names()[0];
+    assert!(!name.name_valid);
+    assert!(name.name.contains('\u{fffd}'));
+}
+
+#[test]
+fn a_boot_sector_in_memory_is_parsed_and_validated_without_a_device() {
+    let device = formatted();
+    let mut boot = [0u8; 512];
+    device.read_at(0, &mut boot).unwrap();
+    let parsed = fs_ntfs::mft_io::parse_boot_sector(&boot).unwrap();
+    let opened = Volume::open_for_salvage(device).unwrap();
+    assert_eq!(parsed.cluster_size, opened.boot().cluster_size);
+    assert_eq!(parsed.total_sectors, opened.boot().total_sectors);
+    assert_eq!(parsed.serial_number, 0x123456789abcdef0);
+    assert!(fs_ntfs::mft_io::parse_boot_sector(&boot[..511]).is_err());
+    boot[3] = b'X';
+    assert!(fs_ntfs::mft_io::parse_boot_sector(&boot).is_err());
+    assert!(fs_ntfs::mft_io::parse_boot_sector(&[0; 512]).is_err());
+}
+
+#[test]
+fn volume_record_evidence_matches_the_mounted_volume_information() {
+    let device = formatted();
+    let volume = Volume::open(device).unwrap();
+    let info = volume.volume_info().unwrap();
+    let record = volume.inspect_mft_record(3).unwrap();
+    let decoded = record.volume_information().unwrap();
+    assert_eq!(
+        (decoded.major, decoded.minor),
+        (info.version_major, info.version_minor)
+    );
+    assert_eq!(decoded.flags, info.flags);
+    assert_eq!(decoded.is_dirty(), info.flags & 1 != 0);
+    assert_eq!(record.volume_name().unwrap(), info.label);
+    assert_eq!(info.label, "THREE API");
+    assert!(volume
+        .inspect_mft_record(5)
+        .unwrap()
+        .volume_information()
+        .is_none());
+}
+
+/// A 1024-byte FILE record with an empty attribute list, whose update sequence array starts at
+/// `usa_offset`. NTFS 3.1 starts it at 0x30 and keeps the record's own number at 0x2c; the older
+/// layout starts it at 0x2a, so those bytes belong to the array and say nothing about a number.
+fn bare_record(usa_offset: u16, number_at_0x2c: Option<u32>) -> Vec<u8> {
+    let mut record = vec![0u8; 1024];
+    record[0..4].copy_from_slice(b"FILE");
+    record[4..6].copy_from_slice(&usa_offset.to_le_bytes());
+    record[6..8].copy_from_slice(&3u16.to_le_bytes());
+    record[16..18].copy_from_slice(&1u16.to_le_bytes());
+    let first = usa_offset.div_ceil(8) * 8 + 8;
+    record[20..22].copy_from_slice(&first.to_le_bytes());
+    record[22..24].copy_from_slice(&1u16.to_le_bytes());
+    record[24..28].copy_from_slice(&(u32::from(first) + 8).to_le_bytes());
+    record[28..32].copy_from_slice(&1024u32.to_le_bytes());
+    if let Some(number) = number_at_0x2c {
+        record[0x2c..0x30].copy_from_slice(&number.to_le_bytes());
+    }
+    record[usize::from(first)..usize::from(first) + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    fs_ntfs::mft_io::apply_fixup_on_write(&mut record, 512).unwrap();
+    record
+}
+
+#[test]
+fn a_record_number_is_only_read_where_the_header_has_one() {
+    // NTFS 3.1: the update sequence array starts at 0x30 and the number is at 0x2c.
+    let modern = inspect_file_record(0, bare_record(0x30, Some(77)), 512);
+    assert!(modern.issues.is_empty(), "{:?}", modern.issues);
+    assert_eq!(modern.record_number, Some(77));
+    // The layout the Linux kernel's ntfs3 driver writes: the array starts at 0x2a, so the bytes
+    // at 0x2c are the array's own, and a number read from them would be wrong.
+    let legacy = inspect_file_record(0, bare_record(0x2a, None), 512);
+    assert!(legacy.issues.is_empty(), "{:?}", legacy.issues);
+    assert_eq!(legacy.record_number, None);
+}
