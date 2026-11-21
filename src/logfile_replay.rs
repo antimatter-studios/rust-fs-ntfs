@@ -1709,6 +1709,7 @@ mod tests {
             sectors_per_cluster: 8,
             cluster_size: 4096,
             mft_lcn: 4,
+            mft_mirror_lcn: 2,
             file_record_size: 1024,
             total_sectors: 0,
             serial_number: 0,

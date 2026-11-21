@@ -794,6 +794,7 @@ mod tests {
                 // `a_files_runs_may_not_free_the_volumes_own_clusters`
                 // for where $MFT's real protection is tested).
                 mft_lcn: 1_000_000,
+                mft_mirror_lcn: 2,
                 file_record_size: 1024,
                 // A real boot sector always says how big the volume is,
                 // and cluster_span judges every transfer against it. 512 MiB
@@ -1929,6 +1930,7 @@ mod range_bound_tests {
                 sectors_per_cluster: 8,
                 cluster_size: 4096,
                 mft_lcn: 4,
+                mft_mirror_lcn: 2,
                 file_record_size: 1024,
                 total_sectors: 1 << 20,
                 serial_number: 0,
@@ -1990,6 +1992,7 @@ mod volume_own_tests {
                 sectors_per_cluster: 8,
                 cluster_size: 4096,
                 mft_lcn,
+                mft_mirror_lcn: 2,
                 file_record_size: 1024,
                 total_sectors: 1 << 20,
                 serial_number: 0,

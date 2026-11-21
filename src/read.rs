@@ -2567,6 +2567,7 @@ mod tests {
             sectors_per_cluster: 8,
             cluster_size: 4096,
             mft_lcn: 4,
+            mft_mirror_lcn: 2,
             file_record_size: 1024,
             // The volume claims 64 MiB.
             total_sectors: 131072,
@@ -2610,6 +2611,7 @@ mod tests {
             sectors_per_cluster: 8,
             cluster_size: 4096,
             mft_lcn: 4,
+            mft_mirror_lcn: 2,
             file_record_size: 1024,
             total_sectors: 65536,
             serial_number: 0,
@@ -2658,6 +2660,7 @@ mod tests {
             sectors_per_cluster: 8,
             cluster_size: 4096,
             mft_lcn: 4,
+            mft_mirror_lcn: 2,
             file_record_size: 1024,
             total_sectors: 65536,
             serial_number: 0,

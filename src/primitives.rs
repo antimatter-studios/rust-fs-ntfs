@@ -1,11 +1,13 @@
 use crate::attr_io::{self, AttrType};
 use crate::data_runs::{decode_runs, DataRun};
 use crate::error::Error;
-use crate::mft_io::{self, MFT_FLAG_DIRECTORY, MFT_FLAG_IN_USE};
+use crate::mft_io::{self, BootParams, MFT_FLAG_DIRECTORY, MFT_FLAG_IN_USE};
 use crate::volume::{RawVolume, Volume, VolumeAPI};
 use fs_core::BlockRead;
 
+mod allocation;
 mod extents;
+pub use allocation::{DerivedAllocation, RecordDamage, RunOutsideVolume};
 pub use extents::{
     MftMap, MissingExtent, ResolvedAttribute, ResolvedRecord, SalvageStream, StreamExtent,
 };
@@ -341,6 +343,38 @@ pub trait PrimitiveAPI: VolumeAPI {
         cluster_size: u64,
     ) -> Result<MftMap, Error> {
         extents::read_mft_map(self, mft_offset, record_size, sector_size, cluster_size)
+    }
+
+    /// Reads `$MFT` record `number` from `$MFTMirr`, where the boot sector
+    /// puts it, with the same fixup checks and damage reports as a record
+    /// read from `$MFT`. Only the first [`BootParams::mft_mirror_records`]
+    /// records are mirrored; a later one is refused.
+    fn read_mirror_record(&self, boot: &BootParams, number: u64) -> Result<RecordEvidence, Error> {
+        extents::read_mirror_record(self, boot, number)
+    }
+
+    /// An [`MftMap`] built from `$MFTMirr`'s copy of record 0, for a volume
+    /// whose own record 0 is damaged. The map says so in its limitations,
+    /// and says when the copy disagrees with the boot sector about where
+    /// `$MFT` is.
+    fn read_mft_map_from_mirror(&self, boot: &BootParams) -> Result<MftMap, Error> {
+        extents::read_mft_map_from_mirror(self, boot)
+    }
+
+    /// The cluster allocation the readable file records describe, for a
+    /// volume whose `$Bitmap` cannot be read: every cluster of every
+    /// non-resident attribute of every in-use record `map` covers, base and
+    /// extension records alike, metafiles included, within the volume's
+    /// `cluster_count` clusters. Unreadable records, records read only in
+    /// part and runs past the volume are named in the limitations, and the
+    /// result says whether it is complete. Refused for a contiguous-hypothesis
+    /// map, which does not say how many records there are.
+    fn derive_allocation(
+        &self,
+        map: &MftMap,
+        cluster_count: u64,
+    ) -> Result<DerivedAllocation, Error> {
+        allocation::derive_allocation(self, map, cluster_count)
     }
 
     /// Reads file record `number` through `map`, joining the pieces of a

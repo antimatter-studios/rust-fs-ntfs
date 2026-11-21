@@ -666,6 +666,7 @@ mod tests {
             sectors_per_cluster: cluster_size / 512,
             cluster_size,
             mft_lcn: 0,
+            mft_mirror_lcn: 2,
             file_record_size: 1024,
             // A real boot sector always says how big the volume is,
             // and cluster_span judges every transfer against it. 512 MiB
