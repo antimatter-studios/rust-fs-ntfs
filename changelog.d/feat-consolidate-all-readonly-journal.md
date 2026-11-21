@@ -1,0 +1,3 @@
+### Added
+
+- **Change journal and `$LogFile` evidence from a read-only device.** `evidence::usn_journal_state`, `read_usn_records`, `logfile_state`, `read_logfile` and `walk_logfile` take an `fs_core::BlockRead`, which has no write, where the existing entry points needed a `BlockIo`. `evidence::replay_logfile_in_memory` runs the same Windows-compatible replay `fsck` writes, with every write held in memory, and returns a `ReplayedVolume`: a `BlockRead` showing the volume as the replay leaves it, which `Volume::open` reads like the recovered volume, with the report and the byte ranges the replay changed. The device is never written (#1318, #1307).

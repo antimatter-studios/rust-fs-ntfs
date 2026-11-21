@@ -2213,7 +2213,7 @@ fn ranges_overlap(a: (u64, u64), b: (u64, u64)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
-fn locate_logfile_data_io<T: FsckIo>(io: &mut T) -> Result<(u64, u64), Error> {
+pub(crate) fn locate_logfile_data_io<T: FsckIo>(io: &mut T) -> Result<(u64, u64), Error> {
     // Native: `$LogFile`'s unnamed `$DATA` is non-resident and laid out as a
     // single contiguous extent; the helper returns its on-disk offset + the
     // logical length to overwrite, and fails closed if it's ever fragmented.
