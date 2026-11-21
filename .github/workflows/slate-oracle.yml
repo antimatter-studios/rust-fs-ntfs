@@ -20,12 +20,26 @@ on:
 permissions:
   contents: read
 jobs:
+
+  writer-cases-gate:
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   writer-cases:
     name: Capture matrix data writes before Windows mounts
-    runs-on: ubuntu-latest
+    needs: writer-cases-gate
+    runs-on: ${{ needs.writer-cases-gate.outputs.runner }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: C toolchain for the gated runner
+        if: runner.environment == 'self-hosted'
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.95.0
@@ -77,12 +91,21 @@ jobs:
             tmp/logs/slate-writer-capture.log
           if-no-files-found: error
           retention-days: 7
+
+  windows-cases-gate:
+    needs: writer-cases
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
+
   windows-cases:
     name: Windows formats and chkdsk grades the cases
-    needs: writer-cases
-    runs-on: windows-latest
-    outputs:
-      runners: ${{ steps.runners.outputs.runners || '{}' }}
+    needs: [writer-cases, windows-cases-gate]
+    runs-on: ${{ needs.windows-cases-gate.outputs.runner }}
     # Seventeen images of up to 256 MiB, two Windows formats and seventeen read-only chkdsk
     # passes. A bound, so a hung mount fails by name (#388).
     timeout-minutes: 30
@@ -143,39 +166,21 @@ jobs:
             tmp/slate-oracle/windows-read-diag/
           if-no-files-found: error
           retention-days: 7
-      - name: Pick runners
-        id: runners
-        shell: bash
-        env:
-          ORG: ${{ github.repository_owner }}
-          ACTOR: ${{ github.triggering_actor }}
-          AUTHOR: ${{ github.event.pull_request.user.login }}
-          SENDER: ${{ github.event.sender.login }}
-          GH_ACTOR: ${{ github.actor }}
-          JOBS: slate-check
-        run: |
-          set -euo pipefail
-          ours=true
-          for who in "$ACTOR" "$GH_ACTOR" "$SENDER" "$AUTHOR"; do
-            [ -z "$who" ] || [ "$who" = christhomas ] || ours=false
-          done
-          pick() {
-            $ours || { echo ubuntu-24.04; return; }
-            r=$(curl -fsS --max-time 10 --get https://runner-gate.antimatter-studios.com/pick \
-                  --data-urlencode "org=$ORG" --data-urlencode prefer=antimatter-vps-linux-x64 \
-                  --data-urlencode fallback=ubuntu-24.04 --data-urlencode "actor=$ACTOR" --data-urlencode "author=$AUTHOR" \
-                  --data-urlencode "run=${{ github.run_id }}" --data-urlencode "attempt=${{ github.run_attempt }}" \
-                  --data-urlencode "job=$1") || r=ubuntu-24.04
-            case "$r" in antimatter-vps-linux-x64|ubuntu-24.04) echo "$r" ;; *) echo ubuntu-24.04 ;; esac
-          }
-          runners='{}'
-          for job in $JOBS; do runners=$(jq -c --arg j "$job" --arg r "$(pick "$job")" '. + {($j): $r}' <<<"$runners"); done
-          echo "$runners" | jq . | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "runners=$runners" >> "$GITHUB_OUTPUT"
+
+  slate-check-gate:
+    needs: [writer-cases, windows-cases]
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   slate-check:
     name: Slate checks the same bytes
-    needs: [writer-cases, windows-cases]
-    runs-on: ${{ fromJSON(needs.windows-cases.outputs.runners || '{}')['slate-check'] || 'ubuntu-24.04' }}
+    needs: [writer-cases, windows-cases, slate-check-gate]
+    runs-on: ${{ needs.slate-check-gate.outputs.runner }}
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: 2
@@ -255,6 +260,18 @@ jobs:
             tmp/slate-oracle/writes/
           if-no-files-found: error
           retention-days: 14
+
+  slate-writes-windows-gate:
+    needs: slate-check
+    if: ${{ !cancelled() }}
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
+
   # Windows grades every Slate-written copy (#864): read-only chkdsk on a
   # scratch copy of each, and the read manifest only for a copy it accepts.
   # A copy chkdsk rejects is a Slate writer defect: named in the summary,
@@ -262,9 +279,9 @@ jobs:
   # failure of this job. Runs even when the comparison disagreed.
   slate-writes-windows:
     name: Windows grades each Slate-written copy
-    needs: slate-check
+    needs: [slate-check, slate-writes-windows-gate]
     if: ${{ !cancelled() }}
-    runs-on: windows-latest
+    runs-on: ${{ needs.slate-writes-windows-gate.outputs.runner || 'windows-latest' }}
     # Three 256 MiB copies, each one read-only chkdsk and one read capture.
     timeout-minutes: 30
     steps:

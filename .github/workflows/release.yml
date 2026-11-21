@@ -41,10 +41,22 @@ permissions:
   contents: read
 
 jobs:
+
+  windows-native-read-fixtures-gate:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
+
   windows-native-read-fixtures:
     name: Windows-authored native read fixtures
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    runs-on: windows-latest
+    needs: windows-native-read-fixtures-gate
+    runs-on: ${{ needs.windows-native-read-fixtures-gate.outputs.runner }}
     # Measured at 1.8 to 2.2 minutes. Without a bound, a step that hangs holds
     # the runner for GitHub's six hours and prints nothing (#388).
     timeout-minutes: 15
@@ -84,6 +96,17 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  crates-test-gate:
+    needs: [windows-native-read-fixtures]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   # ---------------------------------------------------------------------------
   # Full Rust test gate (Linux). Generates the read-path fixtures first so the
   # fixture-driven integration tests run for real — NOT trimmed to --lib.
@@ -91,10 +114,13 @@ jobs:
   crates-test:
     name: full test suite (fixtures + integration)
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    needs: [windows-native-read-fixtures]
+    runs-on: ${{ needs.crates-test-gate.outputs.runner }}
+    needs: [windows-native-read-fixtures, crates-test-gate]
     steps:
       - uses: actions/checkout@v4
+      - name: C toolchain for the gated runner
+        if: runner.environment == 'self-hosted'
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - name: check out sibling repos
         # Replaces `submodules: recursive`. The pins live in chores.yml,
         # so CI and a developer's machine read the same declaration
@@ -214,6 +240,16 @@ jobs:
           path: tmp/logs/
           if-no-files-found: ignore
 
+  validate-windows-gate:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
+
   # ---------------------------------------------------------------------------
   # Windows chkdsk validation — the canonical NTFS functional oracle.
   # Mirrors ci.yml's `validate-mkfs-windows`. Microsoft's chkdsk is the only
@@ -223,7 +259,8 @@ jobs:
   validate-windows:
     name: validate rust-ntfs format (Windows chkdsk)
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    runs-on: windows-latest
+    needs: validate-windows-gate
+    runs-on: ${{ needs.validate-windows-gate.outputs.runner }}
     # Measured at 1.6 to 1.8 minutes. Without a bound, a step that hangs holds
     # the runner for GitHub's six hours and prints nothing (#388).
     timeout-minutes: 15
@@ -500,6 +537,17 @@ jobs:
           chkdsk_after_outcome: ${{ steps.chkdsk_after.outcome }}
           chkdsk_after_exit: ${{ steps.chkdsk_after.outputs.scan_exit }}
 
+  crates-publish-gate:
+    needs: [crates-test, validate-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+
   # ---------------------------------------------------------------------------
   # crates.io publish — gated on BOTH the full Linux test suite AND the
   # Windows chkdsk validation. Trusted publishing (OIDC); no stored token.
@@ -508,9 +556,9 @@ jobs:
   # ---------------------------------------------------------------------------
   crates-publish:
     name: publish to crates.io
-    needs: [crates-test, validate-windows]
+    needs: [crates-test, validate-windows, crates-publish-gate]
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.crates-publish-gate.outputs.runner }}
     environment: release
     permissions:
       id-token: write
@@ -519,6 +567,9 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
+      - name: C toolchain for the gated runner
+        if: runner.environment == 'self-hosted'
+        run: sudo apt-get update && sudo apt-get install -y build-essential
       - name: check out sibling repos
         # Replaces `submodules: recursive`. The pins live in chores.yml,
         # so CI and a developer's machine read the same declaration

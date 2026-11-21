@@ -8,8 +8,19 @@ on:
 permissions:
   contents: read
 jobs:
+
+  geometry-capture-gate:
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
+
   geometry-capture:
-    runs-on: windows-latest
+    needs: geometry-capture-gate
+    runs-on: ${{ needs.geometry-capture-gate.outputs.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

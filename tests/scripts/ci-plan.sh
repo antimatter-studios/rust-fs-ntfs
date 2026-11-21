@@ -48,7 +48,8 @@ fi
 grep -q '^        run: bash scripts/ci-plan.sh$' "$CI" && ok || bad "ci.yml does not run scripts/ci-plan.sh"
 grep -q '^  merge_group:' "$CI" && ok || bad "ci.yml has no merge_group trigger"
 grep -q '^  workflow_dispatch:' "$CI" && ok || bad "ci.yml has no workflow_dispatch trigger"
-if sed -n '/^  pull_request:/,/^  [a-z_]*:/p' "$CI" | grep -q 'branches:'; then
+pull_request="$(sed -n '/^  pull_request:/,/^  [a-z_]*:/p' "$CI")"
+if grep -q 'branches:' <<<"$pull_request"; then
     bad "pull_request is limited to some branches; stacked layers get no run"
 else
     ok
@@ -57,8 +58,8 @@ for workflow in "$ROOT"/.github/workflows/*.yml; do
     if ! grep -q '^  pull_request:' "$workflow"; then
         continue
     fi
-    if sed -n '/^  pull_request:/,/^  [a-z_]*:/p' "$workflow" |
-        grep -Eq '^    (paths|paths-ignore|branches|branches-ignore):'; then
+    pull_request="$(sed -n '/^  pull_request:/,/^  [a-z_]*:/p' "$workflow")"
+    if grep -Eq '^    (paths|paths-ignore|branches|branches-ignore):' <<<"$pull_request"; then
         bad "$(basename "$workflow"): every pull request must run without path or branch filters"
     else
         ok
@@ -78,21 +79,35 @@ done
 # and `pipefail` reports that as the pipeline's status, so a match it found
 # reads as a failure. Seen on a runner as `printf: write error: Broken pipe`
 # above a `FAIL` for an assertion that had matched.
-box_cache="$(sed -n '/^  box-cache:/,/^  kernel:/p' "$CI")"
+box_cache="$(sed -n '/^  box-cache:/,/^  kernel-gate:/p' "$CI")"
 grep -q "^    if: github.event_name == 'push' && github.ref == 'refs/heads/main'$" <<<"$box_cache" && ok || bad "box cache must run only on a push to main"
 grep -q '^          chore siblings$' <<<"$box_cache" && ok || bad "box cache does not use the pinned siblings"
 grep -q 'ci-setup-linux.sh --box-cache-key' <<<"$box_cache" && ok || bad "box cache key does not come from the pinned harness"
 grep -q 'key: \${{ steps.vm-host.outputs.box-cache-key }}' <<<"$box_cache" && ok || bad "box cache key differs from the kernel job"
 grep -q 'path: ~/.vagrant.d/boxes' <<<"$box_cache" && ok || bad "box cache path differs from the kernel job"
 grep -q 'vagrant box add "$box" --box-version "$box_version" --provider libvirt --architecture amd64' <<<"$box_cache" && ok || bad "box cache does not fetch the pinned Linux box"
-if printf '%s\n' "$box_cache" | grep -Eq 'needs:|vagrant up|chore (test|linux:up|vm:up)'; then
+# Its only `needs:` is its own runner gate: the gate reads nothing from a suite.
+box_cache_without_gate="$(grep -v '^    needs: box-cache-gate$' <<<"$box_cache")"
+if grep -Eq 'needs:|vagrant up|chore (test|linux:up|vm:up)' <<<"$box_cache_without_gate"; then
     bad "box cache must not depend on a suite or boot a VM"
 else
     ok
 fi
-grep -q "CI_GATE_NON_GATING='asan box-cache validate-mkfs-windows'" "$ROOT/chores.yml" && ok || bad "main-only box cache is not declared non-gating"
-if sed -n '/^  ci-ok:/,$p' "$CI" | grep -q 'needs:.*box-cache'; then
+grep -q "CI_GATE_NON_GATING='asan asan-gate box-cache box-cache-gate validate-mkfs-windows validate-mkfs-windows-gate ci-ok-gate'" "$ROOT/chores.yml" && ok || bad "main-only box cache is not declared non-gating"
+ci_ok="$(sed -n '/^  ci-ok:/,$p' "$CI")"
+if grep -q 'needs:.*box-cache' <<<"$ci_ok"; then
     bad "box cache must not lengthen the merge queue path"
+else
+    ok
+fi
+
+oversized_job="$(printf 'first match\n%1048576s\n' '')"
+legacy_status=0
+(printf '%s\n' "$oversized_job" | grep -Fqx 'first match') 2>/dev/null || legacy_status=$?
+[ "$legacy_status" -eq 141 ] && ok || bad "oversized quiet-grep negative control: expected SIGPIPE (141), got $legacy_status"
+grep -Fqx 'first match' <<<"$oversized_job" && ok || bad "oversized job first match was not found"
+if grep -Fqx 'absent match' <<<"$oversized_job"; then
+    bad "oversized job matched an absent line"
 else
     ok
 fi

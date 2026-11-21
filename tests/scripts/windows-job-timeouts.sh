@@ -20,9 +20,18 @@ fail=0
 ok()  { pass=$((pass + 1)); }
 bad() { fail=$((fail + 1)); printf 'FAIL %s\n' "$*"; }
 
-# Prints `<job> <windows 0|1> <timeout or ->` for each job in a workflow.
+# Prints `<job> <windows 0|1> <timeout or ->` for each job in a workflow. A job
+# is a Windows job when its `runs-on` names a Windows runner, or takes its runner
+# from a `<job>-gate` whose pick step asks for a Windows class (`runner-gate pick
+# windows-x64`, `windows-arm64`): the gate, not the job, now says which runner.
 jobs_of() {
-    awk '
+    local windows_gates
+    windows_gates="$(awk '
+        /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { gate = $1; sub(/:$/, "", gate) }
+        /runner-gate pick windows-/ { print gate }
+    ' "$1" | tr '\n' ' ')"
+    awk -v windows_gates="$windows_gates" '
+        BEGIN { n = split(windows_gates, names, " "); for (i = 1; i <= n; i++) windows[names[i]] = 1 }
         function flush() {
             if (job != "") print job, win, (limit == "" ? "-" : limit)
         }
@@ -34,6 +43,11 @@ jobs_of() {
             next
         }
         in_jobs && job != "" && /^    runs-on:.*windows-(latest|20[0-9][0-9])/ { win = 1 }
+        in_jobs && job != "" && /^    runs-on:.*needs\.[A-Za-z0-9_-]+\.outputs/ {
+            gate = $0
+            sub(/^.*needs\./, "", gate); sub(/\.outputs.*$/, "", gate)
+            if (gate in windows) win = 1
+        }
         in_jobs && job != "" && /^    timeout-minutes:[[:space:]]*[0-9]+[[:space:]]*$/ {
             limit = $2
         }
@@ -104,7 +118,24 @@ jobs:
     runs-on: ubuntu-latest
     steps: []
   gated:
-    runs-on: ${{ fromJSON(needs.windows-native-read-fixtures.outputs.runners || '{}')['gated'] || 'ubuntu-24.04' }}
+    needs: gated-gate
+    runs-on: ${{ needs.gated-gate.outputs.runner }}
+    steps: []
+  gated-gate:
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    steps:
+      - id: pick
+        run: runner-gate pick linux-x64
+  hung-gate:
+    runs-on: antimatter-vps-gate
+    timeout-minutes: 1
+    steps:
+      - id: pick
+        run: runner-gate pick windows-x64
+  hung-by-gate:
+    needs: hung-gate
+    runs-on: ${{ needs.hung-gate.outputs.runner || 'windows-latest' }}
     steps: []
   hung:
     name: a Windows job
@@ -113,8 +144,8 @@ jobs:
       - run: |
           timeout-minutes: 5
 EOF
-if [ "$(unbounded_windows_jobs "$sandbox/unbounded.yml")" = hung ]; then ok; else bad "an unbounded Windows job was not caught, or a Linux job whose runner comes from a Windows job's output was taken for a Windows job"; fi
-sed 's/^    name: a Windows job$/    timeout-minutes: 30/' "$sandbox/unbounded.yml" > "$sandbox/bounded.yml"
+if [ "$(unbounded_windows_jobs "$sandbox/unbounded.yml" | sort | tr '\n' ' ')" = "hung hung-by-gate " ]; then ok; else bad "an unbounded Windows job was not caught (by its runs-on or by its gate's class), or a Linux job whose runner comes from a Linux gate was taken for a Windows job"; fi
+sed -e 's/^    name: a Windows job$/    timeout-minutes: 30/' -e 's/^    runs-on: ${{ needs.hung-gate.outputs.runner || .windows-latest. }}$/&\n    timeout-minutes: 30/' "$sandbox/unbounded.yml" > "$sandbox/bounded.yml"
 if [ -z "$(unbounded_windows_jobs "$sandbox/bounded.yml")" ]; then ok; else bad "a bounded Windows job was reported as unbounded"; fi
 
 for timeout_minutes in 85 119 120 180; do
