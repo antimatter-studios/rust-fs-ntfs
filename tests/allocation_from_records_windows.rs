@@ -5,12 +5,12 @@
 //! wrote (`test-disks/build-windows-salvage-stream-fixtures.ps1`): a
 //! fragmented file, compressed files with sparse units, named streams and
 //! hard links in extension records. Its `$Bitmap` is Windows' own account of
-//! which clusters are in use. The allocation `PrimitiveAPI` rebuilds from the
+//! which clusters are in use. The allocation `NtfsPrimitiveAPI` rebuilds from the
 //! records has to equal it; then `$Bitmap` and some `$MFT` records are
 //! destroyed on copies, and the rebuild has to go on and name what it lost.
 
 use fs_ntfs::mft_io::{parse_boot_sector, BootParams};
-use fs_ntfs::primitives::{MftMap, PrimitiveAPI};
+use fs_ntfs::primitives::{MftMap, NtfsPrimitiveAPI};
 use fs_ntfs::volume::RawVolume;
 use std::path::Path;
 

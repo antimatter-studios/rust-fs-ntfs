@@ -4,12 +4,12 @@
 //! `test-disks/ntfs-salvage-streams.img` is a volume Windows formatted and
 //! wrote (`test-disks/build-windows-salvage-stream-fixtures.ps1`); its
 //! `$MFTMirr` holds Windows' own copy of `$MFT`'s first records. Each test
-//! damages a copy of it in memory and reads through `PrimitiveAPI` on a
+//! damages a copy of it in memory and reads through `NtfsPrimitiveAPI` on a
 //! `RawVolume`, as a salvage tool does.
 
 use fs_ntfs::attr_io::AttrType;
 use fs_ntfs::mft_io::{parse_boot_sector, BootParams};
-use fs_ntfs::primitives::{AttributeValue, PrimitiveAPI};
+use fs_ntfs::primitives::{AttributeValue, NtfsPrimitiveAPI};
 use fs_ntfs::volume::RawVolume;
 use sha2::{Digest, Sha256};
 use std::path::Path;

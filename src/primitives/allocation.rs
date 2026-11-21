@@ -9,7 +9,7 @@
 //! never guessed: a cluster no readable record claims is not proven free.
 
 use super::extents::{read_stream_at, SalvageStream};
-use super::{AttributeValue, MftMap, PrimitiveAPI};
+use super::{AttributeValue, MftMap, NtfsPrimitiveAPI};
 use crate::attr_io::AttrType;
 use crate::error::Error;
 
@@ -93,7 +93,7 @@ fn merged(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
     out
 }
 
-pub(super) fn derive_allocation<V: PrimitiveAPI + ?Sized>(
+pub(super) fn derive_allocation<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     map: &MftMap,
     cluster_count: u64,
@@ -236,7 +236,11 @@ pub(super) fn derive_allocation<V: PrimitiveAPI + ?Sized>(
 
 /// `$MFT`'s `$BITMAP`, one bit per record, from record 0 as the map reads
 /// it; `None` when it cannot be read whole.
-fn mft_bitmap<V: PrimitiveAPI + ?Sized>(volume: &V, map: &MftMap, records: u64) -> Option<Vec<u8>> {
+fn mft_bitmap<V: NtfsPrimitiveAPI + ?Sized>(
+    volume: &V,
+    map: &MftMap,
+    records: u64,
+) -> Option<Vec<u8>> {
     let record = volume.read_mapped_record(map, 0).ok()?;
     let mut base = record;
     base.fixed.as_ref()?;

@@ -10,12 +10,12 @@
 //! filesystem, each hard-link name, and each file's extent count.
 //! `test-disks/build-windows-salvage-stream-fixtures.ps1` builds both.
 //!
-//! Every read here goes through `PrimitiveAPI` on a `RawVolume`, the way a
+//! Every read here goes through `NtfsPrimitiveAPI` on a `RawVolume`, the way a
 //! salvage tool reads a volume whose namespace it cannot trust: from the
 //! boot sector's `$MFT` location to a record by number, never by path.
 
 use fs_ntfs::attr_io::AttrType;
-use fs_ntfs::primitives::{MftMap, PrimitiveAPI, ResolvedRecord, SalvageStream};
+use fs_ntfs::primitives::{MftMap, NtfsPrimitiveAPI, ResolvedRecord, SalvageStream};
 use fs_ntfs::volume::RawVolume;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};

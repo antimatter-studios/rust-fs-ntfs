@@ -2,7 +2,7 @@ use crate::attr_io::{self, AttrType};
 use crate::data_runs::{decode_runs, DataRun};
 use crate::error::Error;
 use crate::mft_io::{self, BootParams, MFT_FLAG_DIRECTORY, MFT_FLAG_IN_USE};
-use crate::volume::{RawVolume, Volume, VolumeAPI};
+use crate::volume::{NtfsVolumeAPI, RawVolume, Volume};
 use fs_core::BlockRead;
 
 mod allocation;
@@ -268,7 +268,7 @@ impl RecordEvidence {
     }
 }
 
-pub trait PrimitiveAPI: VolumeAPI {
+pub trait NtfsPrimitiveAPI: NtfsVolumeAPI {
     fn read_file_record_at(
         &self,
         offset: u64,
@@ -289,8 +289,8 @@ pub trait PrimitiveAPI: VolumeAPI {
     ///
     /// The attribute has to hold its whole stream: a record with an
     /// `$ATTRIBUTE_LIST`, or an extent that does not start at VCN 0, is
-    /// refused here; [`PrimitiveAPI::resolve_salvage_record`] follows the list
-    /// and [`PrimitiveAPI::read_resolved_stream_at`] reads what it joins.
+    /// refused here; [`NtfsPrimitiveAPI::resolve_salvage_record`] follows the list
+    /// and [`NtfsPrimitiveAPI::read_resolved_stream_at`] reads what it joins.
     /// LZNT1-compressed streams are decoded; encrypted ones are refused.
     fn read_salvage_stream_at(
         &self,
@@ -411,15 +411,16 @@ pub trait PrimitiveAPI: VolumeAPI {
     }
 }
 
-impl<Device: BlockRead> PrimitiveAPI for RawVolume<Device> {}
-impl<Device: BlockRead> PrimitiveAPI for Volume<Device> {}
+impl<Device: BlockRead> NtfsPrimitiveAPI for RawVolume<Device> {}
+impl<Device: BlockRead> NtfsPrimitiveAPI for Volume<Device> {}
 
 impl<Device: BlockRead> Volume<Device> {
     pub fn inspect_mft_record(&self, record_number: u64) -> Result<RecordEvidence, Error> {
         let offset = self
             .raw
             .with_io(|io| mft_io::mft_record_offset_io(io, self.boot(), record_number))?;
-        self.read_file_record_at(
+        NtfsPrimitiveAPI::read_file_record_at(
+            self,
             offset,
             self.boot().file_record_size as usize,
             self.boot().bytes_per_sector,
@@ -563,3 +564,83 @@ pub fn inspect_file_record(offset: u64, raw: Vec<u8>, sector_size: u16) -> Recor
     }
     evidence
 }
+
+/// The name [`NtfsPrimitiveAPI`] had before rust-fs-core's shared
+/// `PrimitiveAPI` (`fs_core::layers`), which [`crate::layers::NtfsVolume`]
+/// implements with its salvage verbs. Kept for one release.
+#[deprecated(
+    since = "0.12.0",
+    note = "use NtfsPrimitiveAPI for NTFS records and streams, and fs_ntfs::layers::NtfsVolume through fs_core::layers::PrimitiveAPI for the salvage verbs"
+)]
+#[allow(deprecated)]
+pub trait PrimitiveAPI: NtfsPrimitiveAPI + crate::volume::VolumeAPI {
+    fn read_file_record_at(
+        &self,
+        offset: u64,
+        length: usize,
+        sector_size: u16,
+    ) -> Result<RecordEvidence, Error> {
+        NtfsPrimitiveAPI::read_file_record_at(self, offset, length, sector_size)
+    }
+    fn read_salvage_stream_at(
+        &self,
+        record: &RecordEvidence,
+        attribute: usize,
+        cluster_size: u64,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, Error> {
+        NtfsPrimitiveAPI::read_salvage_stream_at(
+            self,
+            record,
+            attribute,
+            cluster_size,
+            offset,
+            output,
+        )
+    }
+    fn read_mft_map(
+        &self,
+        mft_offset: u64,
+        record_size: usize,
+        sector_size: u16,
+        cluster_size: u64,
+    ) -> Result<MftMap, Error> {
+        NtfsPrimitiveAPI::read_mft_map(self, mft_offset, record_size, sector_size, cluster_size)
+    }
+    fn read_mirror_record(&self, boot: &BootParams, number: u64) -> Result<RecordEvidence, Error> {
+        NtfsPrimitiveAPI::read_mirror_record(self, boot, number)
+    }
+    fn read_mft_map_from_mirror(&self, boot: &BootParams) -> Result<MftMap, Error> {
+        NtfsPrimitiveAPI::read_mft_map_from_mirror(self, boot)
+    }
+    fn derive_allocation(
+        &self,
+        map: &MftMap,
+        cluster_count: u64,
+    ) -> Result<DerivedAllocation, Error> {
+        NtfsPrimitiveAPI::derive_allocation(self, map, cluster_count)
+    }
+    fn read_mapped_record(&self, map: &MftMap, number: u64) -> Result<RecordEvidence, Error> {
+        NtfsPrimitiveAPI::read_mapped_record(self, map, number)
+    }
+    fn resolve_salvage_record(
+        &self,
+        base: &RecordEvidence,
+        map: &MftMap,
+    ) -> Result<ResolvedRecord, Error> {
+        NtfsPrimitiveAPI::resolve_salvage_record(self, base, map)
+    }
+    fn read_resolved_stream_at(
+        &self,
+        stream: &SalvageStream,
+        cluster_size: u64,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, Error> {
+        NtfsPrimitiveAPI::read_resolved_stream_at(self, stream, cluster_size, offset, output)
+    }
+}
+
+#[allow(deprecated)]
+impl<T: NtfsPrimitiveAPI + ?Sized> PrimitiveAPI for T {}
