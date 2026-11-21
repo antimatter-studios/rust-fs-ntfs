@@ -5,6 +5,11 @@ use crate::mft_io::{self, MFT_FLAG_DIRECTORY, MFT_FLAG_IN_USE};
 use crate::volume::{RawVolume, Volume, VolumeAPI};
 use fs_core::BlockRead;
 
+mod extents;
+pub use extents::{
+    MftMap, MissingExtent, ResolvedAttribute, ResolvedRecord, SalvageStream, StreamExtent,
+};
+
 pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -24,6 +29,15 @@ pub struct AttributeEvidence {
     pub name: String,
     pub flags: u16,
     pub offset: usize,
+    /// The attribute's instance number in its record (header offset 0x0E),
+    /// which an `$ATTRIBUTE_LIST` entry names it by.
+    pub attribute_id: u16,
+    /// For a non-resident attribute, the last VCN its run list maps (header
+    /// offset 0x18); `None` for a resident one.
+    pub last_vcn: Option<u64>,
+    /// For a non-resident attribute, the base-2 log of its compression unit in
+    /// clusters (header offset 0x22); 0 when uncompressed or resident.
+    pub compression_unit: u8,
     pub value: AttributeValue,
 }
 
@@ -63,7 +77,8 @@ impl VolumeInformationEvidence {
 /// parent record still exists or still has that sequence number.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileNameEvidence {
-    /// The attribute's index in [`RecordEvidence::attributes`].
+    /// The attribute's index in [`RecordEvidence::attributes`], or in
+    /// [`ResolvedRecord::attributes`] for a name from a resolved record.
     pub attribute: usize,
     /// Low 48 bits of the parent reference.
     pub parent_record: u64,
@@ -125,6 +140,54 @@ fn le_u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
 }
 
+/// One resident `$FILE_NAME`, decoded; `None` when it is not one, or is too
+/// short to hold the name its length byte declares.
+pub(crate) fn decode_file_name(
+    index: usize,
+    attribute: &AttributeEvidence,
+) -> Option<FileNameEvidence> {
+    if attribute.type_code != AttrType::FileName as u32 {
+        return None;
+    }
+    let AttributeValue::Resident(value) = &attribute.value else {
+        return None;
+    };
+    if value.len() < FILE_NAME_FIXED_BYTES {
+        return None;
+    }
+    let characters = usize::from(value[64]);
+    let name_bytes = value.get(FILE_NAME_FIXED_BYTES..FILE_NAME_FIXED_BYTES + characters * 2)?;
+    let units: Vec<u16> = name_bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let mut name_valid = true;
+    let name: String = char::decode_utf16(units)
+        .map(|unit| {
+            unit.unwrap_or_else(|_| {
+                name_valid = false;
+                char::REPLACEMENT_CHARACTER
+            })
+        })
+        .collect();
+    let parent = le_u64(value, 0);
+    Some(FileNameEvidence {
+        attribute: index,
+        parent_record: parent & 0x0000_ffff_ffff_ffff,
+        parent_sequence: (parent >> 48) as u16,
+        namespace: value[65],
+        name,
+        name_valid,
+        flags: le_u32(value, 56),
+        created_nt: le_u64(value, 8),
+        modified_nt: le_u64(value, 16),
+        mft_modified_nt: le_u64(value, 24),
+        accessed_nt: le_u64(value, 32),
+        allocated_size: le_u64(value, 40),
+        real_size: le_u64(value, 48),
+    })
+}
+
 impl RecordEvidence {
     /// The unnamed resident `$STANDARD_INFORMATION`, when the record has one
     /// long enough to decode.
@@ -154,49 +217,7 @@ impl RecordEvidence {
         self.attributes
             .iter()
             .enumerate()
-            .filter_map(|(index, attribute)| {
-                if attribute.type_code != AttrType::FileName as u32 {
-                    return None;
-                }
-                let AttributeValue::Resident(value) = &attribute.value else {
-                    return None;
-                };
-                if value.len() < FILE_NAME_FIXED_BYTES {
-                    return None;
-                }
-                let characters = usize::from(value[64]);
-                let name_bytes =
-                    value.get(FILE_NAME_FIXED_BYTES..FILE_NAME_FIXED_BYTES + characters * 2)?;
-                let units: Vec<u16> = name_bytes
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                    .collect();
-                let mut name_valid = true;
-                let name: String = char::decode_utf16(units)
-                    .map(|unit| {
-                        unit.unwrap_or_else(|_| {
-                            name_valid = false;
-                            char::REPLACEMENT_CHARACTER
-                        })
-                    })
-                    .collect();
-                let parent = le_u64(value, 0);
-                Some(FileNameEvidence {
-                    attribute: index,
-                    parent_record: parent & 0x0000_ffff_ffff_ffff,
-                    parent_sequence: (parent >> 48) as u16,
-                    namespace: value[65],
-                    name,
-                    name_valid,
-                    flags: le_u32(value, 56),
-                    created_nt: le_u64(value, 8),
-                    modified_nt: le_u64(value, 16),
-                    mft_modified_nt: le_u64(value, 24),
-                    accessed_nt: le_u64(value, 32),
-                    allocated_size: le_u64(value, 40),
-                    real_size: le_u64(value, 48),
-                })
-            })
+            .filter_map(|(index, attribute)| decode_file_name(index, attribute))
             .collect()
     }
 
@@ -262,6 +283,13 @@ pub trait PrimitiveAPI: VolumeAPI {
         Ok(inspect_file_record(offset, raw, sector_size))
     }
 
+    /// Reads one `$DATA` attribute of a single record, as a stream.
+    ///
+    /// The attribute has to hold its whole stream: a record with an
+    /// `$ATTRIBUTE_LIST`, or an extent that does not start at VCN 0, is
+    /// refused here; [`PrimitiveAPI::resolve_salvage_record`] follows the list
+    /// and [`PrimitiveAPI::read_resolved_stream_at`] reads what it joins.
+    /// LZNT1-compressed streams are decoded; encrypted ones are refused.
     fn read_salvage_stream_at(
         &self,
         record: &RecordEvidence,
@@ -282,102 +310,70 @@ pub trait PrimitiveAPI: VolumeAPI {
         if attribute.type_code != AttrType::Data as u32 {
             return Err(Error::invalid("attribute is not a data stream"));
         }
-        if attribute.flags
-            & (attr_io::attr_flags::COMPRESSION_MASK | attr_io::attr_flags::ENCRYPTED)
-            != 0
-        {
+        if record.has_attribute_list() {
             return Err(Error::refused(
-                "compressed or encrypted salvage streams require a format-specific decoder",
+                "stream requires unresolved attribute extents: the record has an \
+                 $ATTRIBUTE_LIST, which resolve_salvage_record follows",
             ));
         }
-        match &attribute.value {
-            AttributeValue::Resident(data) => {
-                let count = (data.len() as u64)
-                    .saturating_sub(offset)
-                    .min(output.len() as u64) as usize;
-                if count != 0 {
-                    output[..count]
-                        .copy_from_slice(&data[offset as usize..offset as usize + count]);
-                }
-                Ok(count)
-            }
-            AttributeValue::NonResident {
-                runs,
-                first_vcn,
-                data_size,
-                initialized_size,
-            } => {
-                if !cluster_size.is_power_of_two()
-                    || !(512..=2 * 1024 * 1024).contains(&cluster_size)
-                {
-                    return Err(Error::invalid("invalid cluster size"));
-                }
-                if *first_vcn != 0
-                    || *initialized_size > *data_size
-                    || record
-                        .attributes
-                        .iter()
-                        .any(|entry| entry.type_code == AttrType::AttributeList as u32)
-                {
-                    return Err(Error::refused(
-                        "stream requires unresolved attribute extents",
-                    ));
-                }
-                let mut next_vcn = 0u64;
-                for run in runs {
-                    if run.starting_vcn != next_vcn || run.length == 0 {
-                        return Err(Error::invalid("stream run list is discontinuous"));
-                    }
-                    next_vcn = next_vcn
-                        .checked_add(run.length)
-                        .ok_or_else(|| Error::invalid("run list overflow"))?;
-                    if let Some(lcn) = run.lcn {
-                        lcn.checked_add(run.length)
-                            .and_then(|end| end.checked_mul(cluster_size))
-                            .filter(|end| *end <= self.size_bytes())
-                            .ok_or_else(|| Error::invalid("data run exceeds volume"))?;
-                    }
-                }
-                if next_vcn
-                    .checked_mul(cluster_size)
-                    .filter(|bytes| *bytes >= *data_size)
-                    .is_none()
-                {
-                    return Err(Error::invalid("run list ends before stream size"));
-                }
-                let count = data_size.saturating_sub(offset).min(output.len() as u64) as usize;
-                let mut copied = 0;
-                while copied < count {
-                    let position = offset + copied as u64;
-                    if position >= *initialized_size {
-                        output[copied..count].fill(0);
-                        break;
-                    }
-                    let vcn = position / cluster_size;
-                    let run = runs
-                        .iter()
-                        .find(|run| vcn >= run.starting_vcn && vcn - run.starting_vcn < run.length)
-                        .ok_or_else(|| Error::invalid("stream has an unmapped range"))?;
-                    let within = position % cluster_size;
-                    let chunk = (cluster_size - within)
-                        .min((count - copied) as u64)
-                        .min(initialized_size - position) as usize;
-                    let target = &mut output[copied..copied + chunk];
-                    match run.lcn {
-                        Some(lcn) => {
-                            let physical = (lcn + vcn - run.starting_vcn)
-                                .checked_mul(cluster_size)
-                                .and_then(|start| start.checked_add(within))
-                                .ok_or_else(|| Error::invalid("stream offset overflow"))?;
-                            self.read_volume_bytes(physical, target)?;
-                        }
-                        None => target.fill(0),
-                    }
-                    copied += chunk;
-                }
-                Ok(count)
+        if let AttributeValue::NonResident { first_vcn, .. } = &attribute.value {
+            if *first_vcn != 0 {
+                return Err(Error::refused(
+                    "stream requires unresolved attribute extents: this extent starts at a \
+                     later VCN",
+                ));
             }
         }
+        let stream = SalvageStream::from_single_attribute(record.record_number, attribute);
+        self.read_resolved_stream_at(&stream, cluster_size, offset, output)
+    }
+
+    /// Where the file records of a volume are, read from `$MFT`'s own record
+    /// (record 0) at `mft_offset`. When record 0 has an `$ATTRIBUTE_LIST`, the
+    /// extents it names are followed through the part of `$MFT` its first
+    /// extent maps. A part of `$MFT` this cannot map is a limitation of the
+    /// returned map, not an error.
+    fn read_mft_map(
+        &self,
+        mft_offset: u64,
+        record_size: usize,
+        sector_size: u16,
+        cluster_size: u64,
+    ) -> Result<MftMap, Error> {
+        extents::read_mft_map(self, mft_offset, record_size, sector_size, cluster_size)
+    }
+
+    /// Reads file record `number` through `map`, joining the pieces of a
+    /// record that spans clusters `$MFT` does not hold contiguously.
+    fn read_mapped_record(&self, map: &MftMap, number: u64) -> Result<RecordEvidence, Error> {
+        extents::read_mapped_record(self, map, number)
+    }
+
+    /// Follows a base record's `$ATTRIBUTE_LIST` to its extension records and
+    /// returns every attribute the record has, wherever it is held. Each
+    /// extension record is checked: its fixups, that it is in use, and that it
+    /// names this base record and its sequence number. One that is missing or
+    /// fails a check is reported in [`ResolvedRecord::limitations`] and the
+    /// streams it held a part of are marked incomplete, never read short.
+    fn resolve_salvage_record(
+        &self,
+        base: &RecordEvidence,
+        map: &MftMap,
+    ) -> Result<ResolvedRecord, Error> {
+        extents::resolve_salvage_record(self, base, map)
+    }
+
+    /// Reads a stream from a resolved record. A stream with any limitation is
+    /// refused, naming it. LZNT1-compressed units are decoded, and a unit that
+    /// does not decode is an error, never zeros. Encrypted streams are refused.
+    fn read_resolved_stream_at(
+        &self,
+        stream: &SalvageStream,
+        cluster_size: u64,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, Error> {
+        extents::read_stream_at(self, stream, cluster_size, offset, output)
     }
 }
 
@@ -465,6 +461,8 @@ pub fn inspect_file_record(offset: u64, raw: Vec<u8>, sector_size: u16) -> Recor
             }
             next = location.attr_offset + location.attr_length;
             let attribute = &fixed[location.attr_offset..next];
+            let mut last_vcn = None;
+            let mut compression_unit = 0;
             let value = if location.is_resident {
                 let start = location.resident_value_offset.unwrap() as usize;
                 let length = location.resident_value_length.unwrap() as usize;
@@ -484,6 +482,8 @@ pub fn inspect_file_record(offset: u64, raw: Vec<u8>, sector_size: u16) -> Recor
                     return Err(Error::invalid("mapping pairs exceed attribute"));
                 }
                 let first_vcn = attr_io::read_u64_le(attribute, 16).unwrap();
+                last_vcn = attr_io::read_u64_le(attribute, 24);
+                compression_unit = attribute[0x22];
                 let mut runs = decode_runs(&attribute[start..])?;
                 for run in &mut runs {
                     run.starting_vcn = run
@@ -503,6 +503,9 @@ pub fn inspect_file_record(offset: u64, raw: Vec<u8>, sector_size: u16) -> Recor
                 name: attr_io::decode_attr_name(&fixed, &location),
                 flags: attr_io::attribute_flags(&fixed, &location).unwrap(),
                 offset: location.attr_offset,
+                attribute_id: location.attribute_id,
+                last_vcn,
+                compression_unit,
                 value,
             });
         }

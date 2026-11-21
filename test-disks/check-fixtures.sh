@@ -9,7 +9,8 @@
 # this first so the answer is two lines. It is a failure, not a skip.
 #
 # The first seven are built by build-ntfs-feature-images.sh. The final three,
-# and the symlink targets report, require the Windows PowerShell builder.
+# the symlink targets report and the salvage-stream volume and its report
+# require the Windows PowerShell builder.
 set -euo pipefail
 
 dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,6 +19,9 @@ for img in basic manyfiles large-file sparse ads unicode deep attrlist compresse
     [ -f "$dir/ntfs-$img.img" ] || missing="$missing ntfs-$img.img"
 done
 [ -f "$dir/ntfs-symlink.targets.tsv" ] || missing="$missing ntfs-symlink.targets.tsv"
+for f in ntfs-salvage-streams.img ntfs-salvage-streams.tsv; do
+    [ -f "$dir/$f" ] || missing="$missing $f"
+done
 for c in 512 4096; do
     for f in "ntfs-populated-$c.img" "ntfs-populated-$c.manifest.tsv"; do
         [ -f "$dir/$f" ] || missing="$missing $f"

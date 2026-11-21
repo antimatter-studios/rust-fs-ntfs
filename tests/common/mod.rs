@@ -21,6 +21,9 @@ mod image_bytes;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub use image_bytes::{ImageBytes, TestDigest};
+mod patched_image;
+#[allow(unused_imports)]
+pub use patched_image::PatchedImage;
 mod small_file;
 #[allow(unused_imports)]
 pub use small_file::{read_repair_file, read_small_file, IMAGE_CHUNK_SIZE, MAX_REPAIR_FILE_BYTES};
