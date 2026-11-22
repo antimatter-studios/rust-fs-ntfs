@@ -74,7 +74,16 @@ vars:
   # and required module before any consumer joins (harness #225).
   # v0.7.1 disables guest auto-updates on every boot and defaults builds to
   # one job, with transient destroy-lock retries.
-  LINUX_HARNESS_REF: v0.7.1
+  # v0.8.0: Linux needs upstream virtiofsd 1.14.0, which answers a non-UTF-8
+  # xattr name (harness #274); CI installs it with the harness's
+  # install-virtiofsd action, whose tag in .github/workflows must match this
+  # one. FLTH_PROFILE/FLTH_PROFILE_DIR are renamed FLTH_VM_PROFILE and
+  # FLTH_VM_PROFILE_DIR, and the shared guest is sized by a host profile.
+  # v0.9.1: a macOS host needs the virtiofsd port 1.14.0.1 or newer, and a
+  # grep check under pipefail no longer fails on its own match.
+  # v0.10.0: a call waiting on a run's virtiofsd that has gone or stopped
+  # answering fails within FLTH_WATCHDOG_TREE_SECS instead of hanging.
+  LINUX_HARNESS_REF: v0.10.0
 
   # The in-house VHD writer (rust-img-vhd) the Windows jobs build to wrap
   # a raw image for Windows. Not a cargo dependency, so this is the only

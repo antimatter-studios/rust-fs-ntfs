@@ -32,7 +32,7 @@ assert unsupported_arch.returncode != 0 and "unsupported architecture" in unsupp
 assert '"linux-image-$FLTH_KERNEL_RELEASE=6.12.95-1~bpo12+1"' in prepare.read_text()
 assert "apt-get" not in (root / "scripts/vm-setup.sh").read_text()
 chores = yaml.safe_load((root / "chores.yml").read_text())
-assert chores["vars"]["LINUX_HARNESS_REF"] == "v0.7.1"
+assert chores["vars"]["LINUX_HARNESS_REF"] == "v0.10.0"
 jobs = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())["jobs"]
 for job in ("kernel", "box-cache"):
     assert any(step.get("run") == "../fs-linux-test-harness/scripts/ci-setup-linux.sh"
@@ -54,10 +54,10 @@ with tempfile.TemporaryDirectory() as temporary:
         target.chmod(0o755)
     environment = {key: value for key, value in os.environ.items() if not key.startswith("FLTH_")}
     override = subprocess.run([harness / "scripts/vm.sh", "config"], cwd=bin_dir,
-                              env=dict(environment, FLTH_CONFIG=str(root / "fs-linux-test-harness.toml"), FLTH_PROFILE="ntfs3", FLTH_PROFILE_DIR=str(profile_dir)), capture_output=True, text=True)
+                              env=dict(environment, FLTH_CONFIG=str(root / "fs-linux-test-harness.toml"), FLTH_VM_PROFILE="ntfs3", FLTH_VM_PROFILE_DIR=str(profile_dir)), capture_output=True, text=True)
     assert override.returncode == 0 and f"root={root}\n" in override.stdout and "vm.profile=ntfs3\n" in override.stdout, override
     missing = subprocess.run([harness / "scripts/vm.sh", "config"], cwd=root,
-                             env=dict(environment, FLTH_PROFILE="missing-profile"), capture_output=True, text=True)
+                             env=dict(environment, FLTH_VM_PROFILE="missing-profile"), capture_output=True, text=True)
     assert missing.returncode != 0 and "missing-profile.toml" in missing.stderr, missing
     environment["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
     for arch in ("x86_64", "aarch64"):

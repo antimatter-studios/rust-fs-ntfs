@@ -2880,6 +2880,13 @@ jobs:
         with:
           path: ~/.vagrant.d/boxes
           key: ${{ steps.vm-host.outputs.box-cache-key }}
+      - name: Upstream virtiofsd 1.14.0
+        if: steps.box.outputs.cache-hit != 'true'
+        # Ubuntu 24.04 packages virtiofsd 1.10.0, which never answers a
+        # non-UTF-8 xattr name (fs-linux-test-harness #274), and the harness's
+        # ci-setup-linux.sh no longer installs it. The tag must match
+        # LINUX_HARNESS_REF in chores.yml.
+        uses: antimatter-studios/fs-linux-test-harness/.github/actions/install-virtiofsd@v0.10.0
       - name: KVM, QEMU, virtiofsd and Vagrant
         if: steps.box.outputs.cache-hit != 'true'
         run: ../fs-linux-test-harness/scripts/ci-setup-linux.sh
@@ -2922,6 +2929,14 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ needs.kernel-gate.outputs.runner }}
     timeout-minutes: 45
+    env:
+      # The shared guest's size. Harness v0.8.0 and later size it by a host
+      # resource profile, which on a GitHub-hosted runner is 2G and 2 CPUs;
+      # with that size test binaries were SIGKILLed in the guest in
+      # rust-fs-xfs and rust-fs-bcachefs (fs-linux-test-harness #290). 4G and
+      # 4 CPUs is the size those suites and rust-fs-btrfs's run on.
+      FLTH_SHARED_MEMORY: 4G
+      FLTH_SHARED_CPUS: "4"
     steps:
       - uses: actions/checkout@v4
       - name: C toolchain for the gated runner
@@ -2934,6 +2949,12 @@ jobs:
           curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 "https://github.com/antimatter-studios/chore/releases/download/v0.11.0/chore-0.11.0-linux-x86_64.tar.gz" \
             | sudo tar xz -C /usr/local/bin chore
           chore siblings
+      - name: Upstream virtiofsd 1.14.0
+        # Ubuntu 24.04 packages virtiofsd 1.10.0, which never answers a
+        # non-UTF-8 xattr name (fs-linux-test-harness #274), and the harness's
+        # ci-setup-linux.sh no longer installs it. The tag must match
+        # LINUX_HARNESS_REF in chores.yml.
+        uses: antimatter-studios/fs-linux-test-harness/.github/actions/install-virtiofsd@v0.10.0
       - name: KVM, QEMU, virtiofsd and Vagrant
         id: vm-host
         run: ../fs-linux-test-harness/scripts/ci-setup-linux.sh
