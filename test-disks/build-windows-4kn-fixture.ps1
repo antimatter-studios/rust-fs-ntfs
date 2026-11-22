@@ -3,6 +3,8 @@
 # ntfs-cli-read.img, plus
 #   * ntfs-4kn-read.sha256.tsv: each file's path, size and the SHA-256
 #     Get-FileHash computes, in ntfs-cli-read.sha256.tsv's format
+#   * ntfs-4kn-read.index.tsv: the same for the 400 files of /index-blocks,
+#     a directory large enough for index blocks, written beside that file set
 #   * ntfs-4kn-read.ntfsinfo.txt: fsutil fsinfo ntfsinfo of the mounted
 #     volume, after the image's SHA-256, the commit that built it and the
 #     tool that made the disk
@@ -88,6 +90,12 @@ $out = [IO.Path]::GetFullPath($OutDir)
 $image = Join-Path $out 'ntfs-4kn-read.img'
 $hashes = Join-Path $out 'ntfs-4kn-read.sha256.tsv'
 $record = Join-Path $out 'ntfs-4kn-read.ntfsinfo.txt'
+# A directory of 400 files, so the volume holds index blocks (#1384); kept
+# apart from the file set of ntfs-cli-read.img that fixture_4kn_windows.rs
+# holds the volume to.
+$indexHashes = Join-Path $out 'ntfs-4kn-read.index.tsv'
+$IndexDirectory = '/index-blocks'
+$IndexFiles = 400
 $cliRead = Join-Path $out 'ntfs-cli-read.sha256.tsv'
 $lifecycle = Join-Path $out 'ntfs-4kn-read.lifecycle.log'
 $stateRoot = [IO.Path]::GetFullPath($StateDir)
@@ -109,7 +117,7 @@ try {
 
     if ($Phase -eq 'create') {
         New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
-        foreach ($path in $image, $hashes, $record, $statePath, $infoPath) {
+        foreach ($path in $image, $hashes, $indexHashes, $record, $statePath, $infoPath) {
             Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
         }
         $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
@@ -205,6 +213,20 @@ try {
                 }
             }
             [IO.File]::WriteAllText($hashes, (($lines -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
+            $indexLines = Invoke-4KnFixturePhase @phaseSettings -PhaseName 'populate-index-blocks' -PhaseAction {
+                $directory = Join-Path $root ($IndexDirectory.TrimStart('/'))
+                New-Item -ItemType Directory -Path $directory -Force | Out-Null
+                for ($i = 0; $i -lt $IndexFiles; $i++) {
+                    $name = 'f{0:D3}.txt' -f $i
+                    $bytes = [byte[]]::new((($i * 53) % 900) + 1)
+                    $rng.GetBytes($bytes)
+                    $path = Join-Path $directory $name
+                    [IO.File]::WriteAllBytes($path, $bytes)
+                    $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+                    "$IndexDirectory/$name`t$($bytes.Length)`t$hash"
+                }
+            }
+            [IO.File]::WriteAllText($indexHashes, (($indexLines -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
         }
         'fsutil' {
             # Windows' account of the mounted volume.
@@ -288,7 +310,7 @@ try {
             } finally {
                 if ($scratch) { Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue }
                 if (-not ($state -and $state.done)) {
-                    foreach ($path in $image, $hashes, $record) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+                    foreach ($path in $image, $hashes, $indexHashes, $record) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
                 }
             }
         }

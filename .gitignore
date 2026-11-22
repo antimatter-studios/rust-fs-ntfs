@@ -31,6 +31,8 @@ test-disks/_*.img*
 test-disks/*.targets.tsv
 # The files Windows wrote and the SHA-256 it computed, beside ntfs-cli-read.img.
 test-disks/*.sha256.tsv
+# The /index-blocks files Windows wrote beside ntfs-4kn-read.img (#1384).
+test-disks/*.index.tsv
 # Which names Win32 creates as files, measured by measure-win32-names.ps1.
 test-disks/win32-name-verdicts.tsv
 # The EA names and values handed to Windows, beside ntfs-ea.img.

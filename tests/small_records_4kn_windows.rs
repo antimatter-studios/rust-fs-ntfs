@@ -6,7 +6,9 @@
 //! defaults, write a file set to it, run a read-only `chkdsk` (clean), and
 //! copy the volume out to `ntfs-4kn-read.img`, with
 //! `ntfs-4kn-read.sha256.tsv`, each file's path, size and `Get-FileHash`
-//! SHA-256, and `ntfs-4kn-read.ntfsinfo.txt`, `fsutil fsinfo ntfsinfo`.
+//! SHA-256, `ntfs-4kn-read.index.tsv`, the same for the 400 files of a
+//! directory large enough for index blocks, and `ntfs-4kn-read.ntfsinfo.txt`,
+//! `fsutil fsinfo ntfsinfo`.
 //! Windows chose 1024-byte file records for that disk, and its update
 //! sequence arrays have one entry per 512 bytes whatever the sector size:
 //! three words in a file record, nine in a 4096-byte index block. The
@@ -23,6 +25,9 @@ use std::collections::BTreeSet;
 
 const IMAGE: &str = "test-disks/ntfs-4kn-read.img";
 const HASHES: &str = "test-disks/ntfs-4kn-read.sha256.tsv";
+/// The files of `/index-blocks`, a directory large enough for index blocks.
+const INDEX_HASHES: &str = "test-disks/ntfs-4kn-read.index.tsv";
+const INDEX_DIRECTORY: &str = "/index-blocks";
 const RECORD: &str = "test-disks/ntfs-4kn-read.ntfsinfo.txt";
 const PROVIDER: &str = "test-disks/build-windows-4kn-fixture.ps1";
 
@@ -37,10 +42,10 @@ fn image() -> Image {
     })
 }
 
-/// `(path, size, sha256)` of every file Windows wrote.
-fn windows_files() -> Vec<(String, u64, String)> {
-    let text = std::fs::read_to_string(HASHES)
-        .unwrap_or_else(|e| panic!("{HASHES}: {e}; {PROVIDER} builds it"));
+/// `(path, size, sha256)` of each file a report of Windows' names.
+fn report(path: &str) -> Vec<(String, u64, String)> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("{path}: {e}; {PROVIDER} builds it"));
     text.lines()
         .filter(|line| !line.is_empty())
         .map(|line| {
@@ -52,6 +57,21 @@ fn windows_files() -> Vec<(String, u64, String)> {
             )
         })
         .collect()
+}
+
+/// `(path, size, sha256)` of every file Windows wrote: the file set of
+/// ntfs-cli-read.img and the files of [`INDEX_DIRECTORY`].
+fn windows_files() -> Vec<(String, u64, String)> {
+    let mut files = report(HASHES);
+    assert!(!files.is_empty(), "{HASHES} names no file");
+    let index = report(INDEX_HASHES);
+    assert!(
+        index.len() >= 400,
+        "{INDEX_HASHES} names {} files; {PROVIDER} writes 400",
+        index.len()
+    );
+    files.extend(index);
+    files
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -101,7 +121,6 @@ fn the_geometry_is_what_fsutil_reported() {
 fn every_file_windows_wrote_reads_back() {
     let volume = Volume::open(image()).unwrap();
     let files = windows_files();
-    assert!(files.len() > 400, "{HASHES} names {} files", files.len());
     for (path, size, digest) in &files {
         let file = volume
             .open_file(path)
@@ -130,20 +149,24 @@ fn every_file_windows_wrote_reads_back() {
 fn a_directory_held_in_index_blocks_lists_what_windows_wrote() {
     let volume = Volume::open(image()).unwrap();
     let listed: BTreeSet<String> = volume
-        .read_directory("/dir")
+        .read_directory(INDEX_DIRECTORY)
         .unwrap()
         .into_iter()
         .map(|entry| entry.name)
         .filter(|name| name != "." && name != "..")
         .collect();
-    let windows: BTreeSet<String> = windows_files()
+    let windows: BTreeSet<String> = report(INDEX_HASHES)
         .into_iter()
         .filter_map(|(path, ..)| {
-            let rest = path.strip_prefix("/dir/")?;
+            let rest = path.strip_prefix(INDEX_DIRECTORY)?.strip_prefix('/')?;
             Some(rest.split('/').next().unwrap().to_owned())
         })
         .collect();
-    assert!(windows.len() > 400);
+    assert!(
+        windows.len() >= 400,
+        "{INDEX_HASHES} names {}",
+        windows.len()
+    );
     assert_eq!(listed, windows);
 }
 
@@ -151,7 +174,8 @@ fn a_directory_held_in_index_blocks_lists_what_windows_wrote() {
 fn a_torn_stride_of_a_record_smaller_than_its_sector_is_still_detected() {
     let device = image();
     let volume = Volume::open(device.clone()).unwrap();
-    let number = volume.open_file("/large.bin").unwrap().record_number();
+    let (path, ..) = &report(HASHES)[0];
+    let number = volume.open_file(path).unwrap().record_number();
     let record = volume.inspect_mft_record(number).unwrap();
     assert!(record.issues.is_empty(), "{:?}", record.issues);
     for stride_end in [510usize, 1022] {
