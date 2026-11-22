@@ -416,7 +416,7 @@ pub fn inspect_file_record(offset: u64, raw: Vec<u8>, sector_size: u16) -> Recor
     if !sector_size.is_power_of_two()
         || !(512..=4096).contains(&sector_size)
         || evidence.raw.len() < 48
-        || !evidence.raw.len().is_multiple_of(usize::from(sector_size))
+        || !evidence.raw.len().is_multiple_of(512)
     {
         evidence
             .issues
