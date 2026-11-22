@@ -44,6 +44,8 @@ test-disks/*.records.csv
 test-disks/usn-journal-measurements.txt
 # What Windows reports for each path of ntfs-stat.img (#642).
 test-disks/*.windows.tsv
+# What Windows reports of ntfs-salvage-streams.img's streams and names (#1379).
+test-disks/ntfs-salvage-streams.tsv
 !test-disks/.gitkeep
 
 # Local Windows-VM test pipeline outputs. The orchestrator
