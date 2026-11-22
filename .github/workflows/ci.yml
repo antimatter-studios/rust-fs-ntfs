@@ -26,7 +26,7 @@ jobs:
   interrupted-bootstrap-gate:
     needs: changes
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -65,7 +65,7 @@ jobs:
   python-abi-gate:
     needs: changes
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -117,7 +117,7 @@ jobs:
   python-volume-info-windows-gate:
     needs: [changes, windows-native-read-fixtures]
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -170,7 +170,7 @@ jobs:
   readonly-file-name-gate:
     needs: changes
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -239,7 +239,7 @@ jobs:
   test-linux-x64-gate:
     needs: [changes]
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -636,7 +636,7 @@ jobs:
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -830,7 +830,7 @@ jobs:
   darwin-cross-gate:
     needs: changes
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -860,7 +860,7 @@ jobs:
     needs: [changes, test-linux-x64, test-linux-arm64]
     if: needs.changes.outputs.code == 'true'
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -940,7 +940,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -1425,7 +1425,7 @@ jobs:
     needs: [changes, windows-native-read-fixtures]
     if: needs.changes.outputs.code == 'true'
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -1624,7 +1624,7 @@ jobs:
   integration-gate:
     needs: [changes, windows-native-read-fixtures]
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -1839,7 +1839,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -2018,7 +2018,7 @@ jobs:
 
   changes-gate:
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -2082,7 +2082,7 @@ jobs:
     needs: [changes]
     if: needs.changes.outputs.mkfs == 'true'
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -2729,7 +2729,7 @@ jobs:
   cli-gate:
     needs: [changes, windows-native-read-fixtures]
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -2843,7 +2843,7 @@ jobs:
   box-cache-gate:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -2911,7 +2911,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -2994,7 +2994,7 @@ jobs:
   semver-gate:
     needs: changes
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -3053,7 +3053,7 @@ jobs:
     needs: [changes, validate-mkfs-windows-run]
     if: always()
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
@@ -3063,7 +3063,7 @@ jobs:
   validate-mkfs-windows:
     name: validate rust-ntfs format (Windows chkdsk)
     runs-on: ${{ needs.validate-mkfs-windows-gate.outputs.runner || 'ubuntu-24.04' }}
-    timeout-minutes: 3
+    timeout-minutes: 5
     if: always()
     needs: [changes, validate-mkfs-windows-run, validate-mkfs-windows-gate]
     steps:
@@ -3079,7 +3079,7 @@ jobs:
     needs: [readonly-file-name, test-linux-x64, test-linux-arm64, darwin-cross, windows-native-read-fixtures, windows-4kn-fixture, integration, changes, validate-mkfs-windows, cli, kernel, semver, interrupted-bootstrap, python-abi, python-volume-info-windows, op-sequence-chkdsk, interrupted-bootstrap-gate, python-abi-gate, python-volume-info-windows-gate, readonly-file-name-gate, test-linux-x64-gate, test-linux-arm64-gate, darwin-cross-gate, op-sequence-chkdsk-gate, windows-native-read-fixtures-gate, windows-4kn-fixture-gate, integration-gate, changes-gate, cli-gate, kernel-gate, semver-gate, validate-mkfs-windows-gate]
     if: always()
     runs-on: antimatter-vps-gate
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       runner: ${{ steps.pick.outputs.runner }}
     steps:
