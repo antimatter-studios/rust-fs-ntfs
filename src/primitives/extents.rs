@@ -10,12 +10,13 @@
 
 use super::{
     decode_file_name, inspect_file_record, AttributeEvidence, AttributeValue, FileNameEvidence,
-    PrimitiveAPI, RecordEvidence, MAX_RECORD_BYTES,
+    NtfsPrimitiveAPI, RecordEvidence, MAX_RECORD_BYTES,
 };
 use crate::attr_io::{attr_flags, AttrType};
 use crate::compression;
 use crate::data_runs::DataRun;
 use crate::error::Error;
+use crate::mft_io::BootParams;
 use std::collections::BTreeMap;
 
 /// NTFS compresses in units of 16 clusters, `compression_unit = 4`, and
@@ -133,6 +134,14 @@ impl MftMap {
     /// Whether this map is the contiguous hypothesis rather than `$MFT`'s runs.
     pub fn is_hypothesis(&self) -> bool {
         matches!(self.layout, Layout::Contiguous { .. })
+    }
+
+    /// `$MFT`'s run list, as the map holds it; empty for the hypothesis.
+    pub fn runs(&self) -> &[DataRun] {
+        match &self.layout {
+            Layout::Contiguous { .. } => &[],
+            Layout::Runs { runs, .. } => runs,
+        }
     }
 
     /// How many records the map covers, when it is read from `$MFT`.
@@ -587,7 +596,7 @@ fn entry_names(entry: &ListEntry, attribute: &AttributeEvidence) -> bool {
         && attribute_vcn(attribute) == entry.starting_vcn
 }
 
-pub(super) fn read_mapped_record<V: PrimitiveAPI + ?Sized>(
+pub(super) fn read_mapped_record<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     map: &MftMap,
     number: u64,
@@ -604,7 +613,7 @@ pub(super) fn read_mapped_record<V: PrimitiveAPI + ?Sized>(
     Ok(inspect_file_record(pieces[0].0, raw, map.sector_size))
 }
 
-pub(super) fn read_mft_map<V: PrimitiveAPI + ?Sized>(
+pub(super) fn read_mft_map<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     mft_offset: u64,
     record_size: usize,
@@ -615,9 +624,79 @@ pub(super) fn read_mft_map<V: PrimitiveAPI + ?Sized>(
     let mut raw = vec![0; record_size];
     volume.read_volume_bytes(mft_offset, &mut raw)?;
     let record = inspect_file_record(mft_offset, raw, sector_size);
+    let map = map_from_record_zero(volume, &record, record_size, sector_size, cluster_size)?;
+    if map.record_offset(0) != Some(mft_offset) {
+        return Err(Error::invalid(
+            "$MFT's run list does not start where its record was read",
+        ));
+    }
+    Ok(map)
+}
+
+pub(super) fn read_mft_map_from_mirror<V: NtfsPrimitiveAPI + ?Sized>(
+    volume: &V,
+    boot: &BootParams,
+) -> Result<MftMap, Error> {
+    let record = read_mirror_record(volume, boot, 0)?;
+    let mut map = map_from_record_zero(
+        volume,
+        &record,
+        boot.file_record_size as usize,
+        boot.bytes_per_sector,
+        boot.cluster_size,
+    )?;
+    map.limitations.insert(
+        0,
+        "built from $MFTMirr's copy of $MFT's record 0, which is only as current as the \
+         mirror"
+            .into(),
+    );
+    let expected = boot.mft_lcn.checked_mul(boot.cluster_size);
+    if map.record_offset(0) != expected {
+        map.limitations.push(format!(
+            "$MFTMirr's record 0 puts $MFT at byte {:?}, and the boot sector at cluster {}",
+            map.record_offset(0),
+            boot.mft_lcn
+        ));
+    }
+    Ok(map)
+}
+
+pub(super) fn read_mirror_record<V: NtfsPrimitiveAPI + ?Sized>(
+    volume: &V,
+    boot: &BootParams,
+    number: u64,
+) -> Result<RecordEvidence, Error> {
+    if number >= boot.mft_mirror_records() {
+        return Err(Error::invalid(format!(
+            "$MFTMirr holds $MFT's first {} records, not record {number}",
+            boot.mft_mirror_records()
+        )));
+    }
+    let offset = boot
+        .mft_mirror_offset()
+        .and_then(|start| start.checked_add(number.checked_mul(boot.file_record_size)?))
+        .ok_or_else(|| Error::invalid("the boot sector's $MFTMirr cluster overflows"))?;
+    volume.read_file_record_at(
+        offset,
+        boot.file_record_size as usize,
+        boot.bytes_per_sector,
+    )
+}
+
+/// A map from `$MFT`'s own record 0, wherever that copy was read, following
+/// its attribute list when it has one.
+fn map_from_record_zero<V: NtfsPrimitiveAPI + ?Sized>(
+    volume: &V,
+    record: &RecordEvidence,
+    record_size: usize,
+    sector_size: u16,
+    cluster_size: u64,
+) -> Result<MftMap, Error> {
     if record.fixed.is_none() || record.base_reference != 0 {
         return Err(Error::invalid(format!(
-            "$MFT's record at {mft_offset} does not validate: {}",
+            "$MFT's record at {} does not validate: {}",
+            record.offset,
             record.issues.join("; ")
         )));
     }
@@ -646,13 +725,11 @@ pub(super) fn read_mft_map<V: PrimitiveAPI + ?Sized>(
         sector_size,
         cluster_size,
     )?;
-    if map.record_offset(0) != Some(mft_offset) {
-        return Err(Error::invalid(
-            "$MFT's run list does not start where its record was read",
-        ));
-    }
     if record.has_attribute_list() {
-        let resolved = resolve_salvage_record(volume, &record, &map)?;
+        // Record 0 is $MFT itself, wherever this copy of it came from.
+        let mut base = record.clone();
+        base.record_number.get_or_insert(0);
+        let resolved = resolve_salvage_record(volume, &base, &map)?;
         match resolved.stream("") {
             Some(stream) if stream.is_complete() => {
                 let mut full = MftMap::from_runs(
@@ -681,7 +758,7 @@ pub(super) fn read_mft_map<V: PrimitiveAPI + ?Sized>(
     Ok(map)
 }
 
-pub(super) fn resolve_salvage_record<V: PrimitiveAPI + ?Sized>(
+pub(super) fn resolve_salvage_record<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     base: &RecordEvidence,
     map: &MftMap,
@@ -878,7 +955,7 @@ pub(super) fn resolve_salvage_record<V: PrimitiveAPI + ?Sized>(
     Ok(resolved)
 }
 
-pub(super) fn read_stream_at<V: PrimitiveAPI + ?Sized>(
+pub(super) fn read_stream_at<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     stream: &SalvageStream,
     cluster_size: u64,
@@ -945,7 +1022,7 @@ pub(super) fn read_stream_at<V: PrimitiveAPI + ?Sized>(
     Ok(count)
 }
 
-fn read_plain<V: PrimitiveAPI + ?Sized>(
+fn read_plain<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     stream: &SalvageStream,
     cluster_size: u64,
@@ -988,7 +1065,7 @@ fn read_plain<V: PrimitiveAPI + ?Sized>(
 /// some leading clusters allocated and the rest a hole, LZNT1-compressed into
 /// the allocated ones; no cluster allocated, all zeros. Bytes past the
 /// initialized size read as zeros, as they do uncompressed.
-fn read_compressed<V: PrimitiveAPI + ?Sized>(
+fn read_compressed<V: NtfsPrimitiveAPI + ?Sized>(
     volume: &V,
     stream: &SalvageStream,
     cluster_size: u64,

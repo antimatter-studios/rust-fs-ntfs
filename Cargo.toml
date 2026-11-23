@@ -126,7 +126,15 @@ libc = "0.2"
 # Strictly additive — ntfs's existing BlockIo trait is unchanged; this
 # adds a bridge module so external `fs_core::BlockDevice` implementors
 # (a `Qcow2Reader`, a `SliceReader`, etc.) can be driven by ntfs.
-rust-fs-core = { version = "0.4.2" }
+# The 0.5 releases carry the three API layers (`layers` feature,
+# rust-fs-core#453), which `fs_ntfs::layers` implements. By version only;
+# building against an unreleased core is a local `[patch]` in an
+# uncommitted `.cargo/config.toml`.
+rust-fs-core = { version = "0.5", features = ["layers"] }
+# The layers' evidence is serde data, so the candidate detail and geometry
+# hypothesis this crate defines derive it too. MIT/Apache-2.0, already in
+# the tree through rust-fs-core's `layers` feature.
+serde = { version = "1", features = ["derive"] }
 # The command-line tools' argument parser, behind the `cli` feature (see
 # the `rust-fs-ntfs` target above). No derive: the builder API keeps each
 # tool's command a function the man pages and completions are made from.

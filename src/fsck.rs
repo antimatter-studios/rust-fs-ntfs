@@ -2891,6 +2891,7 @@ mod fill_range_tests {
             sectors_per_cluster: 8,
             cluster_size: 4096,
             mft_lcn: 1024,
+            mft_mirror_lcn: 2,
             file_record_size: 1024,
             total_sectors: 1 << 20,
             serial_number: 0,

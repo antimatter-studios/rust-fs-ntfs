@@ -2,7 +2,7 @@ use crate::attr_io::AttrType;
 use crate::error::Error;
 use crate::mft_io::{self, MFT_FLAG_IN_USE};
 use crate::read::{self, DirEntry, Stat};
-use crate::volume::{Volume, VolumeAPI};
+use crate::volume::{NtfsVolumeAPI, Volume};
 use fs_core::BlockRead;
 
 #[derive(Clone, Debug)]
@@ -18,7 +18,7 @@ impl FileHandle {
     }
 }
 
-pub trait FileAPI {
+pub trait NtfsFileAPI {
     fn read_directory(&self, path: &str) -> Result<Vec<DirEntry>, Error>;
     fn metadata(&self, path: &str) -> Result<Stat, Error>;
     fn open_file(&self, path: &str) -> Result<FileHandle, Error>;
@@ -53,7 +53,7 @@ impl<Device: BlockRead> Volume<Device> {
     }
 }
 
-impl<Device: BlockRead> FileAPI for Volume<Device> {
+impl<Device: BlockRead> NtfsFileAPI for Volume<Device> {
     fn read_directory(&self, path: &str) -> Result<Vec<DirEntry>, Error> {
         self.raw.with_io(|io| {
             let record = read::resolve_path(io, path)?;
@@ -169,3 +169,63 @@ impl<Device: BlockRead> FileAPI for Volume<Device> {
         self.raw.with_io(|io| crate::write::rmdir_io(io, path))
     }
 }
+
+/// The name [`NtfsFileAPI`] had before rust-fs-core's shared `FileAPI`
+/// (`fs_core::layers`), which [`crate::layers::NtfsVolume`] implements.
+/// Kept for one release.
+#[deprecated(
+    since = "0.12.0",
+    note = "use fs_ntfs::layers::NtfsVolume through fs_core::layers::FileAPI, or NtfsFileAPI for the NTFS-specific and writable surface"
+)]
+pub trait FileAPI: NtfsFileAPI {
+    fn read_directory(&self, path: &str) -> Result<Vec<DirEntry>, Error> {
+        NtfsFileAPI::read_directory(self, path)
+    }
+    fn metadata(&self, path: &str) -> Result<Stat, Error> {
+        NtfsFileAPI::metadata(self, path)
+    }
+    fn open_file(&self, path: &str) -> Result<FileHandle, Error> {
+        NtfsFileAPI::open_file(self, path)
+    }
+    fn read_file_at(
+        &self,
+        file: &FileHandle,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<usize, Error> {
+        NtfsFileAPI::read_file_at(self, file, offset, output)
+    }
+    fn read_stream_at(
+        &self,
+        path: &str,
+        name: &str,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>, Error> {
+        NtfsFileAPI::read_stream_at(self, path, name, offset, length)
+    }
+    fn create_file(&self, parent: &str, name: &str) -> Result<u64, Error> {
+        NtfsFileAPI::create_file(self, parent, name)
+    }
+    fn create_directory(&self, parent: &str, name: &str) -> Result<u64, Error> {
+        NtfsFileAPI::create_directory(self, parent, name)
+    }
+    fn write_file_at(&self, path: &str, offset: u64, data: &[u8]) -> Result<u64, Error> {
+        NtfsFileAPI::write_file_at(self, path, offset, data)
+    }
+    fn set_len(&self, path: &str, length: u64) -> Result<u64, Error> {
+        NtfsFileAPI::set_len(self, path, length)
+    }
+    fn rename(&self, path: &str, new_name: &str) -> Result<(), Error> {
+        NtfsFileAPI::rename(self, path, new_name)
+    }
+    fn remove_file(&self, path: &str) -> Result<(), Error> {
+        NtfsFileAPI::remove_file(self, path)
+    }
+    fn remove_directory(&self, path: &str) -> Result<(), Error> {
+        NtfsFileAPI::remove_directory(self, path)
+    }
+}
+
+#[allow(deprecated)]
+impl<T: NtfsFileAPI + ?Sized> FileAPI for T {}
