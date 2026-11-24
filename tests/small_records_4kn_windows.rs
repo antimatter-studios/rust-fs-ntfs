@@ -1,5 +1,5 @@
 //! A volume Windows formatted on 4096-byte sectors with 1024-byte file
-//! records is read, and only read (#1384).
+//! records is writable with the native 512-byte update-sequence stride (#1396).
 //!
 //! `test-disks/build-windows-4kn-fixture.ps1` has Windows format a disk
 //! presenting 4096-byte logical sectors with `Format-Volume` and its
@@ -11,10 +11,8 @@
 //! `fsutil fsinfo ntfsinfo`.
 //! Windows chose 1024-byte file records for that disk, and its update
 //! sequence arrays have one entry per 512 bytes whatever the sector size:
-//! three words in a file record, nine in a 4096-byte index block. The
-//! reader takes the stride from the record's own array; the writers build
-//! arrays from the sector size, so a writable mount of this geometry is
-//! refused by name.
+//! three words in a file record, nine in a 4096-byte index block. Readers
+//! and writers take the stride from each record's array.
 #![cfg(windows)]
 
 use fs_ntfs::file::NtfsFileAPI;

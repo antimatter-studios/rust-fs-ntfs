@@ -304,8 +304,8 @@ pub(crate) fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParam
     // tests/small_records_4kn_windows.rs, #1384). The readers take the
     // stride from each record's own array (`validate_usa_geometry`), so the
     // torn-write check still compares two tails in such a record. The
-    // writers build arrays from the sector size, so a writable mount of this
-    // geometry is refused in `refuse_unwritable_geometry`.
+    // writers keep or build the same 512-byte stride, so these records can be
+    // updated without treating the full 4096-byte sector as one stride.
 
     // Same signed encoding as clusters_per_mft_record.
     let cpib = boot[BOOT_OFF_CLUSTERS_PER_INDEX_BLOCK] as i8;
@@ -770,20 +770,6 @@ fn validate_usa_geometry(
 /// The stride Windows keeps an update sequence word for inside sectors
 /// larger than it (#1384).
 const USA_STRIDE: usize = 512;
-
-/// Refuses a writable mount of a volume whose file records are smaller
-/// than its sectors: Windows protects them in 512-byte strides, and this
-/// crate's writers build arrays from the sector size (#1384).
-pub fn refuse_unwritable_geometry(params: &BootParams) -> Result<(), Error> {
-    if u64::from(params.bytes_per_sector) > params.file_record_size {
-        return Err(Error::refused(format!(
-            "file records of {} bytes are smaller than the volume's {}-byte sectors: they are \
-             read, and writing them is not supported (rust-fs-ntfs#1384)",
-            params.file_record_size, params.bytes_per_sector
-        )));
-    }
-    Ok(())
-}
 
 /// Read an MFT record, apply fixup, and return the clean bytes.
 pub fn read_mft_record(path: &Path, record_number: u64) -> Result<(BootParams, Vec<u8>), Error> {
