@@ -1548,12 +1548,13 @@ pub(crate) fn promote_index_root_to_first_indx(
     let entries = record[entries_start..entries_end].to_vec();
 
     let sector_size = usize::from(bytes_per_sector);
-    if sector_size == 0 || block_size < sector_size || !block_size.is_multiple_of(sector_size) {
+    let stride = sector_size.min(512);
+    if stride == 0 || block_size < stride || !block_size.is_multiple_of(stride) {
         return Err(Error::io(
-            "index block size is incompatible with the sector size",
+            "index block size is incompatible with the update-sequence stride",
         ));
     }
-    let usa_count = block_size / sector_size + 1;
+    let usa_count = block_size / stride + 1;
     let usa_offset = 0x28usize;
     let block_ih = crate::idx_block::INDX_INDEX_HEADER_OFFSET;
     // The on-disk first-entry offset is relative to the INDEX_HEADER, not
@@ -1965,12 +1966,13 @@ pub(crate) fn write_indx_node(
 /// the caller applies the update sequence on write.
 pub(crate) fn empty_indx_block(block_size: usize, bytes_per_sector: u16) -> Result<Vec<u8>, Error> {
     let sector_size = usize::from(bytes_per_sector);
-    if sector_size == 0 || block_size < sector_size || !block_size.is_multiple_of(sector_size) {
+    let stride = sector_size.min(512);
+    if stride == 0 || block_size < stride || !block_size.is_multiple_of(stride) {
         return Err(Error::io(
-            "index block size is incompatible with the sector size",
+            "index block size is incompatible with the update-sequence stride",
         ));
     }
-    let usa_count = block_size / sector_size + 1;
+    let usa_count = block_size / stride + 1;
     let usa_offset = 0x28usize;
     let ih = crate::idx_block::INDX_INDEX_HEADER_OFFSET;
     let first_abs = (usa_offset + usa_count * 2 + 7) & !7;
@@ -2453,6 +2455,17 @@ mod tests {
         rec[end_marker_pos..end_marker_pos + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
 
         rec
+    }
+
+    #[test]
+    fn new_indx_on_4kn_uses_512_byte_usa_strides() {
+        let block = empty_indx_block(4096, 4096).unwrap();
+        assert_eq!(u16::from_le_bytes([block[6], block[7]]), 9);
+        let mut protected = block;
+        crate::mft_io::apply_fixup_on_write_magic(&mut protected, 4096, b"INDX").unwrap();
+        assert_eq!(&protected[510..512], &protected[0x28..0x2A]);
+        assert_eq!(&protected[4094..4096], &protected[0x28..0x2A]);
+        assert_eq!(&protected[0x38..0x3A], &[0, 0]);
     }
 
     #[test]

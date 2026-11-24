@@ -686,22 +686,8 @@ pub fn apply_fixup_on_write_magic(
             &record[0..4]
         )));
     }
-    if record.len() < bytes_per_sector as usize {
-        return Err(Error::refused(format!(
-            "a record of {} bytes is smaller than a {bytes_per_sector}-byte sector, and this \
-             crate writes update sequence arrays with the sector stride only (rust-fs-ntfs#1384)",
-            record.len()
-        )));
-    }
     let (usa_offset, usa_count) = read_usa_header(record)?;
-    if validate_usa_geometry(record.len(), bytes_per_sector, usa_offset, usa_count)?
-        != bytes_per_sector as usize
-    {
-        return Err(Error::refused(format!(
-            "the record's update sequence array has 512-byte strides, and this crate writes \
-             arrays with the {bytes_per_sector}-byte sector stride only (rust-fs-ntfs#1384)"
-        )));
-    }
+    let stride = validate_usa_geometry(record.len(), bytes_per_sector, usa_offset, usa_count)?;
 
     // Bump USN, skipping 0 (some NTFS drivers treat 0 as "uninitialized").
     let old_usn = u16::from_le_bytes([record[usa_offset], record[usa_offset + 1]]);
@@ -713,7 +699,7 @@ pub fn apply_fixup_on_write_magic(
 
     let sectors = usa_count - 1;
     for sector in 0..sectors {
-        let sector_end = (sector + 1) * bytes_per_sector as usize;
+        let sector_end = (sector + 1) * stride;
         let replace = sector_end - SECTOR_TAIL_BYTES;
         let saved = usa_offset + 2 + sector * 2;
         record[saved] = record[replace];
@@ -1384,13 +1370,33 @@ mod tests {
         apply_fixup_on_read(&mut fixed, 4096).unwrap();
     }
 
-    /// The writers build arrays from the sector size, so a record smaller
-    /// than its sector is refused rather than written with no stride.
+    /// The writers must preserve Windows' 512-byte USA layout on 4Kn
+    /// media, including when the FILE record itself is only 1024 bytes.
     #[test]
-    fn a_record_smaller_than_a_sector_is_not_written() {
+    fn a_512_byte_stride_record_smaller_than_sector_is_written() {
         let mut record = protected_record(1024, 512);
-        let error = apply_fixup_on_write(&mut record, 4096).unwrap_err();
-        assert!(error.contains("smaller than"), "{error}");
+        apply_fixup_on_write(&mut record, 4096).unwrap();
+        let usn = [record[0x30], record[0x31]];
+        assert_eq!(&record[510..512], &usn);
+        assert_eq!(&record[1022..1024], &usn);
+    }
+
+    /// A record smaller than its sector still writes and checks a USA entry
+    /// for each 512-byte stride.
+    #[test]
+    fn a_record_smaller_than_a_sector_is_written_with_512_byte_strides() {
+        let mut record: Vec<u8> = (0..1024).map(|i| (i * 7) as u8).collect();
+        record[..4].copy_from_slice(FILE_MAGIC);
+        record[OFF_USA_OFFSET..OFF_USA_OFFSET + 2].copy_from_slice(&0x30u16.to_le_bytes());
+        record[OFF_USA_COUNT..OFF_USA_COUNT + 2].copy_from_slice(&3u16.to_le_bytes());
+        apply_fixup_on_write(&mut record, 4096).unwrap();
+        assert_eq!(&record[510..512], &record[0x30..0x32]);
+        assert_eq!(&record[1022..1024], &record[0x30..0x32]);
+        apply_fixup_on_read(&mut record, 4096).unwrap();
+        for tail in [510, 1022] {
+            assert_eq!(record[tail], (tail * 7) as u8);
+            assert_eq!(record[tail + 1], ((tail + 1) * 7) as u8);
+        }
     }
 
     /// The boundary is real and legitimate: 4Kn volumes put a 4096-byte

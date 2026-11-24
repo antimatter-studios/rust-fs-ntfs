@@ -233,7 +233,8 @@ pub(crate) fn build_extension_record(
     base_reference: u64,
     bytes_per_sector: u16,
 ) -> Result<Vec<u8>, Error> {
-    if record_size < 512 || !record_size.is_multiple_of(bytes_per_sector as usize) {
+    let stride = usize::from(bytes_per_sector).min(512);
+    if stride == 0 || record_size < stride || !record_size.is_multiple_of(stride) {
         return Err(Error::invalid(format!("invalid record_size {record_size}")));
     }
     let mut rec = vec![0u8; record_size];
@@ -271,7 +272,7 @@ fn write_file_record_header(
     rec[0..4].copy_from_slice(FILE_MAGIC);
     rec[REC_OFF_USA_OFFSET..REC_OFF_USA_OFFSET + 2]
         .copy_from_slice(&(USA_OFFSET as u16).to_le_bytes());
-    let sectors = record_size / bytes_per_sector as usize;
+    let sectors = record_size / usize::from(bytes_per_sector).min(512);
     rec[REC_OFF_USA_COUNT..REC_OFF_USA_COUNT + 2]
         .copy_from_slice(&((sectors + 1) as u16).to_le_bytes());
     rec[REC_OFF_LSN..REC_OFF_LSN + 8].copy_from_slice(&0u64.to_le_bytes());
@@ -309,7 +310,8 @@ pub fn build_directory_record(
     // `build_empty_ir_value` (#144).
     cluster_size: u32,
 ) -> Result<Vec<u8>, Error> {
-    if record_size < 512 || !record_size.is_multiple_of(bytes_per_sector as usize) {
+    let stride = usize::from(bytes_per_sector).min(512);
+    if stride == 0 || record_size < stride || !record_size.is_multiple_of(stride) {
         return Err(Error::invalid(format!("invalid record_size {record_size}")));
     }
     let utf16: Vec<u16> = name.encode_utf16().collect();
@@ -480,7 +482,8 @@ fn build_record_inner(
     bytes_per_sector: u16,
     is_dir: bool,
 ) -> Result<Vec<u8>, Error> {
-    if record_size < 512 || !record_size.is_multiple_of(bytes_per_sector as usize) {
+    let stride = usize::from(bytes_per_sector).min(512);
+    if stride == 0 || record_size < stride || !record_size.is_multiple_of(stride) {
         return Err(Error::invalid(format!("invalid record_size {record_size}")));
     }
     let utf16: Vec<u16> = name.encode_utf16().collect();
@@ -1449,6 +1452,22 @@ mod tests {
     }
 
     // --- regular file record builder smoke test ----------------------------
+
+    #[test]
+    fn build_regular_file_record_uses_512_byte_usa_on_4kn() {
+        let rec = build_regular_file_record(
+            1024,
+            100,
+            1,
+            encode_file_reference(5, 1),
+            "4kn.txt",
+            0,
+            4096,
+        )
+        .unwrap();
+        assert_eq!(u16::from_le_bytes([rec[6], rec[7]]), 3);
+        assert_eq!(u16::from_le_bytes([rec[0x14], rec[0x15]]), 0x38);
+    }
 
     #[test]
     fn build_regular_file_record_produces_well_formed_record() {
