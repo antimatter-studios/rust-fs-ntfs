@@ -2464,7 +2464,8 @@ mod tests {
         let mut protected = block;
         crate::mft_io::apply_fixup_on_write_magic(&mut protected, 4096, b"INDX").unwrap();
         assert_eq!(&protected[510..512], &protected[0x28..0x2A]);
-        assert_eq!(&protected[4094..4096], &protected[0x38..0x3A]);
+        assert_eq!(&protected[4094..4096], &protected[0x28..0x2A]);
+        assert_eq!(&protected[0x38..0x3A], &[0, 0]);
     }
 
     #[test]

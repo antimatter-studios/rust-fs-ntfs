@@ -1381,13 +1381,22 @@ mod tests {
         assert_eq!(&record[1022..1024], &usn);
     }
 
-    /// The writers build arrays from the sector size, so a record smaller
-    /// than its sector is refused rather than written with no stride.
+    /// A record smaller than its sector still writes and checks a USA entry
+    /// for each 512-byte stride.
     #[test]
-    fn a_record_smaller_than_a_sector_is_not_written() {
-        let mut record = protected_record(1024, 512);
-        let error = apply_fixup_on_write(&mut record, 4096).unwrap_err();
-        assert!(error.contains("smaller than"), "{error}");
+    fn a_record_smaller_than_a_sector_is_written_with_512_byte_strides() {
+        let mut record: Vec<u8> = (0..1024).map(|i| (i * 7) as u8).collect();
+        record[..4].copy_from_slice(FILE_MAGIC);
+        record[OFF_USA_OFFSET..OFF_USA_OFFSET + 2].copy_from_slice(&0x30u16.to_le_bytes());
+        record[OFF_USA_COUNT..OFF_USA_COUNT + 2].copy_from_slice(&3u16.to_le_bytes());
+        apply_fixup_on_write(&mut record, 4096).unwrap();
+        assert_eq!(&record[510..512], &record[0x30..0x32]);
+        assert_eq!(&record[1022..1024], &record[0x30..0x32]);
+        apply_fixup_on_read(&mut record, 4096).unwrap();
+        for tail in [510, 1022] {
+            assert_eq!(record[tail], (tail * 7) as u8);
+            assert_eq!(record[tail + 1], ((tail + 1) * 7) as u8);
+        }
     }
 
     /// The boundary is real and legitimate: 4Kn volumes put a 4096-byte
