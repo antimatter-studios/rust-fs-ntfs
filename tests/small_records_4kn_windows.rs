@@ -225,15 +225,9 @@ fn a_salvage_read_follows_the_same_records() {
 }
 
 #[test]
-fn a_writable_mount_of_records_smaller_than_a_sector_is_refused_and_writes_nothing() {
+fn a_writable_mount_of_records_smaller_than_a_sector_is_admitted() {
     let device = image();
-    let before = device.digest();
-    let error = match Volume::open_writable(device.clone()) {
-        Ok(_) => panic!("a writable mount was admitted"),
-        Err(error) => error.to_string(),
-    };
-    assert!(error.contains("smaller than"), "{error}");
-    assert_eq!(device.digest(), before);
+    Volume::open_writable(device).expect("512-byte USA strides make these records writable");
 }
 
 #[test]
