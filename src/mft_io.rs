@@ -1384,6 +1384,17 @@ mod tests {
         apply_fixup_on_read(&mut fixed, 4096).unwrap();
     }
 
+    /// The writers must preserve Windows' 512-byte USA layout on 4Kn
+    /// media, including when the FILE record itself is only 1024 bytes.
+    #[test]
+    fn a_512_byte_stride_record_smaller_than_sector_is_written() {
+        let mut record = protected_record(1024, 512);
+        apply_fixup_on_write(&mut record, 4096).unwrap();
+        let usn = [record[0x30], record[0x31]];
+        assert_eq!(&record[510..512], &usn);
+        assert_eq!(&record[1022..1024], &usn);
+    }
+
     /// The writers build arrays from the sector size, so a record smaller
     /// than its sector is refused rather than written with no stride.
     #[test]
