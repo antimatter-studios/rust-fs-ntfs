@@ -2021,7 +2021,7 @@ fn build_system_record_with_parent(
     rec[0..4].copy_from_slice(FILE_MAGIC);
     rec[REC_OFF_USA_OFFSET..REC_OFF_USA_OFFSET + 2]
         .copy_from_slice(&(USA_OFFSET as u16).to_le_bytes());
-    let sectors = rs / bps as usize;
+    let sectors = rs / usize::from(bps).min(512);
     rec[REC_OFF_USA_COUNT..REC_OFF_USA_COUNT + 2]
         .copy_from_slice(&((sectors + 1) as u16).to_le_bytes());
     // USA starts at 0x30 and consumes 2 bytes per slot (1 USN + N
@@ -2182,7 +2182,7 @@ fn build_reserved_placeholder(layout: &MftLayout, record_number: u32) -> Result<
     rec[0..4].copy_from_slice(FILE_MAGIC);
     rec[REC_OFF_USA_OFFSET..REC_OFF_USA_OFFSET + 2]
         .copy_from_slice(&(USA_OFFSET as u16).to_le_bytes());
-    let sectors = rs / bps as usize;
+    let sectors = rs / usize::from(bps).min(512);
     rec[REC_OFF_USA_COUNT..REC_OFF_USA_COUNT + 2]
         .copy_from_slice(&((sectors + 1) as u16).to_le_bytes());
     let attrs_offset = align8(USA_OFFSET + 2 + sectors * 2);
@@ -2246,7 +2246,7 @@ fn build_free_record(layout: &MftLayout, record_number: u32) -> Result<Vec<u8>, 
     rec[0..4].copy_from_slice(FILE_MAGIC);
     rec[REC_OFF_USA_OFFSET..REC_OFF_USA_OFFSET + 2]
         .copy_from_slice(&(USA_OFFSET as u16).to_le_bytes());
-    let sectors = rs / bps as usize;
+    let sectors = rs / usize::from(bps).min(512);
     rec[REC_OFF_USA_COUNT..REC_OFF_USA_COUNT + 2]
         .copy_from_slice(&((sectors + 1) as u16).to_le_bytes());
     let attrs_offset = align8(USA_OFFSET + 2 + sectors * 2);
@@ -2909,13 +2909,14 @@ fn build_first_indx_block(
     bytes_per_sector: u16,
 ) -> Result<Vec<u8>, Error> {
     let sector_size = usize::from(bytes_per_sector);
-    if sector_size == 0 || block_size < sector_size || !block_size.is_multiple_of(sector_size) {
+    let stride = sector_size.min(512);
+    if stride == 0 || block_size < stride || !block_size.is_multiple_of(stride) {
         return Err(Error::io(
-            "index block size is incompatible with the sector size",
+            "index block size is incompatible with the update-sequence stride",
         ));
     }
     let usa_offset = 0x28usize;
-    let usa_count = block_size / sector_size + 1;
+    let usa_count = block_size / stride + 1;
     let block_ih = crate::idx_block::INDX_INDEX_HEADER_OFFSET;
     // The first-entry offset is relative to the INDEX_HEADER; the USA ends
     // at an absolute block offset.

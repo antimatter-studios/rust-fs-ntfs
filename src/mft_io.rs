@@ -686,22 +686,8 @@ pub fn apply_fixup_on_write_magic(
             &record[0..4]
         )));
     }
-    if record.len() < bytes_per_sector as usize {
-        return Err(Error::refused(format!(
-            "a record of {} bytes is smaller than a {bytes_per_sector}-byte sector, and this \
-             crate writes update sequence arrays with the sector stride only (rust-fs-ntfs#1384)",
-            record.len()
-        )));
-    }
     let (usa_offset, usa_count) = read_usa_header(record)?;
-    if validate_usa_geometry(record.len(), bytes_per_sector, usa_offset, usa_count)?
-        != bytes_per_sector as usize
-    {
-        return Err(Error::refused(format!(
-            "the record's update sequence array has 512-byte strides, and this crate writes \
-             arrays with the {bytes_per_sector}-byte sector stride only (rust-fs-ntfs#1384)"
-        )));
-    }
+    let stride = validate_usa_geometry(record.len(), bytes_per_sector, usa_offset, usa_count)?;
 
     // Bump USN, skipping 0 (some NTFS drivers treat 0 as "uninitialized").
     let old_usn = u16::from_le_bytes([record[usa_offset], record[usa_offset + 1]]);
@@ -713,7 +699,7 @@ pub fn apply_fixup_on_write_magic(
 
     let sectors = usa_count - 1;
     for sector in 0..sectors {
-        let sector_end = (sector + 1) * bytes_per_sector as usize;
+        let sector_end = (sector + 1) * stride;
         let replace = sector_end - SECTOR_TAIL_BYTES;
         let saved = usa_offset + 2 + sector * 2;
         record[saved] = record[replace];
