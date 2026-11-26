@@ -286,6 +286,41 @@ fn every_committed_corpus_seed_names_its_geometry() {
     }
 }
 
+/// Every cluster and MFT record size #1401 names has a pinned seed, and each
+/// seed at a 1, 2 or 4 KiB cluster writes an EA to a directory it made.
+#[test]
+fn every_cluster_and_record_pair_has_a_committed_seed() {
+    let mut problems = Vec::new();
+    for cluster in [512, 1024, 2048, 4096, 65536] {
+        for record in [1024, 4096] {
+            let name = format!("geometry-c{cluster}-r{record}-v1.json");
+            let seed = Path::new(CORPUS).join(&name);
+            if !seed.is_file() {
+                problems.push(format!("{name}: missing"));
+                continue;
+            }
+            let (operations, pinned) =
+                generator::decode_regression(&common::read_small_file(&seed).unwrap()).unwrap();
+            if pinned.map(|p| (p.geometry.cluster, p.geometry.record)) != Some((cluster, record)) {
+                problems.push(format!("{name}: pins another geometry"));
+            }
+            let directory_ea = operations.iter().any(|made| {
+                let generator::Op::Mkdir { parent, name } = made else {
+                    return false;
+                };
+                let directory = format!("{}/{name}", parent.trim_end_matches('/'));
+                operations.iter().any(
+                    |op| matches!(op, generator::Op::WriteEa { path, .. } if *path == directory),
+                )
+            });
+            if [1024, 2048, 4096].contains(&cluster) && !directory_ea {
+                problems.push(format!("{name}: writes no directory EA"));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "geometry corpus: {problems:#?}");
+}
+
 fn boundary_corpus_replay(cluster: u32, record: u32) {
     let stem = format!("geometry-c{cluster}-r{record}-v1");
     let seed = Path::new(CORPUS).join(format!("{stem}.json"));
