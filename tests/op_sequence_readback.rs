@@ -354,6 +354,36 @@ fn corpus_c512_r4096_survives_fresh_remount() {
 }
 
 #[test]
+fn corpus_c1024_r1024_survives_fresh_remount() {
+    boundary_corpus_replay(1024, 1024);
+}
+
+#[test]
+fn corpus_c1024_r4096_survives_fresh_remount() {
+    boundary_corpus_replay(1024, 4096);
+}
+
+#[test]
+fn corpus_c2048_r1024_survives_fresh_remount() {
+    boundary_corpus_replay(2048, 1024);
+}
+
+#[test]
+fn corpus_c2048_r4096_survives_fresh_remount() {
+    boundary_corpus_replay(2048, 4096);
+}
+
+#[test]
+fn corpus_c4096_r1024_survives_fresh_remount() {
+    boundary_corpus_replay(4096, 1024);
+}
+
+#[test]
+fn corpus_c4096_r4096_survives_fresh_remount() {
+    boundary_corpus_replay(4096, 4096);
+}
+
+#[test]
 fn corpus_c65536_r1024_survives_fresh_remount() {
     boundary_corpus_replay(65536, 1024);
 }
