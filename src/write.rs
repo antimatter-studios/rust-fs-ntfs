@@ -2061,10 +2061,6 @@ fn rename_keeps_index_slot_io<T: BlockIo + ?Sized>(
 /// its `$FILE_NAME` key carries are copied, not rebuilt. Each step is
 /// undone when a later one fails, and when an undo fails too, the error
 /// names what the volume is left holding.
-///
-/// Taking an entry out of an interior node would orphan the subtree it
-/// points to, so `remove_parent_index_entry_io` refuses that before
-/// anything is written, and so does this rename.
 fn rename_into_new_index_slot_io<T: BlockIo + ?Sized>(
     io: &mut T,
     parent_rec: u64,
@@ -2103,10 +2099,9 @@ fn rename_into_new_index_slot_io<T: BlockIo + ?Sized>(
 /// directory with INDX blocks (#466, #474).
 ///
 /// Each step is undone when a later one fails, and when an undo fails too,
-/// the error names what the volume is left holding. Taking an entry out of
-/// an interior node would orphan the subtree it points to, so
-/// `remove_parent_index_entry_io` refuses that before anything is written
-/// (#495).
+/// the error names what the volume is left holding. Either entry may come
+/// from an interior node; both are inserted as a leaf holds them, since the
+/// child VCN stays with the place the old entry is taken from.
 #[allow(clippy::too_many_arguments)]
 fn move_index_entry_io<T: BlockIo + ?Sized>(
     io: &mut T,
@@ -2118,6 +2113,8 @@ fn move_index_entry_io<T: BlockIo + ?Sized>(
     new_entry: &[u8],
     rename_file: impl FnOnce(&mut T) -> Result<(), Error>,
 ) -> Result<(), Error> {
+    let old_entry = &index_io::entry_as_leaf(old_entry);
+    let new_entry = &index_io::entry_as_leaf(new_entry);
     remove_parent_index_entry_io(io, parent_rec, file_rec, old).map_err(|e| {
         e.map_message(|m| {
             format!(
@@ -10709,6 +10706,38 @@ mod tests {
                 kept,
                 "f{i:03}"
             );
+        }
+    }
+
+    /// A name an interior node holds is renamed into a leaf without the
+    /// child VCN it had there, at the same length and at another (#1396).
+    #[test]
+    fn renaming_a_separator_leaves_its_child_vcn_behind() {
+        const KEYS: crate::index_io::NodeKeys = crate::index_io::NodeKeys::FileNames;
+        let mut dev = fresh_vol();
+        mkdir_io(&mut dev, "/", "d").unwrap();
+        for i in 0..300 {
+            create_file_io(&mut dev, "/d", &format!("f{i:03}")).unwrap();
+        }
+        let d = crate::read::resolve_path(&mut dev, "/d").unwrap();
+        for (round, new) in ["z", "zz-longer-"].into_iter().enumerate() {
+            let (_, record) = crate::mft_io::read_mft_record_io(&mut dev, d).unwrap();
+            let root =
+                crate::index_io::parse_index_root_node_of(&record, crate::mkfs::stream::I30, KEYS)
+                    .unwrap();
+            let separator = root
+                .entries
+                .iter()
+                .map(|entry| crate::index_io::node_entry_name(entry).unwrap())
+                .map(|name| String::from_utf16(&name).unwrap())
+                .find(|name| name.starts_with('f'))
+                .expect("the root holds a separator");
+            let renamed = format!("{new}{}", &separator[1..]);
+            rename_io(&mut dev, &format!("/d/{separator}"), &renamed)
+                .unwrap_or_else(|e| panic!("rename {separator}: {e}"));
+            assert_every_leaf_holds_a_name(&mut dev, d, &format!("after rename {round}"));
+            assert!(crate::read::resolve_path(&mut dev, &format!("/d/{renamed}")).is_ok());
+            assert!(crate::read::resolve_path(&mut dev, &format!("/d/{separator}")).is_err());
         }
     }
 

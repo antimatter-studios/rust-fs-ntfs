@@ -1005,6 +1005,25 @@ pub fn rename_index_entry_same_length(
     Ok(())
 }
 
+/// `entry` as a leaf holds it. An entry of an interior node ends in the VCN
+/// of the child below it, which belongs to its place in the tree and not to
+/// the name: an entry taken from there to be inserted elsewhere leaves it
+/// behind, or a leaf is given an entry with a child (#1396).
+pub(crate) fn entry_as_leaf(entry: &[u8]) -> Vec<u8> {
+    let mut out = entry.to_vec();
+    if out.len() < IE_KEY_START + 8 {
+        return out;
+    }
+    let flags = u16::from_le_bytes([out[IE_FLAGS], out[IE_FLAGS + 1]]);
+    if flags & IE_FLAG_HAS_SUBNODE != 0 {
+        out.truncate(out.len() - 8);
+        let length = out.len() as u16;
+        out[IE_LENGTH..IE_LENGTH + 2].copy_from_slice(&length.to_le_bytes());
+        out[IE_FLAGS..IE_FLAGS + 2].copy_from_slice(&(flags & !IE_FLAG_HAS_SUBNODE).to_le_bytes());
+    }
+    out
+}
+
 /// Set the namespace of the `$FILE_NAME` key in a built index entry, such
 /// as one [`build_file_name_index_entry`] returns, so that it agrees with
 /// the record's `$FILE_NAME` (#492).

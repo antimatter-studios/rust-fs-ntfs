@@ -11,3 +11,5 @@
 - Removing or renaming the last name of a directory index leaf no longer
   leaves the leaf empty in the index, which Windows' `chkdsk` reports as an
   error in the directory.
+- Renaming a file whose name a large directory's index holds above a leaf no
+  longer writes a damaged index block.
