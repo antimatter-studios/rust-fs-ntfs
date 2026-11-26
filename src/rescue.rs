@@ -256,25 +256,45 @@ impl ScanReport {
 }
 
 /// Scan `source` into a new archive at `archive`, which must not exist (so
-/// it can never be the source). The source is opened read-only.
+/// it can never be the source). The source is opened read-only. The archive
+/// is created as [`scan_to_new_archive`] creates it.
 pub fn scan_to_path(
     source: &Path,
     archive: &Path,
     options: ScanOptions,
 ) -> Result<ScanReport, String> {
     let mut input = FileSource::open(source)?;
-    let size = input.size();
+    scan_to_new_archive(&mut input, archive, options)
+}
+
+/// [`scan`] `source` into a new archive at `archive`, which must not exist.
+///
+/// A source or options the scan refuses are refused before the archive is
+/// created. The new archive's parent directory is synced before anything is
+/// scanned, so no report can name an archive a power cut would lose; when it
+/// cannot be synced, the empty archive is removed and the scan fails. A scan
+/// that stops later keeps the archive, for [`resume`].
+pub fn scan_to_new_archive<S: RescueSource + ?Sized>(
+    source: &mut S,
+    archive: &Path,
+    options: ScanOptions,
+) -> Result<ScanReport, String> {
+    let size = source.size();
     if size == 0 {
         return Err(EMPTY_SOURCE.into());
     }
-    options.sector(boot_sector_size(&mut input, size), DEFAULT_SECTOR)?;
+    options.sector(boot_sector_size(source, size), DEFAULT_SECTOR)?;
     let mut out = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(archive)
         .map_err(|e| format!("create the archive '{}': {e}", archive.display()))?;
-    sync_parent(archive)?;
-    scan(&mut input, &mut out, options)
+    if let Err(e) = sync_parent(archive) {
+        drop(out);
+        let _ = std::fs::remove_file(archive);
+        return Err(e);
+    }
+    scan(source, &mut out, options)
 }
 
 /// Scan `source` into `archive`, an empty file opened for writing. The

@@ -107,17 +107,15 @@ pub fn run(target: &OsString, offset: u64, sub: &ArgMatches) -> Result<Outcome, 
             })?;
         rescue::resume(&mut input, &mut out, options)
     } else {
-        let mut out = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(archive)
-            .map_err(|e| {
-                CliError::failed(format!(
-                    "create the archive '{}': {e} (pass --resume to carry on an existing one)",
-                    archive.display()
-                ))
-            })?;
-        rescue::scan(&mut input, &mut out, options)
+        // The library creates the archive with `create_new`, so this check
+        // only words the refusal; it is not what protects the file.
+        if archive.symlink_metadata().is_ok() {
+            return Err(CliError::failed(format!(
+                "the archive '{}' exists; pass --resume to carry on an existing one",
+                archive.display()
+            )));
+        }
+        rescue::scan_to_new_archive(&mut input, archive, options)
     }
     .map_err(CliError::failed)?;
 
