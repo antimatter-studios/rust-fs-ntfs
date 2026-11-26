@@ -33,6 +33,9 @@ test-disks/*.targets.tsv
 test-disks/*.sha256.tsv
 # The /index-blocks files Windows wrote beside ntfs-4kn-read.img (#1384).
 test-disks/*.index.tsv
+# What tests/write_4kn_windows.rs says the volume it wrote must hold (#1396).
+test-disks/*.expected.tsv
+test-disks/*.lifecycle.log
 # Which names Win32 creates as files, measured by measure-win32-names.ps1.
 test-disks/win32-name-verdicts.tsv
 # The EA names and values handed to Windows, beside ntfs-ea.img.

@@ -1005,6 +1005,25 @@ pub fn rename_index_entry_same_length(
     Ok(())
 }
 
+/// `entry` as a leaf holds it. An entry of an interior node ends in the VCN
+/// of the child below it, which belongs to its place in the tree and not to
+/// the name: an entry taken from there to be inserted elsewhere leaves it
+/// behind, or a leaf is given an entry with a child (#1396).
+pub(crate) fn entry_as_leaf(entry: &[u8]) -> Vec<u8> {
+    let mut out = entry.to_vec();
+    if out.len() < IE_KEY_START + 8 {
+        return out;
+    }
+    let flags = u16::from_le_bytes([out[IE_FLAGS], out[IE_FLAGS + 1]]);
+    if flags & IE_FLAG_HAS_SUBNODE != 0 {
+        out.truncate(out.len() - 8);
+        let length = out.len() as u16;
+        out[IE_LENGTH..IE_LENGTH + 2].copy_from_slice(&length.to_le_bytes());
+        out[IE_FLAGS..IE_FLAGS + 2].copy_from_slice(&(flags & !IE_FLAG_HAS_SUBNODE).to_le_bytes());
+    }
+    out
+}
+
 /// Set the namespace of the `$FILE_NAME` key in a built index entry, such
 /// as one [`build_file_name_index_entry`] returns, so that it agrees with
 /// the record's `$FILE_NAME` (#492).
@@ -1021,6 +1040,21 @@ pub(crate) fn set_entry_namespace(entry: &mut [u8], namespace: u8) -> Result<(),
 /// the duplicated allocated size and data size, the two adjacent.
 const FN_ALLOCATED_SIZE_OFFSET: usize = 0x28;
 const FN_DATA_SIZE_OFFSET: usize = 0x30;
+
+/// Carry into `new`, a freshly built entry, what `old`'s key duplicates of
+/// the file itself: its allocated and data sizes, its attribute flags and the
+/// extended attribute or reparse word after them. A builder knows none of
+/// them, and Windows lists a file's length from its directory entry (#1396).
+pub(crate) fn keep_duplicated_sizes(new: &mut [u8], old: &[u8]) -> Result<(), Error> {
+    let span = IE_KEY_START + FN_ALLOCATED_SIZE_OFFSET..IE_KEY_START + FN_NAME_LENGTH_OFFSET;
+    let kept = old
+        .get(span.clone())
+        .ok_or_else(|| Error::io("index entry too short to hold a $FILE_NAME's sizes"))?;
+    new.get_mut(span)
+        .ok_or_else(|| Error::io("index entry too short to hold a $FILE_NAME's sizes"))?
+        .copy_from_slice(kept);
+    Ok(())
+}
 
 /// Set only READONLY in an index key, returning its previous bit for undo.
 /// The native six-stage FILE_NAME capture establishes this eager bit (#629).

@@ -33,11 +33,15 @@ using our own stride proves only internal consistency.
 sectors with `Format-Volume` defaults chose 1024-byte file records and 4096-byte
 index blocks, and every FILE, INDX, RSTR and RCRD array it wrote keeps one word per
 512 bytes: three words in a file record, nine in an index block or log page. The
-readers now take the stride from each record's own array, the sector or 512 bytes;
-the writers still build arrays with the sector stride, so a writable mount of
-records smaller than their sector is refused. Whether Windows' 4096-byte records on
-such a disk also use 512-byte strides, and whether a write keeping them would pass
-chkdsk, is still open.
+readers take the stride from each record's own array, the sector or 512 bytes.
+
+**Measured (#1396).** The writers keep an existing array's stride and build new
+1024-byte FILE and 4096-byte INDX arrays with 512-byte strides on such a volume.
+Windows' `chkdsk`, listing and hashes judge the files and directories created,
+written, renamed and removed on it (`tests/write_4kn_windows.rs`,
+`test-disks/grade-windows-4kn-write.ps1`), so that geometry is mounted writable.
+Other geometries with records smaller than their sector are still refused. Whether
+Windows' 4096-byte records on such a disk also use 512-byte strides is still open.
 
 ### Q02 — Boot-copy location and arbitration
 

@@ -1,5 +1,5 @@
 //! A volume Windows formatted on 4096-byte sectors with 1024-byte file
-//! records is read, and only read (#1384).
+//! records is writable with the native 512-byte update-sequence stride (#1396).
 //!
 //! `test-disks/build-windows-4kn-fixture.ps1` has Windows format a disk
 //! presenting 4096-byte logical sectors with `Format-Volume` and its
@@ -11,10 +11,8 @@
 //! `fsutil fsinfo ntfsinfo`.
 //! Windows chose 1024-byte file records for that disk, and its update
 //! sequence arrays have one entry per 512 bytes whatever the sector size:
-//! three words in a file record, nine in a 4096-byte index block. The
-//! reader takes the stride from the record's own array; the writers build
-//! arrays from the sector size, so a writable mount of this geometry is
-//! refused by name.
+//! three words in a file record, nine in a 4096-byte index block. Readers
+//! and writers take the stride from each record's array.
 #![cfg(windows)]
 
 use fs_ntfs::file::NtfsFileAPI;
@@ -225,15 +223,9 @@ fn a_salvage_read_follows_the_same_records() {
 }
 
 #[test]
-fn a_writable_mount_of_records_smaller_than_a_sector_is_refused_and_writes_nothing() {
+fn a_writable_mount_of_records_smaller_than_a_sector_is_admitted() {
     let device = image();
-    let before = device.digest();
-    let error = match Volume::open_writable(device.clone()) {
-        Ok(_) => panic!("a writable mount was admitted"),
-        Err(error) => error.to_string(),
-    };
-    assert!(error.contains("smaller than"), "{error}");
-    assert_eq!(device.digest(), before);
+    Volume::open_writable(device).expect("512-byte USA strides make these records writable");
 }
 
 #[test]

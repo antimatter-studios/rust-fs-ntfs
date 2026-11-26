@@ -304,8 +304,8 @@ pub(crate) fn parse_boot_params_from_bytes(boot: &[u8; 512]) -> Result<BootParam
     // tests/small_records_4kn_windows.rs, #1384). The readers take the
     // stride from each record's own array (`validate_usa_geometry`), so the
     // torn-write check still compares two tails in such a record. The
-    // writers build arrays from the sector size, so a writable mount of this
-    // geometry is refused in `refuse_unwritable_geometry`.
+    // writers keep or build the same 512-byte stride, so these records can be
+    // updated without treating the full 4096-byte sector as one stride.
 
     // Same signed encoding as clusters_per_mft_record.
     let cpib = boot[BOOT_OFF_CLUSTERS_PER_INDEX_BLOCK] as i8;
@@ -771,15 +771,19 @@ fn validate_usa_geometry(
 /// larger than it (#1384).
 const USA_STRIDE: usize = 512;
 
-/// Refuses a writable mount of a volume whose file records are smaller
-/// than its sectors: Windows protects them in 512-byte strides, and this
-/// crate's writers build arrays from the sector size (#1384).
-pub fn refuse_unwritable_geometry(params: &BootParams) -> Result<(), Error> {
-    if u64::from(params.bytes_per_sector) > params.file_record_size {
+/// Refuses a writable mount of a volume whose file records are smaller than
+/// its sectors in any geometry but the one measured: Windows formats a disk
+/// presenting 4096-byte sectors with 1024-byte records in 512-byte
+/// update-sequence strides, and has graded this crate's writes to such a
+/// volume (#1396). Other such geometries are read, not written.
+pub(crate) fn refuse_unmeasured_geometry(params: &BootParams) -> Result<(), Error> {
+    let sector = u64::from(params.bytes_per_sector);
+    let record = params.file_record_size;
+    if sector > record && (sector, record) != (4096, 1024) {
         return Err(Error::refused(format!(
-            "file records of {} bytes are smaller than the volume's {}-byte sectors: they are \
-             read, and writing them is not supported (rust-fs-ntfs#1384)",
-            params.file_record_size, params.bytes_per_sector
+            "file records of {record} bytes are smaller than the volume's {sector}-byte \
+             sectors: they are read, and writing them is supported only for 1024-byte \
+             records on 4096-byte sectors (rust-fs-ntfs#1396)"
         )));
     }
     Ok(())
@@ -1112,6 +1116,33 @@ pub fn restore_mft_record_io<T: BlockIo + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Records smaller than their sector are written only in the geometry
+    /// Windows graded (#1396); records at least a sector long are written.
+    #[test]
+    fn only_the_measured_sub_sector_geometry_is_admitted_for_writing() {
+        let params = |bytes_per_sector: u16, file_record_size: u64| BootParams {
+            bytes_per_sector,
+            sectors_per_cluster: 1,
+            cluster_size: 4096,
+            mft_lcn: 4,
+            mft_mirror_lcn: 2,
+            file_record_size,
+            total_sectors: 1024,
+            serial_number: 1,
+            index_block_size: 4096,
+            oem_id: *NTFS_OEM_ID,
+        };
+        for (sector, record) in [(4096, 1024), (512, 1024), (4096, 4096), (512, 512)] {
+            refuse_unmeasured_geometry(&params(sector, record))
+                .unwrap_or_else(|error| panic!("{sector}/{record}: {error}"));
+        }
+        for (sector, record) in [(4096, 512), (4096, 2048), (2048, 1024), (1024, 512)] {
+            let error = refuse_unmeasured_geometry(&params(sector, record))
+                .expect_err("an unmeasured geometry was admitted");
+            assert!(error.to_string().contains("smaller than"), "{error}");
+        }
+    }
 
     /// A ROLLBACK MUST LEAVE A USN THE DISK HAS NOT SEEN.
     ///
