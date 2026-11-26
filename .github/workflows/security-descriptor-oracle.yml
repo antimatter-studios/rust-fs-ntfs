@@ -155,9 +155,16 @@ jobs:
       - name: New-WindowsFixture releases only its own VHD on success and on failure
         shell: pwsh
         run: pwsh -NoProfile -File tests/scripts/windows-fixture-lifecycle.ps1
+      - name: Prove the FILE_NAME watchdog interrupts a blocked phase
+        shell: pwsh
+        run: python tests/python/test_fixture_process.py FixtureProcess.test_blocked_dotnet_phase_and_its_descendant_end_at_the_phase_deadline
       - name: Capture the six FILE_NAME steps
         shell: pwsh
-        run: ./test-disks/capture-filename-fields.ps1
+        run: >-
+          python scripts/run-fixture-process.py --watch-phases --timeout-seconds 600
+          --log-dir tmp/filename-fixture-process
+          --lifecycle tmp/filename-fixture-process/lifecycle.log
+          -- pwsh -NoProfile -File test-disks/capture-filename-fields.ps1
       - name: Every step left an image and a manifest row bound to this commit
         shell: pwsh
         run: |
@@ -185,6 +192,7 @@ jobs:
           path: |
             tmp/fn-fields/
             test-disks/ntfs-fn-fields-step*.img
+            tmp/filename-fixture-process/
           if-no-files-found: error
           retention-days: 14
       - name: The six generated stage images are removed after the artifact handoff
