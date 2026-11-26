@@ -480,6 +480,72 @@ fn a_damaged_record_in_the_windows_journal_is_refused_not_skipped() {
     assert_eq!(common::image_digest(USN_IMG).unwrap(), before);
 }
 
+/// A record whose bytes are all zero is not the padding Windows leaves
+/// (#1421), which runs only to the end of a page the next record did not fit
+/// in. Each case is refused, never read as a shorter or an empty journal.
+#[test]
+fn a_zeroed_record_in_the_windows_journal_is_refused_not_read_as_padding() {
+    const PAGE: i64 = 4096;
+    let before = common::image_digest(USN_IMG).unwrap();
+    let (_, journal, records) = undamaged_journal();
+    let refused = |device: &Image, cursor: UsnCursor, what: &str| match read_usn_records(
+        device,
+        &journal,
+        cursor,
+        WHOLE_JOURNAL,
+    ) {
+        Err(error) => assert!(error.to_string().contains("zero"), "{what}: {error}"),
+        Ok(batch) => panic!(
+            "{what} read as {} records, finished: {}",
+            batch.records.len(),
+            batch.finished
+        ),
+    };
+
+    for (record, what) in [
+        (&records[1], "a zeroed record mid-page"),
+        (records.last().unwrap(), "a zeroed last record"),
+    ] {
+        let zeros = vec![0; record.record_length as usize];
+        let device = damaged(&record_head(record), 0, &zeros);
+        refused(&device, journal.first_cursor(), what);
+    }
+
+    // A page of `$J` is a cluster of this volume, found by the record that
+    // starts it.
+    let zeroed_page = |first: &UsnRecordV2| {
+        let mut device = Image::open(USN_IMG).unwrap();
+        let found: Vec<u64> = occurrences(USN_IMG, &record_head(first))
+            .into_iter()
+            .filter(|at| at % PAGE as u64 == 0)
+            .collect();
+        assert!(!found.is_empty(), "no cluster starts at USN {}", first.usn);
+        for at in found {
+            device.write(at, &[0; PAGE as usize]);
+        }
+        device
+    };
+    let page_starts: Vec<&UsnRecordV2> = records.iter().filter(|r| r.usn % PAGE == 0).collect();
+    assert!(page_starts.len() > 2, "the journal is too short");
+
+    refused(
+        &zeroed_page(page_starts[1]),
+        journal.first_cursor(),
+        "a zeroed page",
+    );
+    let last = *page_starts.last().unwrap();
+    let cursor = UsnCursor {
+        journal_id: journal.journal_id,
+        next_usn: last.usn,
+    };
+    refused(
+        &zeroed_page(last),
+        cursor,
+        "every record from the cursor to NextUsn zeroed",
+    );
+    assert_eq!(common::image_digest(USN_IMG).unwrap(), before);
+}
+
 #[test]
 fn a_cursor_the_windows_journal_cannot_answer_is_refused_not_empty() {
     let (device, journal, records) = undamaged_journal();
