@@ -54,6 +54,7 @@ fn a_device_another_holder_locked_is_refused_with_nothing_written() {
     );
     assert_eq!(sha256(&img), before, "the refused open wrote nothing");
 
+    holder.unlock().expect("holder releases its lock");
     drop(holder);
     std::fs::remove_file(&img).unwrap();
 }
@@ -69,6 +70,9 @@ fn the_lock_is_released_with_its_holder_and_held_against_a_second_exclusive_open
         .open(&img)
         .expect("open holder");
     holder.try_lock().expect("holder takes the exclusive lock");
+    // Unlocked, not only closed: a `gzip` another test is spawning may hold
+    // a duplicate of the descriptor, and the lock with it (#1348).
+    holder.unlock().expect("holder releases its lock");
     drop(holder);
 
     let first = PathIo::open_exclusive(img.as_ref()).expect("open once the holder is gone");
