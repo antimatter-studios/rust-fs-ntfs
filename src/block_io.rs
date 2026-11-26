@@ -86,6 +86,8 @@ impl<T: BlockIo + ?Sized> BlockIo for &mut T {
 pub struct PathIo {
     file: File,
     size: u64,
+    /// [`PathIo::open_exclusive`] locked `file`, so dropping unlocks it.
+    locked: bool,
 }
 
 impl PathIo {
@@ -99,18 +101,23 @@ impl PathIo {
             .metadata()
             .map_err(|e| format!("stat '{}': {e}", path.display()))?
             .len();
-        Ok(Self { file, size })
+        Ok(Self {
+            file,
+            size,
+            locked: false,
+        })
     }
 
     /// Read-write handle for an in-place repair, holding an exclusive,
     /// non-blocking lock on the device for as long as it lives (#920).
     ///
     /// The lock is [`File::try_lock`] (`flock(LOCK_EX | LOCK_NB)` on Unix),
-    /// which belongs to this open file description. A device another holder
-    /// has locked is refused at once with an error saying it is held by
-    /// another process, before anything is written. On Linux a block device
-    /// is also opened with `O_EXCL`, which the kernel refuses with `EBUSY`
-    /// for a device that is mounted or otherwise held.
+    /// which belongs to this open file description and is released when this
+    /// value drops. A device another holder has locked is refused at once with
+    /// an error saying it is held by another process, before anything is
+    /// written. On Linux a block device is also opened with `O_EXCL`, which
+    /// the kernel refuses with `EBUSY` for a device that is mounted or
+    /// otherwise held.
     ///
     /// Only the in-place repair path of the standalone fsck CLI opens a
     /// device this way, and its journal the same way (#936). Every other caller, the FSKit extension included,
@@ -149,11 +156,18 @@ impl PathIo {
                 return Err(format!("lock '{}': {e}", path.display()))
             }
         }
-        let size = file
+        // Owned from here on, so a failure below also unlocks.
+        let mut io = Self {
+            file,
+            size: 0,
+            locked: true,
+        };
+        io.size = io
+            .file
             .metadata()
             .map_err(|e| format!("stat '{}': {e}", path.display()))?
             .len();
-        Ok(Self { file, size })
+        Ok(io)
     }
 
     /// Path-backed read-only handle. Used by routines that conceptually
@@ -165,7 +179,24 @@ impl PathIo {
             .metadata()
             .map_err(|e| format!("stat '{}': {e}", path.display()))?
             .len();
-        Ok(Self { file, size })
+        Ok(Self {
+            file,
+            size,
+            locked: false,
+        })
+    }
+}
+
+impl Drop for PathIo {
+    /// Release an exclusive lock explicitly. Closing the file is not enough:
+    /// the lock belongs to the open file description, which a child process
+    /// spawned by another thread shares between `fork` and `exec` (#1348).
+    fn drop(&mut self) {
+        if self.locked {
+            // Drop cannot report a failure, and the close that follows still
+            // releases a lock no other descriptor shares.
+            let _ = self.file.unlock();
+        }
     }
 }
 

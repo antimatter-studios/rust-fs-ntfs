@@ -6401,6 +6401,10 @@ fn fsck_apply_in_place_repairs_a_copy_through_an_external_journal() {
                 !Path::new(&journal).exists(),
                 "{k}: a locked copy created the journal"
             );
+            // Unlocked, not only closed: a child another test is spawning may
+            // hold a duplicate of the descriptor, and the lock with it
+            // (#1348), which refused the apply below.
+            holder.unlock().unwrap();
         }
 
         // The in-place apply itself.
