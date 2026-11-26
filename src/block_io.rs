@@ -704,4 +704,30 @@ mod tests {
         };
         assert_eq!(cb.size(), 1234567);
     }
+
+    /// A child spawned by another thread holds a duplicate of every
+    /// descriptor between `fork` and `exec`, including a locked one (#1348).
+    /// `try_clone` duplicates the descriptor the same way, without a race.
+    #[test]
+    fn a_dropped_exclusive_open_releases_its_lock_despite_an_inherited_descriptor() {
+        let path = crate::test_scratch::temp_image_path("exclusive_inherited");
+        std::fs::write(&path, [0u8; 512]).unwrap();
+        let refused = || match PathIo::open_exclusive(path.as_ref()) {
+            Ok(_) => panic!("a contender opened a device its holder still holds"),
+            Err(e) => assert!(e.contains("held by another process"), "{e}"),
+        };
+
+        let holder = PathIo::open_exclusive(path.as_ref()).unwrap();
+        let inherited = holder.file.try_clone().unwrap();
+        // The control: the lock excludes a contender while the holder lives,
+        // and a refused contender does not release it.
+        refused();
+        refused();
+
+        drop(holder);
+        if let Err(e) = PathIo::open_exclusive(path.as_ref()) {
+            panic!("the dropped holder's lock outlived it: {e}");
+        }
+        drop(inherited);
+    }
 }
