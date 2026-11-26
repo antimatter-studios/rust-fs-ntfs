@@ -19,6 +19,12 @@ sandbox="$(mktemp -d)" || exit 1
 trap 'rm -rf "$sandbox"' EXIT
 export FS_CORE_CALLER="$sandbox"
 
+# tier.sh reads a tier's budget from its caller's table and refuses a caller
+# that has none (exit 2). The synthetic caller carries the `unit` row alone,
+# written here so a copy of this script run in another repository has it too.
+mkdir -p "$sandbox/scripts" || exit 1
+printf 'unit 1330 85500\n' >"$sandbox/scripts/tier-budgets.txt" || exit 1
+
 pass=0; fail=0
 
 check() {
