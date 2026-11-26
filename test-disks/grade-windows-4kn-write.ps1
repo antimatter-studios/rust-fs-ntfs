@@ -3,10 +3,18 @@
 # tests/write_4kn_windows.rs changes a copy of ntfs-4kn-read.img and writes
 # ntfs-4kn-write.expected.tsv: every directory (`dir`, path) and file (`file`,
 # path, size, SHA-256) the volume must then hold. This script puts that image
-# on a disk presenting 4096-byte logical sectors, runs a read-only chkdsk
-# before anything else touches the volume, and compares Windows' own listing
-# and Get-FileHash with the report. A file or directory missing, extra, or of
-# other bytes fails, as does an unclean chkdsk.
+# on a disk presenting 4096-byte logical sectors, attaches the disk again
+# read-only, runs chkdsk, and compares Windows' own listing and Get-FileHash
+# with the report. A file or directory missing, extra, or of other bytes
+# fails, as does an unclean chkdsk.
+#
+# READ-ONLY, so Windows judges the bytes this crate wrote. Mounted writable,
+# Windows rewrites its own transaction log ($Extend\$RmMetadata\$TxfLog)
+# while chkdsk reads it, and chkdsk then reports that directory's index
+# (runs 45727929786 and 45738310732) although its record and its files' were
+# byte for byte what Windows had formatted. -Control grades ntfs-4kn-read.img,
+# Windows' own volume, the same way: a method that refuses that one cannot
+# judge anything.
 #
 # One phase per process, for the reason build-windows-4kn-fixture.ps1 gives
 # (#1352): each storage operation is its own CI step under
@@ -23,7 +31,8 @@ param(
     [string]$Phase,
     [string]$OutDir = 'test-disks',
     [string]$StateDir = 'tmp/4kn-write',
-    [ValidateRange(1, 120)] [int]$PhaseTimeoutSeconds = 60
+    [ValidateRange(1, 120)] [int]$PhaseTimeoutSeconds = 60,
+    [switch]$Control
 )
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/../scripts/windows-format-geometry.ps1"
@@ -31,9 +40,14 @@ $ErrorActionPreference = 'Stop'
 
 $SectorBytes = 4096
 $out = [IO.Path]::GetFullPath($OutDir)
-$image = Join-Path $out 'ntfs-4kn-write.img'
+$name = if ($Control) { 'ntfs-4kn-control' } else { 'ntfs-4kn-write' }
+$image = Join-Path $out $(if ($Control) { 'ntfs-4kn-read.img' } else { 'ntfs-4kn-write.img' })
 $expected = Join-Path $out 'ntfs-4kn-write.expected.tsv'
-$lifecycle = Join-Path $out 'ntfs-4kn-write.lifecycle.log'
+$lifecycle = Join-Path $out "$name.lifecycle.log"
+if ($Control) {
+    if ($Phase -eq 'enumerate') { throw 'the control has no report to enumerate against' }
+    $StateDir = "$StateDir-control"
+}
 $stateRoot = [IO.Path]::GetFullPath($StateDir)
 $statePath = Join-Path $stateRoot 'state.json'
 
@@ -66,7 +80,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 if ($Phase -eq 'create') {
     [IO.File]::WriteAllText($lifecycle, '', [Text.UTF8Encoding]::new($false))
-    foreach ($path in $image, $expected) {
+    $needed = if ($Control) { @($image) } else { @($image, $expected) }
+    foreach ($path in $needed) {
         if (-not (Test-Path -LiteralPath $path)) {
             throw "${path} is missing: run cargo test --test write_4kn_windows first"
         }
@@ -153,8 +168,11 @@ switch ($Phase) {
         Invoke-4KnGradeCall 'Dismount-DiskImage' { Dismount-DiskImage -ImagePath $vhdx -ErrorAction Stop | Out-Null }
     }
     'remount' {
-        # Attached again, so ntfs.sys mounts the imported volume afresh.
-        $disk = Invoke-4KnGradeCall 'Mount-DiskImage' { Mount-DiskImage -ImagePath $vhdx -PassThru | Get-Disk }
+        # Attached again, so ntfs.sys mounts the imported volume afresh, and
+        # read-only, so nothing changes it before or while it is judged.
+        $disk = Invoke-4KnGradeCall 'Mount-DiskImage-readonly' {
+            Mount-DiskImage -ImagePath $vhdx -Access ReadOnly -PassThru | Get-Disk
+        }
         $offset = [long]$state.offset
         $letter = Invoke-4KnGradeCall 'drive-letter' {
             $partition = Get-Partition -DiskNumber $disk.Number | Where-Object Offset -eq $offset
@@ -171,15 +189,7 @@ switch ($Phase) {
     }
     'chkdsk' {
         $letter = $state.letter
-        try {
-            Invoke-4KnGradeCall 'chkdsk.exe' -CheckNativeExit { & chkdsk.exe "${letter}:" | Out-Host }
-        } catch {
-            # A read-only run names only the record. What a repair would change
-            # names the entries; the scratch disk is thrown away afterwards, and
-            # the run still fails with the read-only verdict.
-            Invoke-4KnGradeCall 'chkdsk.exe-repair' { & chkdsk.exe "${letter}:" /f /x | Out-Host }
-            throw
-        }
+        Invoke-4KnGradeCall 'chkdsk.exe' -CheckNativeExit { & chkdsk.exe "${letter}:" | Out-Host }
     }
     'enumerate' {
         $letter = $state.letter

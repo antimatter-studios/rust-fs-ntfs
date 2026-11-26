@@ -75,16 +75,25 @@ grader = (root / GRADER).read_text()
 declared = re.search(r'\[ValidateSet\(([^)]*)\)\]\s*\[string\]\$Phase', grader)
 assert declared and re.findall(r"'([^']+)'", declared.group(1)) == GRADE_PHASES, \
     'the grader runs exactly one named phase per process'
-grade_steps = [(index, step) for index, step in enumerate(steps) if GRADER in str(step.get('run', ''))]
+grading = [(index, step) for index, step in enumerate(steps) if GRADER in str(step.get('run', ''))]
+control_steps = [(index, step) for index, step in grading if '-Control' in step['run'].split()]
+grade_steps = [(index, step) for index, step in grading if '-Control' not in step['run'].split()]
 ran = [re.search(r'-Phase (\S+)', step['run']).group(1) for _, step in grade_steps]
 assert ran == GRADE_PHASES, f'every grading phase is one step, in order: {ran}'
-for _, step in grade_steps:
+ran = [re.search(r'-Phase (\S+)', step['run']).group(1) for _, step in control_steps]
+assert ran == [phase for phase in GRADE_PHASES if phase != 'enumerate'], \
+    f'the control runs every phase but the listing, in order: {ran}'
+assert control_steps[-1][0] < grade_steps[0][0], 'the control is judged before the written volume'
+assert re.search(r"'remount' \{.*?-Access ReadOnly", grader, re.S), \
+    'the volume Windows judges is attached read-only'
+for _, step in grade_steps + control_steps:
     run = ' '.join(step['run'].split())
     phase = re.search(r'-Phase (\S+)', run).group(1)
     assert 0 < step.get('timeout-minutes', 0) <= 3, f'{phase} needs a step deadline of at most three minutes'
     process = re.search(r'scripts/run-fixture-process\.py --timeout-seconds (\d+)', run)
     assert process and int(process.group(1)) <= 120, f'{phase} needs an independent process deadline of at most 120 s'
-    assert '--lifecycle test-disks/ntfs-4kn-write.lifecycle.log' in run, f'{phase} must name its last retained phase on timeout'
+    name = 'ntfs-4kn-control' if '-Control' in run.split() else 'ntfs-4kn-write'
+    assert f'--lifecycle test-disks/{name}.lifecycle.log' in run, f'{phase} must name its last retained phase on timeout'
     assert (step.get('if') == 'always()') == (phase == 'cleanup'), f'only cleanup runs after a failed phase, not {phase}'
 writes = [index for index, step in enumerate(steps)
           if str(step.get('run', '')).strip() == 'cargo test --locked --test write_4kn_windows']
