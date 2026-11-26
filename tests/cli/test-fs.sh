@@ -36,6 +36,7 @@ not_found() {
     check "$* prints nothing on stdout" test ! -s "$SANDBOX/nf.out"
     jq_check "$* reports the not_found kind" '.code == 1 and .kind == "not_found"' "$SANDBOX/nf.err"
 }
+cp "$img" "$SANDBOX/nf-before.img"
 not_found ls /missing
 not_found ls /missing/f
 not_found read /missing
@@ -48,6 +49,20 @@ not_found xattr /missing user.absent
 not_found acl show /missing
 not_found acl show /missing/f
 check "export of a missing path writes no destination" test ! -e "$SANDBOX/exported"
+
+# --text carries the same answer: status 1, nothing on stdout, and an error
+# that says the path was not found. The stream, EA and ACL verbs are the
+# ones that once answered otherwise (#1192, #1402).
+for verb in streams xattr "acl show"; do
+    for item in /missing /missing/f; do
+        # Intentional word splitting: "acl show" is two arguments.
+        fs.ntfs "$img" $verb --text "$item" >"$SANDBOX/nf.out" 2>"$SANDBOX/nf.err"
+        check "$verb --text $item exits 1" test $? -eq 1
+        check "$verb --text $item prints nothing on stdout" test ! -s "$SANDBOX/nf.out"
+        check "$verb --text $item says not found" grep -q 'not found' "$SANDBOX/nf.err"
+    done
+done
+check "missing paths leave the volume unchanged" cmp -s "$img" "$SANDBOX/nf-before.img"
 
 # read: the metafiles are files, and two of them can be checked against
 # bytes that are not ours to interpret. $Boot's data is the volume's first
