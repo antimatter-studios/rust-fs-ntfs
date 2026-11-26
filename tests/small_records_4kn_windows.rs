@@ -15,7 +15,10 @@
 //! and writers take the stride from each record's array.
 #![cfg(windows)]
 
+use fs_core::BlockRead;
+use fs_ntfs::evidence::{logfile_state, read_logfile};
 use fs_ntfs::file::NtfsFileAPI;
+use fs_ntfs::mft_io::apply_fixup_on_read_magic;
 use fs_ntfs::primitives::NtfsPrimitiveAPI;
 use fs_ntfs::volume::{NtfsVolumeAPI, RawVolume, Volume};
 use sha2::{Digest, Sha256};
@@ -191,6 +194,131 @@ fn a_torn_stride_of_a_record_smaller_than_its_sector_is_still_detected() {
 }
 
 #[test]
+fn a_malformed_array_of_a_windows_record_is_refused() {
+    let device = image();
+    let volume = Volume::open(device.clone()).unwrap();
+    let (path, ..) = &report(HASHES)[0];
+    let number = volume.open_file(path).unwrap().record_number();
+    let offset = volume.inspect_mft_record(number).unwrap().offset;
+    // The array's offset is at byte 4 of the record, its word count at byte 6.
+    for (field, value) in [(4u64, 508u16), (4, 1020), (6, 2), (6, 4)] {
+        let mut damaged = device.clone();
+        damaged.write(offset + field, &value.to_le_bytes());
+        let refused = Volume::open_for_salvage(damaged)
+            .unwrap()
+            .inspect_mft_record(number)
+            .unwrap();
+        assert!(
+            refused.fixed.is_none(),
+            "{value} at byte {field} of the record was accepted"
+        );
+    }
+}
+
+#[test]
+fn every_log_page_windows_wrote_decodes_with_512_byte_strides() {
+    let device = image();
+    let state = logfile_state(&device).unwrap();
+    assert!(!state.needs_replay(), "{}", state.describe());
+    let log = read_logfile(&device).unwrap();
+    // The system and log page sizes the first restart page names.
+    assert_eq!(&log.bytes[0x10..0x18], &[0, 0x10, 0, 0, 0, 0x10, 0, 0]);
+    let (mut restart_pages, mut record_pages) = (0, 0);
+    for (index, page) in log.bytes.chunks_exact(4096).enumerate() {
+        let magic: &[u8; 4] = match &page[..4] {
+            b"RSTR" => {
+                restart_pages += 1;
+                b"RSTR"
+            }
+            b"RCRD" => {
+                record_pages += 1;
+                b"RCRD"
+            }
+            _ => continue,
+        };
+        assert_eq!(le_u16(page, 6), 9, "log page {index}");
+        apply_fixup_on_read_magic(&mut page.to_vec(), 512, magic)
+            .unwrap_or_else(|error| panic!("log page {index}: {error}"));
+        for tail in (510..4096).step_by(512) {
+            let mut torn = page.to_vec();
+            torn[tail] ^= 0xff;
+            assert!(
+                apply_fixup_on_read_magic(&mut torn, 512, magic).is_err(),
+                "log page {index}: a torn stride ending at {tail} was accepted"
+            );
+        }
+    }
+    assert_eq!(restart_pages, 2);
+    assert!(record_pages > 0, "Windows' log holds no record page");
+
+    // One torn restart page leaves the other to be read; two leave none.
+    let mut damaged = device.clone();
+    damaged.update(log.offset + 510, |byte| byte ^ 0xff);
+    let one = logfile_state(&damaged).unwrap().describe();
+    assert!(!one.contains("no readable restart page"), "{one}");
+    damaged.update(log.offset + 4096 + 510, |byte| byte ^ 0xff);
+    let state = logfile_state(&damaged).unwrap();
+    assert!(
+        state.describe().contains("no readable restart page"),
+        "{}",
+        state.describe()
+    );
+}
+
+/// The offsets of the 4096-byte index blocks that hold a name of
+/// [`INDEX_DIRECTORY`], `f000.txt` to `f399.txt`.
+fn index_blocks_of_the_directory(device: &Image) -> Vec<u64> {
+    let utf16 =
+        |text: &str| -> Vec<u8> { text.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+    let names: Vec<Vec<u8>> = (0..400).map(|i| utf16(&format!("f{i:03}.txt"))).collect();
+    let mut blocks = Vec::new();
+    let mut chunk = vec![0; 1 << 20];
+    let mut at = 0;
+    while at < device.size_bytes() {
+        let count = (device.size_bytes() - at).min(chunk.len() as u64) as usize;
+        device.read_at(at, &mut chunk[..count]).unwrap();
+        for (index, block) in chunk[..count].chunks_exact(4096).enumerate() {
+            if &block[..4] == b"INDX"
+                && block
+                    .windows(16)
+                    .any(|window| names.iter().any(|name| window == name.as_slice()))
+            {
+                blocks.push(at + index as u64 * 4096);
+            }
+        }
+        at += count as u64;
+    }
+    blocks
+}
+
+#[test]
+fn a_torn_stride_of_an_index_block_windows_wrote_is_refused() {
+    let device = image();
+    let blocks = index_blocks_of_the_directory(&device);
+    assert!(!blocks.is_empty(), "no index block holds a name");
+    for &block in &blocks {
+        assert_eq!(le_u16(&device.read(block, 8), 6), 9, "block at {block:#x}");
+    }
+    for tail in (510..4096u64).step_by(512) {
+        let mut damaged = device.clone();
+        for &block in &blocks {
+            damaged.update(block + tail, |byte| byte ^ 0xff);
+        }
+        let error = match Volume::open(damaged)
+            .unwrap()
+            .read_directory(INDEX_DIRECTORY)
+        {
+            Ok(entries) => panic!(
+                "a torn stride ending at {tail} listed {} names",
+                entries.len()
+            ),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("USN mismatch"), "{error}");
+    }
+}
+
+#[test]
 fn a_salvage_read_follows_the_same_records() {
     let device = image();
     let volume = Volume::open(device.clone()).unwrap();
@@ -204,21 +332,37 @@ fn a_salvage_read_follows_the_same_records() {
             boot.cluster_size,
         )
         .unwrap();
-    for (path, size, digest) in windows_files().iter().take(4) {
+    for (path, size, digest) in &windows_files() {
         let number = volume.open_file(path).unwrap().record_number();
         let base = raw.read_mapped_record(&map, number).unwrap();
         assert!(base.issues.is_empty(), "{path}: {:?}", base.issues);
-        let stream = raw
-            .resolve_salvage_record(&base, &map)
-            .unwrap()
-            .stream("")
-            .unwrap();
-        let mut bytes = vec![0; *size as usize];
-        let count = raw
-            .read_resolved_stream_at(&stream, boot.cluster_size, 0, &mut bytes)
-            .unwrap();
-        assert_eq!(count as u64, *size);
-        assert_eq!(&sha256(&bytes), digest, "{path}");
+        let resolved = raw.resolve_salvage_record(&base, &map).unwrap();
+        let name = path.rsplit('/').next().unwrap();
+        let names = resolved.file_names();
+        assert!(
+            names.iter().any(|found| found.name == name),
+            "{path}: the record names {names:?}"
+        );
+        let stream = resolved.stream("").unwrap();
+        // One byte more than Windows' length, so a longer stream shows.
+        let mut bytes = vec![0; *size as usize + 1];
+        let mut filled = 0;
+        loop {
+            let count = raw
+                .read_resolved_stream_at(
+                    &stream,
+                    boot.cluster_size,
+                    filled as u64,
+                    &mut bytes[filled..],
+                )
+                .unwrap_or_else(|error| panic!("{path}: {error}"));
+            if count == 0 {
+                break;
+            }
+            filled += count;
+        }
+        assert_eq!(filled as u64, *size, "{path}");
+        assert_eq!(&sha256(&bytes[..filled]), digest, "{path}");
     }
 }
 
