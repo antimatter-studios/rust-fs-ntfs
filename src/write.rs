@@ -2389,9 +2389,10 @@ fn validate_win32_name(what: &str, name: &str) -> Result<(), Error> {
 /// **Limitations (MVP):**
 /// * A full `$INDEX_ALLOCATION` node splits, and a full resident root hands
 ///   its entries down to a new index block, so the index gains levels as the
-///   directory grows. Growth stops when the directory's resident
-///   `$Bitmap:$I30` has no bit left for another index block; that is
-///   refused before the new record is allocated.
+///   directory grows. The resident
+///   `$Bitmap:$I30` lengthens with it. Growth stops when the directory's
+///   record cannot hold the longer bitmap, or when the bitmap is already
+///   non-resident; that is refused before the new record is allocated.
 pub fn create_file(image: &Path, parent_path: &str, basename: &str) -> Result<u64, Error> {
     let mut io = open_for_write(image)?;
     create_file_io(&mut io, parent_path, basename)
@@ -2969,10 +2970,8 @@ struct IndexBlockAllocator {
     index: String,
     clusters: u64,
     volume_bitmap: crate::bitmap::BitmapLocation,
-    /// Blocks the index's `$Bitmap` can describe where it lives now,
-    /// resident in the index's record. `None` when it is non-resident, which this
-    /// writer does not grow.
-    bitmap_blocks: Option<u64>,
+    /// A non-resident `$Bitmap` cannot grow yet.
+    resident_bitmap: bool,
     /// Cluster runs taken from the volume for this insert.
     taken: Vec<(u64, u64)>,
     dry_run: bool,
@@ -2990,17 +2989,13 @@ impl IndexBlockAllocator {
         let clusters = ia.block_size.div_ceil(ia.params.cluster_size);
         let bitmap = attr_io::find_attribute(record, AttrType::Bitmap, Some(index))
             .ok_or_else(|| Error::io(format!("$Bitmap:{index} missing")))?;
-        let bitmap_blocks = if bitmap.is_resident {
-            Some(u64::from(bitmap.resident_value_length.unwrap_or(0)) * 8)
-        } else {
-            None
-        };
+        let resident_bitmap = bitmap.is_resident;
         Ok(Self {
             ia,
             index: index.to_string(),
             clusters,
             volume_bitmap: crate::bitmap::locate_bitmap_io(io)?,
-            bitmap_blocks,
+            resident_bitmap,
             taken: Vec::new(),
             dry_run,
             changed: false,
@@ -3019,17 +3014,13 @@ impl IndexBlockAllocator {
         let mapped_blocks = self.ia.data_length / self.ia.block_size;
         let reused = (0..mapped_blocks).find(|&b| !self.block_in_use(b));
         let block = reused.unwrap_or(mapped_blocks);
-        let capacity = self.bitmap_blocks.ok_or_else(|| {
-            Error::no_space(format!(
+        if !self.resident_bitmap {
+            return Err(Error::no_space(format!(
                 "index capacity: growing a non-resident $Bitmap:{} is not supported",
                 self.index
-            ))
-        })?;
-        if block >= capacity || block as usize / 8 >= self.ia.bitmap.len() {
-            return Err(Error::no_space(
-                "index capacity: resident bitmap growth required",
-            ));
+            )));
         }
+        let byte = usize::try_from(block / 8).map_err(|_| "index block does not fit usize")?;
         let vcn = block * self.clusters;
         if reused.is_none() {
             let runs_end = self.ia.runs.last().map_or(0, |r| r.starting_vcn + r.length);
@@ -3066,7 +3057,12 @@ impl IndexBlockAllocator {
             }
             self.ia.data_length = (block + 1) * self.ia.block_size;
         }
-        self.ia.bitmap[block as usize / 8] |= 1u8 << (block % 8);
+        // The bitmap grows eight bytes at a time. `finish_record` refuses
+        // the insert if the record cannot hold the longer value.
+        if byte >= self.ia.bitmap.len() {
+            self.ia.bitmap.resize((byte + 1).next_multiple_of(8), 0);
+        }
+        self.ia.bitmap[byte] |= 1u8 << (block % 8);
         self.changed = true;
         Ok(vcn)
     }
@@ -3100,11 +3096,17 @@ impl IndexBlockAllocator {
             return Ok(());
         };
         let length = bitmap.resident_value_length.unwrap_or(0) as usize;
-        if !bitmap.is_resident || length != self.ia.bitmap.len() {
+        if !bitmap.is_resident || length > self.ia.bitmap.len() {
             return Err(Error::io(format!(
                 "index capacity: unsupported $Bitmap:{index} layout"
             )));
         }
+        let length = self.ia.bitmap.len();
+        crate::attr_resize::resize_resident_value(
+            record,
+            bitmap.attr_offset,
+            u32::try_from(length).map_err(|_| "index bitmap length does not fit u32")?,
+        )?;
         let value = bitmap.attr_offset
             + bitmap
                 .resident_value_offset
