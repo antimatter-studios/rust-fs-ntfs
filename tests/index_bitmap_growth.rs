@@ -77,7 +77,7 @@ fn read_directory(img: &str, with_content: &[usize]) -> (Vec<String>, Vec<Vec<u8
 
 #[test]
 fn one_directory_grows_past_sixty_four_index_blocks() {
-    let img = common::temp_image_path("index_bitmap_growth".to_string());
+    let img = common::temp_image_path("index_bitmap_growth");
     std::fs::File::create(&img)
         .expect("create")
         .set_len(VOL_SIZE)
@@ -112,7 +112,7 @@ fn one_directory_grows_past_sixty_four_index_blocks() {
         .expect("directory index bitmap");
     let length = bitmap.resident_value_length.expect("resident bitmap");
     assert!(
-        length > 8 && length % 8 == 0,
+        length > 8 && length.is_multiple_of(8),
         "bitmap must grow in eight-byte steps past 64 blocks, is {length} bytes"
     );
     let allocation = attr_io::find_attribute(&record, AttrType::IndexAllocation, Some("$I30"))
