@@ -745,6 +745,12 @@ fn validate_usa_geometry(
             usa_offset, usa_end, record_len
         )));
     }
+    // The array cannot lie over the header that says where it is (#1392).
+    if usa_offset < MULTI_SECTOR_HEADER_BYTES {
+        return Err(Error::io(format!(
+            "USA at {usa_offset:#x} overlaps the {MULTI_SECTOR_HEADER_BYTES}-byte record header"
+        )));
+    }
     // The stride is the sector, as this crate writes, or 512 bytes, as
     // Windows writes inside sectors larger than that (#1384). The array
     // has to name one of them exactly: a stride either way covers every
@@ -756,6 +762,16 @@ fn validate_usa_geometry(
             && record_len.is_multiple_of(stride)
             && strides == record_len / stride
         {
+            // Microsoft's `MULTI_SECTOR_HEADER`, `UpdateSequenceArrayOffset`:
+            // the array ends before the last word of the first stride. An
+            // array over that word is its own protected tail (#1392).
+            // <https://learn.microsoft.com/en-us/windows/win32/devnotes/multi-sector-header>
+            if usa_end > stride - SECTOR_TAIL_BYTES {
+                return Err(Error::io(format!(
+                    "USA [{usa_offset:#x}..{usa_end:#x}] reaches the protected tail of the \
+                     first {stride}-byte stride"
+                )));
+            }
             return Ok(stride);
         }
     }
@@ -770,6 +786,10 @@ fn validate_usa_geometry(
 /// The stride Windows keeps an update sequence word for inside sectors
 /// larger than it (#1384).
 const USA_STRIDE: usize = 512;
+
+/// `MULTI_SECTOR_HEADER`: a 4-byte signature, then the array's offset and
+/// word count.
+const MULTI_SECTOR_HEADER_BYTES: usize = 8;
 
 /// Refuses a writable mount of a volume whose file records are smaller than
 /// its sectors in any geometry but the one measured: Windows formats a disk
