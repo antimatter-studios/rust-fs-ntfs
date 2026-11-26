@@ -19,7 +19,7 @@
 #   unit        998 / 64,086 (CI macOS, queue run 39937271599)    1,330 / 85,500
 #   unit-debug  866 / 58,333 (CI Linux, the same run)            1,330 / 85,500
 #   mkfs        115 / 3,858 cold (Mac), 24 / 1,022 warm           160 / 5,200
-#   suite       2,919 / 148,548 (CI Linux, release run 38450689361) 3,900 / 198,000
+#   suite       3,711 / 198,039 (CI Linux, run 45764045320, dff73ebc4) 3,900 / 264,000
 #   kernel      243 / 10,875 (CI Linux, cold, run 38233380518)    325 / 14,500
 #   asan        790 / 52,350 (CI, nightly)                        1,100 / 72,000
 #   scripts     214 / 8,156 (CI Linux, run 43296761823)           285 / 10,900
@@ -43,6 +43,16 @@
 # 148,548 bytes: the tests added since, each a line of its own, used up the
 # third the first row allowed. Raised to that measurement plus a third, by
 # the same rule as every other row.
+#
+# THE SUITE ROW MOVED ON 2026-11-26, from 3,900/198,000 to 3,900/264,000.
+# The suite passed every test on the safe-write 4Kn tree at dff73ebc4 (PR
+# #1411; 238 "test result: ok" lines, 0 failed, the executed-test floor
+# met) and printed 3,711 lines / 198,039 bytes (CI Linux, run 45764045320,
+# job 139732974948), which exited 65 on the byte cap with every test
+# passing. The bytes are the passing measurement plus a third, as above.
+# The line cap is unchanged: 3,711 lines fit in 3,900. No output or
+# assertion is removed. Evidence:
+# https://github.com/antimatter-studios/rust-fs-ntfs/actions/runs/45764045320/job/139732974948
 
 # THE KERNEL ROW MOVED ON 2026-10-13, from 160/6,000 to 325/14,500. The
 # first row was 12 lines / 508 bytes measured warm on an arm64 Pi, plus an
@@ -252,7 +262,7 @@ clippy        260   11500
 unit         1330   85500
 unit-debug   1330   85500
 mkfs          160    5200
-suite        3900  198000
+suite        3900  264000
 kernel        325    14500
 asan         1100   72000
 scripts       285   10900
