@@ -11,6 +11,8 @@
 //!   `ntfs-usnjrnl.records.csv`: a journal Windows created and wrote to, what
 //!   `fsutil usn queryjournal` reported of it and every record `fsutil usn
 //!   readjournal` read back (`test-disks/build-windows-native-read-fixtures.ps1`).
+//! * The same journal with one record or its `$Max` stream damaged in memory:
+//!   each damage is refused by name, after the undamaged image read cleanly.
 //! * `test-disks/windows-interrupted-*.img.gz`: volumes Windows was writing
 //!   to when they were captured, and `.recovered.manifest`, every file
 //!   Windows listed after its own restart pass recovered a copy
@@ -25,9 +27,12 @@ use fs_core::BlockRead;
 use fs_ntfs::evidence::{
     logfile_state, read_usn_records, replay_logfile_in_memory, usn_journal_state, walk_logfile,
 };
+use fs_ntfs::facade::Filesystem;
 use fs_ntfs::file::NtfsFileAPI;
 use fs_ntfs::fsck;
-use fs_ntfs::usn_image::JournalState;
+use fs_ntfs::usn::{UsnDecodeError, UsnRecordV2};
+use fs_ntfs::usn_cursor::{CursorAdmission, InvalidBound, UsnCursor};
+use fs_ntfs::usn_image::{ImageJournal, JournalReadError, JournalState};
 use fs_ntfs::volume::Volume;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -332,4 +337,255 @@ fn a_clean_log_replays_to_the_device_unchanged() {
     assert!(reads_as(&replayed, &recovered));
     drop(replayed);
     std::fs::remove_file(&recovered).unwrap();
+}
+
+/// Larger than the fixture's whole `$J`, so one batch reads all of it.
+const WHOLE_JOURNAL: usize = 16 * 1024 * 1024;
+
+fn active_journal(device: &Image) -> ImageJournal {
+    match usn_journal_state(device).unwrap() {
+        JournalState::Active(journal) => journal,
+        other => panic!("the journal is {other:?}"),
+    }
+}
+
+/// The undamaged fixture, its journal and every record in it: the control each
+/// damaged copy is compared with.
+fn undamaged_journal() -> (Image, ImageJournal, Vec<UsnRecordV2>) {
+    assert!(
+        Path::new(USN_IMG).exists(),
+        "missing {USN_IMG}; run test-disks/build-windows-native-read-fixtures.ps1 on Windows"
+    );
+    let device = Image::open(USN_IMG).unwrap();
+    let journal = active_journal(&device);
+    let batch = read_usn_records(&device, &journal, journal.first_cursor(), WHOLE_JOURNAL).unwrap();
+    assert!(batch.finished && batch.records.len() > 2);
+    (device, journal, batch.records)
+}
+
+/// Every 8-byte-aligned offset of the image at `path` that holds `needle`.
+fn occurrences(path: &str, needle: &[u8]) -> Vec<u64> {
+    // Chunks advance short of their length, so a needle of up to `OVERLAP`
+    // bytes across a boundary is seen whole, and seen once.
+    const OVERLAP: usize = 64;
+    const STEP: usize = common::IMAGE_CHUNK_SIZE - OVERLAP;
+    assert!(needle.len() <= OVERLAP);
+    let size = std::fs::metadata(path).unwrap().len();
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < size {
+        let count = (size - at).min(common::IMAGE_CHUNK_SIZE as u64) as usize;
+        let chunk = common::read_image_region(path, at, count).unwrap();
+        for offset in (0..STEP).step_by(8) {
+            if chunk.get(offset..offset + needle.len()) == Some(needle) {
+                found.push(at + offset as u64);
+            }
+        }
+        at += STEP as u64;
+    }
+    found
+}
+
+/// The fixture with `bytes` laid `within` every copy of `needle`, in memory.
+/// A copy `$LogFile` happens to hold is changed too, which no journal read
+/// looks at.
+fn damaged(needle: &[u8], within: u64, bytes: &[u8]) -> Image {
+    let found = occurrences(USN_IMG, needle);
+    assert!(!found.is_empty(), "{USN_IMG} does not hold {needle:02x?}");
+    let mut device = Image::open(USN_IMG).unwrap();
+    for at in found {
+        device.write(at + within, bytes);
+    }
+    device
+}
+
+/// The first 32 bytes of `record` on disk: its length, version 2.0, file and
+/// parent references and USN.
+fn record_head(record: &UsnRecordV2) -> Vec<u8> {
+    let mut head = record.record_length.to_le_bytes().to_vec();
+    head.extend([2, 0, 0, 0]);
+    head.extend(record.file_reference.to_le_bytes());
+    head.extend(record.parent_file_reference.to_le_bytes());
+    head.extend(record.usn.to_le_bytes());
+    head
+}
+
+/// `$Max` as the disk holds it.
+fn max_stream(journal: &ImageJournal) -> Vec<u8> {
+    [
+        journal.maximum_size,
+        journal.allocation_delta,
+        journal.journal_id,
+        journal.lowest_valid_usn as u64,
+    ]
+    .iter()
+    .flat_map(|field| field.to_le_bytes())
+    .collect()
+}
+
+#[test]
+fn a_damaged_record_in_the_windows_journal_is_refused_not_skipped() {
+    let before = common::image_digest(USN_IMG).unwrap();
+    let (_, journal, records) = undamaged_journal();
+    let target = &records[1];
+    let usn = target.usn;
+    let head = record_head(target);
+    // The error each damage to the second record has to name.
+    let read = |within: u64, bytes: &[u8]| {
+        let device = damaged(&head, within, bytes);
+        match read_usn_records(&device, &journal, journal.first_cursor(), WHOLE_JOURNAL) {
+            Err(error) => error,
+            Ok(batch) => panic!(
+                "damage at byte {within} of the record at USN {usn} read as {} records",
+                batch.records.len()
+            ),
+        }
+    };
+    let decode_error = |within: u64, bytes: &[u8]| match read(within, bytes) {
+        JournalReadError::Record { usn: at, error } if at == usn => error,
+        other => panic!("damage at byte {within}: {other:?}"),
+    };
+
+    assert_eq!(
+        decode_error(4, &9u16.to_le_bytes()),
+        UsnDecodeError::UnsupportedVersion { major: 9, minor: 0 }
+    );
+    for length in [0u32, 8] {
+        assert_eq!(
+            decode_error(0, &length.to_le_bytes()),
+            UsnDecodeError::RecordLengthTooSmall {
+                record_length: length
+            }
+        );
+    }
+    assert!(matches!(
+        decode_error(58, &u16::MAX.to_le_bytes()),
+        UsnDecodeError::BadFileName {
+            offset: u16::MAX,
+            ..
+        }
+    ));
+    match read(0, &0xffff_fff8u32.to_le_bytes()) {
+        JournalReadError::PastNextUsn {
+            usn: at,
+            record_length: 0xffff_fff8,
+            ..
+        } if at == usn => {}
+        other => panic!("an out-of-range length: {other:?}"),
+    }
+    match read(24, &(usn + 8).to_le_bytes()) {
+        JournalReadError::Misplaced { usn: at, recorded } if at == usn && recorded == usn + 8 => {}
+        other => panic!("another record's USN: {other:?}"),
+    }
+    assert_eq!(common::image_digest(USN_IMG).unwrap(), before);
+}
+
+#[test]
+fn a_cursor_the_windows_journal_cannot_answer_is_refused_not_empty() {
+    let (device, journal, records) = undamaged_journal();
+    let saved = journal.first_cursor();
+    let second = records[1].usn;
+    let max = max_stream(&journal);
+    let refusal = |device: &Image, journal: &ImageJournal, cursor: UsnCursor| match read_usn_records(
+        device,
+        journal,
+        cursor,
+        WHOLE_JOURNAL,
+    ) {
+        Err(JournalReadError::NotAdmitted(admission)) => admission,
+        other => panic!("{cursor:?}: {other:?}"),
+    };
+    let at = |next_usn| UsnCursor {
+        journal_id: journal.journal_id,
+        next_usn,
+    };
+
+    let past = journal.next_usn + 8;
+    assert_eq!(
+        refusal(&device, &journal, at(past)),
+        CursorAdmission::Future {
+            cursor_usn: past,
+            next_usn: journal.next_usn
+        }
+    );
+    assert_eq!(
+        refusal(&device, &journal, at(-8)),
+        CursorAdmission::InvalidCursor { cursor_usn: -8 }
+    );
+    // The bounds a journal reports once its front is gone.
+    let wrapped = ImageJournal {
+        first_usn: second,
+        ..journal
+    };
+    assert_eq!(
+        refusal(&device, &wrapped, saved),
+        CursorAdmission::Wrapped {
+            cursor_usn: saved.next_usn,
+            first_usn: second
+        }
+    );
+
+    // A journal deleted and created again has another identity.
+    let new_id = journal.journal_id ^ 1;
+    let reset = damaged(&max, 16, &new_id.to_le_bytes());
+    let state = active_journal(&reset);
+    assert_eq!(state.journal_id, new_id);
+    assert_eq!(
+        refusal(&reset, &state, saved),
+        CursorAdmission::JournalReset {
+            cursor_id: journal.journal_id,
+            journal_id: new_id
+        }
+    );
+
+    let raised = damaged(&max, 24, &second.to_le_bytes());
+    let state = active_journal(&raised);
+    assert_eq!((state.lowest_valid_usn, state.first_usn), (second, second));
+    assert_eq!(
+        refusal(&raised, &state, saved),
+        CursorAdmission::BeforeLowestValid {
+            cursor_usn: saved.next_usn,
+            lowest_valid_usn: second
+        }
+    );
+
+    let beyond = damaged(&max, 24, &past.to_le_bytes());
+    let state = active_journal(&beyond);
+    assert_eq!(
+        refusal(&beyond, &state, saved),
+        CursorAdmission::InvalidJournal(InvalidBound::LowestValidAfterNext)
+    );
+}
+
+#[test]
+fn inspecting_a_log_neither_clears_its_work_nor_admits_a_writer() {
+    for capture in CAPTURES {
+        let path = unpack(&format!("windows-interrupted-{capture}"));
+        let before = common::image_digest(&path).unwrap();
+
+        let device = Image::open(&path).unwrap();
+        walk_logfile(&device, None, 1, 1024 * 1024).unwrap();
+        drop(replay_logfile_in_memory(device).unwrap());
+
+        assert!(
+            logfile_state(&Image::open(&path).unwrap())
+                .unwrap()
+                .needs_replay(),
+            "{capture}: inspection cleared the log's work"
+        );
+        let refused = match Filesystem::mount_rw(&path) {
+            Ok(_) => panic!("{capture}: a read-write mount was admitted after inspection"),
+            Err(error) => error.0,
+        };
+        assert!(
+            refused.contains("read-write mount refused"),
+            "{capture}: {refused}"
+        );
+        assert_eq!(
+            common::image_digest(&path).unwrap(),
+            before,
+            "{capture}: the device changed"
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
 }
