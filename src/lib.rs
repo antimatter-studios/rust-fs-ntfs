@@ -112,6 +112,7 @@ mod test_scratch;
 /// shutdown in the log alone and leave the dirty flag clear, so the log is
 /// read whatever the flag says.
 pub(crate) fn prepare_rw_mount<T: BlockIoTrait>(io: &mut T, replay: bool) -> Result<(), Error> {
+    mft_io::refuse_unmeasured_geometry(&mft_io::read_boot_params_io(io)?)?;
     if replay {
         fsck::prepare_rw_mount_replaying_io(io).map(|_| ())
     } else {

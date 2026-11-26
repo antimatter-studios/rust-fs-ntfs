@@ -771,6 +771,24 @@ fn validate_usa_geometry(
 /// larger than it (#1384).
 const USA_STRIDE: usize = 512;
 
+/// Refuses a writable mount of a volume whose file records are smaller than
+/// its sectors in any geometry but the one measured: Windows formats a disk
+/// presenting 4096-byte sectors with 1024-byte records in 512-byte
+/// update-sequence strides, and has graded this crate's writes to such a
+/// volume (#1396). Other such geometries are read, not written.
+pub(crate) fn refuse_unmeasured_geometry(params: &BootParams) -> Result<(), Error> {
+    let sector = u64::from(params.bytes_per_sector);
+    let record = params.file_record_size;
+    if sector > record && (sector, record) != (4096, 1024) {
+        return Err(Error::refused(format!(
+            "file records of {record} bytes are smaller than the volume's {sector}-byte \
+             sectors: they are read, and writing them is supported only for 1024-byte \
+             records on 4096-byte sectors (rust-fs-ntfs#1396)"
+        )));
+    }
+    Ok(())
+}
+
 /// Read an MFT record, apply fixup, and return the clean bytes.
 pub fn read_mft_record(path: &Path, record_number: u64) -> Result<(BootParams, Vec<u8>), Error> {
     let mut io = PathIo::open_ro(path)?;
@@ -1098,6 +1116,33 @@ pub fn restore_mft_record_io<T: BlockIo + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Records smaller than their sector are written only in the geometry
+    /// Windows graded (#1396); records at least a sector long are written.
+    #[test]
+    fn only_the_measured_sub_sector_geometry_is_admitted_for_writing() {
+        let params = |bytes_per_sector: u16, file_record_size: u64| BootParams {
+            bytes_per_sector,
+            sectors_per_cluster: 1,
+            cluster_size: 4096,
+            mft_lcn: 4,
+            mft_mirror_lcn: 2,
+            file_record_size,
+            total_sectors: 1024,
+            serial_number: 1,
+            index_block_size: 4096,
+            oem_id: *NTFS_OEM_ID,
+        };
+        for (sector, record) in [(4096, 1024), (512, 1024), (4096, 4096), (512, 512)] {
+            refuse_unmeasured_geometry(&params(sector, record))
+                .unwrap_or_else(|error| panic!("{sector}/{record}: {error}"));
+        }
+        for (sector, record) in [(4096, 512), (4096, 2048), (2048, 1024), (1024, 512)] {
+            let error = refuse_unmeasured_geometry(&params(sector, record))
+                .expect_err("an unmeasured geometry was admitted");
+            assert!(error.to_string().contains("smaller than"), "{error}");
+        }
+    }
 
     /// A ROLLBACK MUST LEAVE A USN THE DISK HAS NOT SEEN.
     ///
