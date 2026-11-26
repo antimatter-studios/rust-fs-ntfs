@@ -231,6 +231,57 @@ fn bounded_batches_read_every_record_fsutil_read() {
     assert_eq!(whole.records, read, "resumed batches differ from one batch");
 }
 
+/// Where Windows leaves zeros between records (#1421): only from the last
+/// record of a 4096-byte page to that page's end, and only when the next
+/// record is longer than what was left. The records measured are checked
+/// against `fsutil usn readjournal` by the test above.
+#[test]
+fn windows_leaves_zeros_only_at_a_page_end_the_next_record_does_not_fit() {
+    const PAGE: i64 = 4096;
+    require_fixtures();
+    let mut io = PathIo::open_ro(Path::new(IMG)).expect("open the fixture");
+    let journal = active_journal(&mut io);
+    let batch = read_records_io(
+        &mut io,
+        &journal,
+        journal.first_cursor(),
+        journal.next_usn as usize,
+    )
+    .expect("one batch");
+
+    assert_eq!(batch.records[0].usn, journal.first_usn);
+    let mut runs = 0;
+    for pair in batch.records.windows(2) {
+        let end = pair[0].usn + i64::from(pair[0].record_length);
+        let next = &pair[1];
+        assert_eq!(
+            pair[0].usn / PAGE,
+            (end - 1) / PAGE,
+            "the record at USN {} crosses a page",
+            pair[0].usn
+        );
+        if next.usn == end {
+            continue;
+        }
+        runs += 1;
+        assert_eq!(next.usn % PAGE, 0, "zeros from {end} end mid-page");
+        assert!(next.usn - end < PAGE, "zeros from {end} fill a page");
+        assert!(
+            i64::from(next.record_length) > next.usn - end,
+            "the {}-byte record at USN {} fitted in the zeros from {end}",
+            next.record_length,
+            next.usn
+        );
+    }
+    let last = batch.records.last().unwrap();
+    assert_eq!(
+        last.usn + i64::from(last.record_length),
+        journal.next_usn,
+        "zeros before NextUsn"
+    );
+    assert!(runs >= 8, "only {runs} zero runs; the journal is too short");
+}
+
 #[test]
 fn cursors_the_journal_cannot_answer_are_refused() {
     require_fixtures();
