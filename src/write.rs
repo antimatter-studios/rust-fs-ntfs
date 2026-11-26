@@ -10606,9 +10606,31 @@ mod tests {
         b
     }
 
+    /// An INDX block's header and the length and flags of each entry, for a
+    /// failure to show.
+    fn node_shape(block: &[u8]) -> String {
+        let word = |at: usize| u32::from_le_bytes(block[at..at + 4].try_into().unwrap()) as usize;
+        let (first, used) = (word(0x18), word(0x1C));
+        let mut at = 0x18 + first;
+        let mut entries = Vec::new();
+        while at + 16 <= (0x18 + used).min(block.len()) {
+            let length = usize::from(u16::from_le_bytes([block[at + 8], block[at + 9]]));
+            entries.push((length, block[at + 12]));
+            if length == 0 {
+                break;
+            }
+            at += length;
+        }
+        format!(
+            "vcn field {}, node flags {}, first {first}, used {used}, entries {entries:?}",
+            u64::from_le_bytes(block[0x10..0x18].try_into().unwrap()),
+            block[0x24]
+        )
+    }
+
     /// Every block the tree of `dir` reaches holds a name or routes to one,
     /// and `$Bitmap:$I30` marks exactly those blocks.
-    fn assert_every_leaf_holds_a_name<T: BlockIo + ?Sized>(io: &mut T, dir: u64) {
+    fn assert_every_leaf_holds_a_name<T: BlockIo + ?Sized>(io: &mut T, dir: u64, when: &str) {
         const KEYS: crate::index_io::NodeKeys = crate::index_io::NodeKeys::FileNames;
         let (_, record) = crate::mft_io::read_mft_record_io(io, dir).unwrap();
         let ia = crate::idx_block::load_for_directory_io(io, dir).unwrap();
@@ -10627,10 +10649,11 @@ mod tests {
                 .chain(node.last_child)
             {
                 let block = crate::idx_block::read_indx_block_io(io, &ia, vcn).unwrap();
-                let child = crate::index_io::parse_indx_node_of(&block, KEYS).unwrap();
+                let child = crate::index_io::parse_indx_node_of(&block, KEYS)
+                    .unwrap_or_else(|e| panic!("{when}: VCN {vcn}: {e}: {}", node_shape(&block)));
                 assert!(
                     child.is_interior() || !child.entries.is_empty(),
-                    "the leaf at VCN {vcn} holds no name"
+                    "{when}: the leaf at VCN {vcn} holds no name"
                 );
                 reached.push(vcn);
                 open.push(child);
@@ -10638,13 +10661,13 @@ mod tests {
         }
         assert!(
             reached.len() > 2,
-            "the directory has no index tree to judge"
+            "{when}: the directory has no index tree to judge"
         );
         reached.sort_unstable();
         assert_eq!(
             reached,
             ia.allocated_block_vcns(),
-            "$Bitmap:$I30 marks other blocks than the tree reaches"
+            "{when}: $Bitmap:$I30 marks other blocks than the tree reaches"
         );
     }
 
@@ -10658,15 +10681,16 @@ mod tests {
             create_file_io(&mut dev, "/d", &format!("f{i:03}")).unwrap();
         }
         let d = crate::read::resolve_path(&mut dev, "/d").unwrap();
+        assert_every_leaf_holds_a_name(&mut dev, d, "after creating");
         for i in 100..180 {
             unlink_io(&mut dev, &format!("/d/f{i:03}"))
                 .unwrap_or_else(|e| panic!("unlink f{i:03}: {e}"));
-            assert_every_leaf_holds_a_name(&mut dev, d);
+            assert_every_leaf_holds_a_name(&mut dev, d, &format!("after unlinking f{i:03}"));
         }
         for i in 200..260 {
             rename_io(&mut dev, &format!("/d/f{i:03}"), &format!("z{i:03}"))
                 .unwrap_or_else(|e| panic!("rename f{i:03}: {e}"));
-            assert_every_leaf_holds_a_name(&mut dev, d);
+            assert_every_leaf_holds_a_name(&mut dev, d, &format!("after renaming f{i:03}"));
         }
         // The first names, whose leaf is first in its parent, and the last.
         for i in 0..60 {
@@ -10677,7 +10701,7 @@ mod tests {
             unlink_io(&mut dev, &format!("/d/z{i:03}"))
                 .unwrap_or_else(|e| panic!("unlink z{i:03}: {e}"));
         }
-        assert_every_leaf_holds_a_name(&mut dev, d);
+        assert_every_leaf_holds_a_name(&mut dev, d, "at the end");
         for i in 0..300 {
             let kept = (60..100).contains(&i) || (180..200).contains(&i) || i >= 260;
             assert_eq!(
