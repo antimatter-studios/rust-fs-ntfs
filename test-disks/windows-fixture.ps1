@@ -17,8 +17,30 @@
 # still names the fixture and the phase it was in when it stopped.
 function Write-FixturePhase {
     param([string]$Fixture, [string]$Phase)
-    Write-Host ("fixture-phase {0} {1} {2}" -f `
+    $line = ("fixture-phase {0} {1} {2}" -f `
         (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ'), $Fixture, $Phase)
+    Write-Host $line
+    if ($env:NTFS_FIXTURE_LIFECYCLE) {
+        [IO.File]::AppendAllText($env:NTFS_FIXTURE_LIFECYCLE, $line + [Environment]::NewLine)
+    }
+}
+
+function Publish-FixturePhaseState {
+    param([string]$State)
+    if ($env:NTFS_FIXTURE_PHASE_STATE) {
+        $temporary = $env:NTFS_FIXTURE_PHASE_STATE + '.next'
+        [IO.File]::WriteAllText($temporary, $State)
+        for ($attempt = 0; ; $attempt++) {
+            try {
+                [IO.File]::Move($temporary, $env:NTFS_FIXTURE_PHASE_STATE, $true)
+                return
+            } catch [IO.IOException], [UnauthorizedAccessException] {
+                # Windows refuses to replace a file the watchdog is reading.
+                if ($attempt -eq 49) { throw }
+                Start-Sleep -Milliseconds 20
+            }
+        }
+    }
 }
 
 # Runs one lifecycle phase as a nested pipeline in this runspace, so the
@@ -57,8 +79,16 @@ function Invoke-FixturePhase {
     $null = $nested.AddScript('param($fixturePhaseAction, $fixturePhaseArguments) & $fixturePhaseAction @fixturePhaseArguments', $false)
     $null = $nested.AddArgument($PhaseAction).AddArgument($PhaseArguments)
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
-    $timer = [FixturePhaseWatchdog]::Arm($nested, $PhaseTimeoutSeconds * 1000)
+    $timer = $null
     try {
+        if ($env:NTFS_FIXTURE_PHASE_STATE) {
+            Publish-FixturePhaseState (@{
+                id = [string][guid]::NewGuid()
+                name = $PhaseName
+                seconds = $PhaseTimeoutSeconds
+            } | ConvertTo-Json -Compress)
+        }
+        $timer = [FixturePhaseWatchdog]::Arm($nested, $PhaseTimeoutSeconds * 1000)
         $output = $nested.Invoke()
     } catch {
         $failure = $_.Exception
@@ -66,10 +96,11 @@ function Invoke-FixturePhase {
             $failure = $failure.InnerException
         }
     } finally {
-        $timer.Dispose()
+        if ($timer) { $timer.Dispose() }
         $stopped = $nested.InvocationStateInfo.State -eq 'Stopped'
         $errors = @($nested.Streams.Error)
         $nested.Dispose()
+        Publish-FixturePhaseState 'null'
     }
 
     if ($stopped -or $watch.Elapsed.TotalSeconds -ge $PhaseTimeoutSeconds) {
