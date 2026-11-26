@@ -8,13 +8,11 @@
 # with the report. A file or directory missing, extra, or of other bytes
 # fails, as does an unclean chkdsk.
 #
-# READ-ONLY, so Windows judges the bytes this crate wrote. Mounted writable,
-# Windows rewrites its own transaction log ($Extend\$RmMetadata\$TxfLog)
-# while chkdsk reads it, and chkdsk then reports that directory's index
-# (runs 45727929786 and 45738310732) although its record and its files' were
-# byte for byte what Windows had formatted. -Control grades ntfs-4kn-read.img,
+# READ-ONLY, so Windows judges the bytes this crate wrote: nothing can change
+# them between the import and the verdict. -Control grades ntfs-4kn-read.img,
 # Windows' own volume, the same way: a method that refuses that one cannot
-# judge anything.
+# judge anything. chkdsk prints record numbers in hexadecimal: "file 30" is
+# record 48.
 #
 # One phase per process, for the reason build-windows-4kn-fixture.ps1 gives
 # (#1352): each storage operation is its own CI step under

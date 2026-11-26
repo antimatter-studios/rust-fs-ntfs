@@ -8219,6 +8219,13 @@ fn remove_parent_index_entry_io<T: BlockIo + ?Sized>(
                         .ok_or_else(|| Error::io("race: INDX entry vanished"))?;
                     index_io::remove_index_entry(block, &e, index_io::BlockKind::IndexAllocation)
                 })?;
+                let left = idx_block::read_indx_block_io(io, &ia, vcn)?;
+                if index_io::parse_indx_node_of(&left, index_io::NodeKeys::FileNames)?
+                    .entries
+                    .is_empty()
+                {
+                    refill_empty_leaf_io(io, parent_rec, vcn)?;
+                }
                 removed = true;
                 break;
             }
@@ -8247,8 +8254,9 @@ fn remove_parent_index_entry_io<T: BlockIo + ?Sized>(
 /// subtree holds none, the least name in the subtree after it. The
 /// neighbour takes the entry's place, keeping the entry's child pointer.
 ///
-/// Leaves emptied by unlinks stay in the tree, as Windows leaves them, so
-/// the neighbour is not always in a leaf. It is the last (or first) entry
+/// An index can hold empty leaves, ones an earlier release left behind and
+/// ones [`refill_empty_leaf_io`] could not take out, so the neighbour is not
+/// always in a leaf. It is the last (or first) entry
 /// of the deepest node on the walk down that holds one, and every node
 /// below that one on the walk holds nothing. Those empty nodes go with the
 /// neighbour: its own child takes their place, and their blocks are freed in
@@ -8453,7 +8461,172 @@ pub(crate) fn remove_interior_entry_of_io<T: BlockIo + ?Sized>(
             })
         })?;
     }
+    // The neighbour may have been its leaf's only name.
+    if index == crate::mkfs::stream::I30 {
+        if let Some((vcn, _, n)) = &holder {
+            if n.entries.is_empty() && !n.is_interior() {
+                refill_empty_leaf_io(io, parent_rec, *vcn)?;
+            }
+        }
+    }
     Ok(())
+}
+
+/// A node of `$I30` and where it is: its block's VCN and bytes, or `None` for
+/// `$INDEX_ROOT`.
+type OpenNode = (Option<(u64, Vec<u8>)>, index_io::IndexNode);
+
+/// Put names back into the leaf of `$I30` at `empty`, or take the leaf out of
+/// the index: a removal has just emptied it.
+///
+/// Windows' `chkdsk` refuses a directory that keeps an empty leaf among its
+/// names (`Error detected in index $I30`, #1396, run 45744921576), so one is
+/// not left behind, as a B-tree does not leave one:
+///
+/// - when the leaf beside it holds two names or more, the parent's name
+///   between them moves down into the empty leaf, and the neighbour's name
+///   nearest to it moves up into its place;
+/// - otherwise the two leaves become the neighbour, which takes the parent's
+///   name between them; the parent drops that name and the empty leaf, whose
+///   block is freed in `$Bitmap:$I30`.
+///
+/// Each name is written to its new node before it leaves its old one, so
+/// every name is found throughout. A parent that cannot take the change (a
+/// longer name that no longer fits) keeps the empty leaf: the removal that
+/// emptied it has happened, and the index still reads. A directory with an
+/// `$ATTRIBUTE_LIST`, and a parent node holding no name, are left as they
+/// are.
+fn refill_empty_leaf_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    empty: u64,
+) -> Result<(), Error> {
+    const KEYS: index_io::NodeKeys = index_io::NodeKeys::FileNames;
+    let index = crate::mkfs::stream::I30;
+    let (_, record) = read_mft_record_io(io, parent_rec)?;
+    if attr_io::find_attribute(&record, AttrType::AttributeList, None).is_some() {
+        return Ok(());
+    }
+    let ia = idx_block::load_for_directory_io(io, parent_rec)?;
+
+    // The node whose child the empty leaf is: its block, or `None` for
+    // `$INDEX_ROOT`.
+    let root = index_io::parse_index_root_node_of(&record, index, KEYS)?;
+    let mut open: Vec<OpenNode> = vec![(None, root)];
+    let mut found = None;
+    let mut walked = 0usize;
+    while let Some((at, node)) = open.pop() {
+        let children: Vec<u64> = node
+            .entries
+            .iter()
+            .filter_map(|e| e.child)
+            .chain(node.last_child)
+            .collect();
+        if let Some(position) = children.iter().position(|&vcn| vcn == empty) {
+            found = Some((at, node, children, position));
+            break;
+        }
+        for vcn in children {
+            walked += 1;
+            if walked > 1 << 20 {
+                return Err(Error::io(format!(
+                    "record {parent_rec}: its index has a cycle"
+                )));
+            }
+            let block = idx_block::read_indx_block_io(io, &ia, vcn)?;
+            let child = index_io::parse_indx_node_of(&block, KEYS)?;
+            if child.is_interior() {
+                open.push((Some((vcn, block)), child));
+            }
+        }
+    }
+    let Some((parent_at, mut parent, children, position)) = found else {
+        return Ok(());
+    };
+    let names = parent.entries.len();
+    if names == 0 || children.len() != names + 1 {
+        return Ok(());
+    }
+    let on_the_right = position < names;
+    let between = if on_the_right { position } else { names - 1 };
+    let beside = children[if on_the_right {
+        position + 1
+    } else {
+        position - 1
+    }];
+    let empty_block = idx_block::read_indx_block_io(io, &ia, empty)?;
+    let mut leaf = index_io::parse_indx_node_of(&empty_block, KEYS)?;
+    let beside_block = idx_block::read_indx_block_io(io, &ia, beside)?;
+    let mut neighbour = index_io::parse_indx_node_of(&beside_block, KEYS)?;
+    if !leaf.entries.is_empty() || leaf.is_interior() || neighbour.is_interior() {
+        return Ok(());
+    }
+    let separator = index_io::NodeEntry {
+        key: parent.entries[between].key.clone(),
+        child: None,
+    };
+
+    if neighbour.entries.len() >= 2 {
+        let moved = if on_the_right {
+            neighbour.entries.remove(0)
+        } else {
+            neighbour
+                .entries
+                .pop()
+                .ok_or_else(|| Error::io("the neighbouring leaf holds no name"))?
+        };
+        leaf.entries.push(separator);
+        parent.entries[between].key = moved.key;
+        let filled = index_io::write_indx_node(&empty_block, &leaf, empty)?;
+        let shorter = index_io::write_indx_node(&beside_block, &neighbour, beside)?;
+        idx_block::write_indx_block_io(io, &ia, empty, &filled)?;
+        if write_index_node_io(io, parent_rec, &ia, parent_at.as_ref(), &parent).is_err() {
+            return idx_block::write_indx_block_io(io, &ia, empty, &empty_block);
+        }
+        return idx_block::write_indx_block_io(io, &ia, beside, &shorter);
+    }
+
+    // A bitmap this cannot clear keeps the leaf.
+    let (_, mut directory) = crate::read::read_directory_record_io(io, parent_rec)?;
+    if clear_index_block_bits_of(&mut directory, index, &ia, &[empty]).is_err() {
+        return Ok(());
+    }
+    if on_the_right {
+        neighbour.entries.insert(0, separator);
+        parent.entries.remove(between);
+    } else {
+        neighbour.entries.push(separator);
+        let last = parent
+            .entries
+            .pop()
+            .ok_or_else(|| Error::io("the parent node holds no name"))?;
+        parent.last_child = last.child;
+    }
+    let merged = index_io::write_indx_node(&beside_block, &neighbour, beside)?;
+    idx_block::write_indx_block_io(io, &ia, beside, &merged)?;
+    if write_index_node_io(io, parent_rec, &ia, parent_at.as_ref(), &parent).is_err() {
+        return idx_block::write_indx_block_io(io, &ia, beside, &beside_block);
+    }
+    clear_index_block_bits_io(io, parent_rec, index, &ia, &[empty])
+}
+
+/// Write one `$I30` node back: the block `at` names, or `$INDEX_ROOT`.
+fn write_index_node_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    parent_rec: u64,
+    ia: &idx_block::IndexAllocation,
+    at: Option<&(u64, Vec<u8>)>,
+    node: &index_io::IndexNode,
+) -> Result<(), Error> {
+    match at {
+        None => update_mft_record_io(io, parent_rec, |record| {
+            index_io::write_index_root_node_of(record, crate::mkfs::stream::I30, node)
+        }),
+        Some((vcn, original)) => {
+            let bytes = index_io::write_indx_node(original, node, *vcn)?;
+            idx_block::write_indx_block_io(io, ia, *vcn, &bytes)
+        }
+    }
 }
 
 /// Update the bitmap where the directory's list keeps it, including an
@@ -10431,6 +10604,88 @@ mod tests {
         b[last + 0x08..last + 0x0A].copy_from_slice(&(last_len as u16).to_le_bytes());
         b[last + 0x0C..last + 0x0E].copy_from_slice(&0x02u16.to_le_bytes()); // LAST
         b
+    }
+
+    /// Every block the tree of `dir` reaches holds a name or routes to one,
+    /// and `$Bitmap:$I30` marks exactly those blocks.
+    fn assert_every_leaf_holds_a_name<T: BlockIo + ?Sized>(io: &mut T, dir: u64) {
+        const KEYS: crate::index_io::NodeKeys = crate::index_io::NodeKeys::FileNames;
+        let (_, record) = crate::mft_io::read_mft_record_io(io, dir).unwrap();
+        let ia = crate::idx_block::load_for_directory_io(io, dir).unwrap();
+        let mut open = vec![crate::index_io::parse_index_root_node_of(
+            &record,
+            crate::mkfs::stream::I30,
+            KEYS,
+        )
+        .unwrap()];
+        let mut reached = Vec::new();
+        while let Some(node) = open.pop() {
+            for vcn in node
+                .entries
+                .iter()
+                .filter_map(|e| e.child)
+                .chain(node.last_child)
+            {
+                let block = crate::idx_block::read_indx_block_io(io, &ia, vcn).unwrap();
+                let child = crate::index_io::parse_indx_node_of(&block, KEYS).unwrap();
+                assert!(
+                    child.is_interior() || !child.entries.is_empty(),
+                    "the leaf at VCN {vcn} holds no name"
+                );
+                reached.push(vcn);
+                open.push(child);
+            }
+        }
+        assert!(
+            reached.len() > 2,
+            "the directory has no index tree to judge"
+        );
+        reached.sort_unstable();
+        assert_eq!(
+            reached,
+            ia.allocated_block_vcns(),
+            "$Bitmap:$I30 marks other blocks than the tree reaches"
+        );
+    }
+
+    /// Runs of neighbouring names removed and renamed away empty whole
+    /// leaves; none stays empty in the index (#1396).
+    #[test]
+    fn removing_a_run_of_names_leaves_no_empty_index_leaf() {
+        let mut dev = fresh_vol();
+        mkdir_io(&mut dev, "/", "d").unwrap();
+        for i in 0..300 {
+            create_file_io(&mut dev, "/d", &format!("f{i:03}")).unwrap();
+        }
+        let d = crate::read::resolve_path(&mut dev, "/d").unwrap();
+        for i in 100..180 {
+            unlink_io(&mut dev, &format!("/d/f{i:03}"))
+                .unwrap_or_else(|e| panic!("unlink f{i:03}: {e}"));
+            assert_every_leaf_holds_a_name(&mut dev, d);
+        }
+        for i in 200..260 {
+            rename_io(&mut dev, &format!("/d/f{i:03}"), &format!("z{i:03}"))
+                .unwrap_or_else(|e| panic!("rename f{i:03}: {e}"));
+            assert_every_leaf_holds_a_name(&mut dev, d);
+        }
+        // The first names, whose leaf is first in its parent, and the last.
+        for i in 0..60 {
+            unlink_io(&mut dev, &format!("/d/f{i:03}"))
+                .unwrap_or_else(|e| panic!("unlink f{i:03}: {e}"));
+        }
+        for i in (200..260).rev() {
+            unlink_io(&mut dev, &format!("/d/z{i:03}"))
+                .unwrap_or_else(|e| panic!("unlink z{i:03}: {e}"));
+        }
+        assert_every_leaf_holds_a_name(&mut dev, d);
+        for i in 0..300 {
+            let kept = (60..100).contains(&i) || (180..200).contains(&i) || i >= 260;
+            assert_eq!(
+                crate::read::resolve_path(&mut dev, &format!("/d/f{i:03}")).is_ok(),
+                kept,
+                "f{i:03}"
+            );
+        }
     }
 
     #[test]
