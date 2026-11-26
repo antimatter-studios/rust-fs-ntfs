@@ -1732,6 +1732,36 @@ mod tests {
         assert!(err.contains("inconsistent"), "{err}");
     }
 
+    /// Microsoft's `MULTI_SECTOR_HEADER`, `UpdateSequenceArrayOffset`
+    /// (<https://learn.microsoft.com/en-us/windows/win32/devnotes/multi-sector-header>):
+    /// the array ends before the last word of the first stride. An array over that word is
+    /// its own protected tail, so the check compares it with itself (#1392).
+    #[test]
+    fn validate_usa_geometry_rejects_an_array_over_the_first_tail() {
+        for (len, sector, count) in [(1024, 4096u16, 3), (1024, 512, 3), (4096, 4096, 9)] {
+            for offset in [506, 508, 510] {
+                assert!(
+                    validate_usa_geometry(len, sector, offset, count).is_err(),
+                    "{len}-byte record: an array at {offset} was accepted"
+                );
+            }
+        }
+        // The last offset that ends before the tail of the first stride.
+        validate_usa_geometry(1024, 4096, 504, 3).unwrap();
+    }
+
+    /// The array cannot lie over the 8-byte header that locates it (#1392).
+    #[test]
+    fn validate_usa_geometry_rejects_an_array_over_its_header() {
+        for offset in [0, 4, 6] {
+            assert!(
+                validate_usa_geometry(1024, 4096, offset, 3).is_err(),
+                "an array at {offset} was accepted"
+            );
+        }
+        validate_usa_geometry(1024, 4096, 8, 3).unwrap();
+    }
+
     // --- helpers for formatted-volume tests ----------------------------------
 
     fn formatted_dev() -> MemDev {
