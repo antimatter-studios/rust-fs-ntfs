@@ -171,7 +171,15 @@ switch ($Phase) {
     }
     'chkdsk' {
         $letter = $state.letter
-        Invoke-4KnGradeCall 'chkdsk.exe' -CheckNativeExit { & chkdsk.exe "${letter}:" | Out-Host }
+        try {
+            Invoke-4KnGradeCall 'chkdsk.exe' -CheckNativeExit { & chkdsk.exe "${letter}:" | Out-Host }
+        } catch {
+            # A read-only run names only the record. What a repair would change
+            # names the entries; the scratch disk is thrown away afterwards, and
+            # the run still fails with the read-only verdict.
+            Invoke-4KnGradeCall 'chkdsk.exe-repair' { & chkdsk.exe "${letter}:" /f /x | Out-Host }
+            throw
+        }
     }
     'enumerate' {
         $letter = $state.letter

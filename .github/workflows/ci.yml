@@ -1687,6 +1687,18 @@ jobs:
           --log-dir tmp/4kn-write-process/cleanup
           --lifecycle test-disks/ntfs-4kn-write.lifecycle.log
           -- pwsh -NoProfile -File test-disks/grade-windows-4kn-write.ps1 -Phase cleanup
+      # The volume Windows refused, beside the one it formatted, so the bytes
+      # that differ can be read.
+      - name: Retain the 4Kn images Windows refused
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-4kn-write-images
+          path: |
+            test-disks/ntfs-4kn-read.img
+            test-disks/ntfs-4kn-write.img
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Retain the 4Kn write grading evidence
         if: always()
         uses: actions/upload-artifact@v4
