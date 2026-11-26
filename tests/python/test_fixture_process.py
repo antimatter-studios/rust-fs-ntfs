@@ -20,7 +20,7 @@ class FixtureProcess(unittest.TestCase):
         self.logs = self.work / "logs"
         self.lifecycle = self.work / "lifecycle.log"
 
-    def run_child(self, source, timeout=10, executable=None):
+    def run_child(self, source, timeout=10, executable=None, watch_phases=False):
         executable = executable or sys.executable
         suffix = ".ps1" if pathlib.Path(executable).stem == "pwsh" else ".py"
         script = self.work / ("child fixture" + suffix)
@@ -31,7 +31,7 @@ class FixtureProcess(unittest.TestCase):
         return subprocess.run(
             [sys.executable, str(RUNNER), "--timeout-seconds", str(timeout),
              "--log-dir", str(self.logs), "--lifecycle", str(self.lifecycle),
-             "--", *arguments],
+             *(["--watch-phases"] if watch_phases else []), "--", *arguments],
             capture_output=True, text=True, timeout=25,
         )
 
@@ -51,6 +51,82 @@ class FixtureProcess(unittest.TestCase):
         self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
         self.assertEqual(self.report()["exit_code"], 7)
         self.assertIn("native failed", (self.logs / "stderr.log").read_text())
+
+    def test_phase_deadline_ends_the_producer_before_its_overall_deadline(self):
+        source = (
+            "import json,os,pathlib,time\n"
+            "print('before the stall', flush=True)\n"
+            "phase = {'id': 'phase-7', 'name': 'win-read', 'seconds': 1}\n"
+            "state = pathlib.Path(os.environ['NTFS_FIXTURE_PHASE_STATE'])\n"
+            "state.write_text(json.dumps(phase))\n"
+            "time.sleep(0.5)\n"
+            "state.write_text('{')\n"
+            "time.sleep(30)\n"
+        )
+        result = self.run_child(source, timeout=20, watch_phases=True)
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertLess(self.report()["elapsed_seconds"], 15)
+        self.assertEqual(self.report()["timed_out_phase"], "win-read")
+        self.assertIn("win-read", result.stderr)
+        self.assertIn("before the stall", result.stdout, "the job log lost the producer's output")
+
+    def test_blocked_dotnet_phase_and_its_descendant_end_at_the_phase_deadline(self):
+        pwsh = shutil.which("pwsh")
+        self.assertIsNotNone(pwsh, "install PowerShell with chore setup:tools")
+
+        def quoted(value):
+            return "'" + str(value).replace("'", "''") + "'"
+
+        marker = self.work / "descendant-survived"
+        ready = self.work / "descendant-started"
+        leaf = self.work / "leaf.py"
+        leaf.write_text(
+            "import pathlib,sys,time\n"
+            "pathlib.Path(sys.argv[1]).write_text('ready')\n"
+            "time.sleep(12)\n"
+            "pathlib.Path(sys.argv[2]).write_text('alive')\n",
+            encoding="utf-8",
+        )
+        source = (
+            "$ErrorActionPreference = 'Stop'\n"
+            f". {quoted(ROOT / 'test-disks/windows-fixture.ps1')}\n"
+            "Write-FixturePhase test-fixture attach\n"
+            "Invoke-FixturePhase -PhaseName attach -PhaseTimeoutSeconds 3 -PhaseAction {\n"
+            "    $start = [Diagnostics.ProcessStartInfo]::new()\n"
+            f"    $start.FileName = {quoted(sys.executable)}\n"
+            "    $start.UseShellExecute = $false\n"
+            f"    foreach ($a in {quoted(leaf)}, {quoted(ready)}, {quoted(marker)}) {{ $start.ArgumentList.Add($a) }}\n"
+            "    $null = [Diagnostics.Process]::Start($start)\n"
+            "    [Threading.Thread]::Sleep(60000)\n"
+            "}\n"
+        )
+        result = self.run_child(source, timeout=22, executable=pwsh, watch_phases=True)
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertEqual(self.report()["timed_out_phase"], "attach")
+        self.assertLess(self.report()["elapsed_seconds"], 20)
+        self.assertIn("test-fixture attach", self.lifecycle.read_text())
+        self.assertTrue(ready.exists(), "the descendant never started, so nothing was proven")
+        time.sleep(13)
+        self.assertFalse(marker.exists(), "the blocked phase's descendant outlived the watchdog")
+
+    def test_finished_phases_leave_a_normal_run_and_its_artifact(self):
+        pwsh = shutil.which("pwsh")
+        self.assertIsNotNone(pwsh, "install PowerShell with chore setup:tools")
+        helper = str(ROOT / "test-disks/windows-fixture.ps1").replace("'", "''")
+        artifact = self.work / "artifact"
+        target = str(artifact).replace("'", "''")
+        source = (
+            "$ErrorActionPreference = 'Stop'\n"
+            f". '{helper}'\n"
+            "foreach ($n in 1..20) {\n"
+            "    Invoke-FixturePhase -PhaseName \"quick-$n\" -PhaseTimeoutSeconds 30 -PhaseAction { }\n"
+            "}\n"
+            f"[IO.File]::WriteAllText('{target}', 'built')\n"
+        )
+        result = self.run_child(source, timeout=20, executable=pwsh, watch_phases=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(artifact.read_text(), "built")
+        self.assertEqual((self.logs / "phase.json").read_text().strip(), "null")
 
     def test_uninterruptible_phase_is_killed_and_retains_its_last_phase(self):
         pwsh = shutil.which("pwsh")
