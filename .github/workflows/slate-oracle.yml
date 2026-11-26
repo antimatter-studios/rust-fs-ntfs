@@ -17,6 +17,14 @@ on:
   schedule:
     - cron: '17 4 * * *'
   workflow_dispatch:
+# A new head cancels this workflow's obsolete runs of the same pull request.
+# Every other run has a group of its own, so main pushes, merge groups,
+# scheduled and manual runs, and `red:` evidence are never cancelled or
+# replaced (#1360). tests/scripts/ci-concurrency.sh holds this block.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'red:') && !startsWith(github.head_ref, 'red/') && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && !startsWith(github.event.pull_request.title, 'red:') && !startsWith(github.head_ref, 'red/') }}
+
 permissions:
   contents: read
 jobs:

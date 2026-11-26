@@ -12,6 +12,13 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT" || exit 1
 
+# The wrapper writes tmp/logs/unit.log in its caller's checkout. These cases
+# are synthetic, so their caller is a throwaway directory: the checkout's own
+# unit.log, finished or still being written, is never touched (#1353).
+sandbox="$(mktemp -d)" || exit 1
+trap 'rm -rf "$sandbox"' EXIT
+export FS_CORE_CALLER="$sandbox"
+
 pass=0; fail=0
 
 check() {
