@@ -428,31 +428,75 @@ fn a_damaged_compression_unit_is_an_error_not_zeros() {
         .is_ok());
 }
 
-/// Patches the flags of the unnamed `$DATA` attribute in the base record of
-/// `path`. Walks the attribute headers the way the record itself does, so the
-/// test does not depend on where Windows placed the attribute.
-fn set_base_data_flag(fixture: &mut Fixture, path: &str, flag: u16) {
+const ATTRIBUTE_LIST: u32 = 0x20;
+
+/// Offset of the first attribute header of `kind` without a name in `record`,
+/// walking the headers the way the record itself does.
+fn find_unnamed_attribute(record: &[u8], kind: u32) -> Option<usize> {
+    let mut offset = u16::from_le_bytes([record[0x14], record[0x15]]) as usize;
+    loop {
+        let found = u32::from_le_bytes(record[offset..offset + 4].try_into().unwrap());
+        if found == 0xffff_ffff {
+            return None;
+        }
+        let length = u32::from_le_bytes(record[offset + 4..offset + 8].try_into().unwrap());
+        assert!(length > 0, "attribute header of length 0 at {offset:#x}");
+        if found == kind && record[offset + 9] == 0 {
+            return Some(offset);
+        }
+        offset += length as usize;
+    }
+}
+
+/// The extension record that holds the unnamed `$DATA` at VCN 0, as the
+/// base record's `$ATTRIBUTE_LIST` names it.
+fn first_extent_record_from_list(record: &[u8]) -> Option<u64> {
+    let list = find_unnamed_attribute(record, ATTRIBUTE_LIST)?;
+    assert_eq!(record[list + 8], 0, "$ATTRIBUTE_LIST must be resident");
+    let value_length = u32::from_le_bytes(record[list + 0x10..list + 0x14].try_into().unwrap());
+    let value = u16::from_le_bytes([record[list + 0x14], record[list + 0x15]]) as usize + list;
+    let end = value + value_length as usize;
+    let mut entry = value;
+    while entry + 0x18 <= end {
+        let kind = u32::from_le_bytes(record[entry..entry + 4].try_into().unwrap());
+        let length = u16::from_le_bytes([record[entry + 4], record[entry + 5]]) as usize;
+        assert!(length > 0, "attribute list entry of length 0 at {entry:#x}");
+        let lowest_vcn = u64::from_le_bytes(record[entry + 8..entry + 16].try_into().unwrap());
+        let reference = u64::from_le_bytes(record[entry + 0x10..entry + 0x18].try_into().unwrap());
+        if kind == AttrType::Data as u32 && record[entry + 6] == 0 && lowest_vcn == 0 {
+            return Some(reference & 0xffff_ffff_ffff);
+        }
+        entry += length;
+    }
+    None
+}
+
+/// Patches the flags of the unnamed `$DATA` attribute holding VCN 0 of
+/// `path`. The base record holds it when it can; otherwise the attribute list
+/// names the extension record that does. Salvage takes a stream's flags from
+/// that first extent.
+fn set_first_extent_data_flag(fixture: &mut Fixture, path: &str, flag: u16) {
     let number = fixture.record(path);
     let volume = fixture.volume();
     let map = fixture.map(&volume);
     let at = map.record_offset(number).unwrap() as usize;
     let record = fixture.image.read(at as u64, fixture.record_size);
-    let mut offset = u16::from_le_bytes([record[0x14], record[0x15]]) as usize;
-    loop {
-        let kind = u32::from_le_bytes(record[offset..offset + 4].try_into().unwrap());
-        if kind == 0xffff_ffff {
-            panic!("{path}: no unnamed $DATA in the base record");
+    let data = AttrType::Data as u32;
+    let (record_at, attribute) = match find_unnamed_attribute(&record, data) {
+        Some(offset) => (at, offset),
+        None => {
+            let extension = first_extent_record_from_list(&record).expect("no VCN 0 list entry");
+            let extension_at = map.record_offset(extension).unwrap() as usize;
+            let extension_record = fixture.image.read(extension_at as u64, fixture.record_size);
+            let offset = find_unnamed_attribute(&extension_record, data).expect("no unnamed $DATA");
+            (extension_at, offset)
         }
-        let length = u32::from_le_bytes(record[offset + 4..offset + 8].try_into().unwrap());
-        if kind == AttrType::Data as u32 && record[offset + 9] == 0 {
-            let flags = offset + 0x0c;
-            let current = u16::from_le_bytes([record[flags], record[flags + 1]]);
-            let patched = (current | flag).to_le_bytes();
-            fixture.image.write((at + flags) as u64, &patched);
-            return;
-        }
-        offset += length as usize;
-    }
+    };
+    let flags = record_at + attribute + 0x0c;
+    let current = u16::from_le_bytes(fixture.image.read(flags as u64, 2).try_into().unwrap());
+    fixture
+        .image
+        .write(flags as u64, &(current | flag).to_le_bytes());
 }
 
 #[test]
@@ -474,7 +518,7 @@ fn a_stale_sequence_extension_record_is_reported_and_never_read_short() {
 fn an_encrypted_stream_is_refused_by_name_through_salvage() {
     let mut fixture = fixture();
     const ATTR_FLAG_ENCRYPTED: u16 = 0x4000;
-    set_base_data_flag(&mut fixture, "/fragmented.bin", ATTR_FLAG_ENCRYPTED);
+    set_first_extent_data_flag(&mut fixture, "/fragmented.bin", ATTR_FLAG_ENCRYPTED);
     let volume = fixture.volume();
     let map = fixture.map(&volume);
     let resolved = fixture.resolve(&volume, &map, "/fragmented.bin");
