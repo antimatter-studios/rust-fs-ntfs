@@ -369,12 +369,51 @@ mod tests {
 
     #[test]
     fn padding_between_records_is_skipped_and_counted() {
-        // a.txt fills 72 bytes; the rest of the 128-byte gap is zero.
-        let j = journal(4000, &[(4000, "a.txt"), (4128, "b.txt")], 4200);
-        let (records, read) = decode_window(&j, 4000, 4200, j.len()).unwrap();
+        // a.txt fills 72 bytes; the 24 left of the page are too few for
+        // b.txt and are zero.
+        let j = journal(4000, &[(4000, "a.txt"), (4096, "b.txt")], 4168);
+        let (records, read) = decode_window(&j, 4000, 4168, j.len()).unwrap();
         let usns: Vec<i64> = records.iter().map(|r| r.usn).collect();
-        assert_eq!(usns, [4000, 4128]);
+        assert_eq!(usns, [4000, 4096]);
         assert_eq!(read, j.len());
+    }
+
+    /// The message of the refusal of `$J` from `from` to `end`.
+    fn refusal(from: i64, parts: &[(i64, &str)], end: i64) -> String {
+        let j = journal(from, parts, end);
+        match decode_window(&j, from, end, j.len()) {
+            Err(error) => error.to_string(),
+            Ok((records, read)) => panic!("{} records in {read} bytes", records.len()),
+        }
+    }
+
+    #[test]
+    fn zeros_that_are_not_page_end_padding_are_refused() {
+        // Ending mid-page.
+        let mid = refusal(0, &[(0, "a.txt"), (128, "b.txt")], 200);
+        // Long enough to have held the record after them.
+        let fits = refusal(3952, &[(3952, "a.txt"), (4096, "b.txt")], 4168);
+        // A whole page.
+        let page = refusal(4000, &[(4000, "a.txt"), (8192, "b.txt")], 8264);
+        // Reaching NextUsn, mid-page and at a page end.
+        let tail = refusal(0, &[(0, "a.txt")], 144);
+        let end = refusal(4000, &[(4000, "a.txt")], 4096);
+        for message in [mid, fits, page, tail, end] {
+            assert!(message.contains("zero"), "{message}");
+        }
+    }
+
+    #[test]
+    fn padding_whose_next_record_the_window_cuts_is_left_for_the_next_batch() {
+        let j = journal(4000, &[(4000, "a.txt"), (4096, "b.txt")], 4168);
+        for window in [80, 96, 99] {
+            let (records, read) = decode_window(&j[..window], 4000, 4168, window).unwrap();
+            assert_eq!((records.len(), read), (1, 72), "a {window}-byte window");
+        }
+        match decode_window(&j[72..96], 4072, 4168, 24) {
+            Err(JournalReadError::BoundTooSmall { usn: 4072, .. }) => {}
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
