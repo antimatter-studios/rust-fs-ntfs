@@ -10,11 +10,12 @@ export NTFS_SD_CAPTURE=security-descriptor-windows.tsv
 export NTFS_SD_EVIDENCE=security-descriptor-zero-flag
 
 bash ../rust-fs-core/scripts/tier.sh --refuse-skips --refuse-ignored unit -- cargo test --locked --test security_descriptor_windows_oracle
-grep -Eq '^test result: ok\. 4 passed; 0 failed; 0 ignored;' tmp/logs/unit.log
+grep -Eq '^test result: ok\. 5 passed; 0 failed; 0 ignored;' tmp/logs/unit.log
 for name in windows_authored_descriptors_match_security_apis_and_are_captured \
   windows_authored_object_aces_match_windows_guids_and_sids \
   windows_accepts_zero_flag_object_ace_through_add_ace \
-  windows_built_acl_presence_states_match_both_roles; do
+  windows_built_acl_presence_states_match_both_roles \
+  windows_authored_callback_and_audit_aces_match_windows_layout; do
   grep -Eq "^test $name \.\.\. ok$" tmp/logs/unit.log || { echo "not observed: $name"; exit 1; }
 done
 

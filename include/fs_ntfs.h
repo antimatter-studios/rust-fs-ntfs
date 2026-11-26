@@ -1122,6 +1122,98 @@ int fs_ntfs_read_security_descriptor(const char *image, const char *path,
                                      size_t *out_len);
 
 /*
+ * Decoded views over a self-relative security descriptor the caller holds,
+ * such as the bytes fs_ntfs_read_security_descriptor returns. Nothing is
+ * copied or allocated: every offset indexes the caller's buffer, so owner,
+ * group, ACL, ACE and callback bytes stay exactly as stored. No access
+ * decision is evaluated. Input over 1 MiB is refused.
+ */
+#define FS_NTFS_SD_ACL_ABSENT 0 /* present bit clear */
+#define FS_NTFS_SD_ACL_NULL 1   /* present bit set, offset zero */
+#define FS_NTFS_SD_ACL_EMPTY 2
+#define FS_NTFS_SD_ACL_NON_EMPTY 3
+
+#define FS_NTFS_SD_ERR_TRUNCATED 1
+#define FS_NTFS_SD_ERR_RESOURCE_LIMIT 2
+#define FS_NTFS_SD_ERR_DESCRIPTOR_REVISION 3
+#define FS_NTFS_SD_ERR_NOT_SELF_RELATIVE 4
+#define FS_NTFS_SD_ERR_RELATIVE_OFFSET 5
+#define FS_NTFS_SD_ERR_ACL_OFFSET_WITHOUT_PRESENT_BIT 6
+#define FS_NTFS_SD_ERR_SID_REVISION 7
+#define FS_NTFS_SD_ERR_SID_SUBAUTHORITY_COUNT 8
+#define FS_NTFS_SD_ERR_ACL_SIZE 9 /* an AclSize or AceSize */
+#define FS_NTFS_SD_ERR_LENGTH_OVERFLOW 10
+
+/* offset is from the descriptor start; kind is FS_NTFS_SD_ERR_*. */
+typedef struct {
+    uint32_t offset;
+    uint32_t kind;
+} fs_ntfs_sd_error_t;
+
+/* state is FS_NTFS_SD_ACL_*; the rest is zero unless an ACL is stored. */
+typedef struct {
+    uint32_t offset;
+    uint32_t size;
+    uint16_t ace_count;
+    uint8_t revision;
+    uint8_t state;
+} fs_ntfs_sd_acl_t;
+
+/* An absent owner or group has offset and length zero. */
+typedef struct {
+    uint8_t revision;
+    uint8_t resource_manager_control;
+    uint16_t control;
+    uint32_t owner_offset;
+    uint32_t owner_len;
+    uint32_t group_offset;
+    uint32_t group_len;
+    fs_ntfs_sd_acl_t sacl;
+    fs_ntfs_sd_acl_t dacl;
+} fs_ntfs_sd_info_t;
+
+/*
+ * offset, size, ace_type and flags are always filled. The remaining fields
+ * are zero when decoded is 0. Types 0, 1, 2, 5, 6, 7, 9, 10, 11 and 13 are
+ * decoded. A GUID is meaningful only when its object_flags bit (0x1 object
+ * type, 0x2 inherited object type) is set. data_offset/data_len cover the
+ * bytes after the SID, such as callback application data.
+ */
+typedef struct {
+    uint32_t offset;
+    uint32_t size;
+    uint8_t ace_type;
+    uint8_t flags;
+    uint8_t decoded;
+    uint8_t is_object;
+    uint32_t mask;
+    uint32_t object_flags;
+    uint32_t sid_offset;
+    uint32_t sid_len;
+    uint32_t data_offset;
+    uint32_t data_len;
+    uint8_t object_type[16];
+    uint8_t inherited_object_type[16];
+} fs_ntfs_sd_ace_t;
+
+/*
+ * Returns 0 with *out filled, or -1. A malformed descriptor also fills *err
+ * (when non-NULL); a NULL sd or out leaves *err untouched.
+ */
+int fs_ntfs_sd_parse(const void *sd, size_t len, fs_ntfs_sd_info_t *out,
+                     fs_ntfs_sd_error_t *err);
+
+/*
+ * ACE `index`, in stored order, of the DACL (sacl == 0) or the SACL.
+ * Returns:
+ *    1 — *out is filled
+ *    0 — index is past the last ACE (also for an absent, null or empty ACL)
+ *   -1 — error; a malformed descriptor or ACE also fills *err
+ */
+int fs_ntfs_sd_ace(const void *sd, size_t len, int sacl, uint32_t index,
+                   fs_ntfs_sd_ace_t *out, fs_ntfs_sd_error_t *err);
+
+/*
  * Full $STANDARD_INFORMATION value (MS-FSCC §2.4.2). The four
  * timestamps are NT 100-nanosecond intervals since 1601-01-01 UTC.
  * file_attributes is the FILE_ATTRIBUTE_* bitmask. The trailing

@@ -53,6 +53,7 @@ pub mod attr_resize;
 pub mod bad_clusters;
 pub mod bitmap;
 pub mod block_io;
+pub mod capi_sd;
 pub mod compression;
 pub mod data_runs;
 pub mod ea_io;
@@ -4936,7 +4937,7 @@ mod ffi_guard_tests {
     /// calling the existing ones cannot see.
     #[test]
     fn every_c_entry_point_goes_through_the_guard() {
-        let source = include_str!("lib.rs");
+        let source = concat!(include_str!("lib.rs"), include_str!("capi_sd.rs"));
         let mut lines = source.lines().peekable();
         let mut checked = 0;
         let mut bare = Vec::new();

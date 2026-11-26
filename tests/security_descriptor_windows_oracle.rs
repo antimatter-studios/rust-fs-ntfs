@@ -848,3 +848,98 @@ fn windows_built_acl_presence_states_match_both_roles() {
     }
     assert_eq!(executed, 32, "every DACL x SACL x control combination ran");
 }
+
+/// Windows authors each callback and audit ACE from SDDL; `GetAce` and
+/// `GetLengthSid` then say where its mask, SID and trailing bytes are (#1399).
+#[test]
+fn windows_authored_callback_and_audit_aces_match_windows_layout() {
+    const OBJECT: &str = "00299570-246d-11d0-a768-00aa006e0529";
+    const CONDITION: &str = "(@User.Title==\"PM\")";
+    let cases = [
+        (false, 9u8, format!("D:(XA;;FA;;;WD;{CONDITION})")),
+        (false, 10, format!("D:(XD;;FA;;;WD;{CONDITION})")),
+        (false, 11, format!("D:(ZA;;CR;{OBJECT};;WD;{CONDITION})")),
+        (true, 2, "S:(AU;SA;FA;;;WD)".to_string()),
+        (true, 7, format!("S:(OU;SA;CR;{OBJECT};;WD)")),
+        (true, 13, format!("S:(XU;SA;FA;;;WD;{CONDITION})")),
+    ];
+    let world = wide("WD");
+    let mut world_sid = ptr::null_mut();
+    assert_ne!(
+        unsafe { ConvertStringSidToSidW(world.as_ptr(), &mut world_sid) },
+        0
+    );
+    let world_sid = WindowsDescriptor(world_sid);
+    for (sacl, ace_type, sddl) in cases {
+        let text = wide(&sddl);
+        let mut address = ptr::null_mut();
+        let mut size = 0;
+        unsafe {
+            assert_ne!(
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    text.as_ptr(),
+                    1,
+                    &mut address,
+                    &mut size
+                ),
+                0,
+                "Windows SDDL capture {sddl}: {}",
+                std::io::Error::last_os_error()
+            );
+            let sd = WindowsDescriptor(address);
+            let bytes = std::slice::from_raw_parts(sd.0.cast::<u8>(), size as usize);
+            let decoded = SecurityDescriptor::parse(bytes).expect("decode Windows descriptor");
+            let (mut present, mut acl, mut defaulted) = (0i32, ptr::null_mut(), 0i32);
+            let get = if sacl {
+                GetSecurityDescriptorSacl(sd.0, &mut present, &mut acl, &mut defaulted)
+            } else {
+                GetSecurityDescriptorDacl(sd.0, &mut present, &mut acl, &mut defaulted)
+            };
+            assert_ne!(get, 0, "{sddl}");
+            assert_ne!(present, 0, "{sddl}");
+            let mut native = ptr::null_mut();
+            assert_ne!(GetAce(acl, 0, &mut native), 0, "{sddl}");
+            let native = native.cast::<u8>();
+            let native_size = usize::from(u16::from_le_bytes([*native.add(2), *native.add(3)]));
+            let native = std::slice::from_raw_parts(native, native_size);
+            let ours = if sacl { decoded.sacl() } else { decoded.dacl() }
+                .expect("ACL")
+                .aces()
+                .next()
+                .expect("one ACE");
+            assert_eq!(native[0], ace_type, "{sddl}");
+            assert_eq!(ours.as_bytes(), native, "{sddl}");
+            let fields = ours.fields().expect("bounded").expect("decoded type");
+            assert_eq!(
+                fields.mask,
+                u32::from_le_bytes(native[4..8].try_into().unwrap()),
+                "{sddl}"
+            );
+            let object = matches!(ace_type, 7 | 11);
+            assert_eq!(fields.object_flags, object.then_some(1), "{sddl}");
+            assert_eq!(
+                fields.object_type,
+                windows_guid(object.then_some(OBJECT)),
+                "{sddl}"
+            );
+            // Mask only: SID at 8. Mask, Flags and one GUID: SID at 28.
+            let sid_at = if object { 28 } else { 8 };
+            assert_eq!(fields.sid_offset, sid_at, "{sddl}");
+            assert_ne!(
+                EqualSid(world_sid.0, native[sid_at..].as_ptr().cast()),
+                0,
+                "{sddl}"
+            );
+            let sid_len = GetLengthSid(world_sid.0) as usize;
+            assert_eq!(fields.sid.as_bytes().len(), sid_len, "{sddl}");
+            assert_eq!(fields.trailing, &native[sid_at + sid_len..], "{sddl}");
+            // A conditional ACE's application data starts "artx"
+            // ([MS-DTYP] 2.4.4.17).
+            if ace_type >= 9 {
+                assert!(fields.trailing.starts_with(b"artx"), "{sddl}");
+            } else {
+                assert!(fields.trailing.is_empty(), "{sddl}");
+            }
+        }
+    }
+}

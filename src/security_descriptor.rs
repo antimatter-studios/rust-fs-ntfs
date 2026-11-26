@@ -3,9 +3,10 @@
 //! Layout sources: Microsoft [MS-DTYP] 2.4.6 and 2.4.2.2:
 //! <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/7d4dac05-9cef-4563-a058-f108abecce1d>.
 //! SID layout: <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/f992ad60-0fe4-4b87-9fed-beb478836861>.
-//! ACL headers and ACE framing are bounded by AclSize. Only the object
-//! allow/deny ACE layout has an optional view (`Ace::object`); every other ACE
-//! kind and callback data are deliberately NOT decoded. `dacl_state` and
+//! ACL headers and ACE framing are bounded by AclSize. The object allow/deny
+//! layout has a view (`Ace::object`); `Ace::fields` also covers the basic,
+//! audit and callback layouts Windows authors from SDDL, keeping callback data
+//! as raw bytes. Every other ACE kind stays opaque. `dacl_state` and
 //! `sacl_state` distinguish absent, null, empty and non-empty ACLs from the raw
 //! present bit and offset, as GetSecurityDescriptorDacl/Sacl report them; no
 //! access decision is evaluated. `as_bytes` preserves all bytes for later decoders.
@@ -169,6 +170,22 @@ impl<'a> Acl<'a> {
     }
 }
 
+/// The fields of an ACE whose layout this module decodes. `trailing` is every
+/// byte after the SID inside AceSize: a callback ACE's application data, kept
+/// raw and never evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AceFields<'a> {
+    pub mask: u32,
+    /// `None` for a layout without the object Flags field.
+    pub object_flags: Option<u32>,
+    pub object_type: Option<[u8; 16]>,
+    pub inherited_object_type: Option<[u8; 16]>,
+    pub sid: Sid<'a>,
+    /// Offset of the SID from the ACE start.
+    pub sid_offset: usize,
+    pub trailing: &'a [u8],
+}
+
 /// One ACE: type and flags are raw; the payload bytes are preserved unmodified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ace<'a> {
@@ -192,29 +209,62 @@ impl<'a> Ace<'a> {
         {
             return Ok(None);
         }
-        let fixed = bounded(self.bytes, 4, 8)?;
+        let fields = self.layout(true)?;
+        Ok(Some(ObjectAce {
+            ace: self,
+            mask: fields.mask,
+            object_flags: fields.object_flags.unwrap_or_default(),
+            object_type: fields.object_type,
+            inherited_object_type: fields.inherited_object_type,
+            sid: fields.sid,
+        }))
+    }
+
+    /// Mask, optional object GUIDs, SID and trailing bytes of these ACE types:
+    ///
+    /// - 0, 1, 2: allow, deny, audit ([MS-DTYP] 2.4.4.2, 2.4.4.4, 2.4.4.10).
+    /// - 5, 6, 7: their object forms.
+    /// - 9, 10: allow and deny callback ([MS-DTYP] 2.4.4.6, 2.4.4.7):
+    ///   <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/c9579cf4-0f4a-44f1-9444-422dfb10557a>,
+    ///   <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/35adad6b-fda5-4cc1-b1b5-9beda5b07d2e>.
+    /// - 11: allow callback object ([MS-DTYP] 2.4.4.8):
+    ///   <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/fe1838ea-ea34-4a5e-b40e-eb870f8322ae>.
+    /// - 13: audit callback ([MS-DTYP] 2.4.4.12):
+    ///   <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/bd6b6fd8-4bef-427e-9a43-b9b46457e934>.
+    ///
+    /// `Ok(None)` for every other type. Error offsets are relative to the ACE
+    /// start. No condition or access policy is evaluated.
+    pub fn fields(self) -> Result<Option<AceFields<'a>>, DecodeError> {
+        match self.ace_type {
+            0..=2 | 9 | 10 | 13 => self.layout(false).map(Some),
+            5..=7 | 11 => self.layout(true).map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    fn layout(self, object: bool) -> Result<AceFields<'a>, DecodeError> {
+        let fixed = bounded(self.bytes, 4, if object { 8 } else { 4 })?;
         let mask = u32::from_le_bytes([fixed[0], fixed[1], fixed[2], fixed[3]]);
-        let object_flags = u32::from_le_bytes([fixed[4], fixed[5], fixed[6], fixed[7]]);
-        let mut at = 12;
-        let object_type = optional_guid(
-            self.bytes,
-            &mut at,
-            object_flags & ACE_OBJECT_TYPE_PRESENT != 0,
-        )?;
+        let object_flags =
+            object.then(|| u32::from_le_bytes([fixed[4], fixed[5], fixed[6], fixed[7]]));
+        let mut at = 4 + fixed.len();
+        let flags = object_flags.unwrap_or_default();
+        let object_type = optional_guid(self.bytes, &mut at, flags & ACE_OBJECT_TYPE_PRESENT != 0)?;
         let inherited_object_type = optional_guid(
             self.bytes,
             &mut at,
-            object_flags & ACE_INHERITED_OBJECT_TYPE_PRESENT != 0,
+            flags & ACE_INHERITED_OBJECT_TYPE_PRESENT != 0,
         )?;
         let sid = Sid::at(self.bytes, at)?;
-        Ok(Some(ObjectAce {
-            ace: self,
+        Ok(AceFields {
             mask,
             object_flags,
             object_type,
             inherited_object_type,
             sid,
-        }))
+            sid_offset: at,
+            trailing: &self.bytes[at + sid.as_bytes().len()..],
+        })
     }
 }
 
@@ -675,6 +725,36 @@ mod tests {
         }
         // Even an ACE too short for any object fields is opaque, not an error.
         assert_eq!(ace(&[0, 0, 4, 0]).object(), Ok(None));
+    }
+
+    #[test]
+    fn fields_decodes_basic_and_callback_layouts_and_keeps_trailing_bytes() {
+        for ace_type in [0u8, 1, 2, 9, 10, 13] {
+            let mut b = vec![ace_type, 0, 0, 0];
+            b.extend_from_slice(&0x0012_019fu32.to_le_bytes());
+            b.extend_from_slice(&SID);
+            b.extend_from_slice(b"artx\x01\x02\x03\x04");
+            let size = b.len() as u16;
+            b[2..4].copy_from_slice(&size.to_le_bytes());
+            let f = ace(&b).fields().unwrap().unwrap();
+            assert_eq!(f.mask, 0x0012_019f);
+            assert_eq!(f.object_flags, None);
+            assert_eq!((f.sid_offset, f.sid.as_bytes()), (8, &SID[..]));
+            assert_eq!(f.trailing, b"artx\x01\x02\x03\x04");
+            assert_eq!(ace(&b[..19]).fields(), Err(error(8, ErrorKind::Truncated)));
+        }
+        for ace_type in [5u8, 6, 7, 11] {
+            let b = object_ace_bytes(ace_type, 3);
+            let f = ace(&b).fields().unwrap().unwrap();
+            assert_eq!(f.object_flags, Some(3));
+            assert_eq!(f.object_type, Some(GUID_A));
+            assert_eq!(f.inherited_object_type, Some(GUID_B));
+            assert_eq!((f.sid_offset, f.sid.as_bytes()), (44, &SID[..]));
+            assert_eq!(f.trailing, [0xca, 0xfe]);
+        }
+        for ace_type in [3u8, 4, 8, 12, 14, 15, 0x11, 0xff] {
+            assert_eq!(ace(&object_ace_bytes(ace_type, 3)).fields(), Ok(None));
+        }
     }
 
     #[test]
