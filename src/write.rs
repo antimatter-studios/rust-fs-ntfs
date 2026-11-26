@@ -9152,6 +9152,24 @@ fn rename_replace_unstamped_io<T: BlockIo + ?Sized>(
             crate::record_build::fn_namespace_after_rename(old, new_basename),
         )?;
     }
+    // The file's sizes and attributes go with its entry to the new name.
+    let (node, entry) = index_entry_io(
+        io,
+        parent_rec,
+        Some(file_rec),
+        ir_flags,
+        &old_basename,
+        &upcase,
+    )?
+    .ok_or_else(|| {
+        Error::not_found(format!(
+            "no index entry for '{old_basename}' in parent record {parent_rec}"
+        ))
+    })?;
+    index_io::keep_duplicated_sizes(
+        &mut new_entry_bytes,
+        &node[entry.record_offset..entry.record_offset + entry.length],
+    )?;
 
     if indexed {
         let (node, entry) = index_entry_io(
@@ -10738,6 +10756,46 @@ mod tests {
             assert_every_leaf_holds_a_name(&mut dev, d, &format!("after rename {round}"));
             assert!(crate::read::resolve_path(&mut dev, &format!("/d/{renamed}")).is_ok());
             assert!(crate::read::resolve_path(&mut dev, &format!("/d/{separator}")).is_err());
+        }
+    }
+
+    /// A rename to another length keeps the sizes the directory entry holds,
+    /// which Windows lists the file's length from, in a resident index and in
+    /// one with blocks (#1396).
+    #[test]
+    fn a_rename_to_another_length_keeps_the_entry_sizes() {
+        for others in [0, 300] {
+            let mut dev = fresh_vol();
+            mkdir_io(&mut dev, "/", "d").unwrap();
+            for i in 0..others {
+                create_file_io(&mut dev, "/d", &format!("f{i:03}")).unwrap();
+            }
+            create_file_io(&mut dev, "/d", "a.bin").unwrap();
+            write_at_io(&mut dev, "/d/a.bin", 0, &[7; 5000]).unwrap();
+            let d = crate::read::resolve_path(&mut dev, "/d").unwrap();
+            let upcase = crate::upcase::UpcaseTable::load_io(&mut dev).unwrap();
+            let sizes = |name: &str, dev: &mut MemDev| {
+                let (_, record) = crate::mft_io::read_mft_record_io(dev, d).unwrap();
+                let flags = crate::index_io::index_root_flags(&record).unwrap();
+                let (node, entry) = index_entry_io(dev, d, None, flags, name, &upcase)
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("no entry for {name}"));
+                // Allocated size, data size and flags, in the entry's key.
+                let at = entry.record_offset + 0x10 + 0x28;
+                node[at..at + 0x18].to_vec()
+            };
+            let before = sizes("a.bin", &mut dev);
+            assert_eq!(
+                u64::from_le_bytes(before[8..16].try_into().unwrap()),
+                5000,
+                "{others} other files"
+            );
+            rename_io(&mut dev, "/d/a.bin", "a-longer-name.bin").unwrap();
+            assert_eq!(
+                sizes("a-longer-name.bin", &mut dev),
+                before,
+                "{others} other files"
+            );
         }
     }
 

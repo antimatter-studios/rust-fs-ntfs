@@ -13,3 +13,5 @@
   error in the directory.
 - Renaming a file whose name a large directory's index holds above a leaf no
   longer writes a damaged index block.
+- Renaming a file to a name of another length no longer makes Windows list it
+  as empty.

@@ -1041,6 +1041,21 @@ pub(crate) fn set_entry_namespace(entry: &mut [u8], namespace: u8) -> Result<(),
 const FN_ALLOCATED_SIZE_OFFSET: usize = 0x28;
 const FN_DATA_SIZE_OFFSET: usize = 0x30;
 
+/// Carry into `new`, a freshly built entry, what `old`'s key duplicates of
+/// the file itself: its allocated and data sizes, its attribute flags and the
+/// extended attribute or reparse word after them. A builder knows none of
+/// them, and Windows lists a file's length from its directory entry (#1396).
+pub(crate) fn keep_duplicated_sizes(new: &mut [u8], old: &[u8]) -> Result<(), Error> {
+    let span = IE_KEY_START + FN_ALLOCATED_SIZE_OFFSET..IE_KEY_START + FN_NAME_LENGTH_OFFSET;
+    let kept = old
+        .get(span.clone())
+        .ok_or_else(|| Error::io("index entry too short to hold a $FILE_NAME's sizes"))?;
+    new.get_mut(span)
+        .ok_or_else(|| Error::io("index entry too short to hold a $FILE_NAME's sizes"))?
+        .copy_from_slice(kept);
+    Ok(())
+}
+
 /// Set only READONLY in an index key, returning its previous bit for undo.
 /// The native six-stage FILE_NAME capture establishes this eager bit (#629).
 pub(crate) fn set_index_entry_readonly(
