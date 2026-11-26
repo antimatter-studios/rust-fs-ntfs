@@ -1451,8 +1451,9 @@ jobs:
     needs: [changes, windows-native-read-fixtures, windows-4kn-fixture-gate]
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ needs.windows-4kn-fixture-gate.outputs.runner }}
-    # A cold build of one test binary and fourteen phases of a few seconds
-    # each, every phase bounded at two minutes.
+    # A cold build of three test binaries and the fixture's and the write
+    # grading's phases of a few seconds each, every phase bounded at two
+    # minutes.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -1480,7 +1481,7 @@ jobs:
       # Built before the disk exists, so no phase waits on the compiler.
       - name: Build the 4096-byte sector fixture's test
         shell: pwsh
-        run: cargo test --locked --test fixture_4kn_windows --test small_records_4kn_windows --no-run
+        run: cargo test --locked --test fixture_4kn_windows --test small_records_4kn_windows --test write_4kn_windows --no-run
       - name: "4Kn create: make the scratch VHDX"
         timeout-minutes: 2
         shell: pwsh
@@ -1611,10 +1612,92 @@ jobs:
         shell: pwsh
         run: cargo test --locked --test fixture_4kn_windows
       # Windows gave that disk 1024-byte file records with one update
-      # sequence word per 512 bytes: read whole, a writable mount refused (#1384).
+      # sequence word per 512 bytes: read whole, and writable (#1384, #1396).
       - name: The 4096-byte sector fixture's 1024-byte records read back
         shell: pwsh
         run: cargo test --locked --test small_records_4kn_windows
+      # WRITE4K-02 (#1396): this crate creates, writes, renames and removes
+      # files and directories in a copy of that volume; Windows then judges
+      # the copy with chkdsk and its own listing and hashes.
+      - name: This crate changes a copy of the 4096-byte sector volume
+        shell: pwsh
+        run: cargo test --locked --test write_4kn_windows
+      - name: "4Kn write create: make the scratch VHDX"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-write-process/create
+          --lifecycle test-disks/ntfs-4kn-write.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/grade-windows-4kn-write.ps1 -Phase create
+      - name: "4Kn write attach: Mount-DiskImage and Initialize-Disk"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-write-process/attach
+          --lifecycle test-disks/ntfs-4kn-write.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/grade-windows-4kn-write.ps1 -Phase attach
+      - name: "4Kn write partition: New-Partition"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-write-process/partition
+          --lifecycle test-disks/ntfs-4kn-write.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/grade-windows-4kn-write.ps1 -Phase partition
+      - name: "4Kn write import: write the image into the partition"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-write-process/import
+          --lifecycle test-disks/ntfs-4kn-write.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/grade-windows-4kn-write.ps1 -Phase import
+      - name: "4Kn write remount: Mount-DiskImage the written volume"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-write-process/remount
+          --lifecycle test-disks/ntfs-4kn-write.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/grade-windows-4kn-write.ps1 -Phase remount
+      - name: "4Kn write chkdsk: chkdsk grades the written volume"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-write-process/chkdsk
+          --lifecycle test-disks/ntfs-4kn-write.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/grade-windows-4kn-write.ps1 -Phase chkdsk
+      - name: "4Kn write enumerate: Windows lists and hashes the written volume"
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-write-process/enumerate
+          --lifecycle test-disks/ntfs-4kn-write.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/grade-windows-4kn-write.ps1 -Phase enumerate
+      - name: "4Kn write cleanup: detach and remove the scratch disk"
+        if: always()
+        timeout-minutes: 2
+        shell: pwsh
+        run: >-
+          python scripts/run-fixture-process.py --timeout-seconds 90
+          --log-dir tmp/4kn-write-process/cleanup
+          --lifecycle test-disks/ntfs-4kn-write.lifecycle.log
+          -- pwsh -NoProfile -File test-disks/grade-windows-4kn-write.ps1 -Phase cleanup
+      - name: Retain the 4Kn write grading evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-4kn-write-grading
+          path: |
+            test-disks/ntfs-4kn-write.lifecycle.log
+            test-disks/ntfs-4kn-write.expected.tsv
+            tmp/4kn-write-process/
+            tmp/4kn-write/
+          if-no-files-found: warn
       - name: Upload the 4096-byte sector fixture
         uses: actions/upload-artifact@v4
         with:
