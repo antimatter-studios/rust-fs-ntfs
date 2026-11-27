@@ -27,6 +27,9 @@ use std::path::Path;
 
 const VOL_SIZE: u64 = 64 * 1024 * 1024;
 const CLUSTER: u32 = 4096;
+/// Small enough that the fill tests run out of clusters before
+/// [`FILL_LIMIT`] names.
+const FILL_VOL_SIZE: u64 = 8 * 1024 * 1024;
 
 /// The MFT record size Windows formats with. A 1024-byte record leaves a
 /// directory's resident `$INDEX_ROOT` room for only a handful of routing
@@ -38,14 +41,18 @@ fn fresh_vol(tag: &str) -> String {
 }
 
 fn fresh_vol_with_records(tag: &str, mft_record_size: u32) -> String {
+    fresh_sized_vol(tag, VOL_SIZE, mft_record_size)
+}
+
+fn fresh_sized_vol(tag: &str, size: u64, mft_record_size: u32) -> String {
     let dst = common::temp_image_path(format!("ld_{tag}"));
     let f = std::fs::File::create(&dst).expect("create");
-    f.set_len(VOL_SIZE).expect("set_len");
+    f.set_len(size).expect("set_len");
     drop(f);
     let mut io = PathIo::open_rw(Path::new(&dst)).expect("open_rw");
     format_filesystem(
         &mut io,
-        VOL_SIZE,
+        size,
         CLUSTER,
         mft_record_size,
         Some("LDTEST"),
@@ -92,11 +99,19 @@ fn list_subdir(img: &str, dir: &str) -> Vec<String> {
     names
 }
 
-/// More names than any directory here can take. The index B-tree now gains
-/// levels as it fills (#432), so the ceiling the fill tests meet is the
-/// directory's resident `$Bitmap:$I30`: 64 bits, one per 4 KiB index block,
-/// which is at most about 2400 of these names.
+/// More names than a [`FILL_VOL_SIZE`] volume can take: each name needs a
+/// 4096-byte MFT record, so the volume has fewer clusters than this.
 const FILL_LIMIT: usize = 3000;
+
+fn fill_vol(tag: &str) -> String {
+    fresh_sized_vol(tag, FILL_VOL_SIZE, CLUSTER)
+}
+
+/// The refusals a full volume gives a create: no room for `$MFT` to grow,
+/// or no room for a new index block.
+fn is_full_volume_refusal(err: &str) -> bool {
+    err.contains("no contiguous free run") || err.contains("index capacity: no ")
+}
 
 /// Create files named `prefix{NNNN}` in `dir` until `create_file` errors,
 /// returning (count_created, the_error_string).
@@ -115,21 +130,18 @@ fn fill_until_full(img: &str, dir: &str, prefix: &str) -> (usize, String) {
 
 #[test]
 fn subdir_fills_gracefully_at_capacity() {
-    let img = fresh_vol("ceiling");
+    let img = fill_vol("ceiling");
     write::mkdir(Path::new(&img), "/", "d").expect("mkdir");
     let (created, err) = fill_until_full(&img, "d", "f_");
 
-    // Index growth now proceeds past the old one-leaf ceiling. A later
-    // capacity limit (often the fixed-size MFT) must be a clean refusal.
+    // Index growth proceeds past the old one-leaf ceiling. Running out of
+    // clusters must be a clean refusal.
     assert!(
         (80..FILL_LIMIT).contains(&created),
         "expected growth past two leaves before a capacity limit, got {created}"
     );
     assert!(
-        err.contains("exceeds record capacity")
-            || err.contains("no room")
-            || err.contains("capacity")
-            || err.contains("MFT has no free records"),
+        is_full_volume_refusal(&err),
         "ceiling failure must be a graceful capacity error, got: {err:?}"
     );
 }
@@ -186,7 +198,7 @@ fn entries_collate_in_upcase_order() {
 
 #[test]
 fn directory_stays_consistent_after_ceiling_rejection() {
-    let img = fresh_vol("afterfull");
+    let img = fill_vol("afterfull");
     write::mkdir(Path::new(&img), "/", "d").expect("mkdir");
     let (created, _err) = fill_until_full(&img, "d", "f_");
     assert!(created > 0);
@@ -309,7 +321,7 @@ fn found_in_root(img: &str, name: &str) -> bool {
 /// and every created entry still independently findable (no silent loss).
 #[test]
 fn root_dir_fills_gracefully_at_capacity() {
-    let img = fresh_vol("root_ceiling");
+    let img = fill_vol("root_ceiling");
     let mut created = 0usize;
     let mut err = String::new();
     for i in 0..FILL_LIMIT {
@@ -323,13 +335,9 @@ fn root_dir_fills_gracefully_at_capacity() {
         }
     }
     assert!(created >= 1, "must create at least one root entry");
-    // A fixed-size MFT can run out before the index does. Both capacity
-    // refusals must preserve the names already committed.
+    // The refusal must preserve the names already committed.
     assert!(
-        err.contains("exceeds record capacity")
-            || err.contains("no room")
-            || err.contains("capacity")
-            || err.contains("MFT has no free records"),
+        is_full_volume_refusal(&err),
         "root ceiling failure must be a graceful capacity error, got: {err:?}"
     );
     // Spot-check first / middle / last created entries remain findable in the

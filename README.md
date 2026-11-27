@@ -92,7 +92,8 @@ fragmented, sparse and LZNT1-compressed data, attribute lists, alternate data
 streams, reparse points, extended attributes and Unicode names; WOF-compressed
 and encrypted files are refused. Writing covers data, create, unlink, mkdir,
 rmdir, rename, hard links, streams, reparse points, extended attributes,
-timestamps and flags, in directories of up to 64 index blocks. `$LogFile` is
+timestamps and flags, in directories whose index bitmap fits the directory's
+MFT record. `$LogFile` is
 replayed as Windows' own restart replays it, on `fsck` and on a read-write
 mount that asks for it; any other read-write mount refuses a log holding
 work, which Windows also leaves after a Fast Startup shutdown, and a log
