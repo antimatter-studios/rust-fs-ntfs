@@ -10,6 +10,7 @@ python3 - <<'PY'
 import re
 import shlex
 import tomllib
+import json
 from pathlib import Path
 
 config = tomllib.loads(Path('fs-windows-test-harness.toml').read_text())
@@ -46,5 +47,18 @@ assert re.search(r"'compact'.*'/c'|compact(\.exe)? /c", text), f'{script} never 
 assert re.search(r"'compact'.*'/q'|compact(\.exe)? /q", text), f'{script} keeps no compact /q evidence'
 assert "'file', 'layout'" in text, f'{script} keeps no fsutil file layout evidence'
 assert 'Compressed' in text, f'{script} never checks the compressed attribute'
+
+name = 'win-format-win-quota-compressed-win-chkdsk'
+scenario = json.loads(Path('test-matrix.json').read_text())['scenarios'][name]
+recipe = scenario['recipe']
+ops = [step['op'] for step in recipe]
+assert ops.index('win-quota-track') < ops.index('win-write-compressed') < ops.index('win-chkdsk')
+writes = [step for step in recipe if step['op'] == 'win-write-compressed']
+assert [step['mode'] for step in writes] == ['write', 'verify']
+assert writes[0]['files'] == writes[1]['files'] and writes[0]['files'], 'verification must read the files Windows wrote'
+assert ops.index('win-chkdsk') < ops.index('win-quota-verify')
+ci = Path('.github/workflows/ci.yml').read_text()
+assert f'bash scripts/run-matrix.sh {name}' in ci, 'Windows CI does not run the compressed quota scenario'
+assert "throw \"$Tool $($ToolArgs -join ' ') exited" in text[text.index('function Show-Tool'):], 'native evidence failures must fail the scenario'
 PY
 echo 'win-write-compressed: ok (the op and its script agree, and the script compresses with compact /c)'

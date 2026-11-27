@@ -2527,6 +2527,15 @@ jobs:
             --vm-host=runneradmin@localhost \
             --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
             --vm-workdir=C:/rust-fs-ntfs-matrix
+      # Windows writes compressed files on a quota-tracked volume and retains
+      # native layout, readback, quota and chkdsk evidence (#1401).
+      - name: Validate Windows compressed files with quota tracking
+        shell: bash
+        run: |
+          bash scripts/run-matrix.sh win-format-win-quota-compressed-win-chkdsk \
+            --vm-host=runneradmin@localhost \
+            --ssh-key="$(cygpath -m ~/.ssh/rust-ntfs-matrix)" \
+            --vm-workdir=C:/rust-fs-ntfs-matrix
       # Windows hard-linking one file past what its base record holds: which
       # attributes it moves out to extension records lands in the
       # diagnostics, measured before fs.ntfs ln matches it (#1069).

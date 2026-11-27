@@ -102,9 +102,12 @@ function Assert-Tool([string]$Tool, [string[]]$ToolArgs) {
     }
 }
 
-# A native tool as evidence: what it said, or that it could not say.
+# A native tool as evidence: a failed query cannot establish the layout.
 function Show-Tool([string]$Tool, [string[]]$ToolArgs) {
     $r = Invoke-Tool $Tool $ToolArgs
+    if ($r.Exit -ne 0) {
+        throw "$Tool $($ToolArgs -join ' ') exited $($r.Exit): $($r.Text)"
+    }
     "--- $Tool $($ToolArgs -join ' ') (exit $($r.Exit))"
     $r.Text
 }
