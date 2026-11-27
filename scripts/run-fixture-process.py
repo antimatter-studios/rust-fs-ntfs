@@ -11,12 +11,16 @@ import time
 
 
 CREATE_SUSPENDED = 0x00000004
+# The in-process phase timer fires at the phase deadline. It gets this long to
+# stop an interruptible phase, so the producer can release its own VHD, before
+# the whole tree is killed for a call the timer cannot stop.
+PHASE_GRACE_SECONDS = 5
 
 
 def deadline(value):
     seconds = int(value)
-    if not 1 <= seconds <= 240:
-        raise argparse.ArgumentTypeError("timeout must be between 1 and 240 seconds")
+    if not 1 <= seconds <= 1800:
+        raise argparse.ArgumentTypeError("timeout must be between 1 and 1800 seconds")
     return seconds
 
 
@@ -201,11 +205,47 @@ def last_phase(path):
         return f"lifecycle log unavailable: {error}"
 
 
+def read_phase(path, active):
+    try:
+        phase = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return active
+    if phase is None:
+        return None
+    if (isinstance(phase, dict) and isinstance(phase.get("id"), str)
+            and isinstance(phase.get("name"), str) and type(phase.get("seconds")) is int
+            and 1 <= phase["seconds"] <= 1800):
+        return phase
+    return active
+
+
+def wait_for_producer(process, timeout, phase_state, result):
+    if phase_state is None:
+        return process.wait(timeout=timeout)
+    overall = time.monotonic() + timeout
+    active, phase_end = None, overall
+    while process.poll() is None:
+        latest = read_phase(phase_state, active)
+        now = time.monotonic()
+        if latest != active:
+            active = latest
+            phase_end = now + active["seconds"] + PHASE_GRACE_SECONDS if active else overall
+        if now >= phase_end and active:
+            result["timed_out_phase"] = active["name"]
+            result["timeout_seconds"] = active["seconds"]
+            raise subprocess.TimeoutExpired(process.args, active["seconds"])
+        if now >= overall:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        time.sleep(min(0.1, overall - now, phase_end - now))
+    return process.returncode
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout-seconds", type=deadline, required=True)
     parser.add_argument("--log-dir", type=pathlib.Path, required=True)
     parser.add_argument("--lifecycle", type=pathlib.Path, required=True)
+    parser.add_argument("--watch-phases", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     arguments = parser.parse_args()
     command = arguments.command
@@ -213,8 +253,17 @@ def main():
         command = command[1:]
     if not command:
         parser.error("a fixture command is required after --")
+    if not arguments.watch_phases and arguments.timeout_seconds > 240:
+        parser.error("timeout without phase tracking must be between 1 and 240 seconds")
 
     arguments.log_dir.mkdir(parents=True, exist_ok=True)
+    phase_state = None
+    environment = os.environ.copy()
+    if arguments.watch_phases:
+        phase_state = (arguments.log_dir / "phase.json").resolve()
+        phase_state.write_text("null\n", encoding="utf-8")
+        environment["NTFS_FIXTURE_PHASE_STATE"] = str(phase_state)
+        environment["NTFS_FIXTURE_LIFECYCLE"] = str(arguments.lifecycle.resolve())
     result = {"exit_code": None, "timed_out": False, "pid": None, "error": ""}
     started = time.monotonic()
     verdict = 127
@@ -228,7 +277,7 @@ def main():
             try:
                 if os.name == "nt":
                     job = WindowsJob()
-                process = subprocess.Popen(command, stdout=stdout, stderr=stderr, **options)
+                process = subprocess.Popen(command, stdout=stdout, stderr=stderr, env=environment, **options)
             except OSError as error:
                 result["error"] = f"cannot launch {command[0]}: {error}"
             else:
@@ -242,7 +291,7 @@ def main():
                     result["error"] = f"cannot place {command[0]} in a job object: {error}"
                 else:
                     try:
-                        result["exit_code"] = process.wait(timeout=arguments.timeout_seconds)
+                        result["exit_code"] = wait_for_producer(process, arguments.timeout_seconds, phase_state, result)
                         verdict = result["exit_code"]
                         if verdict < 0:
                             verdict = 128 - verdict
@@ -257,12 +306,21 @@ def main():
                 if job is not None:
                     job.close()
     result["elapsed_seconds"] = round(time.monotonic() - started, 3)
+    if arguments.watch_phases:
+        # A long producer's output belongs in the job log too: it is what
+        # remains readable when no artifact is opened.
+        for name, stream in (("stdout.log", sys.stdout), ("stderr.log", sys.stderr)):
+            stream.flush()
+            stream.buffer.write((arguments.log_dir / name).read_bytes())
+            stream.buffer.flush()
     result["last_phase"] = last_phase(arguments.lifecycle)
     (arguments.log_dir / "result.json").write_text(
         json.dumps(result, indent=2) + "\n", encoding="utf-8",
     )
     if result["timed_out"]:
-        print(f"fixture-process: timed out after {arguments.timeout_seconds}s; {result['last_phase']}", file=sys.stderr)
+        phase = result.get("timed_out_phase", "producer")
+        seconds = result.get("timeout_seconds", arguments.timeout_seconds)
+        print(f"fixture-process: timed out after {seconds}s ({phase}); {result['last_phase']}", file=sys.stderr)
     elif not result["error"]:
         print(f"fixture-process: exited {verdict} after {result['elapsed_seconds']}s")
     if result["error"]:

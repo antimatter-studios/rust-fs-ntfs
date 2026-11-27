@@ -148,15 +148,31 @@ jobs:
         env:
           CARGO_BUILD_JOBS: 2
         run: cargo build --locked --profile test-opt --features cli --bin rust-fs-ntfs
+      - name: Prove the Slate fixture watchdog interrupts a blocked phase
+        shell: pwsh
+        run: python tests/python/test_fixture_process.py FixtureProcess.test_blocked_dotnet_phase_and_its_descendant_end_at_the_phase_deadline
       - name: Format the cases and grade each with Windows chkdsk
         shell: pwsh
         run: >-
-          ./test-disks/build-slate-oracle-cases.ps1
+          python scripts/run-fixture-process.py --watch-phases --timeout-seconds 900
+          --log-dir tmp/slate-fixture-process
+          --lifecycle tmp/slate-fixture-process/lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-slate-oracle-cases.ps1
           -Cli target/test-opt/rust-fs-ntfs.exe
           -OutDir tmp/slate-oracle
           -WriterCases tmp/writer-input/slate-writer/captures.tsv
           -WriterImages tmp/writer-input/slate-writer/images
           -LabSource tmp/writer-input/slate-writer/lab-source/slate-write-lab-source.img
+      # An artifact of its own: beside tmp/slate-oracle/ it would move the
+      # cases artifact's root up to tmp/.
+      - name: Retain Slate case watchdog diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slate-case-fixture-watchdog-${{ github.sha }}
+          path: tmp/slate-fixture-process/
+          if-no-files-found: warn
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -308,13 +324,27 @@ jobs:
           if (-not $vhd) { throw 'IMG_VHD_REF is missing from chores.yml' }
           git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
           cargo install --locked --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
+      - name: Prove the Slate grading watchdog interrupts a blocked phase
+        shell: pwsh
+        run: python tests/python/test_fixture_process.py FixtureProcess.test_blocked_dotnet_phase_and_its_descendant_end_at_the_phase_deadline
       - name: Grade each Slate-written copy with read-only Windows chkdsk
         shell: pwsh
         run: >-
-          ./test-disks/build-slate-oracle-cases.ps1
+          python scripts/run-fixture-process.py --watch-phases --timeout-seconds 900
+          --log-dir tmp/slate-write-fixture-process
+          --lifecycle tmp/slate-write-fixture-process/lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-slate-oracle-cases.ps1
           -OutDir tmp/slate-write-grades
           -SlateWrites tmp/slate-writes-input/writes/slate-writes.tsv
           -SlateWriteImages tmp/slate-writes-input/writes/images
+      - name: Retain Slate write-grading watchdog diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slate-write-fixture-watchdog-${{ github.sha }}
+          path: tmp/slate-write-fixture-process/
+          if-no-files-found: warn
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         if: always()
         with:

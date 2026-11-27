@@ -72,9 +72,23 @@ jobs:
           $vhd = (Select-String -Path chores.yml -Pattern '^\s*IMG_VHD_REF:\s*(\S+)').Matches[0].Groups[1].Value
           git clone --depth 1 --branch $vhd https://github.com/antimatter-studios/rust-img-vhd.git $env:RUNNER_TEMP/rust-img-vhd
           cargo install --locked --path $env:RUNNER_TEMP/rust-img-vhd --features cli --bin rust-img-vhd
+      - name: Prove the native fixture watchdog interrupts a blocked phase
+        shell: pwsh
+        run: python tests/python/test_fixture_process.py FixtureProcess.test_blocked_dotnet_phase_and_its_descendant_end_at_the_phase_deadline
       - name: Build Windows-authored fixtures
         shell: pwsh
-        run: pwsh -File test-disks/build-windows-native-read-fixtures.ps1
+        run: >-
+          python scripts/run-fixture-process.py --watch-phases --timeout-seconds 600
+          --log-dir tmp/native-fixture-process
+          --lifecycle tmp/native-fixture-process/lifecycle.log
+          -- pwsh -NoProfile -File test-disks/build-windows-native-read-fixtures.ps1
+      - name: Retain native fixture watchdog diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntfs-native-fixture-watchdog
+          path: tmp/native-fixture-process/
+          if-no-files-found: warn
       - name: Measure which names Win32 can create as files
         shell: pwsh
         run: pwsh -File test-disks/measure-win32-names.ps1

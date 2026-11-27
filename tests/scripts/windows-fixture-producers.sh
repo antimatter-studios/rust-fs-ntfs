@@ -54,5 +54,91 @@ grep -q 'Remove-Item -LiteralPath "test-disks/ntfs-fn-fields-step\$step.img"' <<
     && ok || bad "the cleanup removes only the named stage images"
 if grep -qE 'Remove-Item[^|]*\*' <<<"$cleanup"; then bad "the cleanup uses a wildcard"; else ok; fi
 
+# Every named producer runs under the out-of-process watchdog (#1395): the
+# in-process phase timer cannot stop a blocked .NET or CIM storage call. The
+# same job first proves on its own Windows runner that a blocked phase times
+# out, and keeps the watchdog's diagnostics when the producer fails.
+if problems=$(python3 - <<'PY'
+import pathlib
+import re
+
+import yaml
+
+CONTROL = 'FixtureProcess.test_blocked_dotnet_phase_and_its_descendant_end_at_the_phase_deadline'
+EXPECTED = {
+    'ci.yml': {'build-windows-native-read-fixtures.ps1': 1},
+    'release.yml': {'build-windows-native-read-fixtures.ps1': 1},
+    'security-descriptor-oracle.yml': {'capture-filename-fields.ps1': 1},
+    'slate-oracle.yml': {'build-slate-oracle-cases.ps1': 2},
+}
+problems = []
+for workflow, producers in EXPECTED.items():
+    jobs = yaml.safe_load(pathlib.Path('.github/workflows', workflow).read_text())['jobs']
+    for producer, count in producers.items():
+        found = 0
+        for name, job in jobs.items():
+            steps = job.get('steps', [])
+            for index, step in enumerate(steps):
+                run = ' '.join(str(step.get('run', '')).split())
+                if not re.search(r'(-File |\./)test-disks/' + re.escape(producer), run):
+                    continue
+                found += 1
+                where = f'{workflow} {name}: {producer}'
+                wrapped = re.match(
+                    r'python scripts/run-fixture-process\.py --watch-phases --timeout-seconds (\d+) '
+                    r'--log-dir (tmp/\S+) --lifecycle \2/lifecycle\.log -- pwsh -NoProfile -File ', run)
+                if not wrapped:
+                    problems.append(f'{where} runs without the process watchdog')
+                    continue
+                limit, logs = int(wrapped.group(1)) / 60, wrapped.group(2)
+                budget = job.get('timeout-minutes', 360)
+                if limit >= budget:
+                    problems.append(f'{where} watchdog ({limit:g} min) cannot fire inside the {budget} min job')
+                if not any(CONTROL in str(s.get('run', '')) for s in steps[:index]):
+                    problems.append(f'{where} has no blocked-phase control before it')
+                if not any('always()' in str(s.get('if', ''))
+                           and str(s.get('uses', '')).startswith('actions/upload-artifact@')
+                           and logs + '/' in str(s.get('with', {}).get('path', ''))
+                           for s in steps[index + 1:]):
+                    problems.append(f'{where} does not retain {logs}/ when it fails')
+        if found != count:
+            problems.append(f'{workflow}: expected {count} run(s) of {producer}, found {found}')
+print('\n'.join(problems))
+raise SystemExit(bool(problems))
+PY
+); then ok
+else bad "every fixture producer is bounded by the process watchdog:
+$problems"; fi
+
+# actions/upload-artifact roots an artifact at the common parent of its paths.
+# A watchdog log directory beside a Slate output directory moves that root up
+# to tmp/, so a download then finds every output file one level too deep.
+if problems=$(python3 - <<'PY'
+import pathlib
+
+import yaml
+
+ROOTS = {
+    'slate-oracle-cases-': 'tmp/slate-oracle/',
+    'slate-oracle-write-grades-': 'tmp/slate-write-grades/',
+}
+jobs = yaml.safe_load(pathlib.Path('.github/workflows/slate-oracle.yml').read_text())['jobs']
+uploads = [step['with'] for job in jobs.values() for step in job.get('steps', [])
+           if str(step.get('uses', '')).startswith('actions/upload-artifact@')]
+problems = []
+for prefix, root in ROOTS.items():
+    found = [upload for upload in uploads if upload['name'].startswith(prefix)]
+    if len(found) != 1:
+        problems.append(f'expected one {prefix} upload, found {len(found)}')
+        continue
+    problems.extend(f'the {prefix} artifact uploads {path}, outside {root}'
+                    for path in found[0]['path'].split() if not path.startswith(root))
+print('\n'.join(problems))
+raise SystemExit(bool(problems))
+PY
+); then ok
+else bad "each Slate output artifact is rooted at its output directory:
+$problems"; fi
+
 printf '  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
