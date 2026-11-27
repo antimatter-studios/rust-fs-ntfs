@@ -2937,6 +2937,26 @@
       "image": "nfs-win-format-win-link-attr-list-win-chkdsk.img",
       "_notes": "Windows creates /many.txt (64 bytes) and hard-links it forty times as /e/many-0.txt onwards, the names the cli-link recipe gives it, where fs.ntfs ln refuses the 33rd because the base record has no room left for its $ATTRIBUTE_LIST (#1067). After every link the op reads the base record through FSCTL_GET_NTFS_FILE_RECORD; at the end it reads the $ATTRIBUTE_LIST, resident or not, and every extension record it names. attr-list.txt in the diagnostics records which attributes Windows moved out of the base record and when. The step fails when Windows leaves the file without an $ATTRIBUTE_LIST. The image Windows leaves is kept as the fixture the driver's 33rd link is checked against (#1069, part of #1067). Not yet run: its first outcome is recorded here."
     },
+    "win-format-win-quota-compressed-win-chkdsk": {
+      "status": "pending",
+      "volume_params": {
+        "size_mib": 256,
+        "label": "QUOTACOMP",
+        "alloc_unit_size": 4096
+      },
+      "recipe": [
+        { "op": "init-image" },
+        { "op": "ship-to-vm", "src": "{image_dir}/{run_id}/{scenario.image}", "dest": "{vm.workdir}/{scenario.image}" },
+        { "op": "win-format", "label": "{scenario.volume_params.label}", "keep_image": "true" },
+        { "op": "win-quota-track", "keep_image": "true" },
+        { "op": "win-write-compressed", "files": "/compressed.bin@262144 /partial.bin@200000", "mode": "write", "keep_image": "true" },
+        { "op": "win-chkdsk", "modes": "readonly,/scan", "verdict_shape": "Clean", "keep_image": "true" },
+        { "op": "win-write-compressed", "files": "/compressed.bin@262144 /partial.bin@200000", "mode": "verify", "keep_image": "true" },
+        { "op": "win-quota-verify", "keep_image": "false" }
+      ],
+      "image": "nfs-win-format-win-quota-compressed-win-chkdsk.img",
+      "_notes": "Windows writes and compresses two files on a quota-tracked volume. Native compact and fsutil layout output is retained; chkdsk, exact readback and the native quota recount grade the result (#1401)."
+    },
     "win-format-win-quota-mac-delete-win-chkdsk": {
       "status": "pending",
       "volume_params": {
