@@ -110,5 +110,35 @@ PY
 else bad "every fixture producer is bounded by the process watchdog:
 $problems"; fi
 
+# actions/upload-artifact roots an artifact at the common parent of its paths.
+# A watchdog log directory beside a Slate output directory moves that root up
+# to tmp/, so a download then finds every output file one level too deep.
+if problems=$(python3 - <<'PY'
+import pathlib
+
+import yaml
+
+ROOTS = {
+    'slate-oracle-cases-': 'tmp/slate-oracle/',
+    'slate-oracle-write-grades-': 'tmp/slate-write-grades/',
+}
+jobs = yaml.safe_load(pathlib.Path('.github/workflows/slate-oracle.yml').read_text())['jobs']
+uploads = [step['with'] for job in jobs.values() for step in job.get('steps', [])
+           if str(step.get('uses', '')).startswith('actions/upload-artifact@')]
+problems = []
+for prefix, root in ROOTS.items():
+    found = [upload for upload in uploads if upload['name'].startswith(prefix)]
+    if len(found) != 1:
+        problems.append(f'expected one {prefix} upload, found {len(found)}')
+        continue
+    problems.extend(f'the {prefix} artifact uploads {path}, outside {root}'
+                    for path in found[0]['path'].split() if not path.startswith(root))
+print('\n'.join(problems))
+raise SystemExit(bool(problems))
+PY
+); then ok
+else bad "each Slate output artifact is rooted at its output directory:
+$problems"; fi
+
 printf '  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
