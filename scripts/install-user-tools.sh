@@ -28,6 +28,9 @@ PWSH_VERSION=7.6.9
 ZIG_VERSION=0.17.0
 CARGO_ZIGBUILD_VERSION=0.24.0
 
+# ubuntu_apt_options, for user_apt.
+. "$(dirname "${BASH_SOURCE[0]}")/apt-ubuntu.sh"
+
 root="${USER_TOOLS_DIR:-$HOME/.local/user-tools}"
 bin="$root/bin"
 apt_tree="$root/apt/tree"
@@ -181,6 +184,12 @@ user_apt() {
         -o "Debug::NoLocking=1"
         -o "APT::Sandbox::User=$(id -un)"
     )
+    # CI reads Ubuntu's own list alone, and fails without one (#1427). A
+    # developer's machine that is not Ubuntu has none and keeps its sources.
+    if [ -f "${APT_UBUNTU_SOURCES:-/etc/apt/sources.list.d/ubuntu.sources}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then
+        ubuntu_apt_options "$state"
+        opts+=("${UBUNTU_APT_OPTIONS[@]}")
+    fi
     apt-get "${opts[@]}" update
     local pkgs
     mapfile -t pkgs < <(apt-get "${opts[@]}" -s install --no-install-recommends "$@" | awk '$1 == "Inst" { print $2 }')

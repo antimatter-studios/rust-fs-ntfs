@@ -37,16 +37,11 @@ jobs:
       - name: Install the reference reader and C toolchain
         run: |
           packages=(ntfs-3g)
-          apt_options=(-o Acquire::Retries=3)
+          # The gated runner image has no C toolchain; the hosted image does.
           if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
             packages+=(build-essential)
-            sources="$RUNNER_TEMP/directory-abi-ubuntu.sources"
-            sed -E 's@http://(archive|security|ports)[.]ubuntu[.]com/@https://\1.ubuntu.com/@g' \
-              /etc/apt/sources.list.d/ubuntu.sources > "$sources"
-            apt_options+=(-o "Dir::Etc::sourcelist=$sources" -o Dir::Etc::sourceparts=-)
           fi
-          sudo apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
-          sudo apt-get "${apt_options[@]}" install -y "${packages[@]}"
+          bash scripts/apt-ubuntu.sh "${packages[@]}"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
