@@ -13,6 +13,23 @@ RUNNER = ROOT / "scripts/run-fixture-process.py"
 
 
 class FixtureProcess(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # The first PowerShell process on a fresh hosted runner is slow to
+        # start and to compile the phase timer. A case that paid that cost
+        # reached its overall deadline before its phase deadline, so run one
+        # empty phase first, outside every case's deadline. The job timeout
+        # bounds this call. A case that needs PowerShell still fails without it.
+        pwsh = shutil.which("pwsh")
+        if pwsh:
+            helper = str(ROOT / "test-disks/windows-fixture.ps1").replace("'", "''")
+            subprocess.run(
+                [pwsh, "-NoProfile", "-Command",
+                 f"$ErrorActionPreference = 'Stop'; . '{helper}'; "
+                 "Invoke-FixturePhase -PhaseName warm-up -PhaseTimeoutSeconds 30 -PhaseAction { }"],
+                check=True,
+            )
+
     def setUp(self):
         self.sandbox = tempfile.TemporaryDirectory(prefix="fixture process ")
         self.addCleanup(self.sandbox.cleanup)
@@ -102,7 +119,7 @@ class FixtureProcess(unittest.TestCase):
         )
         result = self.run_child(source, timeout=22, executable=pwsh, watch_phases=True)
         self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
-        self.assertEqual(self.report()["timed_out_phase"], "attach")
+        self.assertEqual(self.report().get("timed_out_phase"), "attach", self.report())
         self.assertLess(self.report()["elapsed_seconds"], 20)
         self.assertIn("test-fixture attach", self.lifecycle.read_text())
         self.assertTrue(ready.exists(), "the descendant never started, so nothing was proven")
