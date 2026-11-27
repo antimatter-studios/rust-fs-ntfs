@@ -90,7 +90,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux build tools
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+        run: bash scripts/apt-ubuntu.sh build-essential
       - name: The aggregate gate requires every Python oracle job
         run: python3 -m unittest -v tests/python/test_ci_gate.py
       - name: The fsutil record binding refuses a wrong image or revision
@@ -114,7 +114,7 @@ jobs:
       - name: Compile the independent C directory-listing probe
         run: cc -std=c11 -Wall -Werror -Iinclude tests/python/abi_dir_listing.c -Ltarget/test-opt -lfs_ntfs -Wl,-rpath,"$PWD/target/test-opt" -o target/abi_dir_listing
       - name: Install the independent raw-directory reference
-        run: sudo apt-get update && sudo apt-get install -y ntfs-3g
+        run: bash scripts/apt-ubuntu.sh ntfs-3g
       - name: Python directory iterator agrees with the C ABI
         env:
           FS_NTFS_SHARED_LIB: ${{ github.workspace }}/target/test-opt/libfs_ntfs.so
@@ -144,7 +144,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux build tools
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+        run: bash scripts/apt-ubuntu.sh build-essential
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
@@ -202,7 +202,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Install Linux build tools
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+        run: bash scripts/apt-ubuntu.sh build-essential
       - name: Record and verify the exact source head
         run: |
           mkdir -p tmp/logs
@@ -265,7 +265,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux build tools
-        run: sudo apt-get update && sudo apt-get install -y build-essential gh shellcheck python3-yaml
+        run: bash scripts/apt-ubuntu.sh build-essential gh shellcheck python3-yaml
       # Tools come from scripts/install-user-tools.sh, the script developers
       # run as `chore tools`, so CI and a developer's machine set up the same
       # way. PowerShell and chore use the existing cached user installation.
@@ -278,7 +278,7 @@ jobs:
       # with the harness's own scripts/run-profile.rb. Hosted runners ship
       # Ruby; the antimatter-vps runner image does not, and allows sudo apt.
       - name: ruby for the harness's run-profile resolver
-        run: command -v ruby >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq ruby; }
+        run: command -v ruby >/dev/null || bash scripts/apt-ubuntu.sh ruby
       - name: check out sibling repos
         # Replaces `submodules: recursive`. The pins live in chores.yml,
         # so CI and a developer's machine read the same declaration
@@ -663,7 +663,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux build tools
-        run: sudo apt-get update && sudo apt-get install -y build-essential gh shellcheck python3-yaml
+        run: bash scripts/apt-ubuntu.sh build-essential gh shellcheck python3-yaml
       # Tools come from scripts/install-user-tools.sh, the script developers
       # run as `chore tools`, so CI and a developer's machine set up the same
       # way. PowerShell and chore use the existing cached user installation.
@@ -855,7 +855,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux build tools
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+        run: bash scripts/apt-ubuntu.sh build-essential
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.95.0"
@@ -1837,7 +1837,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux build tools
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+        run: bash scripts/apt-ubuntu.sh build-essential
       - name: check out sibling repos
         # Replaces `submodules: recursive`. The pins live in chores.yml,
         # so CI and a developer's machine read the same declaration
@@ -1901,8 +1901,7 @@ jobs:
       # raw through the crate's own reader.
       - name: Install fixture toolchain (mkntfs + ntfs-3g)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ntfs-3g attr
+          bash scripts/apt-ubuntu.sh ntfs-3g attr
       # Generate the read-path .img fixtures. With these present the
       # fixture-driven integration tests (tests/ads.rs, tests/unicode.rs,
       # …) run instead of self-skipping. The Windows-authored fixtures arrive
@@ -2101,7 +2100,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux build tools
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+        run: bash scripts/apt-ubuntu.sh build-essential
       - name: check out sibling repos
         # Replaces `submodules: recursive`. The pins live in chores.yml,
         # so CI and a developer's machine read the same declaration
@@ -2953,7 +2952,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux build tools
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+        run: bash scripts/apt-ubuntu.sh build-essential
       - name: Install chore and check out sibling repos
         shell: bash
         run: |
@@ -2979,8 +2978,7 @@ jobs:
       # reader beside Windows.
       - name: Install man-db and ntfs-3g
         run: |
-          sudo apt-get update
-          sudo apt-get install -y man-db ntfs-3g
+          bash scripts/apt-ubuntu.sh man-db ntfs-3g
       - name: chore cli:install
         run: chore cli:install
       # FIRST on PATH, so a distribution's mkfs.ntfs later on PATH is the one
@@ -3047,7 +3045,7 @@ jobs:
         # Only a self-hosted Linux runner lacks it; the hosted image has it.
         run: |
           if [ "$RUNNER_OS" = Linux ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
-            sudo apt-get update && sudo apt-get install -y build-essential
+            bash scripts/apt-ubuntu.sh build-essential
           fi
       - name: Install chore and check out sibling repos
         shell: bash
@@ -3126,7 +3124,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: C toolchain for the gated runner
         if: runner.environment == 'self-hosted'
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+        run: bash scripts/apt-ubuntu.sh build-essential
       - name: Install chore and check out sibling repos
         shell: bash
         run: |
@@ -3207,7 +3205,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux build tools
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+        run: bash scripts/apt-ubuntu.sh build-essential
       - name: Install chore and check out sibling repos
         shell: bash
         run: |
