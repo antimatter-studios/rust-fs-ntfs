@@ -101,6 +101,13 @@ parser, then compares again after a fresh whole-image remount. The Ubuntu
 ntfs-3g hook repeats these cases with its reference tools. Existing seed
 names and operations are retained; the readback floor is 20 cases.
 
+Six further pinned seeds (#1401) cover 1024-, 2048- and 4096-byte clusters at
+both record sizes, on volumes from 64 to 256 MiB, with six more fixed CI
+cases. Each also writes, replaces and removes EAs on a directory, renames a
+non-ASCII name by case alone and creates a 255-unit name. A separate contract
+fails when any of the ten cluster/record pairs has no seed pinned to it.
+Cross-parent rename is not yet an operation of the model or the generator.
+
 The existing `fuzz.yml` workflow also runs libFuzzer's `operation_sequence`
 target, preserving all byte-decoder targets. `seconds` (1..3600, default 120)
 sets exploration time; `seed` (1..4294967295, default 683) is logged before
