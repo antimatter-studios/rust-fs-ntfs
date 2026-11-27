@@ -26,9 +26,9 @@ use crate::volume::{RawVolume, Volume};
 use fs_core::layers::{
     check_bounds, ApiError, Candidate, CandidateKind, CandidateState, Capabilities, ClusterLayout,
     Damage, DamageKind, DamageReport, DirEntry, Encoding, Extent, ExtentWalk, FileAPI, Geometry,
-    HealthState, Integrity, Metadata, NodeKind, OpenVolume, Parent, ParentClaim, PrimitiveAPI,
-    Probe, Recognition, SalvageAdapter, SalvageError, ScanReport, Severity, Sink, Structure,
-    StructureRole, SuperblockCopy, Timestamp, Tree, TreeNode, VolumeAPI, VolumeHealth,
+    HealthState, Integrity, Metadata, NodeKind, OpenVolume, Parent, ParentClaim, PlanMetadata,
+    PrimitiveAPI, Probe, Recognition, SalvageAdapter, SalvageError, ScanReport, Severity, Sink,
+    Structure, StructureRole, SuperblockCopy, Timestamp, Tree, TreeNode, VolumeAPI, VolumeHealth,
     VolumeSupport, WalkEnd, WalkExtent,
 };
 use fs_core::BlockRead;
@@ -725,6 +725,34 @@ impl NtfsAdapter {
     /// The boot parameters, when the adapter has any.
     pub fn boot(&self) -> Option<&BootParams> {
         self.boot.as_ref()
+    }
+
+    /// The name and times a materialization plan carries for a candidate:
+    /// `plan.metadata = adapter.plan_metadata(source, &candidate)?`.
+    ///
+    /// The name is the candidate's. Times are the base record's
+    /// `$STANDARD_INFORMATION` FILETIMEs (100 ns since 1601-01-01 UTC) in
+    /// decimal. A time is absent when it is zero, and all three are absent
+    /// when the record cannot be read, does not validate, or has another
+    /// sequence number than the candidate's.
+    pub fn plan_metadata(
+        &self,
+        source: &dyn BlockRead,
+        candidate: &Candidate<NtfsCandidate>,
+    ) -> Result<PlanMetadata, SalvageError> {
+        let raw = raw_view(source);
+        let map = self.map(&raw)?;
+        let times = self
+            .resolve(&raw, &map, candidate.detail.record)
+            .filter(|(base, _)| base.sequence == candidate.detail.sequence)
+            .and_then(|(base, _)| base.standard_information());
+        let time = |nt: u64| (nt != 0).then(|| nt.to_string());
+        Ok(PlanMetadata {
+            name: candidate.name.clone(),
+            created: times.as_ref().and_then(|t| time(t.created_nt)),
+            modified: times.as_ref().and_then(|t| time(t.modified_nt)),
+            accessed: times.as_ref().and_then(|t| time(t.accessed_nt)),
+        })
     }
 
     fn geometry(&self) -> Result<&BootParams, SalvageError> {
