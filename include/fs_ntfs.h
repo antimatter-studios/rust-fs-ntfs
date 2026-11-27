@@ -1144,10 +1144,22 @@ int fs_ntfs_read_security_descriptor(const char *image, const char *path,
 #define FS_NTFS_SD_ERR_ACL_SIZE 9 /* an AclSize or AceSize */
 #define FS_NTFS_SD_ERR_LENGTH_OVERFLOW 10
 
-/* offset is from the descriptor start; kind is FS_NTFS_SD_ERR_*. */
+/* The part of the descriptor a defect belongs to. A bad header offset
+ * belongs to the part that offset names. */
+#define FS_NTFS_SD_IN_HEADER 0
+#define FS_NTFS_SD_IN_OWNER 1
+#define FS_NTFS_SD_IN_GROUP 2
+#define FS_NTFS_SD_IN_SACL 3
+#define FS_NTFS_SD_IN_DACL 4
+
+/* offset is from the descriptor start; kind is FS_NTFS_SD_ERR_*; component is
+ * FS_NTFS_SD_IN_*; ace_index is the stored-order index of the bad ACE in that
+ * ACL, or -1 when no single ACE is at fault. */
 typedef struct {
     uint32_t offset;
     uint32_t kind;
+    uint32_t component;
+    int32_t ace_index;
 } fs_ntfs_sd_error_t;
 
 /* state is FS_NTFS_SD_ACL_*; the rest is zero unless an ACL is stored. */

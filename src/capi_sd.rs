@@ -5,16 +5,20 @@
 //! ACE and callback bytes stay exactly as stored. Parsing and bounds are
 //! [`crate::security_descriptor`]'s.
 
-use crate::security_descriptor::{AclState, DecodeError, ErrorKind, SecurityDescriptor};
+use crate::security_descriptor::{AclState, Component, DecodeError, ErrorKind, SecurityDescriptor};
 use crate::{ffi_guard, set_einval};
 use std::ffi::{c_int, c_void};
 
-/// Where and why a descriptor is malformed. `kind` is `FS_NTFS_SD_ERR_*`.
+/// Where and why a descriptor is malformed. `kind` is `FS_NTFS_SD_ERR_*`,
+/// `component` is `FS_NTFS_SD_IN_*`, and `ace_index` is the stored-order index
+/// of the bad ACE within that ACL, or -1 when no single ACE is at fault.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FsNtfsSdError {
     pub offset: u32,
     pub kind: u32,
+    pub component: u32,
+    pub ace_index: i32,
 }
 
 /// One ACL role. `state` is `FS_NTFS_SD_ACL_*`; the rest is zero unless an
@@ -82,6 +86,17 @@ fn kind_code(kind: ErrorKind) -> u32 {
     }
 }
 
+fn component_code(component: Component) -> u32 {
+    match component {
+        // `Ace` never reaches C: `fs_ntfs_sd_ace` names the ACL first.
+        Component::Header | Component::Ace => 0,
+        Component::Owner => 1,
+        Component::Group => 2,
+        Component::Sacl => 3,
+        Component::Dacl => 4,
+    }
+}
+
 /// Offsets and lengths fit u32: the parser refuses input over 1 MiB.
 fn narrow(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
@@ -95,13 +110,12 @@ fn report(what: &str, e: DecodeError, base: usize, out: *mut FsNtfsSdError) -> c
             out.write(FsNtfsSdError {
                 offset: narrow(offset),
                 kind: kind_code(e.kind),
+                component: component_code(e.component),
+                ace_index: e.ace_index.map_or(-1, i32::from),
             })
         };
     }
-    set_einval(&format!(
-        "{what}: security descriptor byte {offset}: {:?}",
-        e.kind
-    ));
+    set_einval(&format!("{what}: {}", DecodeError { offset, ..e }));
     -1
 }
 
@@ -209,10 +223,10 @@ pub unsafe extern "C" fn fs_ntfs_sd_ace(
             Ok(d) => d,
             Err(e) => return report("fs_ntfs_sd_ace", e, 0, err),
         };
-        let (acl, acl_offset) = if sacl != 0 {
-            (d.sacl(), d.header.sacl_offset)
+        let (acl, acl_offset, role) = if sacl != 0 {
+            (d.sacl(), d.header.sacl_offset, Component::Sacl)
         } else {
-            (d.dacl(), d.header.dacl_offset)
+            (d.dacl(), d.header.dacl_offset, Component::Dacl)
         };
         let Some(acl) = acl else {
             return 0;
@@ -247,7 +261,15 @@ pub unsafe extern "C" fn fs_ntfs_sd_ace(
                     view.inherited_object_type = f.inherited_object_type.unwrap_or_default();
                 }
                 Ok(None) => {}
-                Err(e) => return report("fs_ntfs_sd_ace", e, offset, err),
+                Err(e) => {
+                    let e = DecodeError {
+                        component: role,
+                        // Found: `index` is below the u16 ACE count.
+                        ace_index: u16::try_from(i).ok(),
+                        ..e
+                    };
+                    return report("fs_ntfs_sd_ace", e, offset, err);
+                }
             }
             // SAFETY: non-null; the caller provides a writable FsNtfsSdAce.
             unsafe { out.write(view) };
