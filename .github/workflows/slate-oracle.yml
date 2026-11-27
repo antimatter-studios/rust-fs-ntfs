@@ -163,6 +163,16 @@ jobs:
           -WriterCases tmp/writer-input/slate-writer/captures.tsv
           -WriterImages tmp/writer-input/slate-writer/images
           -LabSource tmp/writer-input/slate-writer/lab-source/slate-write-lab-source.img
+      # An artifact of its own: beside tmp/slate-oracle/ it would move the
+      # cases artifact's root up to tmp/.
+      - name: Retain Slate case watchdog diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slate-case-fixture-watchdog-${{ github.sha }}
+          path: tmp/slate-fixture-process/
+          if-no-files-found: warn
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -170,7 +180,6 @@ jobs:
           path: |
             tmp/slate-oracle/cases.tsv
             tmp/slate-oracle/lab-source.json
-            tmp/slate-fixture-process/
             tmp/slate-oracle/writer-captures.tsv
             tmp/slate-oracle/images/*.img
             tmp/slate-oracle/*.mkfs.json
@@ -328,6 +337,14 @@ jobs:
           -OutDir tmp/slate-write-grades
           -SlateWrites tmp/slate-writes-input/writes/slate-writes.tsv
           -SlateWriteImages tmp/slate-writes-input/writes/images
+      - name: Retain Slate write-grading watchdog diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slate-write-fixture-watchdog-${{ github.sha }}
+          path: tmp/slate-write-fixture-process/
+          if-no-files-found: warn
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -340,6 +357,5 @@ jobs:
             tmp/slate-write-grades/windows-alloc/
             tmp/slate-write-grades/windows-acl/
             tmp/slate-write-grades/windows-read-diag/
-            tmp/slate-write-fixture-process/
           if-no-files-found: error
           retention-days: 14
