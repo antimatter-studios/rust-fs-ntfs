@@ -3,7 +3,7 @@
 //! NTFS_SD_CAPTURE names the retained TSV capture (descriptor/control/SID bytes).
 #![cfg(windows)]
 
-use fs_ntfs::security_descriptor::{AclState, SecurityDescriptor, Sid};
+use fs_ntfs::security_descriptor::{AclState, Component, ErrorKind, SecurityDescriptor, Sid};
 // Windows reads of the DACL: the presence flag, the ACL pointer, and per-ACE pointers.
 use std::ffi::c_void;
 use std::ptr;
@@ -942,4 +942,88 @@ fn windows_authored_callback_and_audit_aces_match_windows_layout() {
             }
         }
     }
+}
+
+/// Whether Windows accepts the descriptor. The copy is aligned and padded, so
+/// a damaged count or size never sends Windows past the allocation.
+fn windows_accepts(bytes: &[u8]) -> bool {
+    let mut buffer = vec![0u64; bytes.len() / 8 + 64];
+    unsafe {
+        ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            buffer.as_mut_ptr().cast::<u8>(),
+            bytes.len(),
+        );
+        IsValidSecurityDescriptor(buffer.as_ptr().cast()) != 0
+    }
+}
+
+/// Damage one length at a time in a Windows-authored descriptor. Windows must
+/// refuse each copy, and the decoder must name the same damaged part (#1399).
+#[test]
+fn windows_refuses_the_damaged_lengths_the_decoder_locates() {
+    let text = wide("O:SYG:BAD:(A;;FA;;;SY)(A;;FR;;;WD)S:(AU;SA;FA;;;WD)");
+    let mut address = ptr::null_mut();
+    let mut size = 0;
+    assert_ne!(
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                text.as_ptr(),
+                1,
+                &mut address,
+                &mut size,
+            )
+        },
+        0,
+        "Windows SDDL capture: {}",
+        std::io::Error::last_os_error()
+    );
+    let sd = WindowsDescriptor(address);
+    let bytes = unsafe { std::slice::from_raw_parts(sd.0.cast::<u8>(), size as usize) }.to_vec();
+    let h = SecurityDescriptor::parse(&bytes)
+        .expect("decode Windows descriptor")
+        .header;
+    assert!(windows_accepts(&bytes), "positive control");
+    let [owner, group, sacl, dacl] = [h.owner_offset, h.group_offset, h.sacl_offset, h.dacl_offset]
+        .map(|offset| offset as usize);
+    let first_size = usize::from(u16::from_le_bytes([bytes[dacl + 10], bytes[dacl + 11]]));
+    let second = dacl + 8 + first_size;
+    use Component::{Dacl, Group, Owner, Sacl};
+    use ErrorKind::{AclSize, SidRevision, SidSubauthorityCount};
+    // (damaged byte, new value, expected offset, kind, part, ACE index)
+    let cases = [
+        (owner, 2, owner, SidRevision, Owner, None),
+        (owner + 1, 16, owner + 1, SidSubauthorityCount, Owner, None),
+        (group + 1, 16, group + 1, SidSubauthorityCount, Group, None),
+        (sacl + 2, 4, sacl + 2, AclSize, Sacl, None),
+        (dacl + 2, 4, dacl + 2, AclSize, Dacl, None),
+        (dacl + 11, 0xff, dacl + 10, AclSize, Dacl, Some(0)),
+        (second + 3, 0xff, second + 2, AclSize, Dacl, Some(1)),
+        (sacl + 11, 0xff, sacl + 10, AclSize, Sacl, Some(0)),
+    ];
+    for (at, value, offset, kind, component, ace_index) in cases {
+        let mut damaged = bytes.clone();
+        assert_ne!(damaged[at], value, "byte {at} must change");
+        damaged[at] = value;
+        assert!(!windows_accepts(&damaged), "Windows accepted byte {at}");
+        let e = SecurityDescriptor::parse(&damaged).expect_err("decoder accepted damage");
+        assert_eq!(
+            (e.offset, e.kind, e.component, e.ace_index),
+            (offset, kind, component, ace_index),
+            "byte {at}"
+        );
+    }
+    // A SID length inside an ACE leaves the framing whole: the field view,
+    // not the descriptor parse, refuses it.
+    let count_at = dacl + 8 + 8 + 1;
+    let mut damaged = bytes.clone();
+    damaged[count_at] = 16;
+    assert!(!windows_accepts(&damaged), "Windows accepted the ACE SID");
+    let parsed = SecurityDescriptor::parse(&damaged).expect("framing is intact");
+    let ace = parsed.dacl().expect("DACL").aces().next().expect("ACE");
+    let e = ace.fields().expect_err("decoder accepted the ACE SID");
+    assert_eq!(
+        (e.offset, e.kind, e.component),
+        (9, SidSubauthorityCount, Component::Ace)
+    );
 }

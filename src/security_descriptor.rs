@@ -17,11 +17,32 @@ use std::fmt;
 pub const DEFAULT_MAX_DESCRIPTOR_BYTES: usize = 1024 * 1024;
 const HEADER_BYTES: usize = 20;
 
-/// An error location is a byte offset relative to the descriptor start.
+/// An error location is a byte offset relative to the descriptor start, or to
+/// the ACE start when `component` is [`Component::Ace`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeError {
     pub offset: usize,
     pub kind: ErrorKind,
+    /// The part of the descriptor the defect belongs to. A bad header offset
+    /// belongs to the part that offset names.
+    pub component: Component,
+    /// The stored-order index of the ACE whose framing is bad. `None` for a
+    /// defect outside an ACL's ACE walk, and for errors from [`Ace::object`]
+    /// and [`Ace::fields`], whose caller already holds the ACE.
+    pub ace_index: Option<u16>,
+}
+
+/// The named parts of a self-relative descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Component {
+    /// The input as a whole, or the header outside its four offsets.
+    Header,
+    Owner,
+    Group,
+    Sacl,
+    Dacl,
+    /// An ACE decoded on its own, outside any descriptor.
+    Ace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,15 +63,37 @@ impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "security descriptor byte {}: {:?}",
-            self.offset, self.kind
-        )
+            "security descriptor byte {}: {:?} in {:?}",
+            self.offset, self.kind, self.component
+        )?;
+        match self.ace_index {
+            Some(index) => write!(f, " ACE {index}"),
+            None => Ok(()),
+        }
     }
 }
 impl std::error::Error for DecodeError {}
 
 fn error(offset: usize, kind: ErrorKind) -> DecodeError {
-    DecodeError { offset, kind }
+    DecodeError {
+        offset,
+        kind,
+        component: Component::Header,
+        ace_index: None,
+    }
+}
+
+impl DecodeError {
+    fn within(self, component: Component) -> Self {
+        Self { component, ..self }
+    }
+
+    fn at_ace(self, index: u16) -> Self {
+        Self {
+            ace_index: Some(index),
+            ..self
+        }
+    }
 }
 
 fn bounded(bytes: &[u8], offset: usize, len: usize) -> Result<&[u8], DecodeError> {
@@ -119,7 +162,7 @@ impl<'a> Acl<'a> {
     fn at(bytes: &'a [u8], offset: usize) -> Result<Self, DecodeError> {
         let h = bounded(bytes, offset, 8)?;
         let size = usize::from(u16::from_le_bytes([h[2], h[3]]));
-        let count = usize::from(u16::from_le_bytes([h[4], h[5]]));
+        let count = u16::from_le_bytes([h[4], h[5]]);
         if size < 8 {
             return Err(error(offset + 2, ErrorKind::AclSize));
         }
@@ -128,13 +171,13 @@ impl<'a> Acl<'a> {
         };
         // Every ACE header and its declared size must lie inside AclSize.
         let mut at = 8;
-        for _ in 0..count {
+        for index in 0..count {
             if at + 4 > size {
-                return Err(error(offset + at, ErrorKind::AclSize));
+                return Err(error(offset + at, ErrorKind::AclSize).at_ace(index));
             }
             let ace_size = usize::from(u16::from_le_bytes([acl.bytes[at + 2], acl.bytes[at + 3]]));
             if ace_size < 4 || at + ace_size > size {
-                return Err(error(offset + at + 2, ErrorKind::AclSize));
+                return Err(error(offset + at + 2, ErrorKind::AclSize).at_ace(index));
             }
             at += ace_size;
         }
@@ -243,6 +286,11 @@ impl<'a> Ace<'a> {
     }
 
     fn layout(self, object: bool) -> Result<AceFields<'a>, DecodeError> {
+        self.decode_layout(object)
+            .map_err(|e| e.within(Component::Ace))
+    }
+
+    fn decode_layout(self, object: bool) -> Result<AceFields<'a>, DecodeError> {
         let fixed = bounded(self.bytes, 4, if object { 8 } else { 4 })?;
         let mask = u32::from_le_bytes([fixed[0], fixed[1], fixed[2], fixed[3]]);
         let object_flags =
@@ -347,40 +395,50 @@ impl<'a> SecurityDescriptor<'a> {
             return Err(error(2, ErrorKind::NotSelfRelative));
         }
         let mut offsets = [0u32; 4];
+        const ROLES: [Component; 4] = [
+            Component::Owner,
+            Component::Group,
+            Component::Sacl,
+            Component::Dacl,
+        ];
         for (i, slot) in offsets.iter_mut().enumerate() {
             let at = 4 + i * 4;
             *slot = u32::from_le_bytes([h[at], h[at + 1], h[at + 2], h[at + 3]]);
             if *slot == 0 {
                 continue;
             }
-            let offset =
-                usize::try_from(*slot).map_err(|_| error(at, ErrorKind::RelativeOffset))?;
+            let bad_offset = error(at, ErrorKind::RelativeOffset).within(ROLES[i]);
+            let offset = usize::try_from(*slot).map_err(|_| bad_offset)?;
             if offset < HEADER_BYTES || offset >= bytes.len() {
-                return Err(error(at, ErrorKind::RelativeOffset));
+                return Err(bad_offset);
             }
             if i >= 2 {
                 let present = if i == 2 { 0x10 } else { 0x4 };
                 if control & present == 0 {
-                    return Err(error(at, ErrorKind::AclOffsetWithoutPresentBit));
+                    return Err(error(at, ErrorKind::AclOffsetWithoutPresentBit).within(ROLES[i]));
                 }
             }
         }
-        let sid = |offset: u32| {
+        let sid = |offset: u32, role: Component| {
             if offset == 0 {
                 Ok(None)
             } else {
-                Sid::at(bytes, offset as usize).map(Some)
+                Sid::at(bytes, offset as usize)
+                    .map(Some)
+                    .map_err(|e| e.within(role))
             }
         };
-        let acl = |offset: u32| {
+        let acl = |offset: u32, role: Component| {
             if offset == 0 {
                 Ok(None)
             } else {
-                Acl::at(bytes, offset as usize).map(Some)
+                Acl::at(bytes, offset as usize)
+                    .map(Some)
+                    .map_err(|e| e.within(role))
             }
         };
-        let sacl = acl(offsets[2])?;
-        let dacl = acl(offsets[3])?;
+        let sacl = acl(offsets[2], Component::Sacl)?;
+        let dacl = acl(offsets[3], Component::Dacl)?;
         Ok(Self {
             sacl,
             dacl,
@@ -394,8 +452,8 @@ impl<'a> SecurityDescriptor<'a> {
                 sacl_offset: offsets[2],
                 dacl_offset: offsets[3],
             },
-            owner: sid(offsets[0])?,
-            group: sid(offsets[1])?,
+            owner: sid(offsets[0], Component::Owner)?,
+            group: sid(offsets[1], Component::Group)?,
         })
     }
 
@@ -532,14 +590,19 @@ mod tests {
             let mut bad = b.clone();
             bad[at] = value;
             let e = SecurityDescriptor::parse(&bad).unwrap_err();
-            assert_eq!(e, error(if at == 3 { 2 } else { at }, kind));
+            let part = if at >= 20 {
+                Component::Owner
+            } else {
+                Component::Header
+            };
+            assert_eq!(e, error(if at == 3 { 2 } else { at }, kind).within(part));
         }
         for offset in [1, 19, 32, u32::MAX] {
             let mut bad = b.clone();
             bad[4..8].copy_from_slice(&offset.to_le_bytes());
             assert_eq!(
                 SecurityDescriptor::parse(&bad).unwrap_err(),
-                error(4, ErrorKind::RelativeOffset)
+                error(4, ErrorKind::RelativeOffset).within(Component::Owner)
             );
         }
         assert_eq!(
@@ -588,7 +651,7 @@ mod tests {
         b[2] = 4;
         assert_eq!(
             SecurityDescriptor::parse(&b).unwrap_err(),
-            error(84, ErrorKind::Truncated)
+            error(84, ErrorKind::Truncated).within(Component::Dacl)
         );
         b[16..20].copy_from_slice(&80u32.to_le_bytes());
         b[82..84].copy_from_slice(&8u16.to_le_bytes());
@@ -623,6 +686,8 @@ mod tests {
         assert_eq!(
             SecurityDescriptor::parse(&b).unwrap_err(),
             error(40, ErrorKind::AclSize)
+                .within(Component::Dacl)
+                .at_ace(0)
         );
         // A correctly framed ACE is retained byte-for-byte.
         b[34..36].copy_from_slice(&24u16.to_le_bytes());
@@ -686,21 +751,43 @@ mod tests {
         assert_eq!(o.sid.as_bytes(), SID);
     }
 
+    fn ace_error(offset: usize, kind: ErrorKind) -> DecodeError {
+        error(offset, kind).within(Component::Ace)
+    }
+
     #[test]
     fn object_ace_missing_or_truncated_fields_are_errors() {
         // Fixed mask and flags fields cut short.
         let b = object_ace_bytes(5, 0);
-        assert_eq!(ace(&b[..10]).object(), Err(error(4, ErrorKind::Truncated)));
+        assert_eq!(
+            ace(&b[..10]).object(),
+            Err(ace_error(4, ErrorKind::Truncated))
+        );
         // A flagged GUID that is absent or truncated.
         let b = object_ace_bytes(5, 1);
-        assert_eq!(ace(&b[..12]).object(), Err(error(12, ErrorKind::Truncated)));
-        assert_eq!(ace(&b[..20]).object(), Err(error(12, ErrorKind::Truncated)));
+        assert_eq!(
+            ace(&b[..12]).object(),
+            Err(ace_error(12, ErrorKind::Truncated))
+        );
+        assert_eq!(
+            ace(&b[..20]).object(),
+            Err(ace_error(12, ErrorKind::Truncated))
+        );
         let b = object_ace_bytes(6, 3);
-        assert_eq!(ace(&b[..28]).object(), Err(error(28, ErrorKind::Truncated)));
+        assert_eq!(
+            ace(&b[..28]).object(),
+            Err(ace_error(28, ErrorKind::Truncated))
+        );
         // The SID header or its subauthorities cut short.
         let b = object_ace_bytes(5, 2);
-        assert_eq!(ace(&b[..32]).object(), Err(error(28, ErrorKind::Truncated)));
-        assert_eq!(ace(&b[..38]).object(), Err(error(28, ErrorKind::Truncated)));
+        assert_eq!(
+            ace(&b[..32]).object(),
+            Err(ace_error(28, ErrorKind::Truncated))
+        );
+        assert_eq!(
+            ace(&b[..38]).object(),
+            Err(ace_error(28, ErrorKind::Truncated))
+        );
         // Flags 0 needs no GUID: the SID follows the flags directly.
         let b = object_ace_bytes(5, 0);
         assert_eq!(ace(&b[..24]).object().unwrap().unwrap().sid.as_bytes(), SID);
@@ -709,11 +796,11 @@ mod tests {
         b[13] = 16;
         assert_eq!(
             ace(&b).object(),
-            Err(error(13, ErrorKind::SidSubauthorityCount))
+            Err(ace_error(13, ErrorKind::SidSubauthorityCount))
         );
         b[13] = 1;
         b[12] = 2;
-        assert_eq!(ace(&b).object(), Err(error(12, ErrorKind::SidRevision)));
+        assert_eq!(ace(&b).object(), Err(ace_error(12, ErrorKind::SidRevision)));
     }
 
     #[test]
@@ -741,7 +828,10 @@ mod tests {
             assert_eq!(f.object_flags, None);
             assert_eq!((f.sid_offset, f.sid.as_bytes()), (8, &SID[..]));
             assert_eq!(f.trailing, b"artx\x01\x02\x03\x04");
-            assert_eq!(ace(&b[..19]).fields(), Err(error(8, ErrorKind::Truncated)));
+            assert_eq!(
+                ace(&b[..19]).fields(),
+                Err(ace_error(8, ErrorKind::Truncated))
+            );
         }
         for ace_type in [5u8, 6, 7, 11] {
             let b = object_ace_bytes(ace_type, 3);
@@ -755,6 +845,48 @@ mod tests {
         for ace_type in [3u8, 4, 8, 12, 14, 15, 0x11, 0xff] {
             assert_eq!(ace(&object_ace_bytes(ace_type, 3)).fields(), Ok(None));
         }
+    }
+
+    #[test]
+    fn errors_name_the_component_and_the_ace() {
+        // Group SID at 20, empty SACL at 32, DACL at 40 holding two 4-byte ACEs.
+        let mut b = descriptor();
+        b[2..4].copy_from_slice(&0x8014u16.to_le_bytes());
+        b[8..12].copy_from_slice(&20u32.to_le_bytes());
+        b[4..8].fill(0);
+        b[12..16].copy_from_slice(&32u32.to_le_bytes());
+        b[16..20].copy_from_slice(&40u32.to_le_bytes());
+        b.extend_from_slice(&[2, 0, 8, 0, 0, 0, 0, 0]);
+        b.extend_from_slice(&[2, 0, 16, 0, 2, 0, 0, 0]);
+        b.extend_from_slice(&[0x42, 0, 4, 0, 0x42, 0, 4, 0]);
+        SecurityDescriptor::parse(&b).expect("positive control");
+        let fail = |at: usize, value: u8| {
+            let mut bad = b.clone();
+            bad[at] = value;
+            let e = SecurityDescriptor::parse(&bad).unwrap_err();
+            (e.offset, e.kind, e.component, e.ace_index)
+        };
+        use Component::{Dacl, Group, Sacl};
+        use ErrorKind::{AclSize, RelativeOffset, SidRevision};
+        assert_eq!(fail(20, 2), (20, SidRevision, Group, None));
+        assert_eq!(fail(8, 1), (8, RelativeOffset, Group, None));
+        assert_eq!(fail(12, 1), (12, RelativeOffset, Sacl, None));
+        assert_eq!(fail(34, 4), (34, AclSize, Sacl, None));
+        assert_eq!(fail(42, 4), (42, AclSize, Dacl, None));
+        assert_eq!(fail(50, 12), (50, AclSize, Dacl, Some(0)));
+        assert_eq!(fail(54, 8), (54, AclSize, Dacl, Some(1)));
+        // A third ACE has no header left inside AclSize.
+        assert_eq!(fail(44, 3), (56, AclSize, Dacl, Some(2)));
+        assert_eq!(
+            SecurityDescriptor::parse(&{
+                let mut bad = b.clone();
+                bad[54] = 8;
+                bad
+            })
+            .unwrap_err()
+            .to_string(),
+            "security descriptor byte 54: AclSize in Dacl ACE 1"
+        );
     }
 
     #[test]
