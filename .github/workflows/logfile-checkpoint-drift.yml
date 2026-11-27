@@ -81,7 +81,7 @@ jobs:
         # Only a self-hosted Linux runner lacks it; the hosted image has it.
         run: |
           if [ "$RUNNER_OS" = Linux ] && [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
-            sudo apt-get update && sudo apt-get install -y build-essential
+            bash scripts/apt-ubuntu.sh build-essential
           fi
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -89,8 +89,7 @@ jobs:
           toolchain: "1.95.0"
       - name: Install ntfs-3g
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ntfs-3g
+          bash scripts/apt-ubuntu.sh ntfs-3g
       - name: Download the fresh captures
         uses: actions/download-artifact@v4
         with:
