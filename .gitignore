@@ -107,3 +107,19 @@ test-disks/usn-v2-capture.tsv
 test-disks/usn-journal-data.tsv
 test-disks/quota-limits.tsv
 test-disks/quota-limits.fsutil.txt
+# The rest of what the tiers and fixture producers write under test-disks/
+# (#1367); tests/scripts/generated-outputs-ignored.sh holds this list.
+test-disks/*.streams.tsv
+test-disks/*.streams.tsv.bytes/
+test-disks/logfile-checkpoint-provenance.json
+test-disks/ntfs-4kn-read.lifecycle.log
+test-disks/ntfs-cli-read.directory.json
+test-disks/ntfs-ea.query.tsv
+test-disks/ntfs-i30-slack.diagnostic.txt
+test-disks/ntfs-i30-slack.manifest.json
+test-disks/ntfs-inventory.fileids.txt
+test-disks/usn-journal-data.wrong-id-control.tsv
+test-disks/usn-journal-identity-controls.txt
+test-disks/usn-read-probe.tsv
+test-disks/usn-read-probe.wrong-id-control.tsv
+test-disks/usn-v2-capture.diagnostics.txt
