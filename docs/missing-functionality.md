@@ -91,8 +91,10 @@ Tests: `a_small_file_is_overwritten_appended_to_and_resized`,
 `appends_extend_a_large_file_and_promote_a_small_one`, and
 `a_new_file_is_written_in_chunks_at_increasing_offsets` in
 `tests/positional_writes.rs`, with readback through this crate and `ntfs`.
-**Remaining:** the corresponding `*_by_record_number` / `*_by_record_number_io`
-primitives still refuse resident `$DATA` for non-empty writes and resizing;
+`truncate_by_record_number` / `truncate_by_record_number_io` resize a resident
+value the same way (`tests/resident_resize_by_record.rs`, #1398).
+**Remaining:** the other `*_by_record_number` / `*_by_record_number_io`
+primitives still refuse resident `$DATA` for non-empty writes and growth;
 those callers must promote first (`promote_resident_data_to_nonresident`).
 *Needs:* resident mutation or transparent promotion for those primitives,
 chkdsk-gated, not another implementation of the path-based behaviour.

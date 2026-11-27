@@ -175,10 +175,15 @@ zeros. It refuses a mapping list too large for its existing record allocation.
 Shrinking trims or splits runs, commits the shorter mapping and lengths, clamps
 initialized length, then frees detached allocated runs. Sparse runs do not become
 cluster-free requests. `truncate` dispatches a larger requested size to growth,
-and equal size is a no-op. This low-level helper refuses resident data; other
-whole-value paths support resident replacement. There is no automatic shrink-to-
-resident conversion.
+and equal size is a no-op. There is no automatic shrink-to-resident conversion.
 **Source:** `truncate_by_record_number_io`, `split_runs_for_shrink`.
+
+A resident unnamed stream is rewritten whole by record number: cut short, extended
+with zeros, or promoted to clusters when the record cannot hold it. The write then
+advances the file times, refreshes directory-entry sizes and recharges quota. A
+compressed, encrypted or sparse stream, and a size larger than the volume, are
+refused before anything is written.
+**Source:** `truncate_resident_data_io`; [resident_resize_by_record.rs](../../../tests/resident_resize_by_record.rs).
 
 `replace_file_contents_io` dispatches resident replacement separately, otherwise
 resizes the existing nonresident stream and writes the new bytes. If growth fails

@@ -989,7 +989,12 @@ fn refuse_transformed_data(
     })?;
     if flags & attr_io::attr_flags::TRANSFORMED != 0 {
         return Err(Error::io(format!(
-            "{what}: non-resident $DATA is {} (flags={flags:#06x})",
+            "{what}: {} $DATA is {} (flags={flags:#06x})",
+            if loc.is_resident {
+                "resident"
+            } else {
+                "non-resident"
+            },
             attr_io::describe_transform_flags(flags)
         )));
     }
@@ -1064,7 +1069,9 @@ fn bytes_to_run_end(run: &DataRun, cluster_size: u64, file_offset: u64) -> Resul
 // Truncate (shrink only — W2.5 MVP)
 // ---------------------------------------------------------------------------
 
-/// Shrink a non-resident file's `$DATA` to `new_size` bytes. Clusters
+/// Resize a file's `$DATA` to `new_size` bytes. A resident value is cut or
+/// zero-extended, and promoted when it outgrows its record. A non-resident
+/// one grows as [`grow_nonresident`] does, or shrinks: clusters
 /// that fall past the new end are freed in `$Bitmap`; the attribute's
 /// mapping-pairs are rewritten; `value_length` / `allocated_length` /
 /// `initialized_length` are updated.
@@ -1075,8 +1082,8 @@ fn bytes_to_run_end(run: &DataRun, cluster_size: u64, file_offset: u64) -> Resul
 /// scan) — not with the file pointing at clusters that another
 /// allocation could claim.
 ///
-/// Rejects: grow (new_size &gt; current size), resident `$DATA`,
-/// compressed / sparse / encrypted flag set.
+/// Rejects a non-resident `$DATA` with the compressed, sparse or encrypted
+/// flag set.
 pub fn truncate(image: &Path, file_path: &str, new_size: u64) -> Result<u64, Error> {
     let mut io = open_for_write(image)?;
     truncate_io(&mut io, file_path, new_size)
@@ -1128,12 +1135,54 @@ fn truncate_listed_unnamed_data_io<T: BlockIo + ?Sized>(
     write_listed_unnamed_data_io(io, rec, &value).map(|_| ())
 }
 
+/// Resize the resident unnamed `$DATA` of the file whose base record is
+/// `rec`, as [`truncate_io`] does by path: cut short, or extended with
+/// zeros, and moved into clusters when it outgrows the record (#1398). A
+/// record too full even for the non-resident form gains an
+/// `$ATTRIBUTE_LIST`, as a path-based write does (#788).
+fn truncate_resident_data_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    new_size: u64,
+) -> Result<(), Error> {
+    let mut value = resident_data_value_io(io, rec)?
+        .ok_or_else(|| Error::io("truncate: unnamed $DATA is no longer resident"))?;
+    let size = usize::try_from(new_size).map_err(|_| Error::io("size too large"))?;
+    if size == value.len() {
+        return Ok(());
+    }
+    check_quota_recharge_io(io, rec)?;
+    value
+        .try_reserve_exact(size.saturating_sub(value.len()))
+        .map_err(|e| Error::no_space(format!("truncate: cannot hold {size} bytes: {e}")))?;
+    value.resize(size, 0);
+    match write_resident_value_io(io, rec, &value) {
+        Ok(()) => {}
+        Err(ResidentWriteError::NeedsPromotion(_)) => {
+            let (_, record) = read_mft_record_io(io, rec)?;
+            let is_directory =
+                crate::mft_io::record_flags(&record) & crate::mft_io::MFT_FLAG_DIRECTORY != 0;
+            if !is_directory && !holds_nonresident_data(&record) {
+                write_listed_unnamed_data_io(io, rec, &value)?;
+            } else {
+                promote_resident_record_data_io(io, rec, &value)?;
+            }
+        }
+        Err(ResidentWriteError::Other(error)) => return Err(error),
+    }
+    finish_data_write_io(io, rec)
+}
+
 /// Attribute-header offsets for non-resident lengths (Microsoft's ATTRIBUTE_RECORD_HEADER devnote).
 const NONRES_ALLOCATED_LENGTH: usize = 0x28;
 const NONRES_DATA_LENGTH: usize = 0x30;
 const NONRES_INITIALIZED_LENGTH: usize = 0x38;
 const NONRES_LAST_VCN: usize = 0x18;
 
+/// See [`truncate`]. Takes a record number instead of a path, and resizes
+/// a resident, non-resident or listed unnamed `$DATA` in either direction.
+/// A resident or listed value is rewritten whole, and its times, directory
+/// entry sizes and quota charge follow it.
 pub fn truncate_by_record_number(
     image: &Path,
     record_number: u64,
@@ -1162,10 +1211,19 @@ pub fn truncate_by_record_number_io<T: BlockIo + ?Sized>(
 
     let loc = attr_io::find_attribute(&record, AttrType::Data, None)
         .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
-    if loc.is_resident {
-        return Err(Error::io("truncate: resident $DATA unsupported in W2 MVP"));
-    }
     refuse_transformed_data(&record, &loc, "truncate")?;
+    if loc.is_resident {
+        let volume = params
+            .total_sectors
+            .saturating_mul(u64::from(params.bytes_per_sector));
+        if new_size > volume {
+            return Err(Error::no_space(format!(
+                "truncate: no space for {new_size} bytes on a volume of {volume}"
+            )));
+        }
+        truncate_resident_data_io(io, record_number, new_size)?;
+        return Ok(new_size);
+    }
 
     let current_len = loc
         .non_resident_value_length
@@ -5412,7 +5470,9 @@ fn parent_path_of(path: &str) -> String {
 /// Every path-based write calls it once the write is done. The
 /// `*_by_record_number_io` primitives do not: they are the single steps a
 /// host composes, and one that writes by record number calls this when it
-/// is done with the file, as Windows does when the last handle closes.
+/// is done with the file, as Windows does when the last handle closes. The
+/// exception is [`truncate_by_record_number_io`] on a resident or listed
+/// value, which it rewrites whole and finishes itself.
 ///
 /// A record with no unnamed `$DATA` in it -- a directory -- has nothing to
 /// copy, and a name whose parent has no entry for it pointing back at
@@ -7217,6 +7277,17 @@ fn promote_resident_data_to_nonresident_unrefreshed_io<T: BlockIo + ?Sized>(
 ) -> Result<(), Error> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     refuse_metafile_io(io, rec, &format!("write {file_path}"))?;
+    promote_resident_record_data_io(io, rec, new_data)
+}
+
+/// Move the resident unnamed `$DATA` of the file whose base record is `rec`
+/// into newly allocated clusters holding `new_data`. The caller has already
+/// refused a metafile.
+fn promote_resident_record_data_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    new_data: &[u8],
+) -> Result<(), Error> {
     let (params, record) = read_mft_record_io(io, rec)?;
     let cluster_size = params.cluster_size;
 
@@ -8848,6 +8919,19 @@ fn write_resident_contents_attempt_io<T: BlockIo + ?Sized>(
 ) -> Result<u64, ResidentWriteError> {
     let rec = resolve_path_to_record_number_io(io, file_path)?;
     refuse_metafile_io(io, rec, &format!("write {file_path}"))?;
+    write_resident_value_io(io, rec, new_data)?;
+    Ok(new_data.len() as u64)
+}
+
+/// Replace the value of the resident unnamed `$DATA` in the base record
+/// `rec`, reporting [`ResidentWriteError::NeedsPromotion`], with nothing
+/// written, when the record cannot hold it. The caller has already refused
+/// a metafile.
+fn write_resident_value_io<T: BlockIo + ?Sized>(
+    io: &mut T,
+    rec: u64,
+    new_data: &[u8],
+) -> Result<(), ResidentWriteError> {
     update_mft_record_io_typed(io, rec, |record| {
         let loc = attr_io::find_attribute(record, AttrType::Data, None)
             .ok_or_else(|| Error::not_found("unnamed $DATA attribute not found"))?;
@@ -8858,8 +8942,7 @@ fn write_resident_contents_attempt_io<T: BlockIo + ?Sized>(
         }
         crate::attr_resize::set_resident_value_typed(record, loc.attr_offset, new_data)
             .map_err(ResidentWriteError::from)
-    })?;
-    Ok(new_data.len() as u64)
+    })
 }
 
 // ---------------------------------------------------------------------------
