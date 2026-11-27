@@ -36,8 +36,14 @@ pub const MAX_STREAM_LEN: usize = 32;
 /// `$VOLUME_INFORMATION`'s flag for a journal Windows is deleting; its next
 /// mount finishes the deletion.
 const VOLUME_DELETE_USN_UNDERWAY: u16 = 0x0010;
-/// Records are 8-byte aligned; the space between them is zero.
+/// Records are 8-byte aligned.
 const RECORD_ALIGNMENT: usize = 8;
+/// `$J` is filled in pages of this many bytes, and a record never crosses
+/// one. Journals Windows wrote hold zeros only from a page's last record to
+/// the page's end, when the next record is longer than what was left
+/// (`tests/usn_image_windows_oracle.rs`, on a volume with 4096-byte
+/// clusters).
+const PAGE_SIZE: usize = 4096;
 
 /// What an image's change journal is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +171,9 @@ pub enum JournalReadError {
     },
     /// The record at `usn` could not be decoded.
     Record { usn: i64, error: UsnDecodeError },
+    /// The zero bytes from `usn` are not the padding at the end of a page:
+    /// what was there has been zeroed or lost.
+    ZeroGap { usn: i64 },
     /// The record at byte `usn` of `$J` carries another USN.
     Misplaced { usn: i64, recorded: i64 },
     /// The record at `usn` runs past the journal's `NextUsn`.
@@ -192,6 +201,10 @@ impl fmt::Display for JournalReadError {
                 "the record at USN {usn} is {record_length} bytes, over the {max_bytes}-byte bound"
             ),
             Self::Record { usn, error } => write!(f, "the record at USN {usn}: {error}"),
+            Self::ZeroGap { usn } => write!(
+                f,
+                "the zero bytes at USN {usn} are not page-end padding: records are missing"
+            ),
             Self::Misplaced { usn, recorded } => {
                 write!(f, "the record at USN {usn} records USN {recorded}")
             }
@@ -213,9 +226,15 @@ impl std::error::Error for JournalReadError {}
 /// Reads the records from `cursor` on, examining at most `max_bytes` of
 /// `$J`, from `io`, which is never written.
 ///
-/// The zero padding between records counts against the bound. A batch
-/// stops before a record it cannot read whole, and an empty batch is
-/// returned only when the cursor is already at `NextUsn`.
+/// The zero padding at a page's end counts against the bound. A batch
+/// stops before a record it cannot read whole, and before padding unless it
+/// can also read the first eight bytes of the record after it. An empty
+/// batch is returned only when the cursor is already at `NextUsn`.
+///
+/// Zeros anywhere else are refused as [`JournalReadError::ZeroGap`]. One
+/// loss cannot be told from padding: zeroed records at the end of a page,
+/// when the record starting the next page is longer than all the zeros
+/// before it.
 pub fn read_records_io<T: BlockIo + ?Sized>(
     io: &mut T,
     journal: &ImageJournal,
@@ -260,7 +279,7 @@ pub fn read_records_io<T: BlockIo + ?Sized>(
 
 /// Decodes the records in `bytes`, the window of `$J` starting at USN
 /// `from`. Returns them and the number of bytes consumed: up to the first
-/// record that does not fit, or all of `bytes`.
+/// record, or padding, that does not fit, or all of `bytes`.
 fn decode_window(
     bytes: &[u8],
     from: i64,
@@ -293,15 +312,41 @@ fn decode_window(
         }
         let length = u32::from_le_bytes(rest[..4].try_into().unwrap());
         if length == 0 {
-            // The zero space between records, which a record never starts
-            // in: all of the slot is zero, or it is not padding.
+            // All of the slot is zero, or it is a damaged record and not
+            // padding.
             if rest[..RECORD_ALIGNMENT].iter().any(|&b| b != 0) {
                 return Err(JournalReadError::Record {
                     usn,
                     error: UsnDecodeError::RecordLengthTooSmall { record_length: 0 },
                 });
             }
-            pos += RECORD_ALIGNMENT;
+            // Padding is less than a page, zero to the page's end, and
+            // followed there by a record.
+            let padding = PAGE_SIZE - (usn % PAGE_SIZE as i64) as usize;
+            let follower = padding + RECORD_ALIGNMENT;
+            if padding == PAGE_SIZE
+                || rest[..padding.min(rest.len())].iter().any(|&b| b != 0)
+                || usn + follower as i64 > next_usn
+            {
+                return Err(JournalReadError::ZeroGap { usn });
+            }
+            if rest.len() < follower {
+                if pos == 0 {
+                    return Err(JournalReadError::BoundTooSmall {
+                        usn,
+                        record_length: 0,
+                        max_bytes,
+                    });
+                }
+                break;
+            }
+            // A record that fitted in those bytes would have been written
+            // there, so they were not left as padding.
+            let next = u32::from_le_bytes(rest[padding..padding + 4].try_into().unwrap());
+            if next as usize <= padding {
+                return Err(JournalReadError::ZeroGap { usn });
+            }
+            pos += padding;
             continue;
         }
         if usn + i64::from(length) > next_usn {
@@ -369,12 +414,51 @@ mod tests {
 
     #[test]
     fn padding_between_records_is_skipped_and_counted() {
-        // a.txt fills 72 bytes; the rest of the 128-byte gap is zero.
-        let j = journal(4000, &[(4000, "a.txt"), (4128, "b.txt")], 4200);
-        let (records, read) = decode_window(&j, 4000, 4200, j.len()).unwrap();
+        // a.txt fills 72 bytes; the 24 left of the page are too few for
+        // b.txt and are zero.
+        let j = journal(4000, &[(4000, "a.txt"), (4096, "b.txt")], 4168);
+        let (records, read) = decode_window(&j, 4000, 4168, j.len()).unwrap();
         let usns: Vec<i64> = records.iter().map(|r| r.usn).collect();
-        assert_eq!(usns, [4000, 4128]);
+        assert_eq!(usns, [4000, 4096]);
         assert_eq!(read, j.len());
+    }
+
+    /// The message of the refusal of `$J` from `from` to `end`.
+    fn refusal(from: i64, parts: &[(i64, &str)], end: i64) -> String {
+        let j = journal(from, parts, end);
+        match decode_window(&j, from, end, j.len()) {
+            Err(error) => error.to_string(),
+            Ok((records, read)) => panic!("{} records in {read} bytes", records.len()),
+        }
+    }
+
+    #[test]
+    fn zeros_that_are_not_page_end_padding_are_refused() {
+        // Ending mid-page.
+        let mid = refusal(0, &[(0, "a.txt"), (128, "b.txt")], 200);
+        // Long enough to have held the record after them.
+        let fits = refusal(3952, &[(3952, "a.txt"), (4096, "b.txt")], 4168);
+        // A whole page.
+        let page = refusal(4000, &[(4000, "a.txt"), (8192, "b.txt")], 8264);
+        // Reaching NextUsn, mid-page and at a page end.
+        let tail = refusal(0, &[(0, "a.txt")], 144);
+        let end = refusal(4000, &[(4000, "a.txt")], 4096);
+        for message in [mid, fits, page, tail, end] {
+            assert!(message.contains("zero"), "{message}");
+        }
+    }
+
+    #[test]
+    fn padding_whose_next_record_the_window_cuts_is_left_for_the_next_batch() {
+        let j = journal(4000, &[(4000, "a.txt"), (4096, "b.txt")], 4168);
+        for window in [80, 96, 99] {
+            let (records, read) = decode_window(&j[..window], 4000, 4168, window).unwrap();
+            assert_eq!((records.len(), read), (1, 72), "a {window}-byte window");
+        }
+        match decode_window(&j[72..96], 4072, 4168, 24) {
+            Err(JournalReadError::BoundTooSmall { usn: 4072, .. }) => {}
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

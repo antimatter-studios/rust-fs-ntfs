@@ -393,6 +393,16 @@ New-WindowsFixture -ImagePath 'test-disks/ntfs-usnjrnl.img' -Label 'USNJRNL' -Po
     $o = & fsutil.exe usn createjournal m=8388608 a=1048576 $volume 2>&1
     if ($LASTEXITCODE -ne 0) { throw "fsutil usn createjournal: $o" }
 
+    # Enough records to fill many 4096-byte pages of $J, with names of many
+    # lengths, so that the zero runs Windows leaves between them are measured
+    # at many page boundaries (#1421). In their own directory, so the root
+    # holds only what the changes below name.
+    New-Item -ItemType Directory -Path (Join-Path $root 'pages') | Out-Null
+    foreach ($i in 1..300) {
+        $name = 'pages\p{0:d3}-{1}.txt' -f $i, ('x' * (($i * 7) % 90))
+        [System.IO.File]::WriteAllText((Join-Path $root $name), 'p')
+    }
+
     [System.IO.File]::WriteAllBytes((Join-Path $root 'create-empty.txt'), [byte[]]@())
     [System.IO.File]::WriteAllText((Join-Path $root 'write-resident.txt'), 'resident')
     [System.IO.File]::WriteAllBytes((Join-Path $root 'write-nonresident.bin'), (New-Object byte[] 10000))
