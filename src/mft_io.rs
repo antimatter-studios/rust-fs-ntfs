@@ -745,6 +745,12 @@ fn validate_usa_geometry(
             usa_offset, usa_end, record_len
         )));
     }
+    // The array cannot lie over the header that says where it is (#1392).
+    if usa_offset < MULTI_SECTOR_HEADER_BYTES {
+        return Err(Error::io(format!(
+            "USA at {usa_offset:#x} overlaps the {MULTI_SECTOR_HEADER_BYTES}-byte record header"
+        )));
+    }
     // The stride is the sector, as this crate writes, or 512 bytes, as
     // Windows writes inside sectors larger than that (#1384). The array
     // has to name one of them exactly: a stride either way covers every
@@ -756,6 +762,16 @@ fn validate_usa_geometry(
             && record_len.is_multiple_of(stride)
             && strides == record_len / stride
         {
+            // Microsoft's `MULTI_SECTOR_HEADER`, `UpdateSequenceArrayOffset`:
+            // the array ends before the last word of the first stride. An
+            // array over that word is its own protected tail (#1392).
+            // <https://learn.microsoft.com/en-us/windows/win32/devnotes/multi-sector-header>
+            if usa_end > stride - SECTOR_TAIL_BYTES {
+                return Err(Error::io(format!(
+                    "USA [{usa_offset:#x}..{usa_end:#x}] reaches the protected tail of the \
+                     first {stride}-byte stride"
+                )));
+            }
             return Ok(stride);
         }
     }
@@ -770,6 +786,10 @@ fn validate_usa_geometry(
 /// The stride Windows keeps an update sequence word for inside sectors
 /// larger than it (#1384).
 const USA_STRIDE: usize = 512;
+
+/// `MULTI_SECTOR_HEADER`: a 4-byte signature, then the array's offset and
+/// word count.
+const MULTI_SECTOR_HEADER_BYTES: usize = 8;
 
 /// Refuses a writable mount of a volume whose file records are smaller than
 /// its sectors in any geometry but the one measured: Windows formats a disk
@@ -1730,6 +1750,36 @@ mod tests {
         // 1024-byte record, 512 bps → 2 sectors → expected count = 3; give 4 → fail
         let err = validate_usa_geometry(1024, 512, 0x2A, 4).unwrap_err();
         assert!(err.contains("inconsistent"), "{err}");
+    }
+
+    /// Microsoft's `MULTI_SECTOR_HEADER`, `UpdateSequenceArrayOffset`
+    /// (<https://learn.microsoft.com/en-us/windows/win32/devnotes/multi-sector-header>):
+    /// the array ends before the last word of the first stride. An array over that word is
+    /// its own protected tail, so the check compares it with itself (#1392).
+    #[test]
+    fn validate_usa_geometry_rejects_an_array_over_the_first_tail() {
+        for (len, sector, count) in [(1024, 4096u16, 3), (1024, 512, 3), (4096, 4096, 9)] {
+            for offset in [506, 508, 510] {
+                assert!(
+                    validate_usa_geometry(len, sector, offset, count).is_err(),
+                    "{len}-byte record: an array at {offset} was accepted"
+                );
+            }
+        }
+        // The last offset that ends before the tail of the first stride.
+        validate_usa_geometry(1024, 4096, 504, 3).unwrap();
+    }
+
+    /// The array cannot lie over the 8-byte header that locates it (#1392).
+    #[test]
+    fn validate_usa_geometry_rejects_an_array_over_its_header() {
+        for offset in [0, 4, 6] {
+            assert!(
+                validate_usa_geometry(1024, 4096, offset, 3).is_err(),
+                "an array at {offset} was accepted"
+            );
+        }
+        validate_usa_geometry(1024, 4096, 8, 3).unwrap();
     }
 
     // --- helpers for formatted-volume tests ----------------------------------

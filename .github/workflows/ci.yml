@@ -1788,6 +1788,7 @@ jobs:
             test-disks/ntfs-4kn-read.img
             test-disks/ntfs-4kn-read.ntfsinfo.txt
             test-disks/ntfs-4kn-read.sha256.tsv
+            test-disks/ntfs-4kn-read.index.tsv
           if-no-files-found: error
           retention-days: 1
 
