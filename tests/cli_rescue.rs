@@ -173,3 +173,93 @@ fn an_incomplete_rescue_exit_status_is_not_one_the_contract_already_uses() {
         );
     }
 }
+
+/// A directory that takes a new file but cannot be opened, so it cannot be
+/// synced: write and search permission without read.
+#[cfg(unix)]
+struct UnsyncableDirectory(std::path::PathBuf);
+
+#[cfg(unix)]
+impl UnsyncableDirectory {
+    fn new(tag: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::path::PathBuf::from(common::temp_image_path(format!("cli_rescue_{tag}")));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir(&path).expect("create the directory");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o300))
+            .expect("drop read permission");
+        let made = Self(path);
+        assert!(
+            std::fs::File::open(&made.0).is_err(),
+            "this test needs a user that directory permissions bind: run the tests without root"
+        );
+        made
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UnsyncableDirectory {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// An archive whose directory entry is not durable is not an archive yet: a
+/// power cut can lose it whole. So a rescue that cannot sync the parent
+/// directory must not report one (#1021).
+#[cfg(unix)]
+#[test]
+fn a_rescue_that_cannot_sync_the_archive_directory_reports_nothing() {
+    let img = image("unsynced", 0);
+    let source_before = common::snapshot_image(&img).unwrap();
+    let dir = UnsyncableDirectory::new("unsynced_dir");
+    let archive = dir.0.join("archive.ntrescue");
+    let archive = archive.to_str().expect("a UTF-8 temporary path");
+
+    let (code, report, stderr) = fs(&[&img, "rescue", archive]);
+    assert_eq!(code, 1, "{report} {stderr}");
+    assert!(report.get("complete").is_none(), "{report}");
+    assert!(stderr.contains("flush the directory"), "{stderr}");
+    assert!(
+        !Path::new(archive).exists(),
+        "a refused rescue left an archive"
+    );
+    common::assert_images_equal(&img, source_before.path(), "image contents");
+}
+
+/// The library's path form makes the same promise, and leaves nothing that
+/// would block a second attempt.
+#[cfg(unix)]
+#[test]
+fn a_library_scan_that_cannot_sync_the_archive_directory_leaves_no_archive() {
+    let img = image("unsynced_lib", 0);
+    let dir = UnsyncableDirectory::new("unsynced_lib_dir");
+    let archive = dir.0.join("archive.ntrescue");
+
+    let error = fs_ntfs::rescue::scan_to_path(Path::new(&img), &archive, Default::default())
+        .expect_err("the directory cannot be synced");
+    assert!(error.contains("flush the directory"), "{error}");
+    assert!(!archive.exists(), "a refused scan left an archive");
+}
+
+/// A sector size the scan refuses is refused before the archive is made: an
+/// empty file left behind would block the corrected command.
+#[test]
+fn a_refused_sector_size_creates_no_archive() {
+    let img = image("bad_sector", 0);
+    let source_before = common::snapshot_image(&img).unwrap();
+    let archive = fresh_archive("bad_sector");
+
+    for size in ["1000", "4096"] {
+        let (code, _, stderr) = fs(&[&img, "rescue", &archive, "--sector-size", size]);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains("sector size"), "{stderr}");
+        assert!(
+            !Path::new(&archive).exists(),
+            "a refused rescue left an archive"
+        );
+    }
+    common::assert_images_equal(&img, source_before.path(), "image contents");
+}

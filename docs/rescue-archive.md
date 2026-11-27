@@ -12,7 +12,14 @@ Nothing here is an NTFS structure, and an archive is never a repair plan.
 ## How a scan fills it
 
 - The source is opened read-only and is never written. The archive is created
-  new: an existing file, the source included, is refused.
+  new: an existing file, the source included, is refused. A source or sector
+  size the scan refuses creates no file.
+- On Unix the new archive's parent directory is synced before the scan starts,
+  so before any report of it. When that sync fails, the empty archive is
+  removed and the rescue fails. `rescue::scan_to_path`,
+  `rescue::scan_to_new_archive` and `fs.ntfs SOURCE rescue` all do this.
+  `rescue::scan` takes a file the caller made, so the caller syncs its
+  directory.
 - The scan reads in bulk chunks (1 MiB by default). When a bulk read fails
   with a media error (`EIO`; on Windows `ERROR_CRC`, `ERROR_SECTOR_NOT_FOUND`,
   `ERROR_READ_FAULT` or `ERROR_IO_DEVICE`), the chunk is read again one
